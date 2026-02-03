@@ -1,0 +1,27 @@
+{
+  "name": "@secure-wallet/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "generate:client": "openapi-typescript ../../contracts/openapi.yaml -o api-client/types.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src --ext .ts",
+    "format": "prettier --check \"src/**/*.{ts,tsx}\"",
+    "test": "echo 'tests pending'"
+  },
+  "dependencies": {
+    "openapi-fetch": "^0.9.2",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "eslint": "^8.56.0",
+    "prettier": "^3.1.1",
+    "@typescript-eslint/parser": "^6.13.2",
+    "@typescript-eslint/eslint-plugin": "^6.13.2"
+  }
+}

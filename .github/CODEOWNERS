@@ -1,0 +1,10 @@
+/apps/web/** @frontend-dev
+/apps/api/** @backend-dev
+/apps/ai-service/** @ai-dev
+/prisma/** @db-encrypt-dev
+/apps/api/src/db/** @db-encrypt-dev
+/apps/api/src/security/encryption/** @db-encrypt-dev
+/apps/api/src/admin/** @admin-audit-dev
+/apps/api/src/audit/** @admin-audit-dev
+/apps/web/src/admin/** @admin-audit-dev
+/packages/shared/** @backend-dev @frontend-dev

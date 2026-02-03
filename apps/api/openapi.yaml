@@ -1,0 +1,59 @@
+openapi: 3.0.3
+info:
+  title: Secure E-Wallet API
+  version: 0.1.0
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: OK
+  /auth/register:
+    post:
+      summary: Register user (stub)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterInput'
+      responses:
+        '201':
+          description: Registered
+  /auth/login:
+    post:
+      summary: Login (stub with AI score)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginInput'
+      responses:
+        '200':
+          description: JWT + anomaly score
+components:
+  schemas:
+    RegisterInput:
+      type: object
+      required: [email, password, role]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+        role:
+          type: string
+          enum: [USER, ADMIN]
+    LoginInput:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string

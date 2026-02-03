@@ -1,0 +1,25 @@
+{
+  "name": "secure-ewallet-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "node": ">=18.18"
+  },
+  "scripts": {
+    "dev": "pnpm -r --parallel --if-present dev",
+    "lint": "pnpm -r --if-present lint",
+    "format": "pnpm -r --if-present format",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test",
+    "contract:validate": "pnpm exec redocly lint contracts/openapi.yaml",
+    "contract:gen": "pnpm exec openapi-typescript contracts/openapi.yaml -o packages/shared/api-client/types.ts",
+    "prepare": "husky install"
+  },
+  "devDependencies": {
+    "@redocly/cli": "^1.14.0",
+    "husky": "^9.0.11",
+    "openapi-typescript": "^6.7.0",
+    "typescript": "^5.3.3"
+  }
+}
