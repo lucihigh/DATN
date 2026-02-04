@@ -11,7 +11,7 @@ paths:
           description: OK
   /auth/register:
     post:
-      summary: Register user (stub)
+      summary: Register user
       requestBody:
         required: true
         content:
@@ -21,9 +21,11 @@ paths:
       responses:
         '201':
           description: Registered
+        '409':
+          description: Email already exists
   /auth/login:
     post:
-      summary: Login (stub with AI score)
+      summary: Login with anomaly scoring
       requestBody:
         required: true
         content:
@@ -33,6 +35,8 @@ paths:
       responses:
         '200':
           description: JWT + anomaly score
+        '401':
+          description: Invalid credentials
 components:
   schemas:
     RegisterInput:

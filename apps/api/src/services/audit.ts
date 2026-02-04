@@ -1,12 +1,26 @@
+import { createAuditLogRepository } from "../db/repositories";
+
 interface AuditEvent {
-  actor: string;
+  actor?: string;
   action: string;
-  details?: string;
-  timestamp?: string;
+  details?: string | Record<string, unknown>;
+  userId?: string;
+  ipAddress?: string;
 }
 
-export const logAuditEvent = (event: AuditEvent) => {
-  const payload = { ...event, timestamp: event.timestamp || new Date().toISOString() };
-  // TODO: persist to DB AuditLog table
-  console.log('[AUDIT]', payload);
+export const logAuditEvent = async (event: AuditEvent) => {
+  const payload = {
+    ...event,
+    actor: event.actor || "system",
+    details: event.details,
+  };
+
+  try {
+    await createAuditLogRepository().createAuditLog(payload);
+  } catch (err) {
+    // Audit should never block core API flow.
+    console.warn("Failed to persist audit event", err);
+  }
+
+  console.log("[AUDIT]", payload);
 };

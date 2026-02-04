@@ -1,5 +1,5 @@
-import type { CreateIndexesOptions, Db, IndexSpecification } from "mongodb";
 import { MongoServerError } from "mongodb";
+import type { CreateIndexesOptions, Db, IndexSpecification } from "mongodb";
 import { COLLECTIONS } from "./schemas";
 
 type IndexDefinition = {
@@ -8,6 +8,7 @@ type IndexDefinition = {
   options?: CreateIndexesOptions;
 };
 
+const SAFE_UNIQUE_INDEX_NAMES = new Set(["users_email_unique"]);
 // Indexes are additive-only to avoid dropping existing data or collections.
 // Partial filters keep dirty/legacy documents from blocking index creation.
 export const indexDefinitions: IndexDefinition[] = [
@@ -99,6 +100,13 @@ export const ensureIndexes = async (db: Db) => {
   for (const definition of indexDefinitions) {
     const collection = db.collection(definition.collection);
     const options: CreateIndexesOptions = { background: true, ...definition.options };
+    if (options.unique && !SAFE_UNIQUE_INDEX_NAMES.has(options.name ?? "")) {
+      console.warn(`Skipping unsafe unique index on ${definition.collection}`, {
+        key: definition.key,
+        name: options.name,
+      });
+      continue;
+    }
     try {
       await collection.createIndex(definition.key, options);
     } catch (error) {

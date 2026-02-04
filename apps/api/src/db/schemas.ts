@@ -42,10 +42,14 @@ export const encryptionEnvelopeSchema = z
   .object({
     iv: z.string().min(16),
     tag: z.string().min(16),
-    ciphertext: z.string().min(16),
+    data: z.string().min(16).optional(),
+    ciphertext: z.string().min(16).optional(),
     algorithm: z.literal("aes-256-gcm").optional(),
     keyId: z.string().optional(),
     version: z.number().optional(),
+  })
+  .refine((value) => typeof value.data === "string" || typeof value.ciphertext === "string", {
+    message: "Encrypted payload must include `data` or `ciphertext`",
   })
   // passthrough keeps backward compatibility if older fields exist
   .passthrough();
@@ -66,6 +70,7 @@ export const userSchema = z
     fullName: z.string().trim().min(1).optional(),
     phone: piiFieldSchema, // encrypted via field-level crypto; keep optional for legacy docs
     address: piiFieldSchema,
+    dob: piiFieldSchema,
     status: z.enum(["ACTIVE", "DISABLED", "PENDING"]).catch("ACTIVE"),
     lastLoginAt: optionalDate,
     createdAt: optionalDate,
