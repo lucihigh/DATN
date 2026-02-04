@@ -10,7 +10,7 @@ import type {
   UserDoc,
   WalletDoc,
 } from "./schemas";
-import { COLLECTIONS } from "./schemas";
+import { COLLECTIONS, validators } from "./schemas";
 
 // Load env from current working dir, then fall back to repo root
 dotenv.config();
@@ -62,6 +62,92 @@ export const collections = (): MongoCollections => {
   };
 };
 
+const asObject = <T extends object>(input: unknown): Partial<T> =>
+  typeof input === "object" && input !== null ? (input as Partial<T>) : {};
+
+const asRecord = (input: unknown): Record<string, unknown> =>
+  typeof input === "object" && input !== null && !Array.isArray(input)
+    ? (input as Record<string, unknown>)
+    : {};
+
+const asNumber = (value: unknown, fallback: number): number => {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const asBoolean = (value: unknown, fallback: boolean): boolean => {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes"].includes(normalized)) return true;
+    if (["false", "0", "no"].includes(normalized)) return false;
+  }
+  return fallback;
+};
+
+export const readFromMongo = {
+  user: (input: unknown) => {
+    const doc = asObject<UserDoc>(input);
+    return validators.user({
+      ...doc,
+      role: doc?.role ?? "USER",
+      status: doc?.status ?? "ACTIVE",
+      metadata: asRecord(doc?.metadata),
+    });
+  },
+  wallet: (input: unknown) => {
+    const doc = asObject<WalletDoc>(input);
+    return validators.wallet({
+      ...doc,
+      balance: asNumber(doc?.balance, 0),
+      currency: doc?.currency ?? "USD",
+      status: doc?.status ?? "ACTIVE",
+      tags: Array.isArray(doc?.tags) ? doc.tags : [],
+      metadata: asRecord(doc?.metadata),
+    });
+  },
+  transaction: (input: unknown) => {
+    const doc = asObject<TransactionDoc>(input);
+    return validators.transaction({
+      ...doc,
+      amount: asNumber(doc?.amount, 0),
+      type: doc?.type ?? "TRANSFER",
+      status: doc?.status ?? "COMPLETED",
+      metadata: asRecord(doc?.metadata),
+    });
+  },
+  loginEvent: (input: unknown) => {
+    const doc = asObject<LoginEventDoc>(input);
+    return validators.loginEvent({
+      ...doc,
+      success: asBoolean(doc?.success, false),
+      anomaly: asNumber(doc?.anomaly, 0),
+      metadata: asRecord(doc?.metadata),
+    });
+  },
+  auditLog: (input: unknown) => {
+    const doc = asObject<AuditLogDoc>(input);
+    return validators.auditLog({
+      ...doc,
+      actor: doc?.actor ?? "system",
+      action: doc?.action ?? "UNKNOWN",
+      details: doc?.details ?? "",
+      metadata: asRecord(doc?.metadata),
+    });
+  },
+  securityPolicy: (input: unknown) => {
+    const doc = asObject<SecurityPolicyDoc>(input);
+    return validators.securityPolicy({
+      ...doc,
+      maxLoginAttempts: asNumber(doc?.maxLoginAttempts, 5),
+      lockoutMinutes: asNumber(doc?.lockoutMinutes, 15),
+      rateLimitPerMin: asNumber(doc?.rateLimitPerMin, 60),
+      passwordMinLength: asNumber(doc?.passwordMinLength, 12),
+      mfaRequired: asBoolean(doc?.mfaRequired, false),
+    });
+  },
+};
+
 export const disconnectMongo = async () => {
   if (client) {
     await client.close();
@@ -73,6 +159,7 @@ export const disconnectMongo = async () => {
 /**
  * Optional helper to ensure indexes after a successful connection.
  * This is non-destructive: it never drops collections and tolerates existing/legacy data.
+ * No DB-level schema validators are applied; validation is handled in application code.
  */
 export const ensureDbIndexes = async () => {
   const database = getDb();
