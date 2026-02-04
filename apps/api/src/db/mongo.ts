@@ -1,6 +1,7 @@
 import { MongoClient, Db } from "mongodb";
 import dotenv from "dotenv";
 import path from "path";
+import { COLLECTIONS } from "./schemas";
 
 // Load env from current working dir, then fall back to repo root
 dotenv.config();
@@ -28,6 +29,18 @@ export const connectMongo = async () => {
 export const getDb = () => {
   if (!db) throw new Error("MongoDB not connected. Call connectMongo() first.");
   return db;
+};
+
+export const collections = () => {
+  const database = getDb();
+  return {
+    users: database.collection(COLLECTIONS.users),
+    wallets: database.collection(COLLECTIONS.wallets),
+    transactions: database.collection(COLLECTIONS.transactions),
+    loginEvents: database.collection(COLLECTIONS.loginEvents),
+    auditLogs: database.collection(COLLECTIONS.auditLogs),
+    securityPolicies: database.collection(COLLECTIONS.securityPolicies),
+  };
 };
 
 export const disconnectMongo = async () => {

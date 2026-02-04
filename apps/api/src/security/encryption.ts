@@ -1,5 +1,7 @@
 import crypto from "crypto";
 
+// ENCRYPTION_KEY must be a 32-byte key, base64-encoded (AES-256-GCM).
+// Example to generate: `openssl rand -base64 32`
 const keyBase64 = process.env.ENCRYPTION_KEY || "";
 const key = keyBase64 ? Buffer.from(keyBase64, "base64") : crypto.randomBytes(32);
 
