@@ -1,6 +1,15 @@
-import { MongoClient, Db } from "mongodb";
+import { MongoClient, Db, Collection } from "mongodb";
 import dotenv from "dotenv";
 import path from "path";
+import { ensureIndexes } from "./indexes";
+import type {
+  AuditLogDoc,
+  LoginEventDoc,
+  SecurityPolicyDoc,
+  TransactionDoc,
+  UserDoc,
+  WalletDoc,
+} from "./schemas";
 import { COLLECTIONS } from "./schemas";
 
 // Load env from current working dir, then fall back to repo root
@@ -31,15 +40,25 @@ export const getDb = () => {
   return db;
 };
 
-export const collections = () => {
+export type MongoCollections = {
+  users: Collection<UserDoc>;
+  wallets: Collection<WalletDoc>;
+  transactions: Collection<TransactionDoc>;
+  loginEvents: Collection<LoginEventDoc>;
+  auditLogs: Collection<AuditLogDoc>;
+  securityPolicies: Collection<SecurityPolicyDoc>;
+};
+
+export const collections = (): MongoCollections => {
   const database = getDb();
   return {
-    users: database.collection(COLLECTIONS.users),
-    wallets: database.collection(COLLECTIONS.wallets),
-    transactions: database.collection(COLLECTIONS.transactions),
-    loginEvents: database.collection(COLLECTIONS.loginEvents),
-    auditLogs: database.collection(COLLECTIONS.auditLogs),
-    securityPolicies: database.collection(COLLECTIONS.securityPolicies),
+    // Keeping collection names unchanged ensures existing Atlas data is reused.
+    users: database.collection<UserDoc>(COLLECTIONS.users),
+    wallets: database.collection<WalletDoc>(COLLECTIONS.wallets),
+    transactions: database.collection<TransactionDoc>(COLLECTIONS.transactions),
+    loginEvents: database.collection<LoginEventDoc>(COLLECTIONS.loginEvents),
+    auditLogs: database.collection<AuditLogDoc>(COLLECTIONS.auditLogs),
+    securityPolicies: database.collection<SecurityPolicyDoc>(COLLECTIONS.securityPolicies),
   };
 };
 
@@ -49,4 +68,14 @@ export const disconnectMongo = async () => {
     client = null;
     db = null;
   }
+};
+
+/**
+ * Optional helper to ensure indexes after a successful connection.
+ * This is non-destructive: it never drops collections and tolerates existing/legacy data.
+ */
+export const ensureDbIndexes = async () => {
+  const database = getDb();
+  await ensureIndexes(database);
+  return database;
 };
