@@ -1,5 +1,6 @@
-import type { CreateIndexesOptions, Db, IndexSpecification } from "mongodb";
 import { MongoServerError } from "mongodb";
+import type { CreateIndexesOptions, Db, IndexSpecification } from "mongodb";
+
 import { COLLECTIONS } from "./schemas";
 
 type IndexDefinition = {

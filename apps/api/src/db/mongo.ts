@@ -1,6 +1,8 @@
-import { MongoClient, Db, Collection } from "mongodb";
-import dotenv from "dotenv";
 import path from "path";
+
+import dotenv from "dotenv";
+import { MongoClient, Db, Collection } from "mongodb";
+
 import { ensureIndexes } from "./indexes";
 import type {
   AuditLogDoc,
@@ -20,24 +22,40 @@ if (!process.env.MONGODB_URI) {
 }
 
 let client: MongoClient | null = null;
-let db: Db | null = null;
+let mongoDb: Db | null = null;
+let connectPromise: Promise<{ client: MongoClient; db: Db }> | null = null;
 
 const getUri = () => process.env.MONGODB_URI || "";
 const getDbName = () => process.env.MONGODB_DB || "ComputerResearchProject";
 
 export const connectMongo = async () => {
-  if (client && db) return { client, db };
+  if (client && mongoDb) return { client, db: mongoDb };
+  if (connectPromise) return connectPromise;
+
   const uri = getUri();
   if (!uri) throw new Error("MONGODB_URI is not set");
-  client = new MongoClient(uri);
-  await client.connect();
-  db = client.db(getDbName());
-  return { client, db };
+
+  connectPromise = (async () => {
+    const nextClient = new MongoClient(uri);
+    await nextClient.connect();
+
+    const nextDb = nextClient.db(getDbName());
+    client = nextClient;
+    mongoDb = nextDb;
+
+    return { client: nextClient, db: nextDb };
+  })();
+
+  try {
+    return await connectPromise;
+  } finally {
+    connectPromise = null;
+  }
 };
 
 export const getDb = () => {
-  if (!db) throw new Error("MongoDB not connected. Call connectMongo() first.");
-  return db;
+  if (!mongoDb) throw new Error("MongoDB not connected. Call connectMongo() first.");
+  return mongoDb;
 };
 
 export type MongoCollections = {
@@ -49,16 +67,36 @@ export type MongoCollections = {
   securityPolicies: Collection<SecurityPolicyDoc>;
 };
 
+export type MongoCollectionAccessors = {
+  users: () => Collection<UserDoc>;
+  wallets: () => Collection<WalletDoc>;
+  transactions: () => Collection<TransactionDoc>;
+  loginEvents: () => Collection<LoginEventDoc>;
+  auditLogs: () => Collection<AuditLogDoc>;
+  securityPolicies: () => Collection<SecurityPolicyDoc>;
+};
+
+/**
+ * Access collections with db.<collection>() style.
+ */
+export const db: MongoCollectionAccessors = {
+  users: () => getDb().collection<UserDoc>(COLLECTIONS.users),
+  wallets: () => getDb().collection<WalletDoc>(COLLECTIONS.wallets),
+  transactions: () => getDb().collection<TransactionDoc>(COLLECTIONS.transactions),
+  loginEvents: () => getDb().collection<LoginEventDoc>(COLLECTIONS.loginEvents),
+  auditLogs: () => getDb().collection<AuditLogDoc>(COLLECTIONS.auditLogs),
+  securityPolicies: () => getDb().collection<SecurityPolicyDoc>(COLLECTIONS.securityPolicies),
+};
+
 export const collections = (): MongoCollections => {
-  const database = getDb();
   return {
     // Keeping collection names unchanged ensures existing Atlas data is reused.
-    users: database.collection<UserDoc>(COLLECTIONS.users),
-    wallets: database.collection<WalletDoc>(COLLECTIONS.wallets),
-    transactions: database.collection<TransactionDoc>(COLLECTIONS.transactions),
-    loginEvents: database.collection<LoginEventDoc>(COLLECTIONS.loginEvents),
-    auditLogs: database.collection<AuditLogDoc>(COLLECTIONS.auditLogs),
-    securityPolicies: database.collection<SecurityPolicyDoc>(COLLECTIONS.securityPolicies),
+    users: db.users(),
+    wallets: db.wallets(),
+    transactions: db.transactions(),
+    loginEvents: db.loginEvents(),
+    auditLogs: db.auditLogs(),
+    securityPolicies: db.securityPolicies(),
   };
 };
 
@@ -149,10 +187,14 @@ export const readFromMongo = {
 };
 
 export const disconnectMongo = async () => {
+  if (connectPromise) {
+    await connectPromise.catch(() => undefined);
+  }
+
   if (client) {
     await client.close();
     client = null;
-    db = null;
+    mongoDb = null;
   }
 };
 
