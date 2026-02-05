@@ -1,4 +1,5 @@
 import jwt from "jsonwebtoken";
+import type { SignOptions } from "jsonwebtoken";
 
 import type { Role } from "../db/schemas";
 
@@ -21,5 +22,5 @@ const getJwtSecret = () => {
 
 export const signAuthToken = (payload: AuthTokenPayload) =>
   jwt.sign(payload, getJwtSecret(), {
-    expiresIn: process.env.JWT_EXPIRES_IN || "7d",
+    expiresIn: (process.env.JWT_EXPIRES_IN || "7d") as SignOptions["expiresIn"],
   });
