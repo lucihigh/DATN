@@ -163,6 +163,7 @@ app.post("/auth/login", async (req, res) => {
 
     await loginEventRepository.createLoginEvent({
       userId: userDoc?._id,
+      email,
       ipAddress: req.ip,
       userAgent,
       success: isPasswordValid,

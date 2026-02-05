@@ -19,10 +19,18 @@
 
 ## DB/Collections
 - Schemas/types: `src/db/schemas.ts`
-- Collections ensured by `db:init`: users, wallets, transactions, loginEvents, auditLogs, securityPolicies (indexes on email/userId/createdAt, etc.)
+- Collections ensured by `db:init`: users, wallets, transactions, loginEvents, auditLogs, securityPolicies
+- Key indexes:
+  - `users.email` (unique)
+  - `transactions.fromUserId + createdAt`
+  - `transactions.toUserId + createdAt`
+  - `loginEvents.email + createdAt`
+  - `loginEvents.userId + createdAt`
+  - `auditLogs.createdAt`
 - Collection accessor pattern: `db.users()`, `db.wallets()`, ... from `src/db/mongo.ts`
 - Base repository: `src/db/baseRepository.ts`
 - Example concrete repo: `src/db/repositories/userRepository.ts`
+- Team handover doc: `docs/mongo-deliverables.md`
 
 ## Routes (contract-driven, stubbed)
 See `contracts/openapi.yaml` for the authoritative contract covering auth, wallet, transfer, security, and admin routes.

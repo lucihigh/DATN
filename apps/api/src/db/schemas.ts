@@ -122,6 +122,8 @@ export const transactionSchema = z
     _id: objectIdSchema.optional(),
     walletId: objectIdSchema.optional(),
     counterpartyWalletId: objectIdSchema.optional(),
+    fromUserId: objectIdSchema.optional(),
+    toUserId: objectIdSchema.optional(),
     amount: optionalNumber.default(0),
     type: z.enum(["DEPOSIT", "WITHDRAW", "TRANSFER"]).catch("TRANSFER"),
     status: z.enum(["PENDING", "COMPLETED", "FAILED", "REVERSED"]).catch("COMPLETED"),
@@ -140,6 +142,7 @@ export const loginEventSchema = z
   .object({
     _id: objectIdSchema.optional(),
     userId: objectIdSchema.optional(),
+    email: z.string().trim().email().optional(),
     ipAddress: z.string().trim().min(3).optional(),
     userAgent: z.string().trim().optional(),
     success: optionalBoolean,
