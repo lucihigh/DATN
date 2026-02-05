@@ -36,7 +36,16 @@ const optionalBoolean = z
   }, z.boolean())
   .optional();
 
-export const objectIdSchema = z.union([z.instanceof(ObjectId), z.string().trim().min(1)]);
+export const objectIdSchema = z.preprocess((value) => {
+  if (value instanceof ObjectId) return value;
+  if (typeof value === "string") {
+    const normalized = value.trim();
+    if (ObjectId.isValid(normalized)) {
+      return new ObjectId(normalized);
+    }
+  }
+  return value;
+}, z.instanceof(ObjectId));
 
 export const encryptionEnvelopeSchema = z
   .object({
