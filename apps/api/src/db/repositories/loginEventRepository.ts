@@ -7,6 +7,7 @@ import type { LoginEventDoc } from "../schemas";
 
 export type CreateLoginEventInput = {
   userId?: string | ObjectId;
+  email?: string;
   ipAddress?: string;
   userAgent?: string;
   success: boolean;
@@ -23,6 +24,7 @@ export class LoginEventRepository extends BaseRepository<LoginEventDoc> {
   async createLoginEvent(input: CreateLoginEventInput) {
     const payload = writeToMongo.loginEvent({
       userId: input.userId,
+      email: input.email,
       ipAddress: input.ipAddress,
       userAgent: input.userAgent,
       success: input.success,
