@@ -2,7 +2,6 @@ import path from "path";
 
 import dotenv from "dotenv";
 import { MongoClient, Db, Collection, ObjectId } from "mongodb";
-
 import { ensureIndexes } from "./indexes";
 import type {
   AuditLogDoc,

@@ -1,6 +1,5 @@
 import { MongoServerError } from "mongodb";
 import type { CreateIndexesOptions, Db, IndexSpecification } from "mongodb";
-
 import { COLLECTIONS } from "./schemas";
 
 type IndexDefinition = {
@@ -10,7 +9,6 @@ type IndexDefinition = {
 };
 
 const SAFE_UNIQUE_INDEX_NAMES = new Set(["users_email_unique"]);
-
 // Indexes are additive-only to avoid dropping existing data or collections.
 // Partial filters keep dirty/legacy documents from blocking index creation.
 export const indexDefinitions: IndexDefinition[] = [
