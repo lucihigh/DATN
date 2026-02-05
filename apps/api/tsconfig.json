@@ -2,7 +2,12 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "dist",
-    "module": "CommonJS"
+    "module": "CommonJS",
+    "baseUrl": ".",
+    "paths": {
+      "@secure-wallet/shared": ["../../packages/shared/src/index.ts"],
+      "@secure-wallet/shared/*": ["../../packages/shared/*"]
+    }
   },
   "include": ["src/**/*"]
 }
