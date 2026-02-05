@@ -57,11 +57,11 @@ export const encryptionEnvelopeSchema = z
     keyId: z.string().optional(),
     version: z.number().optional(),
   })
+  // passthrough keeps backward compatibility if older fields exist
+  .passthrough()
   .refine((value) => typeof value.data === "string" || typeof value.ciphertext === "string", {
     message: "Encrypted payload must include `data` or `ciphertext`",
-  })
-  // passthrough keeps backward compatibility if older fields exist
-  .passthrough();
+  });
 
 export type EncryptedString = z.infer<typeof encryptionEnvelopeSchema>;
 export type MaybeEncryptedString = string | EncryptedString;
@@ -189,8 +189,8 @@ export type SecurityPolicyDoc = z.infer<typeof securityPolicySchema>;
 // ---- Convenience validators ----------------------------------------------
 
 const buildSafeValidator =
-  <T>(schema: z.ZodSchema<T>) =>
-  (input: unknown) => {
+  <TSchema extends z.ZodTypeAny>(schema: TSchema) =>
+  (input: unknown): z.output<TSchema> | null => {
     const parsed = schema.safeParse(input);
     return parsed.success ? parsed.data : null; // null => caller can decide what to do without throwing
   };
