@@ -1,7 +1,7 @@
 import type { ObjectId, OptionalUnlessRequiredId } from "mongodb";
 
 import { BaseRepository } from "../baseRepository";
-import { db, readFromMongo } from "../mongo";
+import { db, readFromMongo, writeToMongo } from "../mongo";
 import type { Role, UserDoc } from "../schemas";
 import { decryptUserPII, encryptUserPII } from "../../security/encryption";
 
@@ -22,7 +22,9 @@ export class UserRepository extends BaseRepository<UserDoc> {
   }
 
   async findByEmail(email: string) {
-    return this.findOne({ email: email.trim().toLowerCase() });
+    const doc = await this.findOne({ email: email.trim().toLowerCase() });
+    const validated = doc ? readFromMongo.user(doc) : null;
+    return validated ? decryptUserPII(validated) : null;
   }
 
   async existsByEmail(email: string) {
@@ -32,7 +34,7 @@ export class UserRepository extends BaseRepository<UserDoc> {
 
   async createUser(input: CreateUserInput) {
     const now = new Date();
-    const payload: OptionalUnlessRequiredId<UserDoc> = {
+    const payload = writeToMongo.user({
       email: input.email.trim().toLowerCase(),
       passwordHash: input.passwordHash,
       role: input.role ?? "USER",
@@ -44,9 +46,9 @@ export class UserRepository extends BaseRepository<UserDoc> {
       createdAt: now,
       updatedAt: now,
       metadata: input.metadata ?? {},
-    };
+    });
 
-    const encryptedPayload = encryptUserPII(payload as UserDoc);
+    const encryptedPayload = encryptUserPII(payload);
     return this.insertOne(encryptedPayload as OptionalUnlessRequiredId<UserDoc>);
   }
 

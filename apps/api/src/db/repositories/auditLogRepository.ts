@@ -2,7 +2,7 @@ import { ObjectId } from "mongodb";
 import type { OptionalUnlessRequiredId } from "mongodb";
 
 import { BaseRepository } from "../baseRepository";
-import { db } from "../mongo";
+import { db, writeToMongo } from "../mongo";
 import type { AuditLogDoc } from "../schemas";
 
 export type CreateAuditLogInput = {
@@ -14,29 +14,23 @@ export type CreateAuditLogInput = {
   metadata?: Record<string, unknown>;
 };
 
-const normalizeObjectId = (value?: string | ObjectId) => {
-  if (!value) return undefined;
-  if (value instanceof ObjectId) return value;
-  return ObjectId.isValid(value) ? new ObjectId(value) : value;
-};
-
 export class AuditLogRepository extends BaseRepository<AuditLogDoc> {
   constructor() {
     super(db.auditLogs);
   }
 
   async createAuditLog(input: CreateAuditLogInput) {
-    const payload: OptionalUnlessRequiredId<AuditLogDoc> = {
-      userId: normalizeObjectId(input.userId),
+    const payload = writeToMongo.auditLog({
+      userId: input.userId,
       actor: input.actor,
       action: input.action,
       details: input.details,
       ipAddress: input.ipAddress,
       createdAt: new Date(),
       metadata: input.metadata ?? {},
-    };
+    });
 
-    return this.insertOne(payload);
+    return this.insertOne(payload as OptionalUnlessRequiredId<AuditLogDoc>);
   }
 }
 
