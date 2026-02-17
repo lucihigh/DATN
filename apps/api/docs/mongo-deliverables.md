@@ -96,14 +96,22 @@ File: `src/security/encryption.ts`
 
 - Uses AES-256-GCM for field-level encryption
 - Supports base64 or hex key input from env
-- Required env:
+- Env:
   - `ENCRYPTION_KEY` (32-byte key, base64 or hex)
   - `ENCRYPTION_KEY_ID` (optional key label)
+  - `ENCRYPTION_KEYS` (optional comma-separated keyId:value list for rotation)
 
 Example key generation:
 
 ```bash
 openssl rand -base64 32
+```
+
+Example rotation setup:
+
+```bash
+ENCRYPTION_KEY_ID=primary
+ENCRYPTION_KEYS=primary:<base64-key>,legacy:<base64-key>
 ```
 
 ## 4) Validation source of truth
