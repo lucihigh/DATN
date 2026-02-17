@@ -58,6 +58,22 @@ export const indexDefinitions: IndexDefinition[] = [
     options: { name: "transactions_type_status" },
   },
   {
+    collection: COLLECTIONS.transactions,
+    key: { fromUserId: 1, createdAt: -1 },
+    options: {
+      name: "transactions_fromUser_createdAt",
+      partialFilterExpression: { fromUserId: { $exists: true } },
+    },
+  },
+  {
+    collection: COLLECTIONS.transactions,
+    key: { toUserId: 1, createdAt: -1 },
+    options: {
+      name: "transactions_toUser_createdAt",
+      partialFilterExpression: { toUserId: { $exists: true } },
+    },
+  },
+  {
     collection: COLLECTIONS.loginEvents,
     key: { userId: 1, createdAt: -1 },
     options: {
@@ -74,6 +90,14 @@ export const indexDefinitions: IndexDefinition[] = [
     },
   },
   {
+    collection: COLLECTIONS.loginEvents,
+    key: { email: 1, createdAt: -1 },
+    options: {
+      name: "loginEvents_email_createdAt",
+      partialFilterExpression: { email: { $type: "string" } },
+    },
+  },
+  {
     collection: COLLECTIONS.auditLogs,
     key: { userId: 1, createdAt: -1 },
     options: {
@@ -85,6 +109,11 @@ export const indexDefinitions: IndexDefinition[] = [
     collection: COLLECTIONS.auditLogs,
     key: { action: 1, createdAt: -1 },
     options: { name: "auditLogs_action_createdAt" },
+  },
+  {
+    collection: COLLECTIONS.auditLogs,
+    key: { createdAt: -1 },
+    options: { name: "auditLogs_createdAt" },
   },
   {
     collection: COLLECTIONS.securityPolicies,

@@ -107,6 +107,15 @@ const asRecord = (input: unknown): Record<string, unknown> =>
     ? (input as Record<string, unknown>)
     : {};
 
+const asString = (value: unknown): string | undefined =>
+  typeof value === "string" && value.trim() ? value.trim() : undefined;
+
+const asEmail = (value: unknown): string | undefined => {
+  const normalized = asString(value)?.toLowerCase();
+  if (!normalized) return undefined;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized) ? normalized : undefined;
+};
+
 const asNumber = (value: unknown, fallback: number): number => {
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -202,6 +211,8 @@ export const readFromMongo = {
       _id: coerceObjectId(doc?._id),
       walletId: coerceObjectId(doc?.walletId),
       counterpartyWalletId: coerceObjectId(doc?.counterpartyWalletId),
+      fromUserId: coerceObjectId(doc?.fromUserId),
+      toUserId: coerceObjectId(doc?.toUserId),
       amount: asNumber(doc?.amount, 0),
       type: doc?.type ?? "TRANSFER",
       status: doc?.status ?? "COMPLETED",
@@ -216,6 +227,7 @@ export const readFromMongo = {
       ...doc,
       _id: coerceObjectId(doc?._id),
       userId: coerceObjectId(doc?.userId),
+      email: asEmail(doc?.email),
       success: asBoolean(doc?.success, false),
       anomaly: asNumber(doc?.anomaly, 0),
       createdAt: asDate(doc?.createdAt),
@@ -296,6 +308,8 @@ export const writeToMongo = {
         _id: requireObjectId(doc?._id, "transactions._id"),
         walletId: requireObjectId(doc?.walletId, "transactions.walletId"),
         counterpartyWalletId: requireObjectId(doc?.counterpartyWalletId, "transactions.counterpartyWalletId"),
+        fromUserId: requireObjectId(doc?.fromUserId, "transactions.fromUserId"),
+        toUserId: requireObjectId(doc?.toUserId, "transactions.toUserId"),
         amount: asNumber(doc?.amount, 0),
         type: doc?.type ?? "TRANSFER",
         status: doc?.status ?? "COMPLETED",
@@ -311,6 +325,7 @@ export const writeToMongo = {
       ...doc,
       _id: requireObjectId(doc?._id, "loginEvents._id"),
       userId: requireObjectId(doc?.userId, "loginEvents.userId"),
+      email: asEmail(doc?.email),
       success: asBoolean(doc?.success, false),
       anomaly: asNumber(doc?.anomaly, 0),
       createdAt: asDate(doc?.createdAt, new Date()),
