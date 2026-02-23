@@ -1,10 +1,17 @@
-import React from "react";
-import ReactDOM from "react-dom/client";
+import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+import { AuthProvider } from "./context/AuthContext";
+import { ToastProvider, ToastContainer } from "./context/ToastContext";
 import App from "./App";
-import AdminApp from "./admin/AdminApp";
+import "./index.css";
 
-const isAdminRoute = window.location.pathname.startsWith("/admin");
-
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>{isAdminRoute ? <AdminApp /> : <App />}</React.StrictMode>
+createRoot(document.getElementById("root")!).render(
+  <StrictMode>
+    <AuthProvider>
+      <ToastProvider>
+        <App />
+        <ToastContainer />
+      </ToastProvider>
+    </AuthProvider>
+  </StrictMode>
 );
