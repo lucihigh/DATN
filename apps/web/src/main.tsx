@@ -1,17 +1,21 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+
 import { AuthProvider } from "./context/AuthContext";
 import { ToastProvider, ToastContainer } from "./context/ToastContext";
 import App from "./App";
+import AdminApp from "./admin/AdminApp";
 import "./index.css";
+
+const isAdminRoute = window.location.pathname.startsWith("/admin");
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <AuthProvider>
       <ToastProvider>
-        <App />
+        {isAdminRoute ? <AdminApp /> : <App />}
         <ToastContainer />
       </ToastProvider>
     </AuthProvider>
-  </StrictMode>
+  </StrictMode>,
 );
