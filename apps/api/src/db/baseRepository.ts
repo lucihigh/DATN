@@ -21,9 +21,13 @@ const normalizeId = (id: string | ObjectId): string | ObjectId => {
 export class BaseRepository<TDocument extends Document> {
   private readonly collectionFactory: () => Collection<TDocument>;
 
-  constructor(collection: Collection<TDocument> | (() => Collection<TDocument>)) {
+  constructor(
+    collection: Collection<TDocument> | (() => Collection<TDocument>),
+  ) {
     this.collectionFactory =
-      typeof collection === "function" ? (collection as () => Collection<TDocument>) : () => collection;
+      typeof collection === "function"
+        ? (collection as () => Collection<TDocument>)
+        : () => collection;
   }
 
   protected getCollection() {
@@ -31,18 +35,26 @@ export class BaseRepository<TDocument extends Document> {
   }
 
   async findById(id: string | ObjectId, options?: FindOptions<TDocument>) {
-    return this.getCollection().findOne({ _id: normalizeId(id) } as Filter<TDocument>, options);
+    return this.getCollection().findOne(
+      { _id: normalizeId(id) } as Filter<TDocument>,
+      options,
+    );
   }
 
   async findOne(filter: Filter<TDocument>, options?: FindOptions<TDocument>) {
     return this.getCollection().findOne(filter, options);
   }
 
-  async findMany(filter: Filter<TDocument> = {} as Filter<TDocument>, options?: FindOptions<TDocument>) {
+  async findMany(
+    filter: Filter<TDocument> = {} as Filter<TDocument>,
+    options?: FindOptions<TDocument>,
+  ) {
     return this.getCollection().find(filter, options).toArray();
   }
 
-  async insertOne(doc: OptionalUnlessRequiredId<TDocument>): Promise<InsertOneResult<TDocument>> {
+  async insertOne(
+    doc: OptionalUnlessRequiredId<TDocument>,
+  ): Promise<InsertOneResult<TDocument>> {
     return this.getCollection().insertOne(doc);
   }
 
@@ -69,7 +81,6 @@ export class BaseRepository<TDocument extends Document> {
 
 export const createRepository = <TDocument extends Document>(
   collection: Collection<TDocument> | (() => Collection<TDocument>),
-) =>
-  new BaseRepository<TDocument>(collection);
+) => new BaseRepository<TDocument>(collection);
 
 export type Entity<TDocument extends Document> = WithId<TDocument>;

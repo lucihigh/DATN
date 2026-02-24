@@ -2,6 +2,7 @@ import path from "path";
 
 import dotenv from "dotenv";
 import { MongoClient, Db, Collection, ObjectId } from "mongodb";
+
 import { ensureIndexes } from "./indexes";
 import type {
   AuditLogDoc,
@@ -53,7 +54,8 @@ export const connectMongo = async () => {
 };
 
 export const getDb = () => {
-  if (!mongoDb) throw new Error("MongoDB not connected. Call connectMongo() first.");
+  if (!mongoDb)
+    throw new Error("MongoDB not connected. Call connectMongo() first.");
   return mongoDb;
 };
 
@@ -81,10 +83,12 @@ export type MongoCollectionAccessors = {
 export const db: MongoCollectionAccessors = {
   users: () => getDb().collection<UserDoc>(COLLECTIONS.users),
   wallets: () => getDb().collection<WalletDoc>(COLLECTIONS.wallets),
-  transactions: () => getDb().collection<TransactionDoc>(COLLECTIONS.transactions),
+  transactions: () =>
+    getDb().collection<TransactionDoc>(COLLECTIONS.transactions),
   loginEvents: () => getDb().collection<LoginEventDoc>(COLLECTIONS.loginEvents),
   auditLogs: () => getDb().collection<AuditLogDoc>(COLLECTIONS.auditLogs),
-  securityPolicies: () => getDb().collection<SecurityPolicyDoc>(COLLECTIONS.securityPolicies),
+  securityPolicies: () =>
+    getDb().collection<SecurityPolicyDoc>(COLLECTIONS.securityPolicies),
 };
 
 export const collections = (): MongoCollections => {
@@ -133,7 +137,8 @@ const asBoolean = (value: unknown, fallback: boolean): boolean => {
 
 const asDate = (value: unknown, fallback?: Date): Date | undefined => {
   if (value === undefined || value === null || value === "") return fallback;
-  if (value instanceof Date) return Number.isNaN(value.getTime()) ? fallback : value;
+  if (value instanceof Date)
+    return Number.isNaN(value.getTime()) ? fallback : value;
   const parsed = new Date(value as string | number);
   return Number.isNaN(parsed.getTime()) ? fallback : parsed;
 };
@@ -149,7 +154,10 @@ const coerceObjectId = (value: unknown): ObjectId | undefined => {
   return undefined;
 };
 
-const requireObjectId = (value: unknown, field: string): ObjectId | undefined => {
+const requireObjectId = (
+  value: unknown,
+  field: string,
+): ObjectId | undefined => {
   const normalized = coerceObjectId(value);
   if (value === undefined || value === null || value === "") return undefined;
   if (normalized) return normalized;
@@ -158,11 +166,20 @@ const requireObjectId = (value: unknown, field: string): ObjectId | undefined =>
 
 const withTimestamps = <T extends { createdAt?: unknown; updatedAt?: unknown }>(
   input: T,
-  options?: { createdAtDefaultToNow?: boolean; updatedAtDefaultToNow?: boolean },
+  options?: {
+    createdAtDefaultToNow?: boolean;
+    updatedAtDefaultToNow?: boolean;
+  },
 ) => {
   const now = new Date();
-  const createdAt = asDate(input.createdAt, options?.createdAtDefaultToNow ? now : undefined);
-  const updatedAt = asDate(input.updatedAt, options?.updatedAtDefaultToNow ? now : undefined);
+  const createdAt = asDate(
+    input.createdAt,
+    options?.createdAtDefaultToNow ? now : undefined,
+  );
+  const updatedAt = asDate(
+    input.updatedAt,
+    options?.updatedAtDefaultToNow ? now : undefined,
+  );
   return {
     ...input,
     createdAt,
@@ -274,7 +291,10 @@ export const writeToMongo = {
       {
         ...doc,
         _id: requireObjectId(doc?._id, "users._id"),
-        email: typeof doc?.email === "string" ? doc.email.trim().toLowerCase() : doc?.email,
+        email:
+          typeof doc?.email === "string"
+            ? doc.email.trim().toLowerCase()
+            : doc?.email,
         role: doc?.role ?? "USER",
         status: doc?.status ?? "ACTIVE",
         metadata: asRecord(doc?.metadata),
@@ -307,7 +327,10 @@ export const writeToMongo = {
         ...doc,
         _id: requireObjectId(doc?._id, "transactions._id"),
         walletId: requireObjectId(doc?.walletId, "transactions.walletId"),
-        counterpartyWalletId: requireObjectId(doc?.counterpartyWalletId, "transactions.counterpartyWalletId"),
+        counterpartyWalletId: requireObjectId(
+          doc?.counterpartyWalletId,
+          "transactions.counterpartyWalletId",
+        ),
         fromUserId: requireObjectId(doc?.fromUserId, "transactions.fromUserId"),
         toUserId: requireObjectId(doc?.toUserId, "transactions.toUserId"),
         amount: asNumber(doc?.amount, 0),
@@ -317,7 +340,10 @@ export const writeToMongo = {
       },
       { createdAtDefaultToNow: true, updatedAtDefaultToNow: true },
     );
-    return ensureValidated(COLLECTIONS.transactions, validators.transaction(normalized));
+    return ensureValidated(
+      COLLECTIONS.transactions,
+      validators.transaction(normalized),
+    );
   },
   loginEvent: (input: unknown) => {
     const doc = asObject<LoginEventDoc>(input);
@@ -331,7 +357,10 @@ export const writeToMongo = {
       createdAt: asDate(doc?.createdAt, new Date()),
       metadata: asRecord(doc?.metadata),
     };
-    return ensureValidated(COLLECTIONS.loginEvents, validators.loginEvent(normalized));
+    return ensureValidated(
+      COLLECTIONS.loginEvents,
+      validators.loginEvent(normalized),
+    );
   },
   auditLog: (input: unknown) => {
     const doc = asObject<AuditLogDoc>(input);
@@ -345,7 +374,10 @@ export const writeToMongo = {
       createdAt: asDate(doc?.createdAt, new Date()),
       metadata: asRecord(doc?.metadata),
     };
-    return ensureValidated(COLLECTIONS.auditLogs, validators.auditLog(normalized));
+    return ensureValidated(
+      COLLECTIONS.auditLogs,
+      validators.auditLog(normalized),
+    );
   },
   securityPolicy: (input: unknown) => {
     const doc = asObject<SecurityPolicyDoc>(input);
@@ -361,7 +393,10 @@ export const writeToMongo = {
       },
       { createdAtDefaultToNow: true, updatedAtDefaultToNow: true },
     );
-    return ensureValidated(COLLECTIONS.securityPolicies, validators.securityPolicy(normalized));
+    return ensureValidated(
+      COLLECTIONS.securityPolicies,
+      validators.securityPolicy(normalized),
+    );
   },
 };
 

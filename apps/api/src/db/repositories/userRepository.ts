@@ -49,7 +49,9 @@ export class UserRepository extends BaseRepository<UserDoc> {
     });
 
     const encryptedPayload = encryptUserPII(payload);
-    return this.insertOne(encryptedPayload as OptionalUnlessRequiredId<UserDoc>);
+    return this.insertOne(
+      encryptedPayload as OptionalUnlessRequiredId<UserDoc>,
+    );
   }
 
   async findValidatedById(id: string | ObjectId) {
@@ -59,7 +61,9 @@ export class UserRepository extends BaseRepository<UserDoc> {
   }
 
   async touchLastLogin(id: string | ObjectId) {
-    return this.updateOne({ _id: id } as never, { $set: { lastLoginAt: new Date(), updatedAt: new Date() } });
+    return this.updateOne({ _id: id } as never, {
+      $set: { lastLoginAt: new Date(), updatedAt: new Date() },
+    });
   }
 }
 

@@ -1,20 +1,31 @@
-import express from "express";
-import type { ErrorRequestHandler } from "express";
 import cors from "cors";
-import helmet from "helmet";
-import morgan from "morgan";
 import dotenv from "dotenv";
+import express, { type ErrorRequestHandler } from "express";
 import fetch from "node-fetch";
+import helmet from "helmet";
 import { MongoServerError, ObjectId } from "mongodb";
-import { loginSchema, registerSchema } from "@secure-wallet/shared";
-import type { components } from "@secure-wallet/shared/api-client/types";
+import morgan from "morgan";
 
-import { createLoginEventRepository, createUserRepository } from "./db/repositories";
-import { logAuditEvent } from "./services/audit";
+/* eslint-disable import/no-unresolved */
+import { loginSchema, registerSchema } from "../../packages/shared/src";
+import type { components } from "../../packages/shared/api-client/types";
+/* eslint-enable import/no-unresolved */
+
+import type { LoginEventDoc } from "./db/schemas";
+import {
+  connectMongo,
+  disconnectMongo,
+  getDb,
+  readFromMongo,
+} from "./db/mongo";
+import {
+  createLoginEventRepository,
+  createUserRepository,
+} from "./db/repositories";
 import { applySecurityHeaders } from "./middleware/secureHeaders";
-import { rateLimitPlaceholder } from "./middleware/rateLimit";
 import { lockoutPlaceholder } from "./middleware/lockout";
-import { connectMongo, disconnectMongo, getDb } from "./db/mongo";
+import { rateLimitPlaceholder } from "./middleware/rateLimit";
+import { decryptUserPII } from "./security/encryption";
 import { signAuthToken } from "./security/jwt";
 import { hashPassword, verifyPassword } from "./security/password";
 
@@ -44,7 +55,100 @@ const toEntityId = (value: unknown, fallback: string) => {
 const toAnomalyScore = (value: unknown) =>
   typeof value === "number" && Number.isFinite(value) ? value : 0;
 
-type AnomalyResponse = Partial<components["schemas"]["AnomalyScore"]> & Record<string, unknown>;
+type AnomalyResponse = Partial<components["schemas"]["AnomalyScore"]> &
+  Record<string, unknown>;
+
+const DEFAULT_SECURITY_POLICY = {
+  maxLoginAttempts: 5,
+  lockoutMinutes: 15,
+  anomalyAlertThreshold: 0.7,
+};
+
+const getSecurityPolicy = async () => {
+  try {
+    const raw = await getDb()
+      .collection("securityPolicies")
+      .findOne({}, { sort: { createdAt: -1 } });
+    const validated = raw ? readFromMongo.securityPolicy(raw) : null;
+    return { ...DEFAULT_SECURITY_POLICY, ...(validated ?? {}) };
+  } catch (err) {
+    console.warn("Falling back to default security policy", err);
+    return { ...DEFAULT_SECURITY_POLICY };
+  }
+};
+
+const sanitizeUser = (doc: unknown) => {
+  const validated = readFromMongo.user(doc);
+  if (!validated) return null;
+  const decrypted = decryptUserPII(validated);
+  const { passwordHash, _id, ...rest } = decrypted;
+  void passwordHash;
+
+  return {
+    ...rest,
+    id: toEntityId(_id, decrypted.email),
+    email: decrypted.email,
+    role: decrypted.role,
+    status: decrypted.status,
+    lastLoginAt: decrypted.lastLoginAt,
+    createdAt: decrypted.createdAt,
+  };
+};
+
+const countRecentFailedAttempts = async (email: string, minutes: number) => {
+  const loginEventRepository = createLoginEventRepository();
+  const windowStart = new Date(Date.now() - minutes * 60 * 1000);
+  return loginEventRepository.count({
+    email,
+    success: false,
+    createdAt: { $gte: windowStart },
+  } as never);
+};
+
+const lockUserAccount = async (
+  userId: ObjectId | undefined,
+  email: string,
+  reason: string,
+  ipAddress?: string,
+) => {
+  if (!userId) return;
+  const userRepository = createUserRepository();
+  await userRepository.updateOne({ _id: userId } as never, {
+    $set: { status: "DISABLED", updatedAt: new Date() },
+  });
+
+  await logAuditEvent({
+    actor: email || "system",
+    userId: userId.toHexString(),
+    action: "ACCOUNT_LOCKED",
+    details: reason,
+    ipAddress,
+  });
+};
+
+const buildAlertFromLoginEvent = (
+  event: LoginEventDoc,
+  anomalyThreshold: number,
+) => {
+  const reasons: string[] = [];
+  if (!event.success) reasons.push("Failed login");
+  if ((event.anomaly ?? 0) >= anomalyThreshold)
+    reasons.push("High anomaly score");
+  if (!event.userAgent || event.userAgent === "unknown")
+    reasons.push("Unknown device");
+  if (!event.ipAddress) reasons.push("Missing IP address");
+
+  return {
+    id: toEntityId(event._id, event.email ?? "unknown"),
+    email: event.email ?? "unknown",
+    ipAddress: event.ipAddress ?? "unknown",
+    userAgent: event.userAgent ?? "unknown",
+    anomaly: event.anomaly ?? 0,
+    success: Boolean(event.success),
+    createdAt: event.createdAt ?? new Date(),
+    reasons,
+  };
+};
 
 const registerShutdownHooks = () => {
   let shuttingDown = false;
@@ -79,7 +183,9 @@ app.get("/health", async (_req, res) => {
     res.json({ status: "ok", service: "api", db: "ok", timestamp });
   } catch (err) {
     console.error("Health-check failed (MongoDB)", err);
-    res.status(503).json({ status: "degraded", service: "api", db: "down", timestamp });
+    res
+      .status(503)
+      .json({ status: "degraded", service: "api", db: "down", timestamp });
   }
 });
 
@@ -112,12 +218,24 @@ app.post("/auth/register", async (req, res) => {
       role: parsed.data.role,
     };
 
-    const token = signAuthToken({ sub: user.id, email: user.email, role: user.role });
-    await logAuditEvent({ actor: email, action: "REGISTER", userId: user.id, ipAddress: req.ip });
+    const token = signAuthToken({
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+    });
+    await logAuditEvent({
+      actor: email,
+      action: "REGISTER",
+      userId: user.id,
+      ipAddress: req.ip,
+    });
 
     return res.status(201).json({ token, user });
   } catch (err) {
-    if (err instanceof MongoServerError && err.code === DUPLICATE_KEY_ERROR_CODE) {
+    if (
+      err instanceof MongoServerError &&
+      err.code === DUPLICATE_KEY_ERROR_CODE
+    ) {
       return res.status(409).json({ error: "Email already registered" });
     }
     console.error("Failed to register user", err);
@@ -135,11 +253,15 @@ app.post("/auth/login", async (req, res) => {
   const userRepository = createUserRepository();
   const loginEventRepository = createLoginEventRepository();
   const email = normalizeEmail(parsed.data.email);
+  const policy = await getSecurityPolicy();
 
-  const userAgent = typeof req.headers["user-agent"] === "string" ? req.headers["user-agent"] : "unknown";
+  const userAgent =
+    typeof req.headers["user-agent"] === "string"
+      ? req.headers["user-agent"]
+      : "unknown";
 
   try {
-    const loginEvent = {
+    const loginEventPayload = {
       ipAddress: req.ip,
       userAgent,
       timestamp: new Date().toISOString(),
@@ -150,7 +272,7 @@ app.post("/auth/login", async (req, res) => {
       const resp = await fetch(`${AI_URL}/ai/score`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(loginEvent),
+        body: JSON.stringify(loginEventPayload),
       });
       aiResult = (await resp.json()) as AnomalyResponse;
     } catch (err) {
@@ -159,7 +281,59 @@ app.post("/auth/login", async (req, res) => {
 
     const userDoc = await userRepository.findByEmail(email);
     const score = toAnomalyScore(aiResult?.score);
-    const isPasswordValid = userDoc ? await verifyPassword(parsed.data.password, userDoc.passwordHash) : false;
+
+    if (userDoc?.status === "DISABLED") {
+      await loginEventRepository.createLoginEvent({
+        userId: userDoc._id,
+        email,
+        ipAddress: req.ip,
+        userAgent,
+        success: false,
+        anomaly: score,
+        metadata: { aiResult, reason: "ACCOUNT_DISABLED" },
+      });
+      await logAuditEvent({
+        actor: email,
+        userId: toEntityId(userDoc._id, email),
+        action: "LOGIN_BLOCKED",
+        details: "account disabled",
+        ipAddress: req.ip,
+      });
+      return res
+        .status(423)
+        .json({ error: "Account is locked. Please contact support." });
+    }
+
+    const failedBefore = await countRecentFailedAttempts(
+      email,
+      policy.lockoutMinutes,
+    );
+    if (failedBefore >= policy.maxLoginAttempts) {
+      if (userDoc?._id) {
+        await lockUserAccount(
+          userDoc._id,
+          email,
+          "Too many failed attempts",
+          req.ip,
+        );
+      }
+      await loginEventRepository.createLoginEvent({
+        userId: userDoc?._id,
+        email,
+        ipAddress: req.ip,
+        userAgent,
+        success: false,
+        anomaly: score,
+        metadata: { aiResult, reason: "LOCKOUT_THRESHOLD" },
+      });
+      return res
+        .status(423)
+        .json({ error: "Account temporarily locked due to repeated failures" });
+    }
+
+    const isPasswordValid = userDoc
+      ? await verifyPassword(parsed.data.password, userDoc.passwordHash)
+      : false;
 
     await loginEventRepository.createLoginEvent({
       userId: userDoc?._id,
@@ -171,6 +345,16 @@ app.post("/auth/login", async (req, res) => {
       metadata: { aiResult },
     });
 
+    if (score >= policy.anomalyAlertThreshold) {
+      await logAuditEvent({
+        actor: email,
+        userId: userDoc?._id ? userDoc._id.toHexString() : undefined,
+        action: "AI_ALERT",
+        details: { score, reasons: aiResult?.reasons ?? [] },
+        ipAddress: req.ip,
+      });
+    }
+
     if (!isPasswordValid || !userDoc) {
       await logAuditEvent({
         actor: email,
@@ -179,7 +363,36 @@ app.post("/auth/login", async (req, res) => {
         ipAddress: req.ip,
       });
 
-      return res.status(401).json({ error: "Invalid credentials", anomaly: aiResult });
+      const failedAttempts = failedBefore + 1;
+      if (userDoc?._id && failedAttempts >= policy.maxLoginAttempts) {
+        await lockUserAccount(
+          userDoc._id,
+          email,
+          "Exceeded failed attempts",
+          req.ip,
+        );
+        return res.status(423).json({
+          error: "Account locked after repeated failed attempts",
+          anomaly: aiResult,
+        });
+      }
+
+      return res
+        .status(401)
+        .json({ error: "Invalid credentials", anomaly: aiResult });
+    }
+
+    if (userDoc.status !== "ACTIVE") {
+      await logAuditEvent({
+        actor: email,
+        userId: userDoc._id?.toHexString(),
+        action: "LOGIN_BLOCKED",
+        details: `status=${userDoc.status}`,
+        ipAddress: req.ip,
+      });
+      return res
+        .status(423)
+        .json({ error: "Account is not active", anomaly: aiResult });
     }
 
     if (userDoc._id) {
@@ -192,7 +405,11 @@ app.post("/auth/login", async (req, res) => {
       role: userDoc.role,
     };
 
-    const token = signAuthToken({ sub: user.id, email: user.email, role: user.role });
+    const token = signAuthToken({
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+    });
     await logAuditEvent({
       actor: email,
       action: "LOGIN",
@@ -214,7 +431,11 @@ app.post("/auth/logout", (_req, res) => {
 
 // Contract placeholders below
 app.get("/wallet/me", (_req, res) => {
-  const wallet: components["schemas"]["Wallet"] = { id: "wallet1", balance: 0, currency: "USD" };
+  const wallet: components["schemas"]["Wallet"] = {
+    id: "wallet1",
+    balance: 0,
+    currency: "USD",
+  };
   res.json(wallet);
 });
 
@@ -223,7 +444,15 @@ app.post("/wallet/deposit", (_req, res) => {
 });
 
 app.post("/transfer", (_req, res) => {
-  res.json({ status: "ok", transaction: { id: "txn1", amount: 10, type: "TRANSFER", createdAt: new Date().toISOString() } });
+  res.json({
+    status: "ok",
+    transaction: {
+      id: "txn1",
+      amount: 10,
+      type: "TRANSFER",
+      createdAt: new Date().toISOString(),
+    },
+  });
 });
 
 app.get("/transactions", (_req, res) => {
@@ -234,28 +463,247 @@ app.post("/security/login-events", (_req, res) => {
   res.json({ score: 0.1, reasons: ["stub"], received: _req.body });
 });
 
-app.get("/security/alerts", (_req, res) => {
-  res.json([]);
+app.get("/security/alerts", async (_req, res) => {
+  const policy = await getSecurityPolicy();
+  const repo = createLoginEventRepository();
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const events = await repo.findMany({ createdAt: { $gte: since } } as never, {
+    sort: { createdAt: -1 },
+    limit: 100,
+  });
+  const normalized = events
+    .map((e) => readFromMongo.loginEvent(e))
+    .filter(Boolean) as LoginEventDoc[];
+  const alerts = normalized
+    .filter(
+      (evt) =>
+        !evt.success || (evt.anomaly ?? 0) >= policy.anomalyAlertThreshold,
+    )
+    .map((evt) => ({
+      ...buildAlertFromLoginEvent(evt, policy.anomalyAlertThreshold),
+      severity: !evt.success ? "high" : "medium",
+    }));
+  res.json(alerts);
 });
 
-app.get("/admin/users", (_req, res) => {
-  res.json([]);
+app.get("/admin/users", async (_req, res) => {
+  const userRepository = createUserRepository();
+  const docs = await userRepository.findMany(
+    {},
+    { sort: { createdAt: -1 }, limit: 200 },
+  );
+  const users = docs.map(sanitizeUser).filter(Boolean);
+  res.json(users);
 });
 
-app.get("/admin/alerts", (_req, res) => {
-  res.json([]);
+app.patch("/admin/users/:id/status", async (req, res) => {
+  const { status, reason } = req.body as { status?: string; reason?: string };
+  const allowedStatuses = ["ACTIVE", "DISABLED", "PENDING"] as const;
+  type UserStatus = (typeof allowedStatuses)[number];
+  const statusNormalized =
+    typeof status === "string" ? status.trim().toUpperCase() : "";
+  if (!allowedStatuses.includes(statusNormalized as UserStatus)) {
+    return res.status(400).json({ error: "Invalid status" });
+  }
+
+  try {
+    const id = new ObjectId(req.params.id);
+    const userRepository = createUserRepository();
+    await userRepository.updateOne({ _id: id } as never, {
+      $set: { status: statusNormalized as UserStatus, updatedAt: new Date() },
+    });
+    const updated = await userRepository.findValidatedById(id);
+    const sanitized = sanitizeUser(updated);
+
+    await logAuditEvent({
+      actor: "admin",
+      userId: id.toHexString(),
+      action:
+        statusNormalized === "DISABLED" ? "ACCOUNT_LOCKED" : "ACCOUNT_UNLOCKED",
+      details: reason ?? "manual update",
+      ipAddress: req.ip,
+    });
+
+    return res.json({ user: sanitized });
+  } catch (err) {
+    console.error("Failed to update user status", err);
+    return res.status(400).json({ error: "Invalid user id" });
+  }
 });
 
-app.get("/admin/audit-logs", (_req, res) => {
-  res.json([]);
+app.get("/admin/login-events", async (req, res) => {
+  const limit = Math.min(
+    parseInt(String(req.query.limit ?? "50"), 10) || 50,
+    200,
+  );
+  const repo = createLoginEventRepository();
+  const events = await repo.findMany({}, { sort: { createdAt: -1 }, limit });
+  const normalized = events
+    .map((e) => readFromMongo.loginEvent(e))
+    .filter(Boolean)
+    .map((evt) => ({
+      id: toEntityId(evt?._id, evt?.email ?? "unknown"),
+      email: evt?.email ?? "unknown",
+      ipAddress: evt?.ipAddress ?? "unknown",
+      userAgent: evt?.userAgent ?? "unknown",
+      success: evt?.success ?? false,
+      anomaly: evt?.anomaly ?? 0,
+      createdAt: evt?.createdAt ?? new Date(),
+      metadata: evt?.metadata ?? {},
+    }));
+  res.json(normalized);
 });
 
-app.get("/admin/policies", (_req, res) => {
-  res.json([]);
+app.get("/admin/transactions", async (req, res) => {
+  const limit = Math.min(
+    parseInt(String(req.query.limit ?? "50"), 10) || 50,
+    200,
+  );
+  const docs = await getDb()
+    .collection("transactions")
+    .find({}, { sort: { createdAt: -1 }, limit })
+    .toArray();
+  const normalized = docs
+    .map((d) => readFromMongo.transaction(d))
+    .filter(Boolean)
+    .map((txn) => ({
+      id: toEntityId(txn?._id, "txn"),
+      amount: txn?.amount ?? 0,
+      type: txn?.type ?? "TRANSFER",
+      status: txn?.status ?? "COMPLETED",
+      description: txn?.description ?? "",
+      createdAt: txn?.createdAt ?? new Date(),
+      fromUserId: txn?.fromUserId?.toHexString?.() ?? undefined,
+      toUserId: txn?.toUserId?.toHexString?.() ?? undefined,
+    }));
+  res.json(normalized);
 });
 
-app.post("/admin/policies", (_req, res) => {
-  res.json({ status: "updated" });
+app.get("/admin/alerts", async (_req, res) => {
+  const policy = await getSecurityPolicy();
+  const repo = createLoginEventRepository();
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const events = await repo.findMany({ createdAt: { $gte: since } } as never, {
+    sort: { createdAt: -1 },
+    limit: 100,
+  });
+  const normalized = events
+    .map((e) => readFromMongo.loginEvent(e))
+    .filter(Boolean) as LoginEventDoc[];
+  const alerts = normalized
+    .filter(
+      (evt) =>
+        !evt.success || (evt.anomaly ?? 0) >= policy.anomalyAlertThreshold,
+    )
+    .map((evt) => ({
+      ...buildAlertFromLoginEvent(evt, policy.anomalyAlertThreshold),
+      severity: !evt.success ? "high" : "medium",
+    }));
+  res.json(alerts);
+});
+
+app.get("/admin/audit-logs", async (req, res) => {
+  const limit = Math.min(
+    parseInt(String(req.query.limit ?? "100"), 10) || 100,
+    300,
+  );
+  const docs = await getDb()
+    .collection("auditLogs")
+    .find({}, { sort: { createdAt: -1 }, limit })
+    .toArray();
+  const logs = docs
+    .map((d) => readFromMongo.auditLog(d))
+    .filter(Boolean)
+    .map((log) => ({
+      id: toEntityId(log?._id, log?.actor ?? "system"),
+      actor: log?.actor ?? "system",
+      action: log?.action ?? "UNKNOWN",
+      details: log?.details ?? "",
+      ipAddress: log?.ipAddress ?? "unknown",
+      createdAt: log?.createdAt ?? new Date(),
+    }));
+  res.json(logs);
+});
+
+app.get("/admin/policies", async (_req, res) => {
+  const policy = await getSecurityPolicy();
+  res.json(policy);
+});
+
+app.post("/admin/policies", async (req, res) => {
+  const body = req.body as Partial<typeof DEFAULT_SECURITY_POLICY>;
+  const policy = {
+    ...DEFAULT_SECURITY_POLICY,
+    ...body,
+    updatedAt: new Date(),
+    createdAt: new Date(),
+  };
+  await getDb()
+    .collection("securityPolicies")
+    .insertOne(policy as never);
+  res.json({ status: "updated", policy });
+});
+
+app.post("/admin/demo/bruteforce", async (req, res) => {
+  const email =
+    typeof req.body?.email === "string"
+      ? normalizeEmail(req.body.email)
+      : "bruteforce@example.com";
+  const userAgent = "demo-script";
+  const repo = createLoginEventRepository();
+  const userRepo = createUserRepository();
+  const userDoc = await userRepo.findByEmail(email);
+  const userId = userDoc?._id;
+
+  const entries = Array.from({ length: 6 }).map((_, i) => ({
+    userId,
+    email,
+    ipAddress: `10.0.0.${i + 10}`,
+    userAgent,
+    success: false,
+    anomaly: 0.8,
+    metadata: { scenario: "bruteforce" },
+  }));
+  for (const evt of entries) {
+    await repo.createLoginEvent(evt);
+  }
+  if (userId) {
+    await lockUserAccount(userId, email, "Demo brute force lock", req.ip);
+  }
+  res.json({ inserted: entries.length, email });
+});
+
+app.post("/admin/demo/unusual-login", async (req, res) => {
+  const email =
+    typeof req.body?.email === "string"
+      ? normalizeEmail(req.body.email)
+      : "anomaly@example.com";
+  const repo = createLoginEventRepository();
+  const userRepo = createUserRepository();
+  const userDoc = await userRepo.findByEmail(email);
+  const userId = userDoc?._id;
+
+  const payload = {
+    userId,
+    email,
+    ipAddress: req.body?.ipAddress || "203.0.113.42",
+    userAgent: req.body?.userAgent || "UnknownDevice/1.0",
+    success: true,
+    anomaly: 0.92,
+    metadata: {
+      scenario: "unusual-device",
+      reasons: ["new device", "geo mismatch"],
+    },
+  };
+  await repo.createLoginEvent(payload);
+  await logAuditEvent({
+    actor: email,
+    userId: userId?.toHexString(),
+    action: "AI_ALERT",
+    details: payload.metadata,
+    ipAddress: payload.ipAddress,
+  });
+  res.json({ inserted: 1, email });
 });
 
 const errorHandler: ErrorRequestHandler = (err, _req, res, next) => {

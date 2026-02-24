@@ -1,6 +1,10 @@
 import crypto from "crypto";
 
-import type { EncryptedString, MaybeEncryptedString, UserDoc } from "../db/schemas";
+import type {
+  EncryptedString,
+  MaybeEncryptedString,
+  UserDoc,
+} from "../db/schemas";
 
 const ALGORITHM = "aes-256-gcm";
 const KEY_BYTES = 32; // AES-256 requires a 32-byte key
@@ -25,11 +29,16 @@ const decodeKey = (rawValue: string) => {
 
 const parseKeyList = (rawValue: string) => {
   const keys = new Map<string, Buffer>();
-  const entries = rawValue.split(",").map((entry) => entry.trim()).filter(Boolean);
+  const entries = rawValue
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
   for (const entry of entries) {
     const separatorIndex = entry.indexOf(":");
     if (separatorIndex <= 0 || separatorIndex === entry.length - 1) {
-      throw new Error("ENCRYPTION_KEYS must be a comma-separated list of keyId:value entries.");
+      throw new Error(
+        "ENCRYPTION_KEYS must be a comma-separated list of keyId:value entries.",
+      );
     }
     const keyId = entry.slice(0, separatorIndex).trim();
     const keyValue = entry.slice(separatorIndex + 1).trim();
@@ -49,7 +58,9 @@ const resolveActiveKeyId = (keys: Map<string, Buffer>) => {
   if (configuredKeyId) return configuredKeyId;
   if (keys.size === 1) return Array.from(keys.keys())[0];
   if (keys.size > 1) {
-    throw new Error("ENCRYPTION_KEY_ID is required when multiple ENCRYPTION_KEYS are configured.");
+    throw new Error(
+      "ENCRYPTION_KEY_ID is required when multiple ENCRYPTION_KEYS are configured.",
+    );
   }
   return DEFAULT_KEY_ID;
 };
@@ -74,12 +85,16 @@ const loadKeys = () => {
   }
 
   if (!keys.size) {
-    throw new Error("No encryption keys are configured. Set ENCRYPTION_KEY or ENCRYPTION_KEYS.");
+    throw new Error(
+      "No encryption keys are configured. Set ENCRYPTION_KEY or ENCRYPTION_KEYS.",
+    );
   }
 
   const activeKeyId = resolveActiveKeyId(keys);
   if (!keys.has(activeKeyId)) {
-    throw new Error(`ENCRYPTION_KEY_ID "${activeKeyId}" was not found in configured keys.`);
+    throw new Error(
+      `ENCRYPTION_KEY_ID "${activeKeyId}" was not found in configured keys.`,
+    );
   }
 
   cachedKeys = keys;
@@ -91,12 +106,15 @@ const loadActiveKey = () => {
   const { keys, activeKeyId } = loadKeys();
   const key = keys.get(activeKeyId);
   if (!key) {
-    throw new Error(`ENCRYPTION_KEY_ID "${activeKeyId}" was not found in configured keys.`);
+    throw new Error(
+      `ENCRYPTION_KEY_ID "${activeKeyId}" was not found in configured keys.`,
+    );
   }
   return { keyId: activeKeyId, key };
 };
 
-const getPayloadData = (value: EncryptedString) => value.data || value.ciphertext;
+const getPayloadData = (value: EncryptedString) =>
+  value.data || value.ciphertext;
 
 export const isEncryptedString = (value: unknown): value is EncryptedString => {
   if (!value || typeof value !== "object") return false;
@@ -104,7 +122,8 @@ export const isEncryptedString = (value: unknown): value is EncryptedString => {
   return (
     typeof candidate.iv === "string" &&
     typeof candidate.tag === "string" &&
-    (typeof candidate.data === "string" || typeof candidate.ciphertext === "string")
+    (typeof candidate.data === "string" ||
+      typeof candidate.ciphertext === "string")
   );
 };
 
@@ -122,14 +141,20 @@ type FieldCryptoOptions = {
   strict?: boolean;
 };
 
-export const encryptField = (plaintext: string, options?: EncryptDecryptOptions): EncryptedString => {
+export const encryptField = (
+  plaintext: string,
+  options?: EncryptDecryptOptions,
+): EncryptedString => {
   const { keyId, key } = loadActiveKey();
   const iv = crypto.randomBytes(12); // 96-bit IV recommended for GCM
   const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
   if (options?.aad) {
     cipher.setAAD(Buffer.from(options.aad, "utf8"));
   }
-  const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  const ciphertext = Buffer.concat([
+    cipher.update(plaintext, "utf8"),
+    cipher.final(),
+  ]);
   const tag = cipher.getAuthTag();
   return {
     iv: iv.toString("base64"),
@@ -141,7 +166,10 @@ export const encryptField = (plaintext: string, options?: EncryptDecryptOptions)
   };
 };
 
-export const decryptField = (payload: EncryptedString, options?: EncryptDecryptOptions): string => {
+export const decryptField = (
+  payload: EncryptedString,
+  options?: EncryptDecryptOptions,
+): string => {
   const encryptedValue = getPayloadData(payload);
   if (!encryptedValue) {
     throw new Error("Encrypted payload is missing `data`/`ciphertext`.");
@@ -156,7 +184,9 @@ export const decryptField = (payload: EncryptedString, options?: EncryptDecryptO
   if (payload.keyId) {
     const key = keys.get(payload.keyId);
     if (!key) {
-      throw new Error(`No encryption key configured for keyId "${payload.keyId}".`);
+      throw new Error(
+        `No encryption key configured for keyId "${payload.keyId}".`,
+      );
     }
     candidates.push({ keyId: payload.keyId, key });
   } else {
@@ -173,7 +203,11 @@ export const decryptField = (payload: EncryptedString, options?: EncryptDecryptO
   let lastError: unknown;
   for (const candidate of candidates) {
     try {
-      const decipher = crypto.createDecipheriv(ALGORITHM, candidate.key, Buffer.from(payload.iv, "base64"));
+      const decipher = crypto.createDecipheriv(
+        ALGORITHM,
+        candidate.key,
+        Buffer.from(payload.iv, "base64"),
+      );
       if (options?.aad) {
         decipher.setAAD(Buffer.from(options.aad, "utf8"));
       }
@@ -188,10 +222,15 @@ export const decryptField = (payload: EncryptedString, options?: EncryptDecryptO
     }
   }
 
-  throw lastError instanceof Error ? lastError : new Error("Failed to decrypt payload.");
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Failed to decrypt payload.");
 };
 
-export const encryptFields = <T extends Record<string, unknown>, K extends keyof T>(
+export const encryptFields = <
+  T extends Record<string, unknown>,
+  K extends keyof T,
+>(
   doc: T,
   fields: readonly K[],
   options?: FieldCryptoOptions,
@@ -205,7 +244,9 @@ export const encryptFields = <T extends Record<string, unknown>, K extends keyof
 
     if (typeof value !== "string") {
       if (options?.strict) {
-        throw new Error(`Cannot encrypt non-string value for field '${String(field)}'.`);
+        throw new Error(
+          `Cannot encrypt non-string value for field '${String(field)}'.`,
+        );
       }
       continue;
     }
@@ -218,7 +259,10 @@ export const encryptFields = <T extends Record<string, unknown>, K extends keyof
   return clone as T;
 };
 
-export const decryptFields = <T extends Record<string, unknown>, K extends keyof T>(
+export const decryptFields = <
+  T extends Record<string, unknown>,
+  K extends keyof T,
+>(
   doc: T,
   fields: readonly K[],
   options?: FieldCryptoOptions,
@@ -232,7 +276,9 @@ export const decryptFields = <T extends Record<string, unknown>, K extends keyof
 
     if (!isEncryptedString(value)) {
       if (options?.strict) {
-        throw new Error(`Field '${String(field)}' is not a valid encrypted payload.`);
+        throw new Error(
+          `Field '${String(field)}' is not a valid encrypted payload.`,
+        );
       }
       continue;
     }
@@ -267,9 +313,13 @@ const USER_PII_FIELDS = ["phone", "address", "dob"] as const;
  * - Leaves already encrypted values untouched to avoid double-encryption.
  */
 export const encryptUserPII = <T extends UserDoc>(user: T): T => {
-  return encryptFields(user as unknown as Record<string, unknown>, USER_PII_FIELDS, {
-    aadNamespace: "user-pii",
-  }) as T;
+  return encryptFields(
+    user as unknown as Record<string, unknown>,
+    USER_PII_FIELDS,
+    {
+      aadNamespace: "user-pii",
+    },
+  ) as T;
 };
 
 /**
@@ -279,7 +329,11 @@ export const encryptUserPII = <T extends UserDoc>(user: T): T => {
  *   (This makes it safe for mixed/legacy data during migrations.)
  */
 export const decryptUserPII = <T extends UserDoc>(user: T): T => {
-  return decryptFields(user as unknown as Record<string, unknown>, USER_PII_FIELDS, {
-    aadNamespace: "user-pii",
-  }) as T;
+  return decryptFields(
+    user as unknown as Record<string, unknown>,
+    USER_PII_FIELDS,
+    {
+      aadNamespace: "user-pii",
+    },
+  ) as T;
 };

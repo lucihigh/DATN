@@ -4,7 +4,9 @@ async function main() {
   await connectMongo();
   await ensureDbIndexes();
 
-  console.log("MongoDB initialized: indexes ensured (background mode, no DB schema validators).");
+  console.log(
+    "MongoDB initialized: indexes ensured (background mode, no DB schema validators).",
+  );
 }
 
 main()

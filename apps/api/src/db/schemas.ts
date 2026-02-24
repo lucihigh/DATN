@@ -17,11 +17,18 @@ export const COLLECTIONS = {
 // ---- Shared helpers -------------------------------------------------------
 
 const optionalDate = z
-  .preprocess((val) => (val === null || val === undefined ? undefined : val), z.coerce.date())
+  .preprocess(
+    (val) => (val === null || val === undefined ? undefined : val),
+    z.coerce.date(),
+  )
   .optional();
 
 const optionalNumber = z
-  .preprocess((val) => (val === null || val === undefined || val === "" ? undefined : val), z.coerce.number())
+  .preprocess(
+    (val) =>
+      val === null || val === undefined || val === "" ? undefined : val,
+    z.coerce.number(),
+  )
   .optional();
 
 const optionalBoolean = z
@@ -59,14 +66,20 @@ export const encryptionEnvelopeSchema = z
   })
   // passthrough keeps backward compatibility if older fields exist
   .passthrough()
-  .refine((value) => typeof value.data === "string" || typeof value.ciphertext === "string", {
-    message: "Encrypted payload must include `data` or `ciphertext`",
-  });
+  .refine(
+    (value) =>
+      typeof value.data === "string" || typeof value.ciphertext === "string",
+    {
+      message: "Encrypted payload must include `data` or `ciphertext`",
+    },
+  );
 
 export type EncryptedString = z.infer<typeof encryptionEnvelopeSchema>;
 export type MaybeEncryptedString = string | EncryptedString;
 
-const piiFieldSchema = z.union([z.string(), encryptionEnvelopeSchema]).optional();
+const piiFieldSchema = z
+  .union([z.string(), encryptionEnvelopeSchema])
+  .optional();
 
 // ---- Users ----------------------------------------------------------------
 
@@ -126,7 +139,9 @@ export const transactionSchema = z
     toUserId: objectIdSchema.optional(),
     amount: optionalNumber.default(0),
     type: z.enum(["DEPOSIT", "WITHDRAW", "TRANSFER"]).catch("TRANSFER"),
-    status: z.enum(["PENDING", "COMPLETED", "FAILED", "REVERSED"]).catch("COMPLETED"),
+    status: z
+      .enum(["PENDING", "COMPLETED", "FAILED", "REVERSED"])
+      .catch("COMPLETED"),
     description: z.string().trim().max(500).optional(),
     createdAt: optionalDate,
     updatedAt: optionalDate,

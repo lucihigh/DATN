@@ -1,5 +1,6 @@
 import { MongoServerError } from "mongodb";
 import type { CreateIndexesOptions, Db, IndexSpecification } from "mongodb";
+
 import { COLLECTIONS } from "./schemas";
 
 type IndexDefinition = {
@@ -128,7 +129,10 @@ const isOptionsConflict = (error: unknown) =>
 export const ensureIndexes = async (db: Db) => {
   for (const definition of indexDefinitions) {
     const collection = db.collection(definition.collection);
-    const options: CreateIndexesOptions = { background: true, ...definition.options };
+    const options: CreateIndexesOptions = {
+      background: true,
+      ...definition.options,
+    };
     if (options.unique && !SAFE_UNIQUE_INDEX_NAMES.has(options.name ?? "")) {
       console.warn(`Skipping unsafe unique index on ${definition.collection}`, {
         key: definition.key,
@@ -141,10 +145,13 @@ export const ensureIndexes = async (db: Db) => {
     } catch (error) {
       if (isOptionsConflict(error)) {
         // Keep the existing index definition; do not drop or replace to avoid risk.
-        console.warn(`Index already exists with different options for ${definition.collection}`, {
-          key: definition.key,
-          name: options.name,
-        });
+        console.warn(
+          `Index already exists with different options for ${definition.collection}`,
+          {
+            key: definition.key,
+            name: options.name,
+          },
+        );
         continue;
       }
       console.warn(`Failed to create index on ${definition.collection}`, {
