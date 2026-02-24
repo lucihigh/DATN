@@ -24,23 +24,9 @@ const NAV_ITEMS: {
   { id: "Accounts", label: "Accounts" },
   { id: "Setting", label: "Setting" },
   {
-    id: "Utilities",
-    label: "Utilities",
-    children: [
-      { id: "Knowledge base", label: "Knowledge base" },
-      { id: "404", label: "404" },
-      { id: "Protected Page", label: "Protected Page" },
-      { id: "Changelog", label: "Changelog" },
-      { id: "License", label: "License" },
-    ],
-  },
-  {
-    id: "Authentication",
-    label: "Authentication",
-    children: [
-      { id: "Sign In", label: "Sign In" },
-      { id: "Sign Up", label: "Sign Up" },
-    ],
+    id: "Support",
+    label: "Support",
+    children: [{ id: "Knowledge base", label: "Knowledge base" }],
   },
 ];
 
@@ -244,16 +230,19 @@ const transactionsHistory = [
 ];
 
 function Ring({ value }: { value: number }) {
-  const dash = `${value * 2.64} ${264 - value * 2.64}`;
+  const r = 36;
+  const circ = 2 * Math.PI * r;
+  const offset = circ * (1 - value / 100);
   return (
     <svg viewBox="0 0 84 84" className="ring">
-      <circle className="ring-bg" cx="42" cy="42" r="42" />
+      <circle className="ring-bg" cx="42" cy="42" r={r} />
       <circle
         className="ring-fg"
         cx="42"
         cy="42"
-        r="42"
-        strokeDasharray={dash}
+        r={r}
+        strokeDasharray={`${circ} ${circ}`}
+        strokeDashoffset={offset}
       />
       <text x="50%" y="52%" textAnchor="middle" className="ring-text">
         {value}%
@@ -638,10 +627,12 @@ const createInvoiceInitialProducts: ProductRow[] = [
 ];
 
 function CreateInvoicesView() {
+  const { toast } = useToast();
   const [products, setProducts] = useState<ProductRow[]>(
     createInvoiceInitialProducts,
   );
   const [nextId, setNextId] = useState(4);
+  const [notes, setNotes] = useState("");
 
   const updateRow = (id: number, field: keyof ProductRow, value: string) => {
     setProducts((p) =>
@@ -662,12 +653,32 @@ function CreateInvoicesView() {
     setProducts((p) => p.filter((r) => r.id !== id));
   };
 
-  const grandTotal = products.reduce((sum, r) => {
+  const subtotal = products.reduce((sum, r) => {
     const q = parseMoney(r.qty);
     const u = parseMoney(r.unitPrice);
     const d = parseMoney(r.discount);
     return sum + (q * u - d);
   }, 0);
+  const tax = subtotal * 0.08;
+  const grandTotal = subtotal + tax;
+
+  const saveInvoice = () => {
+    const payload = {
+      products,
+      subtotal,
+      tax,
+      grandTotal,
+      notes,
+      savedAt: new Date().toISOString(),
+    };
+    try {
+      localStorage.setItem("invoice_draft", JSON.stringify(payload));
+      toast("Invoice saved locally (key: invoice_draft)");
+    } catch (err) {
+      console.error(err);
+      toast("Cannot save invoice to localStorage", "error");
+    }
+  };
 
   return (
     <section className="create-invoices-section">
@@ -788,11 +799,33 @@ function CreateInvoicesView() {
           </table>
         </div>
         <div className="invoice-grand-total">
-          Grand Total: <strong>{formatMoney(grandTotal)}</strong>
+          <div className="invoice-summary-row">
+            <span>Subtotal</span>
+            <strong>{formatMoney(subtotal)}</strong>
+          </div>
+          <div className="invoice-summary-row">
+            <span>Tax (8%)</span>
+            <strong>{formatMoney(tax)}</strong>
+          </div>
+          <div className="invoice-summary-row total">
+            <span>Grand Total</span>
+            <strong>{formatMoney(grandTotal)}</strong>
+          </div>
         </div>
-        <button type="button" className="btn-add-product" onClick={addProduct}>
-          + Add Product
-        </button>
+        <textarea
+          className="invoice-notes"
+          placeholder="Notes for buyer or internal remarks"
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+        />
+        <div className="invoice-actions">
+          <button type="button" className="btn-add-product" onClick={addProduct}>
+            + Add Product
+          </button>
+          <button type="button" className="btn-primary" onClick={saveInvoice}>
+            Save Draft
+          </button>
+        </div>
       </div>
     </section>
   );
@@ -853,6 +886,34 @@ function CardCenterView() {
     number: "",
     holder: user?.name ?? "John Doe",
   });
+  const [method, setMethod] = useState<"Payoneer" | "Mastercard" | "Visa">(
+    "Payoneer",
+  );
+  const [period, setPeriod] = useState<"Monthly" | "Weekly">("Monthly");
+
+  const spendData: Record<
+    typeof method,
+    { label: string; monthly: number[]; weekly: number[] }
+  > = {
+    Payoneer: {
+      label: "Payoneer",
+      monthly: [40, 52, 35, 60, 55, 70, 45, 80],
+      weekly: [10, 18, 12, 20, 25, 22, 28],
+    },
+    Mastercard: {
+      label: "Mastercard",
+      monthly: [55, 60, 48, 72, 66, 78, 50, 85],
+      weekly: [14, 15, 18, 22, 24, 28, 30],
+    },
+    Visa: {
+      label: "Visa",
+      monthly: [30, 36, 28, 40, 44, 52, 35, 60],
+      weekly: [8, 12, 14, 15, 16, 18, 20],
+    },
+  };
+
+  const activeSeries =
+    period === "Monthly" ? spendData[method].monthly : spendData[method].weekly;
 
   const addCard = (e: React.FormEvent) => {
     e.preventDefault();
@@ -925,25 +986,98 @@ function CardCenterView() {
       <div className="card payment-method-card">
         <h3>Payment Method</h3>
         <div className="method-tabs">
-          <button type="button" className="method-tab active">
+          <button
+            type="button"
+            className={`method-tab ${method === "Payoneer" ? "active" : ""}`}
+            onClick={() => setMethod("Payoneer")}
+          >
             Payoneer
           </button>
-          <button type="button" className="method-tab">
+          <button
+            type="button"
+            className={`method-tab ${method === "Mastercard" ? "active" : ""}`}
+            onClick={() => setMethod("Mastercard")}
+          >
             Mastercard
           </button>
-          <button type="button" className="method-tab">
+          <button
+            type="button"
+            className={`method-tab ${method === "Visa" ? "active" : ""}`}
+            onClick={() => setMethod("Visa")}
+          >
             Visa
           </button>
         </div>
         <div className="period-tabs">
-          <button type="button" className="period-tab active">
+          <button
+            type="button"
+            className={`period-tab ${period === "Monthly" ? "active" : ""}`}
+            onClick={() => setPeriod("Monthly")}
+          >
             Monthly
           </button>
-          <button type="button" className="period-tab">
+          <button
+            type="button"
+            className={`period-tab ${period === "Weekly" ? "active" : ""}`}
+            onClick={() => setPeriod("Weekly")}
+          >
             Weekly
           </button>
         </div>
-        <div className="line-chart-placeholder" />
+        <div
+          className="chart-bars"
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(10px, 1fr))",
+            gap: 8,
+            alignItems: "end",
+            height: 160,
+          }}
+        >
+          {activeSeries.map((v, idx) => (
+            <div
+              key={idx}
+              className="chart-bar"
+              style={{
+                width: "100%",
+                background: "#eef2ff",
+                borderRadius: 10,
+                height: 100,
+                position: "relative",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                className="chart-bar-fill"
+                style={{
+                  height: `${v}%`,
+                  width: "100%",
+                  position: "absolute",
+                  bottom: 0,
+                  left: 0,
+                  background:
+                    method === "Payoneer"
+                      ? "var(--accent)"
+                      : method === "Mastercard"
+                        ? "var(--accent-2)"
+                        : "#1a3a5c",
+                  borderRadius: 10,
+                }}
+                title={`${v}%`}
+              />
+            </div>
+          ))}
+        </div>
+        <div className="payment-summary">
+          <span>{spendData[method].label}</span>
+          <strong>
+            Avg {period}:{" "}
+            {Math.round(
+              activeSeries.reduce((a, b) => a + b, 0) / activeSeries.length,
+            )}
+            %
+          </strong>
+        </div>
       </div>
       <div className="card card-expenses-card">
         <h3>Card Expenses</h3>
@@ -1210,6 +1344,7 @@ function AccountsView() {
 }
 
 const SETTING_PROFILE_KEY = "moneyfarm_profile";
+const SETTING_SECURITY_KEY = "moneyfarm_security";
 type ProfileForm = {
   name: string;
   userName: string;
@@ -1304,6 +1439,93 @@ function SettingView() {
   const [notifDeposit, setNotifDeposit] = useState(false);
   const [notifWithdraw1, setNotifWithdraw1] = useState(true);
   const [notifWithdraw2, setNotifWithdraw2] = useState(true);
+  const [passwordForm, setPasswordForm] = useState({
+    current: "",
+    next: "",
+    confirm: "",
+  });
+  const [security, setSecurity] = useState(() => {
+    try {
+      const s = localStorage.getItem(SETTING_SECURITY_KEY);
+      return s
+        ? JSON.parse(s)
+        : {
+            twofa: false,
+            saveLogin: true,
+            devices: [
+              {
+                id: "mbp-16",
+                name: 'MacBook Pro 16"',
+                lastUsed: "2026-02-22 · San Francisco, US",
+                trusted: true,
+              },
+              {
+                id: "iphone-14",
+                name: "iPhone 14 Pro",
+                lastUsed: "2026-02-23 · San Francisco, US",
+                trusted: true,
+              },
+              {
+                id: "office-pc",
+                name: "Windows PC",
+                lastUsed: "2026-02-10 · Ho Chi Minh, VN",
+                trusted: false,
+              },
+            ],
+          };
+    } catch {
+      return {
+        twofa: false,
+        saveLogin: true,
+        devices: [],
+      };
+    }
+  });
+
+  const persistSecurity = (next: typeof security) => {
+    setSecurity(next);
+    localStorage.setItem(SETTING_SECURITY_KEY, JSON.stringify(next));
+  };
+
+  const toggle2fa = (v: boolean) => {
+    persistSecurity({ ...security, twofa: v });
+    toast(v ? "Two-factor enabled" : "Two-factor disabled");
+  };
+
+  const toggleSaveLogin = (v: boolean) => {
+    persistSecurity({ ...security, saveLogin: v });
+    toast(v ? "Login info will be remembered" : "Login info will not be saved");
+  };
+
+  const toggleTrusted = (id: string) => {
+    const devices = security.devices.map((d: any) =>
+      d.id === id ? { ...d, trusted: !d.trusted } : d,
+    );
+    persistSecurity({ ...security, devices });
+  };
+
+  const removeDevice = (id: string) => {
+    const devices = security.devices.filter((d: any) => d.id !== id);
+    persistSecurity({ ...security, devices });
+    toast("Device removed");
+  };
+
+  const changePassword = () => {
+    if (!passwordForm.current || !passwordForm.next) {
+      toast("Fill current and new password", "error");
+      return;
+    }
+    if (passwordForm.next.length < 8) {
+      toast("New password must be at least 8 characters", "error");
+      return;
+    }
+    if (passwordForm.next !== passwordForm.confirm) {
+      toast("Passwords do not match", "error");
+      return;
+    }
+    setPasswordForm({ current: "", next: "", confirm: "" });
+    toast("Password updated (demo)");
+  };
 
   const saveProfile = () => {
     localStorage.setItem(SETTING_PROFILE_KEY, JSON.stringify(profile));
@@ -1492,70 +1714,96 @@ function SettingView() {
             <h3 className="setting-panel-title">Security</h3>
             <div className="setting-block">
               <h4 className="setting-block-head">Two-Factor Authentication</h4>
-              <div className="setting-item-row">
+              <div className="setting-row toggle-row">
                 <div>
                   <strong>Use two-factor authentication</strong>
                   <p className="muted">
-                    We'll ask for a code if we notice an attempted login from an
-                    unrecognized device or browser.
+                    We’ll ask for a code when a login is from an unrecognized
+                    device or browser.
                   </p>
                 </div>
-                <button type="button" className="btn-setting-action">
-                  Edit
-                </button>
+                <Toggle checked={security.twofa} onChange={toggle2fa} />
               </div>
-              <div className="setting-item-row">
+              <div className="setting-row toggle-row">
                 <div>
-                  <strong>Authorized Logins</strong>
+                  <strong>Save login info</strong>
                   <p className="muted">
-                    Review a list of devices where you won't have to use a login
-                    code.
+                    Only on browsers/devices you trust. Turn off on shared
+                    machines.
                   </p>
                 </div>
-                <button type="button" className="btn-setting-action">
-                  View
-                </button>
+                <Toggle checked={security.saveLogin} onChange={toggleSaveLogin} />
               </div>
-              <div className="setting-item-row">
-                <div>
-                  <strong>Authorized Logins</strong>
-                  <p className="muted">
-                    Review a list of devices where you won't have to use a login
-                    code.
-                  </p>
-                </div>
-                <button type="button" className="btn-setting-action">
-                  View
-                </button>
+            </div>
+            <div className="setting-block">
+              <h4 className="setting-block-head">Trusted devices</h4>
+              <div className="trusted-devices">
+                {security.devices.map((d: any) => (
+                  <div key={d.id} className="trusted-row">
+                    <div>
+                      <strong>{d.name}</strong>
+                      <p className="muted">{d.lastUsed}</p>
+                    </div>
+                    <div className="trusted-actions">
+                      <button
+                        type="button"
+                        className={`pill ${d.trusted ? "pill-on" : ""}`}
+                        onClick={() => toggleTrusted(d.id)}
+                      >
+                        {d.trusted ? "Trusted" : "Trust"}
+                      </button>
+                      <button
+                        type="button"
+                        className="pill danger-pill"
+                        onClick={() => removeDevice(d.id)}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                {security.devices.length === 0 && (
+                  <p className="muted">No devices saved.</p>
+                )}
               </div>
             </div>
             <div className="setting-block">
               <h4 className="setting-block-head">Change Password</h4>
-              <div className="setting-item-row">
-                <div>
-                  <strong>Change Password</strong>
-                  <p className="muted">
-                    Review a list of devices where you won't have to use a login
-                    code.
-                  </p>
+              <div className="form-grid setting-form">
+                <div className="form-group">
+                  <label>Current password</label>
+                  <input
+                    type="password"
+                    value={passwordForm.current}
+                    onChange={(e) =>
+                      setPasswordForm((p) => ({ ...p, current: e.target.value }))
+                    }
+                  />
                 </div>
-                <button type="button" className="btn-setting-action">
-                  Edit
-                </button>
+                <div className="form-group">
+                  <label>New password</label>
+                  <input
+                    type="password"
+                    value={passwordForm.next}
+                    onChange={(e) =>
+                      setPasswordForm((p) => ({ ...p, next: e.target.value }))
+                    }
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Confirm new password</label>
+                  <input
+                    type="password"
+                    value={passwordForm.confirm}
+                    onChange={(e) =>
+                      setPasswordForm((p) => ({ ...p, confirm: e.target.value }))
+                    }
+                  />
+                </div>
               </div>
-            </div>
-            <div className="setting-block">
-              <h4 className="setting-block-head">Save Your Login Info</h4>
-              <div className="setting-item-row">
-                <div>
-                  <strong>Save Your Login Info</strong>
-                  <p className="muted">
-                    It will only be saved on the browsers and devices you
-                    choose.
-                  </p>
-                </div>
-                <button type="button" className="btn-setting-action">
-                  Edit
+              <div className="setting-actions">
+                <button type="button" className="btn-primary" onClick={changePassword}>
+                  Update Password
                 </button>
               </div>
             </div>
@@ -1718,68 +1966,6 @@ function Error404View({ onGoHome }: { onGoHome?: () => void }) {
   );
 }
 
-const PROTECTED_PASSWORD = "1234";
-
-function ProtectedPageView() {
-  const [password, setPassword] = useState("");
-  const [unlocked, setUnlocked] = useState(false);
-  const { toast } = useToast();
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (password === PROTECTED_PASSWORD) {
-      setUnlocked(true);
-      toast("Access granted. Page unlocked.");
-    } else {
-      toast("Incorrect password. Try 1234 for demo.", "error");
-    }
-  };
-
-  if (unlocked) {
-    return (
-      <section className="utility-protected-section">
-        <div className="card utility-protected-card">
-          <div className="protected-icon">✅</div>
-          <h3 className="protected-title">Access Granted</h3>
-          <p className="muted protected-desc">
-            This page is now unlocked. You have successfully entered the correct
-            password.
-          </p>
-        </div>
-      </section>
-    );
-  }
-
-  return (
-    <section className="utility-protected-section">
-      <div className="card utility-protected-card">
-        <div className="protected-icon">🔒</div>
-        <h3 className="protected-title">Protected Password</h3>
-        <p className="muted protected-desc">
-          majority have suffered alteration in some form, by injected humour, or
-          randomised words which don't look even slightly believable. If you are
-          going to use a passage of Lorem Ipsum, you need to be sure there isn't
-          anything embarrassing hidden in the middle of text.
-        </p>
-        <form className="protected-form" onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label>Password</label>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Enter your password (demo: 1234)"
-            />
-          </div>
-          <button type="submit" className="btn-primary">
-            Submit
-          </button>
-        </form>
-      </div>
-    </section>
-  );
-}
-
 function ChangelogView() {
   return (
     <section className="utility-changelog-section">
@@ -1830,271 +2016,38 @@ function LicenseView() {
   );
 }
 
-const AUTH_LOREM =
-  "It is a long established fact that a reader will be distracted by the readable content of a page when looking at its layout. The point of using Lorem Ipsum is that it has.";
-
-function AuthPanel() {
-  return (
-    <div className="auth-illust-panel">
-      <div className="auth-illust">🪙</div>
-      <div className="auth-brand">F MoneyFarm</div>
-      <p className="muted auth-panel-desc">{AUTH_LOREM}</p>
-    </div>
-  );
-}
-
-function SignInView({
-  onNavigateSignUp,
-  onSignInSuccess,
-}: {
-  onNavigateSignUp: () => void;
-  onSignInSuccess?: () => void;
-}) {
-  const [showPassword, setShowPassword] = useState(false);
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const { login } = useAuth();
-  const { toast } = useToast();
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!email.trim()) {
-      toast("Please enter email", "error");
-      return;
-    }
-    if (!password) {
-      toast("Please enter password", "error");
-      return;
-    }
-    login(email, password);
-    toast("Signed in successfully");
-    onSignInSuccess?.();
-  };
-
-  return (
-    <section className="auth-section">
-      <div className="auth-card">
-        <h2 className="auth-title">Sign In</h2>
-        <p className="muted auth-intro">{AUTH_LOREM}</p>
-        <div className="auth-social-row">
-          <button type="button" className="auth-social-btn">
-            <span className="auth-social-icon g">G</span> Sign In With Google
-          </button>
-          <button type="button" className="auth-social-btn">
-            <span className="auth-social-icon f">f</span> Sign In With Facebook
-          </button>
-        </div>
-        <div className="auth-sep">
-          <span>OR</span>
-        </div>
-        <form className="auth-form" onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label>Email Address</label>
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="johndoe.banking@gmail.com"
-            />
-          </div>
-          <div className="form-group auth-password-wrap">
-            <label>Password</label>
-            <div className="auth-password-input">
-              <input
-                type={showPassword ? "text" : "password"}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="********"
-              />
-              <button
-                type="button"
-                className="auth-eye"
-                onClick={() => setShowPassword(!showPassword)}
-                aria-label="Toggle password"
-              >
-                {showPassword ? "🙈" : "👁"}
-              </button>
-            </div>
-          </div>
-          <div className="auth-options">
-            <label className="auth-checkbox">
-              <input type="checkbox" /> Remember me
-            </label>
-            <a
-              href="#"
-              className="auth-link"
-              onClick={(e) => e.preventDefault()}
-            >
-              Forgot password
-            </a>
-          </div>
-          <button type="submit" className="btn-primary auth-submit">
-            Sign In
-          </button>
-        </form>
-        <p className="auth-switch">
-          Don't have an account?{" "}
-          <button
-            type="button"
-            className="auth-link-btn"
-            onClick={onNavigateSignUp}
-          >
-            Sign Up
-          </button>
-        </p>
-      </div>
-      <AuthPanel />
-    </section>
-  );
-}
-
-function SignUpView({
-  onNavigateSignIn,
-  onSignUpSuccess,
-}: {
-  onNavigateSignIn: () => void;
-  onSignUpSuccess?: () => void;
-}) {
-  const [showPassword, setShowPassword] = useState(false);
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [agree, setAgree] = useState(false);
-  const { signUp } = useAuth();
-  const { toast } = useToast();
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!name.trim()) {
-      toast("Please enter username", "error");
-      return;
-    }
-    if (!email.trim()) {
-      toast("Please enter email", "error");
-      return;
-    }
-    if (!password) {
-      toast("Please enter password", "error");
-      return;
-    }
-    if (!agree) {
-      toast("Please agree to terms & conditions", "error");
-      return;
-    }
-    signUp(name, email, password);
-    toast("Account created successfully");
-    onSignUpSuccess?.();
-  };
-
-  return (
-    <section className="auth-section">
-      <div className="auth-card">
-        <h2 className="auth-title">Sign Up</h2>
-        <p className="muted auth-intro">{AUTH_LOREM}</p>
-        <div className="auth-social-row">
-          <button type="button" className="auth-social-btn">
-            <span className="auth-social-icon g">G</span> Sign Up With Google
-          </button>
-          <button type="button" className="auth-social-btn">
-            <span className="auth-social-icon f">f</span> Sign Up With Facebook
-          </button>
-        </div>
-        <div className="auth-sep">
-          <span>OR</span>
-        </div>
-        <form className="auth-form" onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label>Username</label>
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="johndoe"
-            />
-          </div>
-          <div className="form-group">
-            <label>Email Address</label>
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="johndoe.banking@gmail.com"
-            />
-          </div>
-          <div className="form-group auth-password-wrap">
-            <label>Password</label>
-            <div className="auth-password-input">
-              <input
-                type={showPassword ? "text" : "password"}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="********"
-              />
-              <button
-                type="button"
-                className="auth-eye"
-                onClick={() => setShowPassword(!showPassword)}
-                aria-label="Toggle password"
-              >
-                {showPassword ? "🙈" : "👁"}
-              </button>
-            </div>
-          </div>
-          <label className="auth-checkbox auth-terms">
-            <input
-              type="checkbox"
-              checked={agree}
-              onChange={(e) => setAgree(e.target.checked)}
-            />{" "}
-            I have read and agree with terms & condition.
-          </label>
-          <button type="submit" className="btn-primary auth-submit">
-            Create Account
-          </button>
-        </form>
-        <p className="auth-switch">
-          Already have an account?{" "}
-          <button
-            type="button"
-            className="auth-link-btn"
-            onClick={onNavigateSignIn}
-          >
-            Sign In
-          </button>
-        </p>
-      </div>
-      <AuthPanel />
-    </section>
-  );
-}
-
-function AuthOnlyLayout() {
-  const [authPage, setAuthPage] = useState<"signin" | "signup">("signin");
-  return (
-    <div className="auth-fullpage">
-      {authPage === "signin" ? (
-        <SignInView onNavigateSignUp={() => setAuthPage("signup")} />
-      ) : (
-        <SignUpView onNavigateSignIn={() => setAuthPage("signin")} />
-      )}
-    </div>
-  );
-}
-
 type PeriodFilter = "This Week" | "All Time";
 
 function TransactionsView() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [period, setPeriod] = useState<PeriodFilter>("This Week");
   const [periodOpen, setPeriodOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<
+    "all" | "Pending" | "Completed" | "Canceled"
+  >("all");
+  const { toast } = useToast();
 
-  const filtered =
-    period === "This Week"
-      ? transactionsHistory.filter(
-          (t) =>
-            t.date.includes("February 18") || t.date.includes("February 19"),
-        )
-      : transactionsHistory;
+  const filtered = transactionsHistory.filter((t) => {
+    if (
+      period === "This Week" &&
+      !(t.date.includes("February 18") || t.date.includes("February 19"))
+    ) {
+      return false;
+    }
+    if (statusFilter !== "all" && t.status !== statusFilter) return false;
+    const term = search.trim().toLowerCase();
+    if (
+      term &&
+      !(
+        t.name.toLowerCase().includes(term) ||
+        t.id.toLowerCase().includes(term)
+      )
+    ) {
+      return false;
+    }
+    return true;
+  });
 
   const toggle = (id: string) => {
     setSelected((s) => {
@@ -2109,6 +2062,20 @@ function TransactionsView() {
     else setSelected(new Set(filtered.map((t) => t.id)));
   };
 
+  const exportSelected = () => {
+    if (selected.size === 0) {
+      toast("No transactions selected", "error");
+      return;
+    }
+    const list = transactionsHistory.filter((t) => selected.has(t.id));
+    const total = list.reduce(
+      (sum, t) =>
+        sum + parseMoney(t.amount) * (t.amount.startsWith("-") ? -1 : 1),
+      0,
+    );
+    toast(`Exported ${list.length} items. Net: ${formatMoney(total)}`);
+  };
+
   return (
     <section className="transactions-section">
       <div className="card transactions-history-card">
@@ -2119,36 +2086,60 @@ function TransactionsView() {
               Lorem ipsum dolor sit amet
             </p>
           </div>
-          <div className="filter-dropdown-wrap">
-            <button
-              type="button"
-              className="pill"
-              onClick={() => setPeriodOpen(!periodOpen)}
+          <div className="tx-filters">
+            <div className="filter-dropdown-wrap">
+              <button
+                type="button"
+                className="pill"
+                onClick={() => setPeriodOpen(!periodOpen)}
+              >
+                {period} ▼
+              </button>
+              {periodOpen && (
+                <div className="filter-dropdown">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPeriod("This Week");
+                      setPeriodOpen(false);
+                    }}
+                  >
+                    This Week
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPeriod("All Time");
+                      setPeriodOpen(false);
+                    }}
+                  >
+                    All Time
+                  </button>
+                </div>
+              )}
+            </div>
+            <select
+              className="pill tx-status-filter"
+              value={statusFilter}
+              onChange={(e) =>
+                setStatusFilter(e.target.value as typeof statusFilter)
+              }
             >
-              {period} ▼
+              <option value="all">Status: All</option>
+              <option value="Completed">Completed</option>
+              <option value="Pending">Pending</option>
+              <option value="Canceled">Canceled</option>
+            </select>
+            <input
+              className="tx-search"
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by ID or recipient"
+            />
+            <button type="button" className="pill" onClick={exportSelected}>
+              Export Selected
             </button>
-            {periodOpen && (
-              <div className="filter-dropdown">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPeriod("This Week");
-                    setPeriodOpen(false);
-                  }}
-                >
-                  This Week
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPeriod("All Time");
-                    setPeriodOpen(false);
-                  }}
-                >
-                  All Time
-                </button>
-              </div>
-            )}
           </div>
         </div>
         <div className="transactions-table-wrap">
@@ -2221,34 +2212,27 @@ function TransactionsView() {
 
 const PAGE_TITLE: Record<string, string> = {
   "Knowledge base": "FAQ",
-  "404": "Error",
-  "Protected Page": "Protected Password",
 };
 
 function App() {
-  const { user, logout } = useAuth();
+  const { user, logout, login, signUp } = useAuth();
   const [activeTab, setActiveTab] = useState("Dashboard");
+  const [search, setSearch] = useState("");
+  const [searchResults, setSearchResults] = useState<string[]>([]);
+  const [showNotifications, setShowNotifications] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
   const [invoicesExpanded, setInvoicesExpanded] = useState(false);
   const [utilitiesExpanded, setUtilitiesExpanded] = useState(false);
-  const [authExpanded, setAuthExpanded] = useState(false);
 
   const isInvoicesActive =
     activeTab === "Invoice List" || activeTab === "Create Invoices";
   const invoicesExpandedShow = invoicesExpanded || isInvoicesActive;
   const utilitiesIds = [
     "Knowledge base",
-    "404",
-    "Protected Page",
-    "Changelog",
-    "License",
   ];
   const isUtilitiesActive = utilitiesIds.includes(activeTab);
   const utilitiesExpandedShow = utilitiesExpanded || isUtilitiesActive;
-  const authIds = ["Sign In", "Sign Up"];
-  const isAuthActive = authIds.includes(activeTab);
-  const authExpandedShow = authExpanded || isAuthActive;
 
   useEffect(() => {
     const close = (e: MouseEvent) => {
@@ -2262,21 +2246,47 @@ function App() {
     return () => document.removeEventListener("click", close);
   }, []);
 
-  if (!user) return <AuthOnlyLayout />;
+  const displayUser =
+    user ?? {
+      name: "Guest User",
+      email: "guest@moneyfarm.app",
+      avatar: "https://i.pravatar.cc/80?img=13",
+    };
+
+  // If not logged in, show dedicated auth shell
+  if (!user) {
+    return <AuthShell onLogin={login} onSignUp={signUp} />;
+  }
 
   const expanded = (item: { id: string }) =>
     item.id === "Invoices"
       ? invoicesExpandedShow
-      : item.id === "Utilities"
+      : item.id === "Support"
         ? utilitiesExpandedShow
-        : item.id === "Authentication"
-          ? authExpandedShow
-          : false;
+        : false;
   const toggleExpanded = (item: { id: string }) => {
     if (item.id === "Invoices") setInvoicesExpanded(!invoicesExpandedShow);
-    if (item.id === "Utilities") setUtilitiesExpanded(!utilitiesExpandedShow);
-    if (item.id === "Authentication") setAuthExpanded(!authExpandedShow);
+    if (item.id === "Support") setUtilitiesExpanded(!utilitiesExpandedShow);
   };
+
+  const doSearch = (term: string) => {
+    setSearch(term);
+    const t = term.trim().toLowerCase();
+    if (!t) {
+      setSearchResults([]);
+      return;
+    }
+    const pool = NAV_ITEMS.flatMap((i) =>
+      i.children ? [i.label, ...i.children.map((c) => c.label)] : [i.label],
+    );
+    setSearchResults(pool.filter((p) => p.toLowerCase().includes(t)).slice(0, 6));
+  };
+
+  const notifications = [
+    "New login from Chrome on MacOS",
+    "Invoice INV-42015 paid",
+    "Security: 2FA enabled",
+  ];
 
   return (
     <div className="shell">
@@ -2342,10 +2352,54 @@ function App() {
               type="search"
               placeholder="Search here ..."
               aria-label="Search"
+              value={search}
+              onChange={(e) => doSearch(e.target.value)}
             />
-            <span className="bell">
-              🔔<span className="badge">3</span>
-            </span>
+            {searchResults.length > 0 && (
+              <div className="search-dropdown">
+                {searchResults.map((r) => (
+                  <button
+                    key={r}
+                    type="button"
+                    className="search-result"
+                    onClick={() => {
+                      setActiveTab(r);
+                      setSearch("");
+                      setSearchResults([]);
+                    }}
+                  >
+                    {r}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="bell-wrap">
+              <button
+                type="button"
+                className="bell"
+                onClick={() => setShowNotifications((v) => !v)}
+                aria-haspopup="true"
+                aria-expanded={showNotifications}
+              >
+                🔔<span className="badge">{notifications.length}</span>
+              </button>
+              {showNotifications && (
+                <div className="notif-dropdown">
+                  {notifications.map((n, i) => (
+                    <div key={i} className="notif-row">
+                      {n}
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    className="pill"
+                    onClick={() => setShowNotifications(false)}
+                  >
+                    Mark read & close
+                  </button>
+                </div>
+              )}
+            </div>
             <div className="user-menu-wrap" ref={userMenuRef}>
               <button
                 type="button"
@@ -2354,7 +2408,7 @@ function App() {
                 aria-expanded={userMenuOpen}
                 aria-haspopup="true"
               >
-                <img className="avatar" src={user.avatar} alt="" />
+                <img className="avatar" src={displayUser.avatar} alt="" />
                 <span className="avatar-chevron">▼</span>
               </button>
               {userMenuOpen && (
@@ -2367,7 +2421,7 @@ function App() {
                       fontSize: 13,
                     }}
                   >
-                    {user.email}
+                    {displayUser.email}
                   </span>
                   <button
                     type="button"
@@ -2403,24 +2457,6 @@ function App() {
         {activeTab === "Accounts" && <AccountsView />}
         {activeTab === "Setting" && <SettingView />}
         {activeTab === "Knowledge base" && <KnowledgeBaseView />}
-        {activeTab === "404" && (
-          <Error404View onGoHome={() => setActiveTab("Dashboard")} />
-        )}
-        {activeTab === "Protected Page" && <ProtectedPageView />}
-        {activeTab === "Changelog" && <ChangelogView />}
-        {activeTab === "License" && <LicenseView />}
-        {activeTab === "Sign In" && (
-          <SignInView
-            onNavigateSignUp={() => setActiveTab("Sign Up")}
-            onSignInSuccess={() => setActiveTab("Dashboard")}
-          />
-        )}
-        {activeTab === "Sign Up" && (
-          <SignUpView
-            onNavigateSignIn={() => setActiveTab("Sign In")}
-            onSignUpSuccess={() => setActiveTab("Dashboard")}
-          />
-        )}
         {![
           "Dashboard",
           "My Wallet",
@@ -2431,12 +2467,6 @@ function App() {
           "Accounts",
           "Setting",
           "Knowledge base",
-          "404",
-          "Protected Page",
-          "Changelog",
-          "License",
-          "Sign In",
-          "Sign Up",
         ].includes(activeTab) && (
           <section className="grid">
             <div className="card span-2">
@@ -2455,3 +2485,351 @@ function App() {
 }
 
 export default App;
+
+// -------- Auth Shell (shown when user is null) ----------
+type AuthShellProps = {
+  onLogin: (email: string, password: string) => boolean;
+  onSignUp: (name: string, email: string, password: string) => boolean;
+};
+
+function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
+  const { toast } = useToast();
+  const [mode, setMode] = useState<"signin" | "signup" | null>(null);
+  const [showPassword, setShowPassword] = useState(false);
+
+  const [signinForm, setSigninForm] = useState({ email: "", password: "" });
+  const [signupForm, setSignupForm] = useState({
+    fullName: "",
+    username: "",
+    email: "",
+    phone: "",
+    address: "",
+    dob: "",
+    password: "",
+    confirm: "",
+  });
+
+  const handleSignIn = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!signinForm.email || !signinForm.password) {
+      toast("Please enter email and password", "error");
+      return;
+    }
+    onLogin(signinForm.email, signinForm.password);
+    toast("Signed in successfully");
+  };
+
+  const handleSignUp = (e: React.FormEvent) => {
+    e.preventDefault();
+    const {
+      fullName,
+      username,
+      email,
+      phone,
+      address,
+      dob,
+      password,
+      confirm,
+    } = signupForm;
+    if (
+      !fullName ||
+      !username ||
+      !email ||
+      !phone ||
+      !address ||
+      !dob ||
+      !password
+    ) {
+      toast("Please fill all required fields", "error");
+      return;
+    }
+    if (password !== confirm) {
+      toast("Password confirmation does not match", "error");
+      return;
+    }
+    onSignUp(fullName, email, password);
+    toast("Account created");
+    setMode("signin");
+    setSigninForm({ email, password });
+  };
+
+  const renderChoice = () => (
+    <div className="auth-choice">
+      <h2>Welcome to MoneyFarm</h2>
+      <p className="muted">
+        Please choose how you want to continue. You can sign in if you already
+        have an account or create a new one.
+      </p>
+      <div className="choice-actions">
+        <button
+          type="button"
+          className="btn-primary"
+          onClick={() => setMode("signin")}
+        >
+          Sign In
+        </button>
+        <button
+          type="button"
+          className="pill"
+          onClick={() => setMode("signup")}
+        >
+          Sign Up
+        </button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="auth-shell">
+      <div className="auth-card-panel">
+        {!mode && renderChoice()}
+
+        {mode === "signin" && (
+          <form className="auth-form-modern" onSubmit={handleSignIn}>
+            <h2>Sign In</h2>
+            <p className="muted">
+              Welcome back! Enter your credentials to access MoneyFarm.
+            </p>
+            <div className="social-row">
+              <button type="button" className="social-btn g">
+                Sign In with Google
+              </button>
+              <button type="button" className="social-btn f">
+                Sign In with Facebook
+              </button>
+            </div>
+            <div className="divider">
+              <span>OR</span>
+            </div>
+            <label className="auth-label">
+              Email Address
+              <input
+                type="email"
+                value={signinForm.email}
+                onChange={(e) =>
+                  setSigninForm({ ...signinForm, email: e.target.value })
+                }
+                placeholder="johndoe@banking.com"
+                required
+              />
+            </label>
+            <label className="auth-label">
+              Password
+              <div className="password-wrap">
+                <input
+                  type={showPassword ? "text" : "password"}
+                  value={signinForm.password}
+                  onChange={(e) =>
+                    setSigninForm({ ...signinForm, password: e.target.value })
+                  }
+                  placeholder="********"
+                  required
+                />
+                <button
+                  type="button"
+                  className="eye"
+                  onClick={() => setShowPassword((s) => !s)}
+                  aria-label="Toggle password"
+                >
+                  {showPassword ? "🙈" : "👁"}
+                </button>
+              </div>
+            </label>
+            <div className="auth-row">
+              <label className="auth-checkbox">
+                <input type="checkbox" /> Remember me
+              </label>
+              <a href="#" onClick={(e) => e.preventDefault()} className="muted">
+                Forgot password
+              </a>
+            </div>
+            <button type="submit" className="btn-primary auth-submit">
+              Sign In
+            </button>
+            <p className="auth-switch">
+              Don&apos;t have an account?{" "}
+              <button
+                type="button"
+                className="link-btn"
+                onClick={() => setMode("signup")}
+              >
+                Sign Up
+              </button>
+              <span className="muted"> · </span>
+              <button
+                type="button"
+                className="link-btn"
+                onClick={() => setMode(null)}
+              >
+                Back
+              </button>
+            </p>
+          </form>
+        )}
+        {mode === "signup" && (
+          <form className="auth-form-modern" onSubmit={handleSignUp}>
+            <h2>Sign Up</h2>
+            <p className="muted">
+              Create your MoneyFarm account to start managing finances smartly.
+            </p>
+            <div className="social-row">
+              <button type="button" className="social-btn g">
+                Sign Up with Google
+              </button>
+              <button type="button" className="social-btn f">
+                Sign Up with Facebook
+              </button>
+            </div>
+            <div className="divider">
+              <span>OR</span>
+            </div>
+            <div className="grid-two">
+              <label className="auth-label">
+                Full Name
+                <input
+                  value={signupForm.fullName}
+                  onChange={(e) =>
+                    setSignupForm({ ...signupForm, fullName: e.target.value })
+                  }
+                  placeholder="Nguyen Van A"
+                  required
+                />
+              </label>
+              <label className="auth-label">
+                Username
+                <input
+                  value={signupForm.username}
+                  onChange={(e) =>
+                    setSignupForm({ ...signupForm, username: e.target.value })
+                  }
+                  placeholder="john_doe"
+                  required
+                />
+              </label>
+            </div>
+            <div className="grid-two">
+              <label className="auth-label">
+                Phone Number
+                <input
+                  value={signupForm.phone}
+                  onChange={(e) =>
+                    setSignupForm({ ...signupForm, phone: e.target.value })
+                  }
+                  placeholder="+84 912 345 678"
+                  required
+                />
+              </label>
+              <label className="auth-label">
+                Date of Birth
+                <input
+                  type="date"
+                  value={signupForm.dob}
+                  onChange={(e) =>
+                    setSignupForm({ ...signupForm, dob: e.target.value })
+                  }
+                  required
+                />
+              </label>
+            </div>
+            <label className="auth-label">
+              Address
+              <input
+                value={signupForm.address}
+                onChange={(e) =>
+                  setSignupForm({ ...signupForm, address: e.target.value })
+                }
+                placeholder="123 Main St, District 1, HCMC"
+                required
+              />
+            </label>
+            <label className="auth-label">
+              Email Address
+              <input
+                type="email"
+                value={signupForm.email}
+                onChange={(e) =>
+                  setSignupForm({ ...signupForm, email: e.target.value })
+                }
+                placeholder="johndoe@banking.com"
+                required
+              />
+            </label>
+            <div className="grid-two">
+              <label className="auth-label">
+                Password
+                <div className="password-wrap">
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    value={signupForm.password}
+                    onChange={(e) =>
+                      setSignupForm({ ...signupForm, password: e.target.value })
+                    }
+                    placeholder="********"
+                    required
+                  />
+                  <button
+                    type="button"
+                    className="eye"
+                    onClick={() => setShowPassword((s) => !s)}
+                    aria-label="Toggle password"
+                  >
+                    {showPassword ? "🙈" : "👁"}
+                  </button>
+                </div>
+              </label>
+              <label className="auth-label">
+                Confirm Password
+                <input
+                  type={showPassword ? "text" : "password"}
+                  value={signupForm.confirm}
+                  onChange={(e) =>
+                    setSignupForm({ ...signupForm, confirm: e.target.value })
+                  }
+                  placeholder="********"
+                  required
+                />
+              </label>
+            </div>
+            <label className="auth-checkbox">
+              <input type="checkbox" required /> I agree to terms & privacy.
+            </label>
+            <button type="submit" className="btn-primary auth-submit">
+              Create Account
+            </button>
+            <p className="auth-switch">
+              Already have an account?{" "}
+              <button
+                type="button"
+                className="link-btn"
+                onClick={() => setMode("signin")}
+              >
+                Sign In
+              </button>
+              <span className="muted"> · </span>
+              <button
+                type="button"
+                className="link-btn"
+                onClick={() => setMode(null)}
+              >
+                Back
+              </button>
+            </p>
+          </form>
+        )}
+      </div>
+
+      <div className="auth-illustration">
+        <div className="auth-illus-inner">
+          <div className="auth-logo">MoneyFarm</div>
+          <p className="muted">
+            A modern e-wallet experience with insights, controls and delightful
+            UI. Sign in to continue.
+          </p>
+          <div className="auth-hero-graphic" aria-hidden="true">
+            🐷💳✨
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

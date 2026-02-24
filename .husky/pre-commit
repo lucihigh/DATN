@@ -1,6 +1,2 @@
-#!/bin/sh
-. "$(dirname "$0")/_/husky.sh"
-
-pnpm lint
-pnpm format
-pnpm test
+corepack pnpm format
+corepack pnpm test
