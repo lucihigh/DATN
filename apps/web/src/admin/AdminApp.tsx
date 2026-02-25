@@ -147,22 +147,22 @@ const styles = `
   .ana-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .ana-segmented {
     display: inline-flex;
-    border: 1px solid #e2e8f0;
-    border-radius: 10px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
     overflow: hidden;
-    background: #fff;
-    box-shadow: 0 6px 16px rgba(0,0,0,0.04);
+    background: var(--panel);
+    box-shadow: 0 10px 28px rgba(15,23,42,0.16);
   }
   .ana-segmented button {
     border: none;
     background: transparent;
     padding: 8px 16px;
     font-weight: 700;
-    color: #6b7280;
+    color: var(--muted);
     cursor: pointer;
   }
   .ana-segmented button.active {
-    background: #ede9fe;
+    background: linear-gradient(135deg, #e0e7ff, #ede9fe);
     color: #5b21b6;
   }
   .ana-pill {
@@ -171,16 +171,16 @@ const styles = `
     gap: 8px;
     padding: 10px 12px;
     border-radius: 12px;
-    border: 1px solid #e2e8f0;
-    background: #fff;
-    color: #4b5563;
-    box-shadow: 0 6px 16px rgba(0,0,0,0.04);
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    box-shadow: 0 10px 28px rgba(15,23,42,0.16);
   }
   .ana-date {
     border: none;
     background: transparent;
     outline: none;
-    color: #1f2937;
+    color: var(--text);
     font-weight: 600;
     font-size: 14px;
     min-width: 180px;
@@ -256,33 +256,39 @@ const styles = `
   .ana-dual-prev { background:#c7d2fe; border-radius:8px 8px 6px 6px; }
   .ana-dual-label { margin-top:6px; font-size:12px; color:#6b7280; text-align:center; }
 
-  /* Make admin main area light but keep sidebar dark */
+  /* Lighten admin shell */
   .mf-main { background: #f6f7fb; }
+  .mf-sidebar {
+    background: #ffffff;
+    border-right: 1px solid #e5e7eb;
+    color: #111827;
+  }
 
   /* Sidebar icons */
   .mf-menu button {
     width: 100%; display: flex; align-items: center; gap: 14px; padding: 14px 16px;
-    background: transparent; border: none; color: var(--mf-text); text-align: left;
-    border-radius: 12px; cursor: pointer; transition: all 0.2s; font-size: 16px; font-weight: 650;
+    background: transparent; border: none; color: #111827; text-align: left;
+    border-radius: 12px; cursor: pointer; transition: all 0.2s; font-size: 16px; font-weight: 700;
   }
-  .mf-menu button:hover, .mf-menu button.active { background: var(--mf-card); color: var(--mf-accent); }
+  .mf-menu button:hover, .mf-menu button.active { background: #e8edfb; color: #111827; }
   .mf-ico {
     width: 32px; height: 32px;
     border-radius: 50%;
     display: grid; place-items: center;
     font-size: 16px;
-    background: #111c35;
-    color: #9cbcf9;
+    background: #e8edfb;
+    color: #1f2937;
     flex-shrink: 0;
   }
   .mf-ico.users, .mf-ico.audit, .mf-ico.profile, .mf-ico.setting, .mf-ico.logout {
-    background: #0f172c;
-    color: #e7ecff;
+    background: #e8edfb;
+    color: #1f2937;
   }
   .mf-menu button.active .mf-ico {
-    background: #1f6bff;
-    color: #e7ecff;
+    background: #2563eb;
+    color: #ffffff;
   }
+  .mf-logo { color: #111827; }
 
   /* User management */
   .user-card { background:#fff; border-radius:16px; padding:20px; box-shadow:0 10px 28px rgba(0,0,0,0.08); }
@@ -294,7 +300,7 @@ const styles = `
   .user-table th, .user-table td { padding:14px 10px; text-align:left; border-bottom:1px solid #eceff5; font-size:14px; }
   .user-badge { padding:4px 10px; border-radius:12px; font-weight:700; font-size:12px; display:inline-block; }
   .user-badge.active { background:#d1fae5; color:#0f5132; border:1px solid #a7f3d0; }
-  .user-badge.locked { background:#e5e7eb; color:#374151; border:1px solid #d1d5db; }
+  .user-badge.locked { background:#ffe4e6; color:#b91c1c; border:1px solid #fecdd3; }
   .user-btn { padding:8px 12px; border-radius:10px; border:1px solid #d8ddee; background:#f8fafc; cursor:pointer; font-weight:600; }
   .user-btn.primary { background:#1f6bff; color:white; border-color:#1f6bff; }
   .user-btn.text { border:none; background:transparent; color:#1f6bff; padding:6px 8px; }
@@ -310,6 +316,7 @@ const styles = `
   .user-tab { padding:10px 16px; border-radius:10px; border:1px solid #e5e7eb; background:#f8fafc; cursor:pointer; font-weight:700; color:#4b5563; }
   .user-tab.active { background:#e8edfb; color:#1f6bff; border-color:#d0dafc; }
   .user-filter-btn { padding:10px 14px; border-radius:12px; border:1px solid #e5e7eb; background:#fff; display:flex; gap:8px; align-items:center; cursor:pointer; }
+  .theme-dark .user-filter-btn { background:#0f1934; border:1px solid #1b2748; color:#e7ecff; }
   .user-footer { padding:12px 0 6px; color:#6b7280; font-size:13px; display:flex; justify-content:space-between; align-items:center; }
   .pager { display:flex; gap:8px; }
   .pager button { width:34px; height:34px; border-radius:8px; border:1px solid #e5e7eb; background:#fff; cursor:pointer; }
@@ -318,15 +325,15 @@ const styles = `
   /* Profile */
   .prof-page { padding: 24px; display:flex; justify-content:center; }
   .prof-card {
-    background: linear-gradient(180deg, #0f172d 0%, #0b1224 100%);
-    color: #e7ecff;
+    background: #ffffff;
+    color: #0f172a;
     border-radius: 18px;
     padding: 36px;
-    box-shadow: 0 20px 46px rgba(0,0,0,0.38);
-    border: 1px solid #101a35;
+    box-shadow: 0 18px 46px rgba(15,23,42,0.08);
+    border: 1px solid #e5e7eb;
     width: min(1100px, 100%);
   }
-  .prof-header { display:flex; flex-direction:column; align-items:center; gap:10px; margin-bottom:24px; }
+  .prof-header { display:flex; flex-direction:column; align-items:center; gap:10px; margin-bottom:24px; color:#0f172a; }
   .prof-avatar-wrap { position:relative; width:120px; height:120px; }
   .prof-avatar { width:120px; height:120px; border-radius:50%; object-fit:cover; border:4px solid #182449; }
   .prof-avatar-btn {
@@ -336,8 +343,8 @@ const styles = `
     display:grid; place-items:center; cursor:pointer;
     box-shadow:0 10px 20px rgba(31,107,255,0.4);
   }
-  .prof-name { font-size:22px; margin:4px 0 0; font-weight:700; }
-  .prof-email { margin:0; color:#a3b1d6; }
+  .prof-name { font-size:22px; margin:4px 0 0; font-weight:700; color:#0f172a; }
+  .prof-email { margin:0; color:#475569; }
   .prof-grid {
     display:grid;
     grid-template-columns: repeat(2, minmax(280px, 1fr));
@@ -345,26 +352,133 @@ const styles = `
     margin-bottom:22px;
   }
   .prof-field { display:flex; flex-direction:column; gap:6px; }
-  .prof-field label { color:#a3b1d6; font-size:13px; }
+  .prof-field label { color:#6b7280; font-size:13px; }
   .prof-field input {
-    background:#0f162e;
-    border:1px solid #1b2748;
-    color:#e7ecff;
+    background:#f8fafc;
+    border:1px solid #dfe3ea;
+    color:#0f172a;
     padding:12px 14px;
     border-radius:12px;
     font-size:14px;
   }
   .prof-actions { display:flex; justify-content:flex-end; margin-top:6px; }
   .prof-save {
-    background:#1f6bff;
+    background:#2563eb;
     color:white;
     border:none;
     border-radius:12px;
     padding:12px 18px;
     font-weight:700;
     cursor:pointer;
-    box-shadow:0 10px 24px rgba(31,107,255,0.35);
+    box-shadow:0 10px 24px rgba(37,99,235,0.28);
   }
+
+  /* Admin theme helpers */
+  .theme-light { background: #f6f7fb; color: #0f172a; }
+  .theme-dark { background: #0b1224; color: #e7ecff; }
+  .theme-light h1, .theme-light h2, .theme-light h3, .theme-light h4, .theme-light h5, .theme-light h6,
+  .theme-light p, .theme-light span, .theme-light label, .theme-light td, .theme-light th, .theme-light li, .theme-light strong { color:#0f172a; }
+  .theme-dark h1, .theme-dark h2, .theme-dark h3, .theme-dark h4, .theme-dark h5, .theme-dark h6,
+  .theme-dark p, .theme-dark span, .theme-dark label, .theme-dark td, .theme-dark th, .theme-dark li, .theme-dark strong { color:#e7ecff; }
+  .theme-dark .mf-main { background: #0b1224; }
+  .theme-dark .mf-sidebar {
+    background: linear-gradient(180deg, #0f172d 0%, #0c1327 100%);
+    border-right: 1px solid #101a35;
+    color: #e7ecff;
+  }
+  .theme-dark .mf-menu button { color: #e7ecff; }
+  .theme-dark .mf-menu button:hover,
+  .theme-dark .mf-menu button.active { background: #162143; color: #e7ecff; }
+  .theme-dark .mf-ico { background: #111c35; color: #9cbcf9; }
+  .theme-dark .mf-menu button.active .mf-ico { background: #1f6bff; color: #e7ecff; }
+  .theme-dark .mf-logo { color: #e7ecff; }
+  .theme-dark .prof-card {
+    background: linear-gradient(180deg, #0f172d 0%, #0b1224 100%);
+    color: #e7ecff;
+    border: 1px solid #101a35;
+    box-shadow: 0 20px 46px rgba(0,0,0,0.38);
+  }
+  .theme-dark .prof-email { color: #a3b1d6; }
+  .theme-dark .prof-field label { color: #a3b1d6; }
+  .theme-dark .prof-field input {
+    background:#0f162e;
+    border:1px solid #1b2748;
+    color:#e7ecff;
+  }
+  .theme-dark .set-card { background:#0f162e; border:1px solid #1b2748; box-shadow:0 16px 32px rgba(0,0,0,0.35); color:#e7ecff; }
+  .theme-dark .set-row { border-color:#1b2748; }
+  .theme-dark .set-row p { color:#7f8bad; }
+  .theme-dark .set-toggle { background:#2a3550; }
+  .theme-dark .set-toggle.on { background:#5b21b6; }
+  .theme-dark .user-card,
+  .theme-dark .audit-card { background:#0f162e; border:1px solid #1b2748; box-shadow:0 16px 32px rgba(0,0,0,0.35); }
+  .theme-dark .user-tab { background:#0f1934; border-color:#1b2748; color:#ffffff; }
+  .theme-dark .user-tab.active { background:#1f6bff; border-color:#1f6bff; color:#ffffff; }
+  .theme-dark .user-btn { background:#162143; border:1px solid #1b2748; color:#ffffff; }
+  .theme-dark .user-btn.primary { background:#1f6bff; border-color:#1f6bff; color:#ffffff; }
+  .theme-dark .user-btn.text { background:#0f1934; border:none; color:#8fb7ff; }
+  .theme-dark .pager button { background:#162143; border:1px solid #1b2748; color:#ffffff; }
+  .theme-dark .pager button.active { background:#1f6bff; border-color:#1f6bff; color:#ffffff; }
+  .theme-dark .user-card h2,
+  .theme-dark .user-head h2,
+  .theme-dark .user-head h1 { color:#ffffff; }
+  .theme-dark .user-search { background:#0f1934; border:1px solid #1b2748; color:#e7ecff; }
+  .theme-dark .user-btn { background:#0f1934; border:1px solid #1b2748; color:#e7ecff; }
+  .theme-dark .user-btn.primary { background:#1f6bff; border-color:#1f6bff; color:#fff; }
+  .theme-dark .audit-input, .theme-dark .audit-select { background:#0f1934; border:1px solid #1b2748; color:#e7ecff; }
+  .theme-dark .audit-row:hover { background:#162143; }
+  .theme-dark .audit-title h1 { color:#e7ecff; }
+  .audit-title p { display:none; }
+  .theme-dark .audit-admin { color:#e7ecff; }
+  .audit-head { margin-bottom: 12px; }
+  .theme-dark .user-head h2 { color:#e7ecff; }
+  .theme-dark .user-name { color:#e7ecff; }
+  .theme-dark .user-title { color:#a3b1d6; }
+  .theme-dark .user-footer { color:#a3b1d6; }
+  .theme-dark .user-table th,
+  .theme-dark .audit-table th,
+  .theme-dark .tx-table th { background:#0f1934; color:#a3b1d6; border-color:#1b2748; }
+  .theme-dark .user-table td,
+  .theme-dark .audit-table td,
+  .theme-dark .tx-table td { background:#0b1224; color:#e7ecff; border-color:#1b2748; }
+  .theme-dark .user-row { background:#0b1224; }
+  .theme-dark .tx-modal { background:#0f162e; border:1px solid #1b2748; box-shadow:0 20px 46px rgba(0,0,0,0.38); }
+  .theme-dark .tx-head { border-color:#1b2748; }
+  .theme-dark .tx-chip.completed { background:#12351c; border-color:#1f5c2d; color:#c8fdd7; }
+  .theme-dark .tx-chip.pending { background:#3c2a14; border-color:#5a381c; color:#ffd7a3; }
+  .theme-dark .tx-chip.failed { background:#3a1c1c; border-color:#5a2a2a; color:#f8c2c2; }
+
+  /* Light inputs stay white with dark text */
+  .theme-light input,
+  .theme-light .user-search,
+  .theme-light .audit-input,
+  .theme-light .audit-select { background:#ffffff; color:#0f172a; border:1px solid #dfe3ea; }
+
+  /* Dark dashboard panels */
+  .theme-dark .ana-page { background:#0b1224; color:#e7ecff; }
+  .theme-dark .ana-card,
+  .theme-dark .ana-panel,
+  .theme-dark .ana-section,
+  .theme-dark .ana-block {
+    background:#0f162e;
+    border:1px solid #1b2748;
+    box-shadow:0 16px 32px rgba(0,0,0,0.35);
+    color:#e7ecff;
+  }
+  .theme-dark .ana-kpi-head,
+  .theme-dark .ana-kpi-list li,
+  .theme-dark .ana-chart-head,
+  .theme-dark .ana-muted,
+  .theme-dark .ana-hbar-row,
+  .theme-dark .ana-legend li,
+  .theme-dark .ana-legend .value { color:#a3b1d6; }
+  .theme-dark .ana-hbar-track { background:#162143; }
+  .theme-dark .ana-hbar-prev { background:#20305a; }
+  .theme-dark .ana-hbar-now { background:#5b21b6; }
+  .theme-dark .ana-pie { box-shadow: inset 0 0 0 14px #0f162e; }
+  .theme-dark .ana-segmented { border-color:#1b2748; background:#0f162e; box-shadow:0 12px 26px rgba(0,0,0,0.38); }
+  .theme-dark .ana-segmented button { color:#a3b1d6; }
+  .theme-dark .ana-segmented button.active { background: linear-gradient(135deg,#1f293a,#162143); color:#8fb7ff; }
 
   /* Setting */
   .set-card { background:#fff; border-radius:16px; padding:20px; box-shadow:0 10px 28px rgba(0,0,0,0.08); }
@@ -477,6 +591,10 @@ function KpiCard({ card }: { card: KpiCard }) {
 
 function AdminApp() {
   const { user, logout } = useAuth();
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    if (typeof window === "undefined") return "light";
+    return (localStorage.getItem("admin-theme") as "light" | "dark") || "light";
+  });
   const [period, setPeriod] = useState<"year" | "month" | "week">("year");
   const [selectedDate, setSelectedDate] = useState(() => {
     // default to current date for realistic demo
@@ -486,6 +604,15 @@ function AdminApp() {
   const [active, setActive] = useState<
     "dashboard" | "users" | "audit" | "profile" | "setting"
   >("dashboard");
+  useEffect(() => {
+    if (typeof document !== "undefined") {
+      document.body.classList.remove("theme-light", "theme-dark");
+      document.body.classList.add(`theme-${theme}`);
+    }
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("admin-theme", theme);
+    }
+  }, [theme]);
   const defaultUsers: AdminUser[] = [
     {
       id: "u001",
@@ -973,7 +1100,7 @@ function AdminApp() {
   }, [users]);
 
   return (
-    <div className="mf-shell">
+    <div className={`mf-shell theme-${theme}`}>
       <style>{styles}</style>
 
       <aside className="mf-sidebar">
@@ -1326,6 +1453,19 @@ function AdminApp() {
             <h2 style={{ marginTop: 0, marginBottom: 10 }}>Settings</h2>
             <div className="set-row">
               <div>
+                <h4>Theme</h4>
+                <p>Switch between light and dark mode.</p>
+              </div>
+              <button
+                className={`set-toggle ${theme === "dark" ? "on" : ""}`}
+                onClick={() =>
+                  setTheme((t) => (t === "dark" ? "light" : "dark"))
+                }
+                aria-label="Toggle theme"
+              />
+            </div>
+            <div className="set-row">
+              <div>
                 <h4>Notifications</h4>
                 <p>Send important updates to your email.</p>
               </div>
@@ -1369,7 +1509,7 @@ function AdminApp() {
             <div className="user-card">
               <div className="user-head">
                 <div>
-                  <h2 style={{ margin: 0, fontSize: 28, color: "#0f172a" }}>
+                  <h2 style={{ margin: 0, fontSize: 28, color: "var(--text)" }}>
                     User Management
                   </h2>
                 </div>
@@ -1451,18 +1591,18 @@ function AdminApp() {
                               </div>
                             </div>
                           </td>
-                          <td style={{ color: "#374151" }}>
+                          <td style={{ color: "var(--text)" }}>
                             <div>{u.email}</div>
                             <div className="user-title">{u.phone}</div>
                           </td>
-                          <td style={{ color: "#374151" }}>
+                          <td style={{ color: "var(--text)" }}>
                             {new Date(u.birthday).toLocaleDateString("en-US", {
                               month: "short",
                               day: "2-digit",
                               year: "numeric",
                             })}
                           </td>
-                          <td style={{ color: "#374151" }}>{u.address}</td>
+                          <td style={{ color: "var(--text)" }}>{u.address}</td>
                           <td>
                             <span
                               className={`user-badge ${u.status === "Active" ? "active" : "locked"}`}
