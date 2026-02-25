@@ -819,7 +819,11 @@ function CreateInvoicesView() {
           onChange={(e) => setNotes(e.target.value)}
         />
         <div className="invoice-actions">
-          <button type="button" className="btn-add-product" onClick={addProduct}>
+          <button
+            type="button"
+            className="btn-add-product"
+            onClick={addProduct}
+          >
             + Add Product
           </button>
           <button type="button" className="btn-primary" onClick={saveInvoice}>
@@ -1732,7 +1736,10 @@ function SettingView() {
                     machines.
                   </p>
                 </div>
-                <Toggle checked={security.saveLogin} onChange={toggleSaveLogin} />
+                <Toggle
+                  checked={security.saveLogin}
+                  onChange={toggleSaveLogin}
+                />
               </div>
             </div>
             <div className="setting-block">
@@ -1776,7 +1783,10 @@ function SettingView() {
                     type="password"
                     value={passwordForm.current}
                     onChange={(e) =>
-                      setPasswordForm((p) => ({ ...p, current: e.target.value }))
+                      setPasswordForm((p) => ({
+                        ...p,
+                        current: e.target.value,
+                      }))
                     }
                   />
                 </div>
@@ -1796,13 +1806,20 @@ function SettingView() {
                     type="password"
                     value={passwordForm.confirm}
                     onChange={(e) =>
-                      setPasswordForm((p) => ({ ...p, confirm: e.target.value }))
+                      setPasswordForm((p) => ({
+                        ...p,
+                        confirm: e.target.value,
+                      }))
                     }
                   />
                 </div>
               </div>
               <div className="setting-actions">
-                <button type="button" className="btn-primary" onClick={changePassword}>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={changePassword}
+                >
                   Update Password
                 </button>
               </div>
@@ -2040,8 +2057,7 @@ function TransactionsView() {
     if (
       term &&
       !(
-        t.name.toLowerCase().includes(term) ||
-        t.id.toLowerCase().includes(term)
+        t.name.toLowerCase().includes(term) || t.id.toLowerCase().includes(term)
       )
     ) {
       return false;
@@ -2228,9 +2244,7 @@ function App() {
   const isInvoicesActive =
     activeTab === "Invoice List" || activeTab === "Create Invoices";
   const invoicesExpandedShow = invoicesExpanded || isInvoicesActive;
-  const utilitiesIds = [
-    "Knowledge base",
-  ];
+  const utilitiesIds = ["Knowledge base"];
   const isUtilitiesActive = utilitiesIds.includes(activeTab);
   const utilitiesExpandedShow = utilitiesExpanded || isUtilitiesActive;
 
@@ -2246,12 +2260,11 @@ function App() {
     return () => document.removeEventListener("click", close);
   }, []);
 
-  const displayUser =
-    user ?? {
-      name: "Guest User",
-      email: "guest@moneyfarm.app",
-      avatar: "https://i.pravatar.cc/80?img=13",
-    };
+  const displayUser = user ?? {
+    name: "Guest User",
+    email: "guest@moneyfarm.app",
+    avatar: "https://i.pravatar.cc/80?img=13",
+  };
 
   // If not logged in, show dedicated auth shell
   if (!user) {
@@ -2279,7 +2292,9 @@ function App() {
     const pool = NAV_ITEMS.flatMap((i) =>
       i.children ? [i.label, ...i.children.map((c) => c.label)] : [i.label],
     );
-    setSearchResults(pool.filter((p) => p.toLowerCase().includes(t)).slice(0, 6));
+    setSearchResults(
+      pool.filter((p) => p.toLowerCase().includes(t)).slice(0, 6),
+    );
   };
 
   const notifications = [
@@ -2291,7 +2306,7 @@ function App() {
   return (
     <div className="shell">
       <aside className="sidebar">
-        <div className="logo">F MoneyFarm</div>
+        <div className="logo">E-Wallet Banking</div>
         <nav>
           {NAV_ITEMS.map((item) => {
             if (item.children) {
@@ -2476,9 +2491,7 @@ function App() {
           </section>
         )}
 
-        <footer className="foot">
-          © MoneyFarm by Flowzai · License · Powered by Webflow
-        </footer>
+        <footer className="foot">© E-Wallet Banking by My Team</footer>
       </main>
     </div>
   );
@@ -2493,6 +2506,29 @@ type AuthShellProps = {
 };
 
 function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    if (typeof window === "undefined") return "light";
+    return (localStorage.getItem("admin-theme") as "light" | "dark") || "light";
+  });
+
+  useEffect(() => {
+    const apply = (t: "light" | "dark") => {
+      document.body.classList.remove("theme-light", "theme-dark");
+      document.body.classList.add(`theme-${t}`);
+    };
+    apply(theme);
+
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === "admin-theme" && e.newValue) {
+        const next = (e.newValue as "light" | "dark") ?? "light";
+        setTheme(next);
+        apply(next);
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [theme]);
+
   const { toast } = useToast();
   const [mode, setMode] = useState<"signin" | "signup" | null>(null);
   const [showPassword, setShowPassword] = useState(false);
@@ -2507,6 +2543,7 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
     dob: "",
     password: "",
     confirm: "",
+    agree: false,
   });
 
   const handleSignIn = (e: React.FormEvent) => {
@@ -2530,6 +2567,7 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
       dob,
       password,
       confirm,
+      agree,
     } = signupForm;
     if (
       !fullName ||
@@ -2547,6 +2585,10 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
       toast("Password confirmation does not match", "error");
       return;
     }
+    if (!agree) {
+      toast("Please agree to terms & privacy", "error");
+      return;
+    }
     onSignUp(fullName, email, password);
     toast("Account created");
     setMode("signin");
@@ -2554,27 +2596,95 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
   };
 
   const renderChoice = () => (
-    <div className="auth-choice">
-      <h2>Welcome to MoneyFarm</h2>
-      <p className="muted">
-        Please choose how you want to continue. You can sign in if you already
-        have an account or create a new one.
-      </p>
-      <div className="choice-actions">
-        <button
-          type="button"
-          className="btn-primary"
-          onClick={() => setMode("signin")}
-        >
-          Sign In
-        </button>
-        <button
-          type="button"
-          className="pill"
-          onClick={() => setMode("signup")}
-        >
-          Sign Up
-        </button>
+    <div className="welcome-hero">
+      <div className="hero-copy">
+        <div className="hero-pill">Secure · Fast · Smart</div>
+        <h1>
+          Secure E-Wallet — <span className="hero-accent">Fast</span>,{" "}
+          <span className="hero-accent-2">Safe</span>, Easy to Use
+        </h1>
+        <p className="hero-lead">
+          Experience multi-layer security and seamless transactions. Protect
+          your digital assets with E-Wallet Banking and stay in control
+          everywhere.
+        </p>
+
+        <div className="hero-features">
+          {[
+            { icon: "🛡️", title: "Multi-layer Security" },
+            { icon: "⚡", title: "Fast Transactions" },
+            { icon: "📊", title: "Transparent Management" },
+          ].map((f) => (
+            <div className="hero-feature" key={f.title}>
+              <span className="hero-feature-ico">{f.icon}</span>
+              <span>{f.title}</span>
+            </div>
+          ))}
+        </div>
+
+        <div className="hero-cta">
+          <button
+            type="button"
+            className="btn-primary hero-cta-btn"
+            onClick={() => setMode("signin")}
+          >
+            Log in
+          </button>
+          <button
+            type="button"
+            className="pill hero-cta-btn secondary"
+            onClick={() => setMode("signup")}
+          >
+            Sign up
+          </button>
+        </div>
+
+        <div className="hero-meta">
+          24/7 Support · Transaction Tracking · Mobile &amp; Desktop Optimized
+        </div>
+      </div>
+
+      <div className="hero-visual">
+        <div className="hero-screen">
+          <div className="screen-header">
+            <span className="dot red" />
+            <span className="dot yellow" />
+            <span className="dot green" />
+            <span className="screen-title">Dashboard</span>
+            <span className="screen-pill">Encrypted</span>
+          </div>
+          <div className="screen-body">
+            <div className="screen-balance">
+              <div className="muted">Balance</div>
+              <div className="big">$12,450.00</div>
+            </div>
+            <div className="screen-bars">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <div
+                  key={i}
+                  className="bar"
+                  style={{ height: `${50 + i * 10}%` }}
+                />
+              ))}
+            </div>
+            <div className="screen-stats">
+              <div>
+                <span className="muted">Income</span>
+                <strong>$6,320</strong>
+              </div>
+              <div>
+                <span className="muted">Expenses</span>
+                <strong>$3,980</strong>
+              </div>
+              <div>
+                <span className="muted">Security</span>
+                <strong>Active</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="hero-orb orb-1" />
+        <div className="hero-orb orb-2" />
       </div>
     </div>
   );
@@ -2585,186 +2695,34 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
         {!mode && renderChoice()}
 
         {mode === "signin" && (
-          <form className="auth-form-modern" onSubmit={handleSignIn}>
-            <h2>Sign In</h2>
-            <p className="muted">
-              Welcome back! Enter your credentials to access MoneyFarm.
-            </p>
-            <div className="social-row">
-              <button type="button" className="social-btn g">
-                Sign In with Google
-              </button>
-              <button type="button" className="social-btn f">
-                Sign In with Facebook
-              </button>
-            </div>
-            <div className="divider">
-              <span>OR</span>
-            </div>
-            <label className="auth-label">
-              Email Address
-              <input
-                type="email"
-                value={signinForm.email}
-                onChange={(e) =>
-                  setSigninForm({ ...signinForm, email: e.target.value })
-                }
-                placeholder="johndoe@banking.com"
-                required
-              />
-            </label>
-            <label className="auth-label">
-              Password
-              <div className="password-wrap">
-                <input
-                  type={showPassword ? "text" : "password"}
-                  value={signinForm.password}
-                  onChange={(e) =>
-                    setSigninForm({ ...signinForm, password: e.target.value })
-                  }
-                  placeholder="********"
-                  required
-                />
-                <button
-                  type="button"
-                  className="eye"
-                  onClick={() => setShowPassword((s) => !s)}
-                  aria-label="Toggle password"
-                >
-                  {showPassword ? "🙈" : "👁"}
-                </button>
-              </div>
-            </label>
-            <div className="auth-row">
-              <label className="auth-checkbox">
-                <input type="checkbox" /> Remember me
-              </label>
-              <a href="#" onClick={(e) => e.preventDefault()} className="muted">
-                Forgot password
-              </a>
-            </div>
-            <button type="submit" className="btn-primary auth-submit">
-              Sign In
-            </button>
-            <p className="auth-switch">
-              Don&apos;t have an account?{" "}
-              <button
-                type="button"
-                className="link-btn"
-                onClick={() => setMode("signup")}
-              >
-                Sign Up
-              </button>
-              <span className="muted"> · </span>
-              <button
-                type="button"
-                className="link-btn"
-                onClick={() => setMode(null)}
-              >
-                Back
-              </button>
-            </p>
-          </form>
-        )}
-        {mode === "signup" && (
-          <form className="auth-form-modern" onSubmit={handleSignUp}>
-            <h2>Sign Up</h2>
-            <p className="muted">
-              Create your MoneyFarm account to start managing finances smartly.
-            </p>
-            <div className="social-row">
-              <button type="button" className="social-btn g">
-                Sign Up with Google
-              </button>
-              <button type="button" className="social-btn f">
-                Sign Up with Facebook
-              </button>
-            </div>
-            <div className="divider">
-              <span>OR</span>
-            </div>
-            <div className="grid-two">
+          <div className="auth-form-shell">
+            <form className="auth-form-modern" onSubmit={handleSignIn}>
+              <h2>Sign In</h2>
+              <p className="muted">
+                Welcome back! Enter your credentials to access E-Wallet Banking.
+              </p>
               <label className="auth-label">
-                Full Name
+                Email Address
                 <input
-                  value={signupForm.fullName}
+                  type="email"
+                  value={signinForm.email}
                   onChange={(e) =>
-                    setSignupForm({ ...signupForm, fullName: e.target.value })
+                    setSigninForm({ ...signinForm, email: e.target.value })
                   }
-                  placeholder="Nguyen Van A"
+                  placeholder="Enter your email"
                   required
                 />
               </label>
-              <label className="auth-label">
-                Username
-                <input
-                  value={signupForm.username}
-                  onChange={(e) =>
-                    setSignupForm({ ...signupForm, username: e.target.value })
-                  }
-                  placeholder="john_doe"
-                  required
-                />
-              </label>
-            </div>
-            <div className="grid-two">
-              <label className="auth-label">
-                Phone Number
-                <input
-                  value={signupForm.phone}
-                  onChange={(e) =>
-                    setSignupForm({ ...signupForm, phone: e.target.value })
-                  }
-                  placeholder="+84 912 345 678"
-                  required
-                />
-              </label>
-              <label className="auth-label">
-                Date of Birth
-                <input
-                  type="date"
-                  value={signupForm.dob}
-                  onChange={(e) =>
-                    setSignupForm({ ...signupForm, dob: e.target.value })
-                  }
-                  required
-                />
-              </label>
-            </div>
-            <label className="auth-label">
-              Address
-              <input
-                value={signupForm.address}
-                onChange={(e) =>
-                  setSignupForm({ ...signupForm, address: e.target.value })
-                }
-                placeholder="123 Main St, District 1, HCMC"
-                required
-              />
-            </label>
-            <label className="auth-label">
-              Email Address
-              <input
-                type="email"
-                value={signupForm.email}
-                onChange={(e) =>
-                  setSignupForm({ ...signupForm, email: e.target.value })
-                }
-                placeholder="johndoe@banking.com"
-                required
-              />
-            </label>
-            <div className="grid-two">
               <label className="auth-label">
                 Password
                 <div className="password-wrap">
                   <input
                     type={showPassword ? "text" : "password"}
-                    value={signupForm.password}
+                    value={signinForm.password}
                     onChange={(e) =>
-                      setSignupForm({ ...signupForm, password: e.target.value })
+                      setSigninForm({ ...signinForm, password: e.target.value })
                     }
-                    placeholder="********"
+                    placeholder="Enter your password"
                     required
                   />
                   <button
@@ -2777,58 +2735,196 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
                   </button>
                 </div>
               </label>
+              <div className="auth-row">
+                <label className="auth-checkbox">
+                  <input type="checkbox" /> Remember me
+                </label>
+                <a
+                  href="#"
+                  onClick={(e) => e.preventDefault()}
+                  className="muted"
+                >
+                  Forgot password
+                </a>
+              </div>
+              <button type="submit" className="btn-primary auth-submit">
+                Sign In
+              </button>
+              <p className="auth-switch">
+                Don&apos;t have an account?{" "}
+                <button
+                  type="button"
+                  className="link-btn"
+                  onClick={() => setMode("signup")}
+                >
+                  Sign Up
+                </button>
+                <span className="muted"> · </span>
+                <button
+                  type="button"
+                  className="link-btn"
+                  onClick={() => setMode(null)}
+                >
+                  Back
+                </button>
+              </p>
+            </form>
+          </div>
+        )}
+        {mode === "signup" && (
+          <div className="auth-form-shell">
+            <form className="auth-form-modern" onSubmit={handleSignUp}>
+              <h2>Sign Up</h2>
+              <p className="muted">
+                Create your E-Wallet Banking account to start managing finances
+                smartly.
+              </p>
+              <div className="grid-two">
+                <label className="auth-label">
+                  Full Name
+                  <input
+                    value={signupForm.fullName}
+                    onChange={(e) =>
+                      setSignupForm({ ...signupForm, fullName: e.target.value })
+                    }
+                    placeholder="Enter your full name"
+                    required
+                  />
+                </label>
+                <label className="auth-label">
+                  Username
+                  <input
+                    value={signupForm.username}
+                    onChange={(e) =>
+                      setSignupForm({ ...signupForm, username: e.target.value })
+                    }
+                    placeholder="Enter your username"
+                    required
+                  />
+                </label>
+              </div>
+              <div className="grid-two">
+                <label className="auth-label">
+                  Phone Number
+                  <input
+                    value={signupForm.phone}
+                    onChange={(e) =>
+                      setSignupForm({ ...signupForm, phone: e.target.value })
+                    }
+                    placeholder="Enter your phone number"
+                    required
+                  />
+                </label>
+                <label className="auth-label">
+                  Date of Birth
+                  <input
+                    type="date"
+                    value={signupForm.dob}
+                    onChange={(e) =>
+                      setSignupForm({ ...signupForm, dob: e.target.value })
+                    }
+                    placeholder="Enter your date of birth"
+                    required
+                  />
+                </label>
+              </div>
               <label className="auth-label">
-                Confirm Password
+                Address
                 <input
-                  type={showPassword ? "text" : "password"}
-                  value={signupForm.confirm}
+                  value={signupForm.address}
                   onChange={(e) =>
-                    setSignupForm({ ...signupForm, confirm: e.target.value })
+                    setSignupForm({ ...signupForm, address: e.target.value })
                   }
-                  placeholder="********"
+                  placeholder="Enter your address"
                   required
                 />
               </label>
-            </div>
-            <label className="auth-checkbox">
-              <input type="checkbox" required /> I agree to terms & privacy.
-            </label>
-            <button type="submit" className="btn-primary auth-submit">
-              Create Account
-            </button>
-            <p className="auth-switch">
-              Already have an account?{" "}
-              <button
-                type="button"
-                className="link-btn"
-                onClick={() => setMode("signin")}
-              >
-                Sign In
+              <label className="auth-label">
+                Email Address
+                <input
+                  type="email"
+                  value={signupForm.email}
+                  onChange={(e) =>
+                    setSignupForm({ ...signupForm, email: e.target.value })
+                  }
+                  placeholder="Enter your email"
+                  required
+                />
+              </label>
+              <div className="grid-two">
+                <label className="auth-label">
+                  Password
+                  <div className="password-wrap">
+                    <input
+                      type={showPassword ? "text" : "password"}
+                      value={signupForm.password}
+                      onChange={(e) =>
+                        setSignupForm({
+                          ...signupForm,
+                          password: e.target.value,
+                        })
+                      }
+                      placeholder="Enter your password"
+                      required
+                    />
+                    <button
+                      type="button"
+                      className="eye"
+                      onClick={() => setShowPassword((s) => !s)}
+                      aria-label="Toggle password"
+                    >
+                      {showPassword ? "🙈" : "👁"}
+                    </button>
+                  </div>
+                </label>
+                <label className="auth-label">
+                  Confirm Password
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    value={signupForm.confirm}
+                    onChange={(e) =>
+                      setSignupForm({ ...signupForm, confirm: e.target.value })
+                    }
+                    placeholder="Confirm your password"
+                    required
+                  />
+                </label>
+              </div>
+              <label className="auth-checkbox">
+                <input
+                  type="checkbox"
+                  checked={signupForm.agree}
+                  onChange={(e) =>
+                    setSignupForm({ ...signupForm, agree: e.target.checked })
+                  }
+                  required
+                />{" "}
+                I agree to terms & privacy.
+              </label>
+              <button type="submit" className="btn-primary auth-submit">
+                Create Account
               </button>
-              <span className="muted"> · </span>
-              <button
-                type="button"
-                className="link-btn"
-                onClick={() => setMode(null)}
-              >
-                Back
-              </button>
-            </p>
-          </form>
-        )}
-      </div>
-
-      <div className="auth-illustration">
-        <div className="auth-illus-inner">
-          <div className="auth-logo">MoneyFarm</div>
-          <p className="muted">
-            A modern e-wallet experience with insights, controls and delightful
-            UI. Sign in to continue.
-          </p>
-          <div className="auth-hero-graphic" aria-hidden="true">
-            🐷💳✨
+              <p className="auth-switch">
+                Already have an account?{" "}
+                <button
+                  type="button"
+                  className="link-btn"
+                  onClick={() => setMode("signin")}
+                >
+                  Sign In
+                </button>
+                <span className="muted"> · </span>
+                <button
+                  type="button"
+                  className="link-btn"
+                  onClick={() => setMode(null)}
+                >
+                  Back
+                </button>
+              </p>
+            </form>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );
