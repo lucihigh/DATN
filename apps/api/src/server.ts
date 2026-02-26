@@ -6,10 +6,8 @@ import helmet from "helmet";
 import { MongoServerError, ObjectId } from "mongodb";
 import morgan from "morgan";
 
-/* eslint-disable import/no-unresolved */
-import { loginSchema, registerSchema } from "../../packages/shared/src";
-import type { components } from "../../packages/shared/api-client/types";
-/* eslint-enable import/no-unresolved */
+import { loginSchema, registerSchema } from "@secure-wallet/shared";
+import type { components } from "@secure-wallet/shared/api-client/types";
 
 import type { LoginEventDoc } from "./db/schemas";
 import {
@@ -23,11 +21,17 @@ import {
   createUserRepository,
 } from "./db/repositories";
 import { applySecurityHeaders } from "./middleware/secureHeaders";
-import { lockoutPlaceholder } from "./middleware/lockout";
-import { rateLimitPlaceholder } from "./middleware/rateLimit";
+import { lockoutGuard } from "./middleware/lockout";
+import { loginRateLimiter } from "./middleware/rateLimit";
+import { requireAuth, requireRole } from "./middleware/auth";
 import { decryptUserPII } from "./security/encryption";
 import { signAuthToken } from "./security/jwt";
 import { hashPassword, verifyPassword } from "./security/password";
+import {
+  getSecurityPolicy,
+  getDefaultSecurityPolicy,
+} from "./services/securityPolicy";
+import { logAuditEvent } from "./services/audit";
 
 dotenv.config();
 
@@ -37,8 +41,7 @@ app.use(helmet());
 app.use(morgan("dev"));
 app.use(express.json());
 app.use(applySecurityHeaders);
-app.use(rateLimitPlaceholder);
-app.use(lockoutPlaceholder);
+app.use(lockoutGuard);
 
 const PORT = process.env.PORT_API || 4000;
 const AI_URL = process.env.AI_SERVICE_URL || "http://localhost:8000";
@@ -58,24 +61,7 @@ const toAnomalyScore = (value: unknown) =>
 type AnomalyResponse = Partial<components["schemas"]["AnomalyScore"]> &
   Record<string, unknown>;
 
-const DEFAULT_SECURITY_POLICY = {
-  maxLoginAttempts: 5,
-  lockoutMinutes: 15,
-  anomalyAlertThreshold: 0.7,
-};
-
-const getSecurityPolicy = async () => {
-  try {
-    const raw = await getDb()
-      .collection("securityPolicies")
-      .findOne({}, { sort: { createdAt: -1 } });
-    const validated = raw ? readFromMongo.securityPolicy(raw) : null;
-    return { ...DEFAULT_SECURITY_POLICY, ...(validated ?? {}) };
-  } catch (err) {
-    console.warn("Falling back to default security policy", err);
-    return { ...DEFAULT_SECURITY_POLICY };
-  }
-};
+const DEFAULT_SECURITY_POLICY = getDefaultSecurityPolicy();
 
 const sanitizeUser = (doc: unknown) => {
   const validated = readFromMongo.user(doc);
@@ -243,7 +229,7 @@ app.post("/auth/register", async (req, res) => {
   }
 });
 
-app.post("/auth/login", async (req, res) => {
+app.post("/auth/login", loginRateLimiter, async (req, res) => {
   type LoginReq = components["schemas"]["LoginRequest"];
   const parsed = loginSchema.safeParse(req.body as LoginReq);
   if (!parsed.success) {
@@ -429,8 +415,37 @@ app.post("/auth/logout", (_req, res) => {
   res.status(204).send();
 });
 
+app.post("/auth/change-password", requireAuth, async (req, res) => {
+  const { currentPassword, newPassword } = req.body as {
+    currentPassword?: string;
+    newPassword?: string;
+  };
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({ error: "Missing password fields" });
+  }
+
+  const userRepository = createUserRepository();
+  const userDoc = await userRepository.findValidatedById(req.user?.sub ?? "");
+  if (!userDoc) return res.status(404).json({ error: "User not found" });
+
+  const isValid = await verifyPassword(currentPassword, userDoc.passwordHash);
+  if (!isValid) return res.status(401).json({ error: "Invalid credentials" });
+
+  const passwordHash = await hashPassword(newPassword);
+  await userRepository.updatePassword(userDoc._id!, passwordHash);
+
+  await logAuditEvent({
+    actor: req.user?.email,
+    userId: userDoc._id?.toHexString(),
+    action: "CHANGE_PASSWORD",
+    ipAddress: req.ip,
+  });
+
+  return res.status(204).send();
+});
+
 // Contract placeholders below
-app.get("/wallet/me", (_req, res) => {
+app.get("/wallet/me", requireAuth, (_req, res) => {
   const wallet: components["schemas"]["Wallet"] = {
     id: "wallet1",
     balance: 0,
@@ -439,11 +454,11 @@ app.get("/wallet/me", (_req, res) => {
   res.json(wallet);
 });
 
-app.post("/wallet/deposit", (_req, res) => {
+app.post("/wallet/deposit", requireAuth, (_req, res) => {
   res.json({ id: "wallet1", balance: 100, currency: "USD" });
 });
 
-app.post("/transfer", (_req, res) => {
+app.post("/transfer", requireAuth, (_req, res) => {
   res.json({
     status: "ok",
     transaction: {
@@ -455,7 +470,7 @@ app.post("/transfer", (_req, res) => {
   });
 });
 
-app.get("/transactions", (_req, res) => {
+app.get("/transactions", requireAuth, (_req, res) => {
   res.json([]);
 });
 
@@ -486,225 +501,280 @@ app.get("/security/alerts", async (_req, res) => {
   res.json(alerts);
 });
 
-app.get("/admin/users", async (_req, res) => {
-  const userRepository = createUserRepository();
-  const docs = await userRepository.findMany(
-    {},
-    { sort: { createdAt: -1 }, limit: 200 },
-  );
-  const users = docs.map(sanitizeUser).filter(Boolean);
-  res.json(users);
-});
-
-app.patch("/admin/users/:id/status", async (req, res) => {
-  const { status, reason } = req.body as { status?: string; reason?: string };
-  const allowedStatuses = ["ACTIVE", "DISABLED", "PENDING"] as const;
-  type UserStatus = (typeof allowedStatuses)[number];
-  const statusNormalized =
-    typeof status === "string" ? status.trim().toUpperCase() : "";
-  if (!allowedStatuses.includes(statusNormalized as UserStatus)) {
-    return res.status(400).json({ error: "Invalid status" });
-  }
-
-  try {
-    const id = new ObjectId(req.params.id);
+app.get(
+  "/admin/users",
+  requireAuth,
+  requireRole(["ADMIN"]),
+  async (_req, res) => {
     const userRepository = createUserRepository();
-    await userRepository.updateOne({ _id: id } as never, {
-      $set: { status: statusNormalized as UserStatus, updatedAt: new Date() },
-    });
-    const updated = await userRepository.findValidatedById(id);
-    const sanitized = sanitizeUser(updated);
+    const docs = await userRepository.findMany(
+      {},
+      { sort: { createdAt: -1 }, limit: 200 },
+    );
+    const users = docs.map(sanitizeUser).filter(Boolean);
+    res.json(users);
+  },
+);
 
+app.patch(
+  "/admin/users/:id/status",
+  requireAuth,
+  requireRole(["ADMIN"]),
+  async (req, res) => {
+    const { status, reason } = req.body as { status?: string; reason?: string };
+    const allowedStatuses = ["ACTIVE", "DISABLED", "PENDING"] as const;
+    type UserStatus = (typeof allowedStatuses)[number];
+    const statusNormalized =
+      typeof status === "string" ? status.trim().toUpperCase() : "";
+    if (!allowedStatuses.includes(statusNormalized as UserStatus)) {
+      return res.status(400).json({ error: "Invalid status" });
+    }
+
+    try {
+      const id = new ObjectId(req.params.id);
+      const userRepository = createUserRepository();
+      await userRepository.updateOne({ _id: id } as never, {
+        $set: { status: statusNormalized as UserStatus, updatedAt: new Date() },
+      });
+      const updated = await userRepository.findValidatedById(id);
+      const sanitized = sanitizeUser(updated);
+
+      await logAuditEvent({
+        actor: "admin",
+        userId: id.toHexString(),
+        action:
+          statusNormalized === "DISABLED"
+            ? "ACCOUNT_LOCKED"
+            : "ACCOUNT_UNLOCKED",
+        details: reason ?? "manual update",
+        ipAddress: req.ip,
+      });
+
+      return res.json({ user: sanitized });
+    } catch (err) {
+      console.error("Failed to update user status", err);
+      return res.status(400).json({ error: "Invalid user id" });
+    }
+  },
+);
+
+app.get(
+  "/admin/login-events",
+  requireAuth,
+  requireRole(["ADMIN"]),
+  async (req, res) => {
+    const limit = Math.min(
+      parseInt(String(req.query.limit ?? "50"), 10) || 50,
+      200,
+    );
+    const repo = createLoginEventRepository();
+    const events = await repo.findMany({}, { sort: { createdAt: -1 }, limit });
+    const normalized = events
+      .map((e) => readFromMongo.loginEvent(e))
+      .filter(Boolean)
+      .map((evt) => ({
+        id: toEntityId(evt?._id, evt?.email ?? "unknown"),
+        email: evt?.email ?? "unknown",
+        ipAddress: evt?.ipAddress ?? "unknown",
+        userAgent: evt?.userAgent ?? "unknown",
+        success: evt?.success ?? false,
+        anomaly: evt?.anomaly ?? 0,
+        createdAt: evt?.createdAt ?? new Date(),
+        metadata: evt?.metadata ?? {},
+      }));
+    res.json(normalized);
+  },
+);
+
+app.get(
+  "/admin/transactions",
+  requireAuth,
+  requireRole(["ADMIN"]),
+  async (req, res) => {
+    const limit = Math.min(
+      parseInt(String(req.query.limit ?? "50"), 10) || 50,
+      200,
+    );
+    const docs = await getDb()
+      .collection("transactions")
+      .find({}, { sort: { createdAt: -1 }, limit })
+      .toArray();
+    const normalized = docs
+      .map((d) => readFromMongo.transaction(d))
+      .filter(Boolean)
+      .map((txn) => ({
+        id: toEntityId(txn?._id, "txn"),
+        amount: txn?.amount ?? 0,
+        type: txn?.type ?? "TRANSFER",
+        status: txn?.status ?? "COMPLETED",
+        description: txn?.description ?? "",
+        createdAt: txn?.createdAt ?? new Date(),
+        fromUserId: txn?.fromUserId?.toHexString?.() ?? undefined,
+        toUserId: txn?.toUserId?.toHexString?.() ?? undefined,
+      }));
+    res.json(normalized);
+  },
+);
+
+app.get(
+  "/admin/alerts",
+  requireAuth,
+  requireRole(["ADMIN"]),
+  async (_req, res) => {
+    const policy = await getSecurityPolicy();
+    const repo = createLoginEventRepository();
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const events = await repo.findMany(
+      { createdAt: { $gte: since } } as never,
+      {
+        sort: { createdAt: -1 },
+        limit: 100,
+      },
+    );
+    const normalized = events
+      .map((e) => readFromMongo.loginEvent(e))
+      .filter(Boolean) as LoginEventDoc[];
+    const alerts = normalized
+      .filter(
+        (evt) =>
+          !evt.success || (evt.anomaly ?? 0) >= policy.anomalyAlertThreshold,
+      )
+      .map((evt) => ({
+        ...buildAlertFromLoginEvent(evt, policy.anomalyAlertThreshold),
+        severity: !evt.success ? "high" : "medium",
+      }));
+    res.json(alerts);
+  },
+);
+
+app.get(
+  "/admin/audit-logs",
+  requireAuth,
+  requireRole(["ADMIN"]),
+  async (req, res) => {
+    const limit = Math.min(
+      parseInt(String(req.query.limit ?? "100"), 10) || 100,
+      300,
+    );
+    const docs = await getDb()
+      .collection("auditLogs")
+      .find({}, { sort: { createdAt: -1 }, limit })
+      .toArray();
+    const logs = docs
+      .map((d) => readFromMongo.auditLog(d))
+      .filter(Boolean)
+      .map((log) => ({
+        id: toEntityId(log?._id, log?.actor ?? "system"),
+        actor: log?.actor ?? "system",
+        action: log?.action ?? "UNKNOWN",
+        details: log?.details ?? "",
+        ipAddress: log?.ipAddress ?? "unknown",
+        createdAt: log?.createdAt ?? new Date(),
+      }));
+    res.json(logs);
+  },
+);
+
+app.get(
+  "/admin/policies",
+  requireAuth,
+  requireRole(["ADMIN"]),
+  async (_req, res) => {
+    const policy = await getSecurityPolicy();
+    res.json(policy);
+  },
+);
+
+app.post(
+  "/admin/policies",
+  requireAuth,
+  requireRole(["ADMIN"]),
+  async (req, res) => {
+    const body = req.body as Partial<typeof DEFAULT_SECURITY_POLICY>;
+    const policy = {
+      ...DEFAULT_SECURITY_POLICY,
+      ...body,
+      updatedAt: new Date(),
+      createdAt: new Date(),
+    };
+    await getDb()
+      .collection("securityPolicies")
+      .insertOne(policy as never);
+    res.json({ status: "updated", policy });
+  },
+);
+
+app.post(
+  "/admin/demo/bruteforce",
+  requireAuth,
+  requireRole(["ADMIN"]),
+  async (req, res) => {
+    const email =
+      typeof req.body?.email === "string"
+        ? normalizeEmail(req.body.email)
+        : "bruteforce@example.com";
+    const userAgent = "demo-script";
+    const repo = createLoginEventRepository();
+    const userRepo = createUserRepository();
+    const userDoc = await userRepo.findByEmail(email);
+    const userId = userDoc?._id;
+
+    const entries = Array.from({ length: 6 }).map((_, i) => ({
+      userId,
+      email,
+      ipAddress: `10.0.0.${i + 10}`,
+      userAgent,
+      success: false,
+      anomaly: 0.8,
+      metadata: { scenario: "bruteforce" },
+    }));
+    for (const evt of entries) {
+      await repo.createLoginEvent(evt);
+    }
+    if (userId) {
+      await lockUserAccount(userId, email, "Demo brute force lock", req.ip);
+    }
+    res.json({ inserted: entries.length, email });
+  },
+);
+
+app.post(
+  "/admin/demo/unusual-login",
+  requireAuth,
+  requireRole(["ADMIN"]),
+  async (req, res) => {
+    const email =
+      typeof req.body?.email === "string"
+        ? normalizeEmail(req.body.email)
+        : "anomaly@example.com";
+    const repo = createLoginEventRepository();
+    const userRepo = createUserRepository();
+    const userDoc = await userRepo.findByEmail(email);
+    const userId = userDoc?._id;
+
+    const payload = {
+      userId,
+      email,
+      ipAddress: req.body?.ipAddress || "203.0.113.42",
+      userAgent: req.body?.userAgent || "UnknownDevice/1.0",
+      success: true,
+      anomaly: 0.92,
+      metadata: {
+        scenario: "unusual-device",
+        reasons: ["new device", "geo mismatch"],
+      },
+    };
+    await repo.createLoginEvent(payload);
     await logAuditEvent({
-      actor: "admin",
-      userId: id.toHexString(),
-      action:
-        statusNormalized === "DISABLED" ? "ACCOUNT_LOCKED" : "ACCOUNT_UNLOCKED",
-      details: reason ?? "manual update",
-      ipAddress: req.ip,
+      actor: email,
+      userId: userId?.toHexString(),
+      action: "AI_ALERT",
+      details: payload.metadata,
+      ipAddress: payload.ipAddress,
     });
-
-    return res.json({ user: sanitized });
-  } catch (err) {
-    console.error("Failed to update user status", err);
-    return res.status(400).json({ error: "Invalid user id" });
-  }
-});
-
-app.get("/admin/login-events", async (req, res) => {
-  const limit = Math.min(
-    parseInt(String(req.query.limit ?? "50"), 10) || 50,
-    200,
-  );
-  const repo = createLoginEventRepository();
-  const events = await repo.findMany({}, { sort: { createdAt: -1 }, limit });
-  const normalized = events
-    .map((e) => readFromMongo.loginEvent(e))
-    .filter(Boolean)
-    .map((evt) => ({
-      id: toEntityId(evt?._id, evt?.email ?? "unknown"),
-      email: evt?.email ?? "unknown",
-      ipAddress: evt?.ipAddress ?? "unknown",
-      userAgent: evt?.userAgent ?? "unknown",
-      success: evt?.success ?? false,
-      anomaly: evt?.anomaly ?? 0,
-      createdAt: evt?.createdAt ?? new Date(),
-      metadata: evt?.metadata ?? {},
-    }));
-  res.json(normalized);
-});
-
-app.get("/admin/transactions", async (req, res) => {
-  const limit = Math.min(
-    parseInt(String(req.query.limit ?? "50"), 10) || 50,
-    200,
-  );
-  const docs = await getDb()
-    .collection("transactions")
-    .find({}, { sort: { createdAt: -1 }, limit })
-    .toArray();
-  const normalized = docs
-    .map((d) => readFromMongo.transaction(d))
-    .filter(Boolean)
-    .map((txn) => ({
-      id: toEntityId(txn?._id, "txn"),
-      amount: txn?.amount ?? 0,
-      type: txn?.type ?? "TRANSFER",
-      status: txn?.status ?? "COMPLETED",
-      description: txn?.description ?? "",
-      createdAt: txn?.createdAt ?? new Date(),
-      fromUserId: txn?.fromUserId?.toHexString?.() ?? undefined,
-      toUserId: txn?.toUserId?.toHexString?.() ?? undefined,
-    }));
-  res.json(normalized);
-});
-
-app.get("/admin/alerts", async (_req, res) => {
-  const policy = await getSecurityPolicy();
-  const repo = createLoginEventRepository();
-  const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const events = await repo.findMany({ createdAt: { $gte: since } } as never, {
-    sort: { createdAt: -1 },
-    limit: 100,
-  });
-  const normalized = events
-    .map((e) => readFromMongo.loginEvent(e))
-    .filter(Boolean) as LoginEventDoc[];
-  const alerts = normalized
-    .filter(
-      (evt) =>
-        !evt.success || (evt.anomaly ?? 0) >= policy.anomalyAlertThreshold,
-    )
-    .map((evt) => ({
-      ...buildAlertFromLoginEvent(evt, policy.anomalyAlertThreshold),
-      severity: !evt.success ? "high" : "medium",
-    }));
-  res.json(alerts);
-});
-
-app.get("/admin/audit-logs", async (req, res) => {
-  const limit = Math.min(
-    parseInt(String(req.query.limit ?? "100"), 10) || 100,
-    300,
-  );
-  const docs = await getDb()
-    .collection("auditLogs")
-    .find({}, { sort: { createdAt: -1 }, limit })
-    .toArray();
-  const logs = docs
-    .map((d) => readFromMongo.auditLog(d))
-    .filter(Boolean)
-    .map((log) => ({
-      id: toEntityId(log?._id, log?.actor ?? "system"),
-      actor: log?.actor ?? "system",
-      action: log?.action ?? "UNKNOWN",
-      details: log?.details ?? "",
-      ipAddress: log?.ipAddress ?? "unknown",
-      createdAt: log?.createdAt ?? new Date(),
-    }));
-  res.json(logs);
-});
-
-app.get("/admin/policies", async (_req, res) => {
-  const policy = await getSecurityPolicy();
-  res.json(policy);
-});
-
-app.post("/admin/policies", async (req, res) => {
-  const body = req.body as Partial<typeof DEFAULT_SECURITY_POLICY>;
-  const policy = {
-    ...DEFAULT_SECURITY_POLICY,
-    ...body,
-    updatedAt: new Date(),
-    createdAt: new Date(),
-  };
-  await getDb()
-    .collection("securityPolicies")
-    .insertOne(policy as never);
-  res.json({ status: "updated", policy });
-});
-
-app.post("/admin/demo/bruteforce", async (req, res) => {
-  const email =
-    typeof req.body?.email === "string"
-      ? normalizeEmail(req.body.email)
-      : "bruteforce@example.com";
-  const userAgent = "demo-script";
-  const repo = createLoginEventRepository();
-  const userRepo = createUserRepository();
-  const userDoc = await userRepo.findByEmail(email);
-  const userId = userDoc?._id;
-
-  const entries = Array.from({ length: 6 }).map((_, i) => ({
-    userId,
-    email,
-    ipAddress: `10.0.0.${i + 10}`,
-    userAgent,
-    success: false,
-    anomaly: 0.8,
-    metadata: { scenario: "bruteforce" },
-  }));
-  for (const evt of entries) {
-    await repo.createLoginEvent(evt);
-  }
-  if (userId) {
-    await lockUserAccount(userId, email, "Demo brute force lock", req.ip);
-  }
-  res.json({ inserted: entries.length, email });
-});
-
-app.post("/admin/demo/unusual-login", async (req, res) => {
-  const email =
-    typeof req.body?.email === "string"
-      ? normalizeEmail(req.body.email)
-      : "anomaly@example.com";
-  const repo = createLoginEventRepository();
-  const userRepo = createUserRepository();
-  const userDoc = await userRepo.findByEmail(email);
-  const userId = userDoc?._id;
-
-  const payload = {
-    userId,
-    email,
-    ipAddress: req.body?.ipAddress || "203.0.113.42",
-    userAgent: req.body?.userAgent || "UnknownDevice/1.0",
-    success: true,
-    anomaly: 0.92,
-    metadata: {
-      scenario: "unusual-device",
-      reasons: ["new device", "geo mismatch"],
-    },
-  };
-  await repo.createLoginEvent(payload);
-  await logAuditEvent({
-    actor: email,
-    userId: userId?.toHexString(),
-    action: "AI_ALERT",
-    details: payload.metadata,
-    ipAddress: payload.ipAddress,
-  });
-  res.json({ inserted: 1, email });
-});
+    res.json({ inserted: 1, email });
+  },
+);
 
 const errorHandler: ErrorRequestHandler = (err, _req, res, next) => {
   void next;

@@ -65,6 +65,12 @@ export class UserRepository extends BaseRepository<UserDoc> {
       $set: { lastLoginAt: new Date(), updatedAt: new Date() },
     });
   }
+
+  async updatePassword(id: string | ObjectId, passwordHash: string) {
+    return this.updateOne({ _id: id } as never, {
+      $set: { passwordHash, updatedAt: new Date() },
+    });
+  }
 }
 
 export const createUserRepository = () => new UserRepository();
