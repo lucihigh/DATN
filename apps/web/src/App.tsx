@@ -1502,6 +1502,7 @@ function Toggle({
 
 function SettingView() {
   const { toast } = useToast();
+  const { theme, setTheme, toggle: toggleTheme } = useTheme();
   const [settingTab, setSettingTab] = useState("profile");
   const [profile, setProfile] = useState<ProfileForm>(() => {
     try {
@@ -1748,6 +1749,18 @@ function SettingView() {
         {settingTab === "preferences" && (
           <>
             <h3 className="setting-panel-title">Preference Setting</h3>
+            <div className="setting-block">
+              <h4 className="setting-block-head">Theme</h4>
+              <p className="muted">Switch between light and dark mode.</p>
+              <div className="setting-row toggle-row">
+                <span>Enable dark mode</span>
+                <Toggle
+                  id="pref-theme"
+                  checked={theme === "dark"}
+                  onChange={(v) => (v ? setTheme("dark") : setTheme("light"))}
+                />
+              </div>
+            </div>
             <div className="setting-block">
               <h4 className="setting-block-head">On Startup</h4>
               <div className="setting-row toggle-row">
