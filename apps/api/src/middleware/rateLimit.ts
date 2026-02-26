@@ -1,10 +1,9 @@
-import { Request, Response, NextFunction } from "express";
+import rateLimit from "express-rate-limit";
 
-// TODO: plug a real rate limiter (e.g., express-rate-limit)
-export const rateLimitPlaceholder = (
-  _req: Request,
-  _res: Response,
-  next: NextFunction,
-) => {
-  return next();
-};
+export const loginRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many login attempts, please try again later." },
+});

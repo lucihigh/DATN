@@ -1,2 +1,3 @@
-corepack pnpm format
-corepack pnpm test
+PATH="/c/Program Files/nodejs:$PATH"
+"C:/Program Files/nodejs/corepack.cmd" pnpm format
+"C:/Program Files/nodejs/corepack.cmd" pnpm test

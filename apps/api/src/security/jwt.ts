@@ -22,5 +22,14 @@ const getJwtSecret = () => {
 
 export const signAuthToken = (payload: AuthTokenPayload) =>
   jwt.sign(payload, getJwtSecret(), {
-    expiresIn: (process.env.JWT_EXPIRES_IN || "7d") as SignOptions["expiresIn"],
+    expiresIn: (process.env.JWT_EXPIRES_IN ||
+      "15m") as SignOptions["expiresIn"],
   });
+
+export const verifyAuthToken = (token: string) =>
+  jwt.verify(token, getJwtSecret()) as AuthTokenPayload & {
+    iat: number;
+    exp: number;
+  };
+
+export type AuthUser = AuthTokenPayload;
