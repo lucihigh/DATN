@@ -95,6 +95,42 @@ html, body { overflow: hidden; }
 .nav-item-child { padding-left: 32px; }
 .nav-item-child .nav-dot { opacity: 0.8; }
 
+/* Light mode overrides for customer shell */
+body.theme-light .sidebar {
+  background: #ffffff;
+  border-right: 1px solid #e5e7eb;
+  color: #0f172a;
+}
+body.theme-light .logo { color: #0f172a; }
+body.theme-light .nav-item { color: #475569; }
+body.theme-light .nav-item:hover,
+body.theme-light .nav-item.active {
+  background: #e8edfb;
+  color: #0f172a;
+}
+body.theme-light .nav-dot { background: #2563eb; }
+body.theme-light .user-menu-trigger:hover { background: #e8edfb; }
+body.theme-light .top-actions input {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  color: #0f172a;
+}
+body.theme-light .search-dropdown,
+body.theme-light .notif-dropdown {
+  border: 1px solid #e5e7eb;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.15);
+}
+body.theme-light .notif-row { background: #f8fafc; color: #0f172a; }
+body.theme-light .card {
+  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.12);
+  border: 1px solid #e5e7eb;
+}
+body.theme-light .pill { border-color: #e5e7eb; background: #ffffff; }
+body.theme-light .user-menu-dropdown {
+  border: 1px solid #e5e7eb;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.14);
+}
+
 .content { padding: 32px 40px 48px; display: flex; flex-direction: column; gap: 22px; width: 100%; max-width: 1480px; margin: 0 auto; }
 .topbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
 .topbar h1 { margin: 0; }
