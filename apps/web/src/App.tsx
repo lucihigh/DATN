@@ -27,7 +27,11 @@ const NAV_ITEMS: {
   {
     id: "Support",
     label: "Support",
-    children: [{ id: "Knowledge base", label: "Knowledge base" }],
+    children: [
+      { id: "Knowledge base", label: "Knowledge base" },
+      { id: "Notifications", label: "Notifications" },
+      { id: "KYC Verification", label: "KYC Verification" },
+    ],
   },
 ];
 
@@ -406,7 +410,18 @@ function DashboardView() {
 function MyWalletView() {
   const { toast } = useToast();
   const [depositAmount, setDepositAmount] = useState("250");
-  const [transfer, setTransfer] = useState({ to: "", amount: "100" });
+  const [depositMethod, setDepositMethod] = useState("bank");
+  const [withdrawMethod, setWithdrawMethod] = useState("bank");
+  const [transfer, setTransfer] = useState({
+    to: "",
+    amount: "100",
+    method: "wallet",
+  });
+  const savedRecipients = [
+    "alice@example.com",
+    "bob@example.com",
+    "carol@example.com",
+  ];
 
   const submitDeposit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -414,7 +429,7 @@ function MyWalletView() {
       toast("Enter a valid amount", "error");
       return;
     }
-    toast(`(Demo) Would deposit $${depositAmount}`);
+    toast(`(Demo) Would deposit $${depositAmount} via ${depositMethod}`);
   };
 
   const submitTransfer = (e: React.FormEvent) => {
@@ -423,7 +438,9 @@ function MyWalletView() {
       toast("Recipient and amount are required", "error");
       return;
     }
-    toast(`(Demo) Would transfer $${transfer.amount} to ${transfer.to}`);
+    toast(
+      `(Demo) Would transfer $${transfer.amount} to ${transfer.to} via ${transfer.method}`,
+    );
   };
 
   return (
@@ -456,6 +473,17 @@ function MyWalletView() {
           <form className="wallet-action-form" onSubmit={submitDeposit}>
             <h4>Deposit funds</h4>
             <label>
+              Method
+              <select
+                value={depositMethod}
+                onChange={(e) => setDepositMethod(e.target.value)}
+              >
+                <option value="bank">Bank transfer (ETA: ~2 min, Fee: $0)</option>
+                <option value="card">Debit/Credit card (ETA: instant, Fee: 1.2%)</option>
+                <option value="qr">QR wallet (ETA: instant, Fee: $0)</option>
+              </select>
+            </label>
+            <label>
               Amount (USD)
               <input
                 type="number"
@@ -483,6 +511,18 @@ function MyWalletView() {
                 placeholder="user@example.com"
                 required
               />
+              <div className="saved-recips">
+                {savedRecipients.map((r) => (
+                  <button
+                    key={r}
+                    type="button"
+                    className="pill"
+                    onClick={() => setTransfer((t) => ({ ...t, to: r }))}
+                  >
+                    {r}
+                  </button>
+                ))}
+              </div>
             </label>
             <label>
               Amount (USD)
@@ -497,6 +537,22 @@ function MyWalletView() {
                 required
               />
             </label>
+            <label>
+              Method
+              <select
+                value={transfer.method}
+                onChange={(e) =>
+                  setTransfer((t) => ({ ...t, method: e.target.value }))
+                }
+              >
+                <option value="wallet">Wallet to wallet (instant)</option>
+                <option value="bank">Bank transfer (ETA: 5-10 min)</option>
+                <option value="card">Card payout (ETA: 1-2 days)</option>
+              </select>
+            </label>
+            <div className="fee-hint muted">
+              Estimated fee: {transfer.method === "card" ? "2.0%" : "0"} · ETA shown above
+            </div>
             <button type="submit" className="btn-primary">
               Transfer (demo)
             </button>
@@ -665,6 +721,7 @@ function InvoiceListView() {
           </table>
         </div>
       </div>
+
     </section>
   );
 }
@@ -2122,6 +2179,7 @@ function TransactionsView() {
   const [statusFilter, setStatusFilter] = useState<
     "all" | "Pending" | "Completed" | "Canceled"
   >("all");
+  const [showReceipt, setShowReceipt] = useState<string | null>(null);
   const { toast } = useToast();
 
   const filtered = transactionsHistory.filter((t) => {
@@ -2293,7 +2351,13 @@ function TransactionsView() {
                     </span>
                   </td>
                   <td>
-                    <span className="tx-dots">⋮</span>
+                    <button
+                      type="button"
+                      className="pill"
+                      onClick={() => setShowReceipt(t.id)}
+                    >
+                      View
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -2305,8 +2369,120 @@ function TransactionsView() {
   );
 }
 
+function NotificationsView({
+  notifications,
+}: {
+  notifications: { type: string; message: string }[];
+}) {
+  const [filter, setFilter] = useState<"all" | "transactions" | "security" | "offers">("all");
+
+  const filtered = notifications.filter(
+    (n) => filter === "all" || n.type === filter,
+  );
+
+  return (
+    <section className="card notifications-card">
+      <div className="card-head">
+        <h3>Notifications</h3>
+        <select
+          className="pill"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value as typeof filter)}
+        >
+          <option value="all">All</option>
+          <option value="transactions">Transactions</option>
+          <option value="security">Security</option>
+          <option value="offers">Offers</option>
+        </select>
+      </div>
+      <div className="notifications-list">
+        {filtered.map((n, i) => (
+          <div key={i} className="notification-row">
+            <div className={`notif-pill notif-${n.type}`}>{n.type}</div>
+            <div>{n.message}</div>
+            <button type="button" className="pill tiny">Mark read</button>
+          </div>
+        ))}
+        {filtered.length === 0 && (
+          <p className="muted">No notifications.</p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function KycView() {
+  const steps = ["Identity document", "Selfie check", "Review & submit"];
+  const [active, setActive] = useState(0);
+
+  return (
+    <section className="card kyc-card">
+      <h3>KYC Verification</h3>
+      <p className="muted">Verify your identity to unlock higher limits.</p>
+      <div className="kyc-steps">
+        {steps.map((s, i) => (
+          <div key={s} className={`kyc-step ${i === active ? "active" : ""} ${i < active ? "done" : ""}`}>
+            <span className="kyc-step-index">{i + 1}</span>
+            <span>{s}</span>
+          </div>
+        ))}
+      </div>
+      {active === 0 && (
+        <div className="kyc-upload">
+          <label className="upload-drop">
+            <span>Upload ID (front)</span>
+            <input type="file" accept="image/*" />
+          </label>
+          <label className="upload-drop">
+            <span>Upload ID (back)</span>
+            <input type="file" accept="image/*" />
+          </label>
+        </div>
+      )}
+      {active === 1 && (
+        <div className="kyc-upload">
+          <label className="upload-drop">
+            <span>Upload selfie</span>
+            <input type="file" accept="image/*" />
+          </label>
+          <p className="muted small">Make sure your face is clear and well lit.</p>
+        </div>
+      )}
+      {active === 2 && (
+        <div className="kyc-review">
+          <p>Review your documents and submit for verification.</p>
+          <ul>
+            <li>Valid government ID</li>
+            <li>Clear selfie</li>
+            <li>Matching name & birth date</li>
+          </ul>
+        </div>
+      )}
+      <div className="kyc-actions">
+        <button
+          type="button"
+          className="pill"
+          onClick={() => setActive((a) => Math.max(0, a - 1))}
+          disabled={active === 0}
+        >
+          Back
+        </button>
+        <button
+          type="button"
+          className="btn-primary"
+          onClick={() => setActive((a) => Math.min(steps.length - 1, a + 1))}
+        >
+          {active === steps.length - 1 ? "Submit" : "Next"}
+        </button>
+      </div>
+    </section>
+  );
+}
+
 const PAGE_TITLE: Record<string, string> = {
   "Knowledge base": "FAQ",
+  Notifications: "Notifications",
+  "KYC Verification": "KYC Verification",
 };
 
 function App() {
@@ -2315,6 +2491,9 @@ function App() {
   const [search, setSearch] = useState("");
   const [searchResults, setSearchResults] = useState<string[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [notificationFilter, setNotificationFilter] = useState<
+    "all" | "transactions" | "security" | "offers"
+  >("all");
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
   const [invoicesExpanded, setInvoicesExpanded] = useState(false);
@@ -2377,9 +2556,10 @@ function App() {
   };
 
   const notifications = [
-    "New login from Chrome on MacOS",
-    "Invoice INV-42015 paid",
-    "Security: 2FA enabled",
+    { type: "security", message: "New login from Chrome on MacOS" },
+    { type: "transactions", message: "Invoice INV-42015 paid" },
+    { type: "security", message: "Security: 2FA enabled" },
+    { type: "offers", message: "Cashback 5% this weekend" },
   ];
 
   return (
@@ -2479,11 +2659,35 @@ function App() {
               </button>
               {showNotifications && (
                 <div className="notif-dropdown">
-                  {notifications.map((n, i) => (
-                    <div key={i} className="notif-row">
-                      {n}
-                    </div>
-                  ))}
+                  <div className="notif-filter">
+                    <select
+                      value={notificationFilter}
+                      onChange={(e) =>
+                        setNotificationFilter(
+                          e.target.value as typeof notificationFilter,
+                        )
+                      }
+                    >
+                      <option value="all">All</option>
+                      <option value="transactions">Transactions</option>
+                      <option value="security">Security</option>
+                      <option value="offers">Offers</option>
+                    </select>
+                  </div>
+                  {notifications
+                    .filter(
+                      (n) =>
+                        notificationFilter === "all" ||
+                        n.type === notificationFilter,
+                    )
+                    .map((n, i) => (
+                      <div key={i} className="notif-row">
+                        <strong style={{ textTransform: "capitalize" }}>
+                          {n.type}
+                        </strong>
+                        <div>{n.message}</div>
+                      </div>
+                    ))}
                   <button
                     type="button"
                     className="pill"
@@ -2551,6 +2755,10 @@ function App() {
         {activeTab === "Accounts" && <AccountsView />}
         {activeTab === "Setting" && <SettingView />}
         {activeTab === "Knowledge base" && <KnowledgeBaseView />}
+        {activeTab === "Notifications" && (
+          <NotificationsView notifications={notifications} />
+        )}
+        {activeTab === "KYC Verification" && <KycView />}
         {![
           "Dashboard",
           "My Wallet",
@@ -2561,6 +2769,8 @@ function App() {
           "Accounts",
           "Setting",
           "Knowledge base",
+          "Notifications",
+          "KYC Verification",
         ].includes(activeTab) && (
           <section className="grid">
             <div className="card span-2">
