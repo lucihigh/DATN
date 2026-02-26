@@ -573,12 +573,20 @@ body.theme-light .auth-form-shell {
 .status-completed-alt { background: rgba(250, 84, 28, 0.2); color: #fa541c; border: 1px solid rgba(250, 84, 28, 0.5); }
 
 /* Invoice List & Create Invoices */
-.invoice-list-section, .create-invoices-section { flex: 1; display: flex; flex-direction: column; gap: 20px; }
+.invoice-list-section, .create-invoices-section {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 1200px;
+  margin: 0 auto;
+  width: 100%;
+}
 .invoice-list-card h3, .create-invoice-card h3 { margin: 0 0 16px; }
 .invoice-list-table-wrap { overflow-x: auto; border-radius: 12px; background: var(--panel-2); }
 .invoice-list-table th, .invoice-list-table td { padding: 12px 16px; }
 
-.create-invoice-card { max-width: 900px; }
+.create-invoice-card { width: 100%; }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
 .form-group { display: flex; flex-direction: column; gap: 6px; }
 .form-group label { font-size: 13px; color: var(--muted); }
