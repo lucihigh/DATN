@@ -157,6 +157,17 @@ body.theme-light .user-menu-dropdown {
   gap: 18px;
   width: 100%;
 }
+.grid-dashboard {
+  display: grid;
+  grid-template-columns: 1.6fr 1fr;
+  gap: 18px;
+  align-items: start;
+}
+.dash-secondary {
+  display: grid;
+  grid-template-columns: 2fr 1.4fr;
+  gap: 18px;
+}
 .card {
   background: var(--panel);
   border-radius: var(--radius);
@@ -170,7 +181,9 @@ body.theme-light .user-menu-dropdown {
 
 h3 { margin: 0 0 12px; }
 
-.rings { display: grid; grid-template-columns: repeat(auto-fit,minmax(120px,1fr)); gap: 14px; }
+.rings { display: grid; grid-template-columns: repeat(auto-fit,minmax(120px,1fr)); gap: 12px; }
+.expense-card { padding-bottom: 16px; }
+.profile-card { align-self: stretch; }
 .ring { width: 84px; height: 84px; }
 .ring-bg { fill: none; stroke: #1b2747; stroke-width: 10; }
 .ring-fg { fill: none; stroke: var(--accent); stroke-width: 10; stroke-linecap: round; transform: rotate(-90deg); transform-origin: 50% 50%; }
@@ -921,6 +934,7 @@ body.theme-light .mf-menu button.active .mf-ico { background:#bfdbfe; color:#0f1
   .nav-item { font-size: 13px; padding: 10px; }
   .nav-item-child { padding-left: 24px; }
   .grid, .grid-wallet { grid-template-columns: repeat(auto-fit,minmax(280px,1fr)); }
+  .grid-dashboard, .dash-secondary { grid-template-columns: 1fr; }
   .span-2 { grid-column: span 1; }
   .payment-row { grid-template-columns: 40px 1fr 1fr 1fr; }
   .payment-row .payment-date, .payment-row .payment-method { grid-column: span 1; }

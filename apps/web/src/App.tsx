@@ -322,8 +322,8 @@ function BarChart({
 function DashboardView() {
   return (
     <>
-      <section className="grid">
-        <div className="card span-2">
+      <section className="grid-dashboard">
+        <div className="card expense-card">
           <h3>Expense Categories</h3>
           <div className="rings">
             {expenseCategories.map((c) => (
@@ -334,7 +334,7 @@ function DashboardView() {
             ))}
           </div>
         </div>
-        <div className="card">
+        <div className="card profile-card">
           <div className="profile">
             <img src="https://i.pravatar.cc/120?img=12" alt="John Doe" />
             <h3>John Doe</h3>
@@ -364,7 +364,9 @@ function DashboardView() {
             <div className="card-valid">12/23</div>
           </div>
         </div>
-        <div className="card span-2">
+      </section>
+      <section className="grid dash-secondary">
+        <div className="card">
           <div className="card-head">
             <h3>Balance History</h3>
             <div className="legend">
@@ -377,7 +379,7 @@ function DashboardView() {
             <div className="bar-line" />
           </div>
         </div>
-        <div className="card span-2">
+        <div className="card">
           <div className="card-head">
             <h3>Last Transactions</h3>
             <button className="pill">All Time ▼</button>
