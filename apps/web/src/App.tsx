@@ -2585,31 +2585,10 @@ type AuthShellProps = {
 };
 
 function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
-  const [theme, setTheme] = useState<"light" | "dark">(() => {
-    if (typeof window === "undefined") return "light";
-    return (localStorage.getItem("admin-theme") as "light" | "dark") || "light";
-  });
-
-  useEffect(() => {
-    const apply = (t: "light" | "dark") => {
-      document.body.classList.remove("theme-light", "theme-dark");
-      document.body.classList.add(`theme-${t}`);
-    };
-    apply(theme);
-
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === "admin-theme" && e.newValue) {
-        const next = (e.newValue as "light" | "dark") ?? "light";
-        setTheme(next);
-        apply(next);
-      }
-    };
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, [theme]);
+  const { theme, toggle: toggleTheme } = useTheme();
 
   const { toast } = useToast();
-  const [mode, setMode] = useState<"signin" | "signup" | null>(null);
+  const [mode, setMode] = useState<"signin" | "signup" | "forgot" | null>(null);
   const [showPassword, setShowPassword] = useState(false);
 
   const [signinForm, setSigninForm] = useState({ email: "", password: "" });
@@ -2625,6 +2604,7 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
     confirm: "",
     agree: false,
   });
+  const [forgotEmail, setForgotEmail] = useState("");
 
   const handleSignIn = (e: React.FormEvent) => {
     e.preventDefault();
@@ -2673,6 +2653,17 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
     toast("Account created");
     setMode("signin");
     setSigninForm({ email, password });
+  };
+
+  const handleForgot = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!forgotEmail) {
+      toast("Please enter your email", "error");
+      return;
+    }
+    toast("Password reset link sent (demo)");
+    setForgotEmail("");
+    setMode("signin");
   };
 
   const renderChoice = () => (
@@ -2821,7 +2812,10 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
                 </label>
                 <a
                   href="#"
-                  onClick={(e) => e.preventDefault()}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    setMode("forgot");
+                  }}
                   className="muted"
                 >
                   Forgot password
@@ -3012,6 +3006,39 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
                   onClick={() => setMode(null)}
                 >
                   Back
+                </button>
+              </p>
+            </form>
+          </div>
+        )}
+        {mode === "forgot" && (
+          <div className="auth-form-shell">
+            <form className="auth-form-modern" onSubmit={handleForgot}>
+              <h2>Forgot Password</h2>
+              <p className="muted">
+                Enter the email linked to your account and we&apos;ll email you a reset link (demo).
+              </p>
+              <label className="auth-label">
+                Email Address
+                <input
+                  type="email"
+                  value={forgotEmail}
+                  onChange={(e) => setForgotEmail(e.target.value)}
+                  placeholder="Enter your email"
+                  required
+                />
+              </label>
+              <button type="submit" className="btn-primary auth-submit">
+                Send Reset Link
+              </button>
+              <p className="auth-switch">
+                Remembered it?{" "}
+                <button
+                  type="button"
+                  className="link-btn"
+                  onClick={() => setMode("signin")}
+                >
+                  Back to Sign In
                 </button>
               </p>
             </form>
