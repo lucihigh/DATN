@@ -1309,19 +1309,6 @@ function CardCenterView() {
 function AccountsView() {
   return (
     <section className="grid grid-accounts">
-      <div className="card invest-card">
-        <div className="invest-content">
-          <h3>Invest your money for a better future</h3>
-          <p className="muted">
-            Lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut eu
-            feugiat amet.
-          </p>
-          <button type="button" className="btn-primary">
-            Invest Now
-          </button>
-        </div>
-        <div className="invest-illus">💰</div>
-      </div>
       <div className="card profile-summary-card">
         <div className="profile-summary">
           <img src="https://i.pravatar.cc/80?img=12" alt="" />
