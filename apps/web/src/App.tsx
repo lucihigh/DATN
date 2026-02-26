@@ -401,6 +401,28 @@ function DashboardView() {
 }
 
 function MyWalletView() {
+  const { toast } = useToast();
+  const [depositAmount, setDepositAmount] = useState("250");
+  const [transfer, setTransfer] = useState({ to: "", amount: "100" });
+
+  const submitDeposit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!depositAmount || Number(depositAmount) <= 0) {
+      toast("Enter a valid amount", "error");
+      return;
+    }
+    toast(`(Demo) Would deposit $${depositAmount}`);
+  };
+
+  const submitTransfer = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!transfer.to || !transfer.amount || Number(transfer.amount) <= 0) {
+      toast("Recipient and amount are required", "error");
+      return;
+    }
+    toast(`(Demo) Would transfer $${transfer.amount} to ${transfer.to}`);
+  };
+
   return (
     <>
       <section className="grid grid-wallet">
@@ -425,6 +447,60 @@ function MyWalletView() {
             percent={usageStats.percent}
             segments={usageStats.segments}
           />
+        </div>
+        <div className="card wallet-actions-card">
+          <h3>Wallet Actions</h3>
+          <form className="wallet-action-form" onSubmit={submitDeposit}>
+            <h4>Deposit funds</h4>
+            <label>
+              Amount (USD)
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={depositAmount}
+                onChange={(e) => setDepositAmount(e.target.value)}
+                required
+              />
+            </label>
+            <button type="submit" className="btn-primary">
+              Deposit (demo)
+            </button>
+          </form>
+          <form className="wallet-action-form" onSubmit={submitTransfer}>
+            <h4>Transfer funds</h4>
+            <label>
+              Recipient email
+              <input
+                type="email"
+                value={transfer.to}
+                onChange={(e) =>
+                  setTransfer((t) => ({ ...t, to: e.target.value }))
+                }
+                placeholder="user@example.com"
+                required
+              />
+            </label>
+            <label>
+              Amount (USD)
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={transfer.amount}
+                onChange={(e) =>
+                  setTransfer((t) => ({ ...t, amount: e.target.value }))
+                }
+                required
+              />
+            </label>
+            <button type="submit" className="btn-primary">
+              Transfer (demo)
+            </button>
+          </form>
+          <p className="muted" style={{ marginTop: 8 }}>
+            These actions are UI-only for now; API wiring will be added later.
+          </p>
         </div>
         <div className="card invoices-card">
           <h3>Invoices List</h3>
@@ -2534,6 +2610,7 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
   const [showPassword, setShowPassword] = useState(false);
 
   const [signinForm, setSigninForm] = useState({ email: "", password: "" });
+  const [captchaToken, setCaptchaToken] = useState("");
   const [signupForm, setSignupForm] = useState({
     fullName: "",
     username: "",
@@ -2548,12 +2625,12 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
 
   const handleSignIn = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!signinForm.email || !signinForm.password) {
-      toast("Please enter email and password", "error");
+    if (!signinForm.email || !signinForm.password || !captchaToken) {
+      toast("Please enter email, password, and CAPTCHA", "error");
       return;
     }
     onLogin(signinForm.email, signinForm.password);
-    toast("Signed in successfully");
+    toast("Signed in successfully (demo)");
   };
 
   const handleSignUp = (e: React.FormEvent) => {
@@ -2750,6 +2827,18 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
               <button type="submit" className="btn-primary auth-submit">
                 Sign In
               </button>
+              <label className="auth-label" style={{ marginTop: 12 }}>
+                CAPTCHA token (demo)
+                <input
+                  value={captchaToken}
+                  onChange={(e) => setCaptchaToken(e.target.value)}
+                  placeholder="Paste CAPTCHA token"
+                  required
+                />
+                <span className="muted" style={{ fontSize: 12 }}>
+                  UI placeholder; will be connected to CAPTCHA widget later.
+                </span>
+              </label>
               <p className="auth-switch">
                 Don&apos;t have an account?{" "}
                 <button
