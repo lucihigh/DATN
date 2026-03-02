@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import { useAuth } from "../context/AuthContext";
 
@@ -316,7 +316,21 @@ const styles = `
   .user-tab { padding:10px 16px; border-radius:10px; border:1px solid #e5e7eb; background:#f8fafc; cursor:pointer; font-weight:700; color:#4b5563; }
   .user-tab.active { background:#e8edfb; color:#1f6bff; border-color:#d0dafc; }
   .user-filter-btn { padding:10px 14px; border-radius:12px; border:1px solid #e5e7eb; background:#fff; display:flex; gap:8px; align-items:center; cursor:pointer; }
+  .user-filter-pop { position:relative; }
+  .user-filter-panel {
+    position:absolute; top:calc(100% + 8px); right:0; z-index:20;
+    min-width:260px; background:#fff; border:1px solid #e5e7eb; border-radius:12px;
+    box-shadow:0 14px 30px rgba(15,23,42,0.12); padding:12px; display:grid; gap:10px;
+  }
+  .user-filter-panel label { display:grid; gap:6px; font-size:12px; color:#6b7280; font-weight:700; }
+  .user-filter-panel select { padding:8px 10px; border:1px solid #e5e7eb; border-radius:10px; background:#fff; color:#0f172a; }
+  .user-filter-actions { display:flex; justify-content:flex-end; }
+  .user-filter-actions button { padding:6px 10px; border-radius:8px; border:1px solid #d8ddee; background:#f8fafc; cursor:pointer; }
   .theme-dark .user-filter-btn { background:#0f1934; border:1px solid #1b2748; color:#e7ecff; }
+  .theme-dark .user-filter-panel { background:#0f162e; border:1px solid #1b2748; box-shadow:0 16px 32px rgba(0,0,0,0.35); }
+  .theme-dark .user-filter-panel label { color:#a3b1d6; }
+  .theme-dark .user-filter-panel select { background:#0f1934; border:1px solid #1b2748; color:#e7ecff; }
+  .theme-dark .user-filter-actions button { background:#162143; border:1px solid #1b2748; color:#e7ecff; }
   .user-footer { padding:12px 0 6px; color:#6b7280; font-size:13px; display:flex; justify-content:space-between; align-items:center; }
   .pager { display:flex; gap:8px; }
   .pager button { width:34px; height:34px; border-radius:8px; border:1px solid #e5e7eb; background:#fff; cursor:pointer; }
@@ -335,7 +349,7 @@ const styles = `
   }
   .prof-header { display:flex; flex-direction:column; align-items:center; gap:10px; margin-bottom:24px; color:#0f172a; }
   .prof-avatar-wrap { position:relative; width:120px; height:120px; }
-  .prof-avatar { width:120px; height:120px; border-radius:50%; object-fit:cover; border:4px solid #182449; }
+  .prof-avatar { width:120px; height:120px; border-radius:50%; object-fit:cover; border:4px solid #182449; cursor:pointer; }
   .prof-avatar-btn {
     position:absolute; right:6px; bottom:6px;
     width:34px; height:34px; border-radius:50%;
@@ -560,8 +574,44 @@ const styles = `
   .audit-expand { background:#f8fafc; }
   .audit-pagination { display:flex; justify-content:space-between; align-items:center; margin-top:12px; color:#6b7280; }
   .audit-pager { display:flex; gap:8px; }
-  .audit-pager button { border:1px solid #e5e7eb; background:#fff; border-radius:8px; padding:6px 10px; cursor:pointer; }
+  .audit-pager button { border:1px solid #e5e7eb; background:#fff; color:#0f172a; border-radius:8px; padding:6px 10px; cursor:pointer; }
   .audit-pager button.active { background:#1f6bff; color:#fff; border-color:#1f6bff; }
+  .theme-dark .audit-pager button { background:#162143; border:1px solid #1b2748; color:#e7ecff; }
+
+  /* Compact desktop layout for 16:9 screens */
+  @media (min-width: 1280px) and (min-aspect-ratio: 16/9) {
+    .mf-sidebar { width: 220px; padding: 20px 14px; gap: 14px; }
+    .mf-logo { font-size: 20px; margin-bottom: 20px; }
+    .mf-menu button { gap: 10px; padding: 10px 12px; font-size: 14px; border-radius: 10px; }
+    .mf-ico { width: 28px; height: 28px; font-size: 14px; border-radius: 10px; }
+
+    .ana-page { padding: 18px 20px 24px; }
+    .ana-title h1 { font-size: 22px; }
+    .ana-kpi-grid { gap: 10px; margin-bottom: 12px; }
+    .ana-grid-main, .ana-bottom-grid { gap: 12px; margin-bottom: 12px; }
+    .ana-card, .user-card, .set-card, .audit-card { border-radius: 12px; padding: 14px; }
+    .ana-kpi-value { font-size: 24px; }
+    .ana-bar-chart { height: 210px; gap: 8px; }
+    .ana-dual-chart { height: 160px; gap: 10px; }
+    .ana-dual-bars { height: 106px; }
+    .ana-pie { width: 160px; height: 160px; }
+    .ana-pie-center { width: 78px; height: 78px; font-size: 13px; }
+
+    .user-table th, .user-table td { padding: 10px 8px; font-size: 13px; }
+    .user-search { padding: 8px 10px; min-width: 200px; }
+    .user-avatar { width: 42px; height: 42px; }
+    .user-tab { padding: 8px 12px; }
+
+    .prof-page { padding: 16px; }
+    .prof-card { max-width: 980px; padding: 24px; gap: 20px; }
+    .prof-avatar-wrap, .prof-avatar { width: 104px; height: 104px; }
+    .prof-name { font-size: 20px; }
+    .prof-field input { padding: 10px 12px; }
+
+    .audit-title h1 { font-size: 24px; }
+    .audit-table th, .audit-table td { padding: 10px 8px; }
+    .audit-avatar { width: 36px; height: 36px; }
+  }
 `;
 
 function KpiCard({ card }: { card: KpiCard }) {
@@ -954,8 +1004,14 @@ function AdminApp() {
     password: "password",
     avatar: user?.avatar ?? "https://i.pravatar.cc/200?img=11",
   });
+  const avatarInputRef = useRef<HTMLInputElement | null>(null);
   const [userSearch, setUserSearch] = useState("");
   const [userTab, setUserTab] = useState<"all" | "active" | "locked">("all");
+  const [showUserFilters, setShowUserFilters] = useState(false);
+  const [userRoleFilter, setUserRoleFilter] = useState<
+    "all" | "Admin" | "User"
+  >("all");
+  const [userSort, setUserSort] = useState<"latest" | "oldest">("latest");
   const [txUser, setTxUser] = useState<AdminUser | null>(null);
   const [expandedAudit, setExpandedAudit] = useState<string | null>(null);
   const [auditSearch, setAuditSearch] = useState("");
@@ -966,6 +1022,53 @@ function AdminApp() {
   const [auditAdmin, setAuditAdmin] = useState<string>("all");
   const [auditPage, setAuditPage] = useState(1);
   const auditPageSize = 5;
+
+  const openAvatarPicker = () => {
+    avatarInputRef.current?.click();
+  };
+
+  const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith("image/")) {
+      alert("Please choose an image file.");
+      e.target.value = "";
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const avatarData = reader.result;
+      if (typeof avatarData === "string") {
+        setProfile((prev) => ({ ...prev, avatar: avatarData }));
+      }
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  };
+
+  const filteredUsers = useMemo(() => {
+    const search = userSearch.trim().toLowerCase();
+    const list = users.filter(
+      (u) =>
+        (!search ||
+          u.name.toLowerCase().includes(search) ||
+          u.email.toLowerCase().includes(search)) &&
+        (userTab === "all" ||
+          (userTab === "active" && u.status === "Active") ||
+          (userTab === "locked" && u.status === "Locked")) &&
+        (userRoleFilter === "all" ||
+          (userRoleFilter === "Admin" && u.role === "Admin") ||
+          (userRoleFilter === "User" && u.role !== "Admin")),
+    );
+
+    return list.sort((a, b) => {
+      const timeA = new Date(a.lastLogin.replace(" ", "T")).getTime();
+      const timeB = new Date(b.lastLogin.replace(" ", "T")).getTime();
+      return userSort === "latest" ? timeB - timeA : timeA - timeB;
+    });
+  }, [users, userSearch, userTab, userRoleFilter, userSort]);
 
   const userTransactions = useMemo(
     () => (txUser ? transactions.filter((t) => t.userId === txUser.id) : []),
@@ -1341,10 +1444,29 @@ function AdminApp() {
                     className="prof-avatar"
                     src={profile.avatar}
                     alt="avatar"
+                    role="button"
+                    tabIndex={0}
+                    onClick={openAvatarPicker}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ")
+                        openAvatarPicker();
+                    }}
                   />
-                  <button className="prof-avatar-btn" aria-label="Upload photo">
+                  <button
+                    type="button"
+                    className="prof-avatar-btn"
+                    aria-label="Upload photo"
+                    onClick={openAvatarPicker}
+                  >
                     📷
                   </button>
+                  <input
+                    ref={avatarInputRef}
+                    type="file"
+                    accept="image/*"
+                    onChange={handleAvatarChange}
+                    style={{ display: "none" }}
+                  />
                 </div>
                 <div className="prof-name">{profile.name}</div>
                 <p className="prof-email">{profile.email}</p>
@@ -1521,9 +1643,58 @@ function AdminApp() {
                     value={userSearch}
                     onChange={(e) => setUserSearch(e.target.value)}
                   />
-                  <button className="user-filter-btn" type="button">
-                    <span aria-hidden="true">☰</span> More Filters
-                  </button>
+                  <div className="user-filter-pop">
+                    <button
+                      className="user-filter-btn"
+                      type="button"
+                      aria-expanded={showUserFilters}
+                      onClick={() => setShowUserFilters((v) => !v)}
+                    >
+                      <span aria-hidden="true">☰</span> More Filters
+                    </button>
+                    {showUserFilters && (
+                      <div className="user-filter-panel">
+                        <label>
+                          Role
+                          <select
+                            value={userRoleFilter}
+                            onChange={(e) =>
+                              setUserRoleFilter(
+                                e.target.value as typeof userRoleFilter,
+                              )
+                            }
+                          >
+                            <option value="all">All roles</option>
+                            <option value="Admin">Admin</option>
+                            <option value="User">User</option>
+                          </select>
+                        </label>
+                        <label>
+                          Last login
+                          <select
+                            value={userSort}
+                            onChange={(e) =>
+                              setUserSort(e.target.value as typeof userSort)
+                            }
+                          >
+                            <option value="latest">Newest first</option>
+                            <option value="oldest">Oldest first</option>
+                          </select>
+                        </label>
+                        <div className="user-filter-actions">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setUserRoleFilter("all");
+                              setUserSort("latest");
+                            }}
+                          >
+                            Reset
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -1556,104 +1727,90 @@ function AdminApp() {
                     </tr>
                   </thead>
                   <tbody>
-                    {users
-                      .filter(
-                        (u) =>
-                          (!userSearch ||
-                            u.name
-                              .toLowerCase()
-                              .includes(userSearch.toLowerCase()) ||
-                            u.email
-                              .toLowerCase()
-                              .includes(userSearch.toLowerCase())) &&
-                          (userTab === "all" ||
-                            (userTab === "active" && u.status === "Active") ||
-                            (userTab === "locked" && u.status === "Locked")),
-                      )
-                      .map((u) => (
-                        <tr key={u.id} className="user-row">
-                          <td>
-                            <div
-                              style={{
-                                display: "flex",
-                                gap: 12,
-                                alignItems: "center",
-                              }}
-                            >
-                              <img
-                                className="user-avatar"
-                                src={u.avatar}
-                                alt={u.name}
-                              />
-                              <div>
-                                <div className="user-name">{u.name}</div>
-                                <div className="user-title">{u.title}</div>
-                              </div>
-                            </div>
-                          </td>
-                          <td style={{ color: "var(--text)" }}>
-                            <div>{u.email}</div>
-                            <div className="user-title">{u.phone}</div>
-                          </td>
-                          <td style={{ color: "var(--text)" }}>
-                            {new Date(u.birthday).toLocaleDateString("en-US", {
-                              month: "short",
-                              day: "2-digit",
-                              year: "numeric",
-                            })}
-                          </td>
-                          <td style={{ color: "var(--text)" }}>{u.address}</td>
-                          <td>
-                            <span
-                              className={`user-badge ${u.status === "Active" ? "active" : "locked"}`}
-                            >
-                              {u.status}
-                            </span>
-                          </td>
-                          <td
+                    {filteredUsers.map((u) => (
+                      <tr key={u.id} className="user-row">
+                        <td>
+                          <div
                             style={{
                               display: "flex",
-                              gap: 8,
-                              flexWrap: "wrap",
+                              gap: 12,
                               alignItems: "center",
                             }}
                           >
-                            <button
-                              className="user-btn danger"
-                              onClick={() =>
-                                setUsers((list) =>
-                                  list.map((x) =>
-                                    x.id === u.id
-                                      ? {
-                                          ...x,
-                                          status:
-                                            x.status === "Locked"
-                                              ? "Active"
-                                              : "Locked",
-                                        }
-                                      : x,
-                                  ),
-                                )
-                              }
-                            >
-                              {u.status === "Locked" ? "Unlock" : "Lock"}
-                            </button>
-                            <button
-                              className="user-btn text"
-                              onClick={() => setTxUser(u)}
-                            >
-                              Transactions
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
+                            <img
+                              className="user-avatar"
+                              src={u.avatar}
+                              alt={u.name}
+                            />
+                            <div>
+                              <div className="user-name">{u.name}</div>
+                              <div className="user-title">{u.title}</div>
+                            </div>
+                          </div>
+                        </td>
+                        <td style={{ color: "var(--text)" }}>
+                          <div>{u.email}</div>
+                          <div className="user-title">{u.phone}</div>
+                        </td>
+                        <td style={{ color: "var(--text)" }}>
+                          {new Date(u.birthday).toLocaleDateString("en-US", {
+                            month: "short",
+                            day: "2-digit",
+                            year: "numeric",
+                          })}
+                        </td>
+                        <td style={{ color: "var(--text)" }}>{u.address}</td>
+                        <td>
+                          <span
+                            className={`user-badge ${u.status === "Active" ? "active" : "locked"}`}
+                          >
+                            {u.status}
+                          </span>
+                        </td>
+                        <td
+                          style={{
+                            display: "flex",
+                            gap: 8,
+                            flexWrap: "wrap",
+                            alignItems: "center",
+                          }}
+                        >
+                          <button
+                            className="user-btn danger"
+                            onClick={() =>
+                              setUsers((list) =>
+                                list.map((x) =>
+                                  x.id === u.id
+                                    ? {
+                                        ...x,
+                                        status:
+                                          x.status === "Locked"
+                                            ? "Active"
+                                            : "Locked",
+                                      }
+                                    : x,
+                                ),
+                              )
+                            }
+                          >
+                            {u.status === "Locked" ? "Unlock" : "Lock"}
+                          </button>
+                          <button
+                            className="user-btn text"
+                            onClick={() => setTxUser(u)}
+                          >
+                            Transactions
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
                   </tbody>
                 </table>
               </div>
               <div className="user-footer">
                 <span>
-                  Showing {users.length ? 1 : 0} to {users.length} of{" "}
-                  {users.length} users
+                  Showing {filteredUsers.length ? 1 : 0} to{" "}
+                  {filteredUsers.length} of {filteredUsers.length} users
                 </span>
                 <div className="pager" aria-hidden="true">
                   <button disabled>{"<"}</button>

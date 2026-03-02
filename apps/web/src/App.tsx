@@ -476,8 +476,12 @@ function MyWalletView() {
                 value={depositMethod}
                 onChange={(e) => setDepositMethod(e.target.value)}
               >
-                <option value="bank">Bank transfer (ETA: ~2 min, Fee: $0)</option>
-                <option value="card">Debit/Credit card (ETA: instant, Fee: 1.2%)</option>
+                <option value="bank">
+                  Bank transfer (ETA: ~2 min, Fee: $0)
+                </option>
+                <option value="card">
+                  Debit/Credit card (ETA: instant, Fee: 1.2%)
+                </option>
                 <option value="qr">QR wallet (ETA: instant, Fee: $0)</option>
               </select>
             </label>
@@ -549,7 +553,8 @@ function MyWalletView() {
               </select>
             </label>
             <div className="fee-hint muted">
-              Estimated fee: {transfer.method === "card" ? "2.0%" : "0"} · ETA shown above
+              Estimated fee: {transfer.method === "card" ? "2.0%" : "0"} · ETA
+              shown above
             </div>
             <button type="submit" className="btn-primary">
               Transfer (demo)
@@ -719,7 +724,6 @@ function InvoiceListView() {
           </table>
         </div>
       </div>
-
     </section>
   );
 }
@@ -1492,7 +1496,15 @@ const defaultProfile: ProfileForm = {
   postalCode: "45962",
 };
 
-const settingMenuItems = [
+type SettingTabId = "profile" | "preferences" | "security" | "notification";
+
+const settingMenuItems: {
+  id: SettingTabId;
+  label: string;
+  desc: string;
+  icon: string;
+  active: boolean;
+}[] = [
   {
     id: "preferences",
     label: "Preferences",
@@ -1538,8 +1550,6 @@ function Toggle({
     </button>
   );
 }
-
-type SettingTabId = "profile" | "preferences" | "security" | "notification";
 
 function SettingView() {
   const { toast } = useToast();
@@ -2063,7 +2073,11 @@ function MyProfileView() {
           onClick={openAvatarPicker}
           aria-label="Change profile image"
         >
-          <img src={avatarUrl} alt="Profile avatar" className="setting-avatar" />
+          <img
+            src={avatarUrl}
+            alt="Profile avatar"
+            className="setting-avatar"
+          />
           <span className="setting-avatar-edit">Edit</span>
           <input
             ref={fileInputRef}
@@ -2530,7 +2544,9 @@ function NotificationsView({
 }: {
   notifications: { type: string; message: string }[];
 }) {
-  const [filter, setFilter] = useState<"all" | "transactions" | "security" | "offers">("all");
+  const [filter, setFilter] = useState<
+    "all" | "transactions" | "security" | "offers"
+  >("all");
 
   const filtered = notifications.filter(
     (n) => filter === "all" || n.type === filter,
@@ -2556,12 +2572,12 @@ function NotificationsView({
           <div key={i} className="notification-row">
             <div className={`notif-pill notif-${n.type}`}>{n.type}</div>
             <div>{n.message}</div>
-            <button type="button" className="pill tiny">Mark read</button>
+            <button type="button" className="pill tiny">
+              Mark read
+            </button>
           </div>
         ))}
-        {filtered.length === 0 && (
-          <p className="muted">No notifications.</p>
-        )}
+        {filtered.length === 0 && <p className="muted">No notifications.</p>}
       </div>
     </section>
   );
@@ -2577,7 +2593,10 @@ function KycView() {
       <p className="muted">Verify your identity to unlock higher limits.</p>
       <div className="kyc-steps">
         {steps.map((s, i) => (
-          <div key={s} className={`kyc-step ${i === active ? "active" : ""} ${i < active ? "done" : ""}`}>
+          <div
+            key={s}
+            className={`kyc-step ${i === active ? "active" : ""} ${i < active ? "done" : ""}`}
+          >
             <span className="kyc-step-index">{i + 1}</span>
             <span>{s}</span>
           </div>
@@ -2601,7 +2620,9 @@ function KycView() {
             <span>Upload selfie</span>
             <input type="file" accept="image/*" />
           </label>
-          <p className="muted small">Make sure your face is clear and well lit.</p>
+          <p className="muted small">
+            Make sure your face is clear and well lit.
+          </p>
         </div>
       )}
       {active === 2 && (
@@ -3076,14 +3097,14 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
             className="btn-primary hero-cta-btn"
             onClick={() => setMode("signin")}
           >
-            Log in
+            Log In
           </button>
           <button
             type="button"
-            className="pill hero-cta-btn secondary"
+            className="btn-primary hero-cta-btn secondary"
             onClick={() => setMode("signup")}
           >
-            Sign up
+            Sign Up
           </button>
         </div>
 
@@ -3393,7 +3414,8 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
             <form className="auth-form-modern" onSubmit={handleForgot}>
               <h2>Forgot Password</h2>
               <p className="muted">
-                Enter the email linked to your account and we&apos;ll email you a reset link (demo).
+                Enter the email linked to your account and we&apos;ll email you
+                a reset link (demo).
               </p>
               <label className="auth-label">
                 Email Address
@@ -3425,5 +3447,3 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
     </div>
   );
 }
-
-
