@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 
 import { useAuth } from "./context/AuthContext";
 import { useToast } from "./context/ToastContext";
+import { useTheme } from "./context/ThemeContext";
 import "./index.css";
 
 const NAV_ITEMS: {
@@ -21,12 +22,14 @@ const NAV_ITEMS: {
     ],
   },
   { id: "Card Center", label: "Card Center" },
-  { id: "Accounts", label: "Accounts" },
-  { id: "Setting", label: "Setting" },
   {
     id: "Support",
     label: "Support",
-    children: [{ id: "Knowledge base", label: "Knowledge base" }],
+    children: [
+      { id: "Knowledge base", label: "Knowledge base" },
+      { id: "Notifications", label: "Notifications" },
+      { id: "KYC Verification", label: "KYC Verification" },
+    ],
   },
 ];
 
@@ -321,8 +324,8 @@ function BarChart({
 function DashboardView() {
   return (
     <>
-      <section className="grid">
-        <div className="card span-2">
+      <section className="grid-dashboard">
+        <div className="card expense-card">
           <h3>Expense Categories</h3>
           <div className="rings">
             {expenseCategories.map((c) => (
@@ -333,7 +336,7 @@ function DashboardView() {
             ))}
           </div>
         </div>
-        <div className="card">
+        <div className="card profile-card">
           <div className="profile">
             <img src="https://i.pravatar.cc/120?img=12" alt="John Doe" />
             <h3>John Doe</h3>
@@ -363,7 +366,9 @@ function DashboardView() {
             <div className="card-valid">12/23</div>
           </div>
         </div>
-        <div className="card span-2">
+      </section>
+      <section className="grid dash-secondary">
+        <div className="card">
           <div className="card-head">
             <h3>Balance History</h3>
             <div className="legend">
@@ -376,7 +381,7 @@ function DashboardView() {
             <div className="bar-line" />
           </div>
         </div>
-        <div className="card span-2">
+        <div className="card">
           <div className="card-head">
             <h3>Last Transactions</h3>
             <button className="pill">All Time ▼</button>
@@ -403,7 +408,18 @@ function DashboardView() {
 function MyWalletView() {
   const { toast } = useToast();
   const [depositAmount, setDepositAmount] = useState("250");
-  const [transfer, setTransfer] = useState({ to: "", amount: "100" });
+  const [depositMethod, setDepositMethod] = useState("bank");
+  const [withdrawMethod, setWithdrawMethod] = useState("bank");
+  const [transfer, setTransfer] = useState({
+    to: "",
+    amount: "100",
+    method: "wallet",
+  });
+  const savedRecipients = [
+    "alice@example.com",
+    "bob@example.com",
+    "carol@example.com",
+  ];
 
   const submitDeposit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -411,7 +427,7 @@ function MyWalletView() {
       toast("Enter a valid amount", "error");
       return;
     }
-    toast(`(Demo) Would deposit $${depositAmount}`);
+    toast(`(Demo) Would deposit $${depositAmount} via ${depositMethod}`);
   };
 
   const submitTransfer = (e: React.FormEvent) => {
@@ -420,7 +436,9 @@ function MyWalletView() {
       toast("Recipient and amount are required", "error");
       return;
     }
-    toast(`(Demo) Would transfer $${transfer.amount} to ${transfer.to}`);
+    toast(
+      `(Demo) Would transfer $${transfer.amount} to ${transfer.to} via ${transfer.method}`,
+    );
   };
 
   return (
@@ -453,6 +471,17 @@ function MyWalletView() {
           <form className="wallet-action-form" onSubmit={submitDeposit}>
             <h4>Deposit funds</h4>
             <label>
+              Method
+              <select
+                value={depositMethod}
+                onChange={(e) => setDepositMethod(e.target.value)}
+              >
+                <option value="bank">Bank transfer (ETA: ~2 min, Fee: $0)</option>
+                <option value="card">Debit/Credit card (ETA: instant, Fee: 1.2%)</option>
+                <option value="qr">QR wallet (ETA: instant, Fee: $0)</option>
+              </select>
+            </label>
+            <label>
               Amount (USD)
               <input
                 type="number"
@@ -480,6 +509,18 @@ function MyWalletView() {
                 placeholder="user@example.com"
                 required
               />
+              <div className="saved-recips">
+                {savedRecipients.map((r) => (
+                  <button
+                    key={r}
+                    type="button"
+                    className="pill"
+                    onClick={() => setTransfer((t) => ({ ...t, to: r }))}
+                  >
+                    {r}
+                  </button>
+                ))}
+              </div>
             </label>
             <label>
               Amount (USD)
@@ -494,6 +535,22 @@ function MyWalletView() {
                 required
               />
             </label>
+            <label>
+              Method
+              <select
+                value={transfer.method}
+                onChange={(e) =>
+                  setTransfer((t) => ({ ...t, method: e.target.value }))
+                }
+              >
+                <option value="wallet">Wallet to wallet (instant)</option>
+                <option value="bank">Bank transfer (ETA: 5-10 min)</option>
+                <option value="card">Card payout (ETA: 1-2 days)</option>
+              </select>
+            </label>
+            <div className="fee-hint muted">
+              Estimated fee: {transfer.method === "card" ? "2.0%" : "0"} · ETA shown above
+            </div>
             <button type="submit" className="btn-primary">
               Transfer (demo)
             </button>
@@ -662,6 +719,7 @@ function InvoiceListView() {
           </table>
         </div>
       </div>
+
     </section>
   );
 }
@@ -1308,19 +1366,6 @@ function CardCenterView() {
 function AccountsView() {
   return (
     <section className="grid grid-accounts">
-      <div className="card invest-card">
-        <div className="invest-content">
-          <h3>Invest your money for a better future</h3>
-          <p className="muted">
-            Lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut eu
-            feugiat amet.
-          </p>
-          <button type="button" className="btn-primary">
-            Invest Now
-          </button>
-        </div>
-        <div className="invest-illus">💰</div>
-      </div>
       <div className="card profile-summary-card">
         <div className="profile-summary">
           <img src="https://i.pravatar.cc/80?img=12" alt="" />
@@ -1424,6 +1469,7 @@ function AccountsView() {
 }
 
 const SETTING_PROFILE_KEY = "moneyfarm_profile";
+const PROFILE_AVATAR_KEY = "moneyfarm_profile_avatar";
 const SETTING_SECURITY_KEY = "moneyfarm_security";
 type ProfileForm = {
   name: string;
@@ -1447,13 +1493,6 @@ const defaultProfile: ProfileForm = {
 };
 
 const settingMenuItems = [
-  {
-    id: "profile",
-    label: "My Profile",
-    desc: "Details about my personal information.",
-    icon: "👤",
-    active: true,
-  },
   {
     id: "preferences",
     label: "Preferences",
@@ -1500,9 +1539,12 @@ function Toggle({
   );
 }
 
+type SettingTabId = "profile" | "preferences" | "security" | "notification";
+
 function SettingView() {
   const { toast } = useToast();
-  const [settingTab, setSettingTab] = useState("profile");
+  const { theme, setTheme, toggle: toggleTheme } = useTheme();
+  const [settingTab, setSettingTab] = useState<SettingTabId>("preferences");
   const [profile, setProfile] = useState<ProfileForm>(() => {
     try {
       const s = localStorage.getItem(SETTING_PROFILE_KEY);
@@ -1749,6 +1791,18 @@ function SettingView() {
           <>
             <h3 className="setting-panel-title">Preference Setting</h3>
             <div className="setting-block">
+              <h4 className="setting-block-head">Theme</h4>
+              <p className="muted">Switch between light and dark mode.</p>
+              <div className="setting-row toggle-row">
+                <span>Enable dark mode</span>
+                <Toggle
+                  id="pref-theme"
+                  checked={theme === "dark"}
+                  onChange={(v) => (v ? setTheme("dark") : setTheme("light"))}
+                />
+              </div>
+            </div>
+            <div className="setting-block">
               <h4 className="setting-block-head">On Startup</h4>
               <div className="setting-row toggle-row">
                 <label htmlFor="pref-start">Open the start page</label>
@@ -1954,6 +2008,168 @@ function SettingView() {
   );
 }
 
+function MyProfileView() {
+  const { toast } = useToast();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [profile, setProfile] = useState<ProfileForm>(() => {
+    try {
+      const s = localStorage.getItem(SETTING_PROFILE_KEY);
+      return s ? { ...defaultProfile, ...JSON.parse(s) } : defaultProfile;
+    } catch {
+      return defaultProfile;
+    }
+  });
+  const [avatarUrl, setAvatarUrl] = useState(() => {
+    return (
+      localStorage.getItem(PROFILE_AVATAR_KEY) ??
+      "https://i.pravatar.cc/120?img=12"
+    );
+  });
+
+  const saveProfile = () => {
+    localStorage.setItem(SETTING_PROFILE_KEY, JSON.stringify(profile));
+    toast("Profile saved successfully");
+  };
+
+  const openAvatarPicker = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      toast("Please choose an image file", "error");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const next = String(reader.result ?? "");
+      if (!next) return;
+      setAvatarUrl(next);
+      localStorage.setItem(PROFILE_AVATAR_KEY, next);
+      toast("Profile image updated");
+    };
+    reader.readAsDataURL(file);
+    e.currentTarget.value = "";
+  };
+
+  return (
+    <section className="card setting-detail-card">
+      <div className="setting-profile-header">
+        <button
+          type="button"
+          className="setting-avatar-wrap"
+          onClick={openAvatarPicker}
+          aria-label="Change profile image"
+        >
+          <img src={avatarUrl} alt="Profile avatar" className="setting-avatar" />
+          <span className="setting-avatar-edit">Edit</span>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            className="sr-only"
+            onChange={handleAvatarChange}
+          />
+        </button>
+      </div>
+      <div className="form-grid setting-form">
+        <div className="form-group">
+          <label>Name</label>
+          <input
+            type="text"
+            value={profile.name}
+            onChange={(e) =>
+              setProfile((p) => ({ ...p, name: e.target.value }))
+            }
+          />
+        </div>
+        <div className="form-group">
+          <label>User Name</label>
+          <input
+            type="text"
+            value={profile.userName}
+            onChange={(e) =>
+              setProfile((p) => ({ ...p, userName: e.target.value }))
+            }
+          />
+        </div>
+        <div className="form-group">
+          <label>Email</label>
+          <input
+            type="email"
+            value={profile.email}
+            onChange={(e) =>
+              setProfile((p) => ({ ...p, email: e.target.value }))
+            }
+          />
+        </div>
+        <div className="form-group">
+          <label>Password</label>
+          <input
+            type="password"
+            value={profile.password}
+            onChange={(e) =>
+              setProfile((p) => ({ ...p, password: e.target.value }))
+            }
+          />
+        </div>
+        <div className="form-group">
+          <label>Date of Birth</label>
+          <input
+            type="text"
+            value={profile.dateOfBirth}
+            onChange={(e) =>
+              setProfile((p) => ({ ...p, dateOfBirth: e.target.value }))
+            }
+          />
+        </div>
+        <div className="form-group">
+          <label>Present Address</label>
+          <input
+            type="text"
+            value={profile.presentAddress}
+            onChange={(e) =>
+              setProfile((p) => ({
+                ...p,
+                presentAddress: e.target.value,
+              }))
+            }
+          />
+        </div>
+        <div className="form-group">
+          <label>Permanent Address</label>
+          <input
+            type="text"
+            value={profile.permanentAddress}
+            onChange={(e) =>
+              setProfile((p) => ({
+                ...p,
+                permanentAddress: e.target.value,
+              }))
+            }
+          />
+        </div>
+        <div className="form-group">
+          <label>Postal Code</label>
+          <input
+            type="text"
+            value={profile.postalCode}
+            onChange={(e) =>
+              setProfile((p) => ({ ...p, postalCode: e.target.value }))
+            }
+          />
+        </div>
+      </div>
+      <div className="setting-actions">
+        <button type="button" className="btn-primary" onClick={saveProfile}>
+          Save Changes
+        </button>
+      </div>
+    </section>
+  );
+}
 // --- Utilities: FAQ (Knowledge base) ---
 const faqGeneral = [
   {
@@ -2119,6 +2335,7 @@ function TransactionsView() {
   const [statusFilter, setStatusFilter] = useState<
     "all" | "Pending" | "Completed" | "Canceled"
   >("all");
+  const [showReceipt, setShowReceipt] = useState<string | null>(null);
   const { toast } = useToast();
 
   const filtered = transactionsHistory.filter((t) => {
@@ -2290,7 +2507,13 @@ function TransactionsView() {
                     </span>
                   </td>
                   <td>
-                    <span className="tx-dots">⋮</span>
+                    <button
+                      type="button"
+                      className="pill"
+                      onClick={() => setShowReceipt(t.id)}
+                    >
+                      View
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -2302,8 +2525,120 @@ function TransactionsView() {
   );
 }
 
+function NotificationsView({
+  notifications,
+}: {
+  notifications: { type: string; message: string }[];
+}) {
+  const [filter, setFilter] = useState<"all" | "transactions" | "security" | "offers">("all");
+
+  const filtered = notifications.filter(
+    (n) => filter === "all" || n.type === filter,
+  );
+
+  return (
+    <section className="card notifications-card">
+      <div className="card-head">
+        <h3>Notifications</h3>
+        <select
+          className="pill"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value as typeof filter)}
+        >
+          <option value="all">All</option>
+          <option value="transactions">Transactions</option>
+          <option value="security">Security</option>
+          <option value="offers">Offers</option>
+        </select>
+      </div>
+      <div className="notifications-list">
+        {filtered.map((n, i) => (
+          <div key={i} className="notification-row">
+            <div className={`notif-pill notif-${n.type}`}>{n.type}</div>
+            <div>{n.message}</div>
+            <button type="button" className="pill tiny">Mark read</button>
+          </div>
+        ))}
+        {filtered.length === 0 && (
+          <p className="muted">No notifications.</p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function KycView() {
+  const steps = ["Identity document", "Selfie check", "Review & submit"];
+  const [active, setActive] = useState(0);
+
+  return (
+    <section className="card kyc-card">
+      <h3>KYC Verification</h3>
+      <p className="muted">Verify your identity to unlock higher limits.</p>
+      <div className="kyc-steps">
+        {steps.map((s, i) => (
+          <div key={s} className={`kyc-step ${i === active ? "active" : ""} ${i < active ? "done" : ""}`}>
+            <span className="kyc-step-index">{i + 1}</span>
+            <span>{s}</span>
+          </div>
+        ))}
+      </div>
+      {active === 0 && (
+        <div className="kyc-upload">
+          <label className="upload-drop">
+            <span>Upload ID (front)</span>
+            <input type="file" accept="image/*" />
+          </label>
+          <label className="upload-drop">
+            <span>Upload ID (back)</span>
+            <input type="file" accept="image/*" />
+          </label>
+        </div>
+      )}
+      {active === 1 && (
+        <div className="kyc-upload">
+          <label className="upload-drop">
+            <span>Upload selfie</span>
+            <input type="file" accept="image/*" />
+          </label>
+          <p className="muted small">Make sure your face is clear and well lit.</p>
+        </div>
+      )}
+      {active === 2 && (
+        <div className="kyc-review">
+          <p>Review your documents and submit for verification.</p>
+          <ul>
+            <li>Valid government ID</li>
+            <li>Clear selfie</li>
+            <li>Matching name & birth date</li>
+          </ul>
+        </div>
+      )}
+      <div className="kyc-actions">
+        <button
+          type="button"
+          className="pill"
+          onClick={() => setActive((a) => Math.max(0, a - 1))}
+          disabled={active === 0}
+        >
+          Back
+        </button>
+        <button
+          type="button"
+          className="btn-primary"
+          onClick={() => setActive((a) => Math.min(steps.length - 1, a + 1))}
+        >
+          {active === steps.length - 1 ? "Submit" : "Next"}
+        </button>
+      </div>
+    </section>
+  );
+}
+
 const PAGE_TITLE: Record<string, string> = {
   "Knowledge base": "FAQ",
+  Notifications: "Notifications",
+  "KYC Verification": "KYC Verification",
 };
 
 function App() {
@@ -2312,6 +2647,9 @@ function App() {
   const [search, setSearch] = useState("");
   const [searchResults, setSearchResults] = useState<string[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [notificationFilter, setNotificationFilter] = useState<
+    "all" | "transactions" | "security" | "offers"
+  >("all");
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
   const [invoicesExpanded, setInvoicesExpanded] = useState(false);
@@ -2374,9 +2712,10 @@ function App() {
   };
 
   const notifications = [
-    "New login from Chrome on MacOS",
-    "Invoice INV-42015 paid",
-    "Security: 2FA enabled",
+    { type: "security", message: "New login from Chrome on MacOS" },
+    { type: "transactions", message: "Invoice INV-42015 paid" },
+    { type: "security", message: "Security: 2FA enabled" },
+    { type: "offers", message: "Cashback 5% this weekend" },
   ];
 
   return (
@@ -2476,11 +2815,35 @@ function App() {
               </button>
               {showNotifications && (
                 <div className="notif-dropdown">
-                  {notifications.map((n, i) => (
-                    <div key={i} className="notif-row">
-                      {n}
-                    </div>
-                  ))}
+                  <div className="notif-filter">
+                    <select
+                      value={notificationFilter}
+                      onChange={(e) =>
+                        setNotificationFilter(
+                          e.target.value as typeof notificationFilter,
+                        )
+                      }
+                    >
+                      <option value="all">All</option>
+                      <option value="transactions">Transactions</option>
+                      <option value="security">Security</option>
+                      <option value="offers">Offers</option>
+                    </select>
+                  </div>
+                  {notifications
+                    .filter(
+                      (n) =>
+                        notificationFilter === "all" ||
+                        n.type === notificationFilter,
+                    )
+                    .map((n, i) => (
+                      <div key={i} className="notif-row">
+                        <strong style={{ textTransform: "capitalize" }}>
+                          {n.type}
+                        </strong>
+                        <div>{n.message}</div>
+                      </div>
+                    ))}
                   <button
                     type="button"
                     className="pill"
@@ -2517,6 +2880,15 @@ function App() {
                   <button
                     type="button"
                     onClick={() => {
+                      setActiveTab("My Profile");
+                      setUserMenuOpen(false);
+                    }}
+                  >
+                    My profile
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
                       setActiveTab("Setting");
                       setUserMenuOpen(false);
                     }}
@@ -2546,8 +2918,13 @@ function App() {
         {activeTab === "Create Invoices" && <CreateInvoicesView />}
         {activeTab === "Card Center" && <CardCenterView />}
         {activeTab === "Accounts" && <AccountsView />}
+        {activeTab === "My Profile" && <MyProfileView />}
         {activeTab === "Setting" && <SettingView />}
         {activeTab === "Knowledge base" && <KnowledgeBaseView />}
+        {activeTab === "Notifications" && (
+          <NotificationsView notifications={notifications} />
+        )}
+        {activeTab === "KYC Verification" && <KycView />}
         {![
           "Dashboard",
           "My Wallet",
@@ -2556,8 +2933,11 @@ function App() {
           "Create Invoices",
           "Card Center",
           "Accounts",
+          "My Profile",
           "Setting",
           "Knowledge base",
+          "Notifications",
+          "KYC Verification",
         ].includes(activeTab) && (
           <section className="grid">
             <div className="card span-2">
@@ -2582,31 +2962,10 @@ type AuthShellProps = {
 };
 
 function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
-  const [theme, setTheme] = useState<"light" | "dark">(() => {
-    if (typeof window === "undefined") return "light";
-    return (localStorage.getItem("admin-theme") as "light" | "dark") || "light";
-  });
-
-  useEffect(() => {
-    const apply = (t: "light" | "dark") => {
-      document.body.classList.remove("theme-light", "theme-dark");
-      document.body.classList.add(`theme-${t}`);
-    };
-    apply(theme);
-
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === "admin-theme" && e.newValue) {
-        const next = (e.newValue as "light" | "dark") ?? "light";
-        setTheme(next);
-        apply(next);
-      }
-    };
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, [theme]);
+  const { theme, toggle: toggleTheme } = useTheme();
 
   const { toast } = useToast();
-  const [mode, setMode] = useState<"signin" | "signup" | null>(null);
+  const [mode, setMode] = useState<"signin" | "signup" | "forgot" | null>(null);
   const [showPassword, setShowPassword] = useState(false);
 
   const [signinForm, setSigninForm] = useState({ email: "", password: "" });
@@ -2622,6 +2981,7 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
     confirm: "",
     agree: false,
   });
+  const [forgotEmail, setForgotEmail] = useState("");
 
   const handleSignIn = (e: React.FormEvent) => {
     e.preventDefault();
@@ -2670,6 +3030,17 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
     toast("Account created");
     setMode("signin");
     setSigninForm({ email, password });
+  };
+
+  const handleForgot = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!forgotEmail) {
+      toast("Please enter your email", "error");
+      return;
+    }
+    toast("Password reset link sent (demo)");
+    setForgotEmail("");
+    setMode("signin");
   };
 
   const renderChoice = () => (
@@ -2818,7 +3189,10 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
                 </label>
                 <a
                   href="#"
-                  onClick={(e) => e.preventDefault()}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    setMode("forgot");
+                  }}
                   className="muted"
                 >
                   Forgot password
@@ -3014,7 +3388,42 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
             </form>
           </div>
         )}
+        {mode === "forgot" && (
+          <div className="auth-form-shell">
+            <form className="auth-form-modern" onSubmit={handleForgot}>
+              <h2>Forgot Password</h2>
+              <p className="muted">
+                Enter the email linked to your account and we&apos;ll email you a reset link (demo).
+              </p>
+              <label className="auth-label">
+                Email Address
+                <input
+                  type="email"
+                  value={forgotEmail}
+                  onChange={(e) => setForgotEmail(e.target.value)}
+                  placeholder="Enter your email"
+                  required
+                />
+              </label>
+              <button type="submit" className="btn-primary auth-submit">
+                Send Reset Link
+              </button>
+              <p className="auth-switch">
+                Remembered it?{" "}
+                <button
+                  type="button"
+                  className="link-btn"
+                  onClick={() => setMode("signin")}
+                >
+                  Back to Sign In
+                </button>
+              </p>
+            </form>
+          </div>
+        )}
       </div>
     </div>
   );
 }
+
+
