@@ -22,8 +22,6 @@ const NAV_ITEMS: {
     ],
   },
   { id: "Card Center", label: "Card Center" },
-  { id: "Accounts", label: "Accounts" },
-  { id: "Setting", label: "Setting" },
   {
     id: "Support",
     label: "Support",
@@ -1471,6 +1469,7 @@ function AccountsView() {
 }
 
 const SETTING_PROFILE_KEY = "moneyfarm_profile";
+const PROFILE_AVATAR_KEY = "moneyfarm_profile_avatar";
 const SETTING_SECURITY_KEY = "moneyfarm_security";
 type ProfileForm = {
   name: string;
@@ -1494,13 +1493,6 @@ const defaultProfile: ProfileForm = {
 };
 
 const settingMenuItems = [
-  {
-    id: "profile",
-    label: "My Profile",
-    desc: "Details about my personal information.",
-    icon: "👤",
-    active: true,
-  },
   {
     id: "preferences",
     label: "Preferences",
@@ -1547,10 +1539,12 @@ function Toggle({
   );
 }
 
+type SettingTabId = "profile" | "preferences" | "security" | "notification";
+
 function SettingView() {
   const { toast } = useToast();
   const { theme, setTheme, toggle: toggleTheme } = useTheme();
-  const [settingTab, setSettingTab] = useState("profile");
+  const [settingTab, setSettingTab] = useState<SettingTabId>("preferences");
   const [profile, setProfile] = useState<ProfileForm>(() => {
     try {
       const s = localStorage.getItem(SETTING_PROFILE_KEY);
@@ -2014,6 +2008,168 @@ function SettingView() {
   );
 }
 
+function MyProfileView() {
+  const { toast } = useToast();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [profile, setProfile] = useState<ProfileForm>(() => {
+    try {
+      const s = localStorage.getItem(SETTING_PROFILE_KEY);
+      return s ? { ...defaultProfile, ...JSON.parse(s) } : defaultProfile;
+    } catch {
+      return defaultProfile;
+    }
+  });
+  const [avatarUrl, setAvatarUrl] = useState(() => {
+    return (
+      localStorage.getItem(PROFILE_AVATAR_KEY) ??
+      "https://i.pravatar.cc/120?img=12"
+    );
+  });
+
+  const saveProfile = () => {
+    localStorage.setItem(SETTING_PROFILE_KEY, JSON.stringify(profile));
+    toast("Profile saved successfully");
+  };
+
+  const openAvatarPicker = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      toast("Please choose an image file", "error");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const next = String(reader.result ?? "");
+      if (!next) return;
+      setAvatarUrl(next);
+      localStorage.setItem(PROFILE_AVATAR_KEY, next);
+      toast("Profile image updated");
+    };
+    reader.readAsDataURL(file);
+    e.currentTarget.value = "";
+  };
+
+  return (
+    <section className="card setting-detail-card">
+      <div className="setting-profile-header">
+        <button
+          type="button"
+          className="setting-avatar-wrap"
+          onClick={openAvatarPicker}
+          aria-label="Change profile image"
+        >
+          <img src={avatarUrl} alt="Profile avatar" className="setting-avatar" />
+          <span className="setting-avatar-edit">Edit</span>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            className="sr-only"
+            onChange={handleAvatarChange}
+          />
+        </button>
+      </div>
+      <div className="form-grid setting-form">
+        <div className="form-group">
+          <label>Name</label>
+          <input
+            type="text"
+            value={profile.name}
+            onChange={(e) =>
+              setProfile((p) => ({ ...p, name: e.target.value }))
+            }
+          />
+        </div>
+        <div className="form-group">
+          <label>User Name</label>
+          <input
+            type="text"
+            value={profile.userName}
+            onChange={(e) =>
+              setProfile((p) => ({ ...p, userName: e.target.value }))
+            }
+          />
+        </div>
+        <div className="form-group">
+          <label>Email</label>
+          <input
+            type="email"
+            value={profile.email}
+            onChange={(e) =>
+              setProfile((p) => ({ ...p, email: e.target.value }))
+            }
+          />
+        </div>
+        <div className="form-group">
+          <label>Password</label>
+          <input
+            type="password"
+            value={profile.password}
+            onChange={(e) =>
+              setProfile((p) => ({ ...p, password: e.target.value }))
+            }
+          />
+        </div>
+        <div className="form-group">
+          <label>Date of Birth</label>
+          <input
+            type="text"
+            value={profile.dateOfBirth}
+            onChange={(e) =>
+              setProfile((p) => ({ ...p, dateOfBirth: e.target.value }))
+            }
+          />
+        </div>
+        <div className="form-group">
+          <label>Present Address</label>
+          <input
+            type="text"
+            value={profile.presentAddress}
+            onChange={(e) =>
+              setProfile((p) => ({
+                ...p,
+                presentAddress: e.target.value,
+              }))
+            }
+          />
+        </div>
+        <div className="form-group">
+          <label>Permanent Address</label>
+          <input
+            type="text"
+            value={profile.permanentAddress}
+            onChange={(e) =>
+              setProfile((p) => ({
+                ...p,
+                permanentAddress: e.target.value,
+              }))
+            }
+          />
+        </div>
+        <div className="form-group">
+          <label>Postal Code</label>
+          <input
+            type="text"
+            value={profile.postalCode}
+            onChange={(e) =>
+              setProfile((p) => ({ ...p, postalCode: e.target.value }))
+            }
+          />
+        </div>
+      </div>
+      <div className="setting-actions">
+        <button type="button" className="btn-primary" onClick={saveProfile}>
+          Save Changes
+        </button>
+      </div>
+    </section>
+  );
+}
 // --- Utilities: FAQ (Knowledge base) ---
 const faqGeneral = [
   {
@@ -2724,6 +2880,15 @@ function App() {
                   <button
                     type="button"
                     onClick={() => {
+                      setActiveTab("My Profile");
+                      setUserMenuOpen(false);
+                    }}
+                  >
+                    My profile
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
                       setActiveTab("Setting");
                       setUserMenuOpen(false);
                     }}
@@ -2753,6 +2918,7 @@ function App() {
         {activeTab === "Create Invoices" && <CreateInvoicesView />}
         {activeTab === "Card Center" && <CardCenterView />}
         {activeTab === "Accounts" && <AccountsView />}
+        {activeTab === "My Profile" && <MyProfileView />}
         {activeTab === "Setting" && <SettingView />}
         {activeTab === "Knowledge base" && <KnowledgeBaseView />}
         {activeTab === "Notifications" && (
@@ -2767,6 +2933,7 @@ function App() {
           "Create Invoices",
           "Card Center",
           "Accounts",
+          "My Profile",
           "Setting",
           "Knowledge base",
           "Notifications",
@@ -3258,3 +3425,5 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
     </div>
   );
 }
+
+
