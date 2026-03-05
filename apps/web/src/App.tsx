@@ -3181,8 +3181,8 @@ export default App;
 
 // -------- Auth Shell (shown when user is null) ----------
 type AuthShellProps = {
-  onLogin: (email: string, password: string) => boolean;
-  onSignUp: (name: string, email: string, password: string) => boolean;
+  onLogin: (email: string, password: string) => Promise<void>;
+  onSignUp: (name: string, email: string, password: string) => Promise<void>;
 };
 
 function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
@@ -3191,6 +3191,7 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
   const { toast } = useToast();
   const [mode, setMode] = useState<"signin" | "signup" | "forgot" | null>(null);
   const [showPassword, setShowPassword] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
 
   const [signinForm, setSigninForm] = useState({ email: "", password: "" });
   const [captchaToken, setCaptchaToken] = useState("");
@@ -3207,17 +3208,24 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
   });
   const [forgotEmail, setForgotEmail] = useState("");
 
-  const handleSignIn = (e: React.FormEvent) => {
+  const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!signinForm.email || !signinForm.password || !captchaToken) {
       toast("Please enter email, password, and CAPTCHA", "error");
       return;
     }
-    onLogin(signinForm.email, signinForm.password);
-    toast("Signed in successfully (demo)");
+    setAuthBusy(true);
+    try {
+      await onLogin(signinForm.email, signinForm.password);
+      toast("Signed in successfully");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Sign in failed", "error");
+    } finally {
+      setAuthBusy(false);
+    }
   };
 
-  const handleSignUp = (e: React.FormEvent) => {
+  const handleSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
     const {
       fullName,
@@ -3250,10 +3258,16 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
       toast("Please agree to terms & privacy", "error");
       return;
     }
-    onSignUp(fullName, email, password);
-    toast("Account created");
-    setMode("signin");
-    setSigninForm({ email, password });
+    setAuthBusy(true);
+    try {
+      await onSignUp(fullName, email, password);
+      toast("Account created successfully");
+      setSigninForm({ email, password });
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Sign up failed", "error");
+    } finally {
+      setAuthBusy(false);
+    }
   };
 
   const handleForgot = (e: React.FormEvent) => {
@@ -3422,8 +3436,12 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
                   Forgot password
                 </a>
               </div>
-              <button type="submit" className="btn-primary auth-submit">
-                Sign In
+              <button
+                type="submit"
+                className="btn-primary auth-submit"
+                disabled={authBusy}
+              >
+                {authBusy ? "Signing in..." : "Sign In"}
               </button>
               <label className="auth-label" style={{ marginTop: 12 }}>
                 CAPTCHA token (demo)
@@ -3588,8 +3606,12 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
                 />{" "}
                 I agree to terms & privacy.
               </label>
-              <button type="submit" className="btn-primary auth-submit">
-                Create Account
+              <button
+                type="submit"
+                className="btn-primary auth-submit"
+                disabled={authBusy}
+              >
+                {authBusy ? "Creating..." : "Create Account"}
               </button>
               <p className="auth-switch">
                 Already have an account?{" "}
