@@ -11,155 +11,84 @@ const NAV_ITEMS: {
   children?: { id: string; label: string }[];
 }[] = [
   { id: "Dashboard", label: "Dashboard" },
-  { id: "My Wallet", label: "My Wallet" },
-  { id: "Transactions", label: "Transactions" },
-  {
-    id: "Invoices",
-    label: "Invoices",
-    children: [
-      { id: "Invoice List", label: "Invoice List" },
-      { id: "Create Invoices", label: "Create Invoices" },
-    ],
-  },
   { id: "Card Center", label: "Card Center" },
   {
     id: "Support",
     label: "Support",
     children: [
       { id: "Knowledge base", label: "Knowledge base" },
-      { id: "Notifications", label: "Notifications" },
       { id: "KYC Verification", label: "KYC Verification" },
     ],
   },
 ];
 
-const expenseCategories = [
-  { label: "Food & Grocery", value: 55 },
-  { label: "Transport", value: 40 },
-  { label: "Medical", value: 20 },
-  { label: "Shopping", value: 30 },
-  { label: "Bill & Others", value: 30 },
-];
-
-const transactions = [
+const dashboardQuickActions = [
   {
-    icon: "🎁",
-    title: "Shopping",
-    type: "Payment",
-    date: "20 February, 2021",
-    time: "10:25 AM",
-    amount: "$50.99",
+    id: "deposit",
+    title: "Deposit (Demo)",
+    detail: "Add funds instantly",
+    icon: "💳",
   },
   {
-    icon: "🚗",
-    title: "Car Repair",
-    type: "Payment",
-    date: "18 February, 2021",
-    time: "03:15 PM",
-    amount: "$156.58",
-  },
-  {
-    icon: "🛒",
-    title: "Grocery",
-    type: "Credit",
-    date: "15 February, 2021",
-    time: "07:17 PM",
-    amount: "$29.55",
-  },
-  {
-    icon: "🏋️",
-    title: "Grocery",
-    type: "Credit",
-    date: "15 February, 2021",
-    time: "07:17 PM",
-    amount: "$29.55",
+    id: "transfer",
+    title: "Internal Transfer",
+    detail: "Move funds between accounts",
+    icon: "➤",
   },
 ];
 
-// My Wallet data
-const walletBalance = {
-  current: "$150,900.75",
-  change: "+$530 (2.5%)",
-  income: "$35,450",
-  expense: "$12,802",
-};
-const usageStats = {
-  percent: 25,
-  segments: [
-    { label: "Payoneer", color: "var(--accent)" },
-    { label: "Mastercard", color: "var(--accent-2)" },
-    { label: "Visa", color: "var(--muted)" },
-  ],
-};
-const invoicesList = [
-  { name: "Randi Press", time: "10h ago", amount: "$490", img: 1 },
-  { name: "Robert", time: "Friday", amount: "$150", img: 2 },
-  { name: "Apple Store", time: "February 10, 2021", amount: "$230", img: 3 },
-  { name: "Tatiana", time: "February 9, 2021", amount: "$180", img: 4 },
-  { name: "David Watson", time: "February 8, 2021", amount: "$520", img: 5 },
-  { name: "Amazon", time: "February 7, 2021", amount: "$95", img: 6 },
-];
-const debitCreditMonths = [
-  "Jan",
-  "Feb",
-  "Mar",
-  "Apr",
-  "May",
-  "Jun",
-  "Jul",
-  "Aug",
-  "Sep",
-  "Oct",
-  "Nov",
-  "Dec",
-];
-const debitCreditData = [12, 19, 8, 24, 18, 30, 22, 28, 15, 20, 25, 32].map(
-  (d, i) => ({ debit: d, credit: Math.max(5, 25 - i) }),
-);
-const paymentHistory = [
+const dashboardSecurityAlerts = [
   {
-    name: "Flaming",
-    id: "#SD6455JB",
-    date: "February 19, 2021, 10:50 AM",
-    amount: "+$1,250",
-    method: "Mastercard",
-    status: "Completed",
-    statusType: "completed",
-    img: 7,
+    title: "Login Verified",
+    location: "San Francisco, US",
+    detail:
+      "Device: MacBook Pro (Chrome 124). AI analyzed behavior patterns and confirmed identity matches your typical usage.",
+    time: "2 minutes ago",
+    tone: "safe",
   },
   {
-    name: "Harold",
-    id: "#SD6455JB",
-    date: "February 15, 2021, 08:25 PM",
-    amount: "-$3,500",
-    method: "Paypal",
-    status: "Canceled",
-    statusType: "canceled",
-    img: 8,
+    title: "New Device Registered",
+    location: "London, UK",
+    detail:
+      "Device: iPhone 15 Pro. Device fingerprint added to encrypted vault. Bio-auth enabled successfully.",
+    time: "Today, 10:45 AM",
+    tone: "info",
   },
   {
-    name: "Samuel",
-    id: "#SD6455JB",
-    date: "February 12, 2021, 02:06 PM",
-    amount: "+$800",
-    method: "Paypal",
-    status: "Pending",
-    statusType: "pending",
-    img: 9,
-  },
-  {
-    name: "Bernerd",
-    id: "#SD6455JB",
-    date: "February 19, 2021, 03:14 AM",
-    amount: "+$1,800",
-    method: "Mastercard",
-    status: "Completed",
-    statusType: "completed",
-    img: 10,
+    title: "Anomalous Connection Blocked",
+    location: "Unrecognized IP",
+    detail:
+      "AI detection engine automatically blocked a login attempt from a known malicious proxy server. No data compromised.",
+    time: "Yesterday, 11:20 PM",
+    tone: "warn",
   },
 ];
 
-const transactionsHistory = [
+const dashboardHistorySeed = [
+  {
+    entity: "Apple Store Online",
+    date: "Oct 24, 2023",
+    status: "AI Cleared",
+    amount: "-$1,299.00",
+    amountTone: "negative",
+  },
+  {
+    entity: "Dividend Payment",
+    date: "Oct 25, 2023",
+    status: "Verified",
+    amount: "+$450.25",
+    amountTone: "positive",
+  },
+  {
+    entity: "Utility Bill Pay",
+    date: "Oct 21, 2023",
+    status: "Scheduled",
+    amount: "-$85.00",
+    amountTone: "negative",
+  },
+];
+
+const accountsRecentTransactions = [
   {
     id: "596380",
     name: "Charlotte",
@@ -189,46 +118,6 @@ const transactionsHistory = [
     status: "Completed",
     statusType: "completed",
     img: 13,
-  },
-  {
-    id: "596383",
-    name: "Jonathan",
-    date: "February 15, 2021, 09:26 AM",
-    amount: "$1260",
-    card: "Paypal",
-    status: "Completed",
-    statusType: "completed",
-    img: 14,
-  },
-  {
-    id: "596384",
-    name: "Brayden",
-    date: "February 15, 2021, 05:37 AM",
-    amount: "$3540",
-    card: "Mastercard",
-    status: "Completed",
-    statusType: "completed",
-    img: 15,
-  },
-  {
-    id: "596385",
-    name: "Nicholas",
-    date: "February 15, 2021, 07:46 AM",
-    amount: "$750",
-    card: "Payoneer",
-    status: "Completed",
-    statusType: "completed-alt",
-    img: 16,
-  },
-  {
-    id: "596386",
-    name: "Jeremiah",
-    date: "February 10, 2021, 10:50 AM",
-    amount: "$240",
-    card: "Payoneer",
-    status: "Completed",
-    statusType: "completed",
-    img: 17,
   },
 ];
 
@@ -322,318 +211,834 @@ function BarChart({
 }
 
 function DashboardView() {
-  return (
-    <>
-      <section className="grid-dashboard">
-        <div className="card expense-card">
-          <h3>Expense Categories</h3>
-          <div className="rings">
-            {expenseCategories.map((c) => (
-              <div key={c.label} className="ring-item">
-                <Ring value={c.value} />
-                <div className="ring-label">{c.label}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-        <div className="card profile-card">
-          <div className="profile">
-            <img src="https://i.pravatar.cc/120?img=12" alt="John Doe" />
-            <h3>John Doe</h3>
-            <a href="mailto:hello@zainiklab.com">hello@zainiklab.com</a>
-          </div>
-          <div className="balance-box">
-            <div className="muted">Current Balance</div>
-            <div className="big">$340,500</div>
-            <div className="mini-stats">
-              <div>
-                <span className="dot blue" /> Income <strong>$35,450</strong>
-              </div>
-              <div>
-                <span className="dot cyan" /> Expense <strong>$12,802</strong>
-              </div>
-            </div>
-          </div>
-          <div className="quick-actions">
-            <button>💸 Money Transfer</button>
-            <button>🏧 Money Withdrawal</button>
-            <button>💳 Make Payment</button>
-          </div>
-          <div className="card-visual">
-            <div className="card-chip" />
-            <div className="card-number">1234 5678 9012 3456</div>
-            <div className="card-name">John Doe</div>
-            <div className="card-valid">12/23</div>
-          </div>
-        </div>
-      </section>
-      <section className="grid dash-secondary">
-        <div className="card">
-          <div className="card-head">
-            <h3>Balance History</h3>
-            <div className="legend">
-              <span className="dot blue" /> Income
-              <span className="dot cyan" /> Balance
-              <span className="chevron">▼</span>
-            </div>
-          </div>
-          <div className="chart-placeholder">
-            <div className="bar-line" />
-          </div>
-        </div>
-        <div className="card">
-          <div className="card-head">
-            <h3>Last Transactions</h3>
-            <button className="pill">All Time ▼</button>
-          </div>
-          <div className="txn-list">
-            {transactions.map((t, i) => (
-              <div key={i} className="txn-row">
-                <span className="txn-icon">{t.icon}</span>
-                <span>{t.title}</span>
-                <span className="muted">{t.type}</span>
-                <span className="muted">{t.date}</span>
-                <span className="muted">{t.time}</span>
-                <span>{t.amount}</span>
-                <span className="muted">⋮</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-    </>
-  );
-}
-
-function MyWalletView() {
+  const { user } = useAuth();
   const { toast } = useToast();
-  const [depositAmount, setDepositAmount] = useState("250");
-  const [depositMethod, setDepositMethod] = useState("bank");
-  const [withdrawMethod, setWithdrawMethod] = useState("bank");
-  const [transfer, setTransfer] = useState({
-    to: "",
-    amount: "100",
-    method: "wallet",
-  });
-  const savedRecipients = [
-    "alice@example.com",
-    "bob@example.com",
-    "carol@example.com",
-  ];
+  const [showWalletId, setShowWalletId] = useState(false);
+  const [detailsModalOpen, setDetailsModalOpen] = useState(false);
+  const [detailsStep, setDetailsStep] = useState<"otp" | "details">("otp");
+  const [otpCode, setOtpCode] = useState("");
+  const [otpInput, setOtpInput] = useState("");
+  const [otpError, setOtpError] = useState("");
+  const [otpAttempts, setOtpAttempts] = useState(0);
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [transferStep, setTransferStep] = useState<1 | 2 | 3 | 4>(1);
+  const [transferMethod, setTransferMethod] = useState<"account" | "qr">(
+    "account",
+  );
+  const [transferAccount, setTransferAccount] = useState("");
+  const [transferReceiverName, setTransferReceiverName] = useState("");
+  const [transferAmount, setTransferAmount] = useState("");
+  const [transferContent, setTransferContent] = useState("");
+  const [transferQrFile, setTransferQrFile] = useState("");
+  const [transferOtpCode, setTransferOtpCode] = useState("");
+  const [transferOtpInput, setTransferOtpInput] = useState("");
+  const [transferOtpError, setTransferOtpError] = useState("");
+  const [transferOtpAttempts, setTransferOtpAttempts] = useState(0);
+  const [transactionHistory, setTransactionHistory] =
+    useState(dashboardHistorySeed);
+  const [historyModalOpen, setHistoryModalOpen] = useState(false);
+  const [transferReceipt, setTransferReceipt] = useState<{
+    txId: string;
+    executedAt: string;
+    fromAccount: string;
+    toAccount: string;
+    amountUsd: string;
+    feeUsd: string;
+    note: string;
+    status: string;
+  } | null>(null);
 
-  const submitDeposit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!depositAmount || Number(depositAmount) <= 0) {
-      toast("Enter a valid amount", "error");
-      return;
-    }
-    toast(`(Demo) Would deposit $${depositAmount} via ${depositMethod}`);
+  const cardProfile = {
+    holder: "Alex Thompson",
+    number: "1234 5678 9012 5678",
+    type: "Visa Signature",
+    expiry: "09/29",
+    cvv: "***",
+    status: "Active",
+    issuedAt: "San Francisco Main Branch",
+    linkedAccount: "Checking •••• 8841",
+    dailyLimit: "$10,000.00",
+    contactless: "Enabled",
+    onlinePayment: "Enabled",
+    lastActivity: "Mar 05, 2026 · 09:42 AM",
   };
 
-  const submitTransfer = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!transfer.to || !transfer.amount || Number(transfer.amount) <= 0) {
-      toast("Recipient and amount are required", "error");
+  const walletGroups = showWalletId
+    ? ["1234", "5678", "9012", "5678"]
+    : ["****", "****", "****", "5678"];
+  const defaultTransferContent = `${user?.name ?? "User"} transfer`;
+
+  const generateOtp = () => {
+    const next = String(Math.floor(100000 + Math.random() * 900000));
+    setOtpCode(next);
+    setOtpInput("");
+    setOtpError("");
+    setOtpAttempts(0);
+    toast(`OTP sent to +1 ••• ••67 (demo OTP: ${next})`, "info");
+  };
+
+  const openDetailsModal = () => {
+    setDetailsModalOpen(true);
+    setDetailsStep("otp");
+    generateOtp();
+  };
+
+  const closeDetailsModal = () => {
+    setDetailsModalOpen(false);
+    setOtpInput("");
+    setOtpError("");
+    setOtpAttempts(0);
+    setDetailsStep("otp");
+  };
+
+  const verifyOtpAndShowDetails = () => {
+    if (!/^\d{6}$/.test(otpInput)) {
+      setOtpError("OTP must be exactly 6 digits.");
       return;
     }
-    toast(
-      `(Demo) Would transfer $${transfer.amount} to ${transfer.to} via ${transfer.method}`,
-    );
+    if (otpInput !== otpCode) {
+      const nextAttempts = otpAttempts + 1;
+      setOtpAttempts(nextAttempts);
+      setOtpError("Incorrect OTP. Please try again.");
+      if (nextAttempts >= 3) {
+        generateOtp();
+        setOtpError("Too many failed attempts. A new OTP has been sent.");
+      }
+      return;
+    }
+    setOtpError("");
+    setDetailsStep("details");
+    toast("OTP verified successfully");
+  };
+
+  const resetTransferFlow = () => {
+    setTransferStep(1);
+    setTransferMethod("account");
+    setTransferAccount("");
+    setTransferReceiverName("");
+    setTransferAmount("");
+    setTransferContent(defaultTransferContent);
+    setTransferQrFile("");
+    setTransferOtpCode("");
+    setTransferOtpInput("");
+    setTransferOtpError("");
+    setTransferOtpAttempts(0);
+    setTransferReceipt(null);
+  };
+
+  const openTransferModal = () => {
+    setTransferOpen(true);
+    resetTransferFlow();
+  };
+
+  const closeTransferModal = () => {
+    setTransferOpen(false);
+    resetTransferFlow();
+  };
+
+  const generateTransferOtp = () => {
+    const next = String(Math.floor(100000 + Math.random() * 900000));
+    setTransferOtpCode(next);
+    setTransferOtpInput("");
+    setTransferOtpError("");
+    setTransferOtpAttempts(0);
+    toast(`Transfer OTP sent (demo OTP: ${next})`, "info");
+  };
+
+  const continueTransferRecipient = () => {
+    if (transferMethod === "account") {
+      if (!/^\d{8,19}$/.test(transferAccount)) {
+        toast("Please enter a valid account number (8-19 digits).", "error");
+        return;
+      }
+      setTransferReceiverName(
+        `Account Holder •••• ${transferAccount.slice(-4)}`,
+      );
+    } else if (!transferAccount) {
+      toast("Please upload QR to extract account number first.", "error");
+      return;
+    }
+    setTransferStep(2);
+  };
+
+  const continueTransferAmount = () => {
+    const amount = Number(transferAmount.replace(/,/g, ""));
+    if (!transferAmount || Number.isNaN(amount) || amount <= 0) {
+      toast("Please enter a valid transfer amount.", "error");
+      return;
+    }
+    if (!transferContent.trim()) {
+      setTransferContent(defaultTransferContent);
+    }
+    generateTransferOtp();
+    setTransferStep(3);
+  };
+
+  const verifyTransferOtpAndSubmit = () => {
+    if (!/^\d{6}$/.test(transferOtpInput)) {
+      setTransferOtpError("OTP must be exactly 6 digits.");
+      return;
+    }
+    if (transferOtpInput !== transferOtpCode) {
+      const nextAttempts = transferOtpAttempts + 1;
+      setTransferOtpAttempts(nextAttempts);
+      setTransferOtpError("Incorrect OTP. Please try again.");
+      if (nextAttempts >= 3) {
+        generateTransferOtp();
+        setTransferOtpError(
+          "Too many failed attempts. A new OTP has been sent.",
+        );
+      }
+      return;
+    }
+    setTransferOtpError("");
+    const now = new Date();
+    const txId = `TXN-${now
+      .toISOString()
+      .replace(/[-:.TZ]/g, "")
+      .slice(0, 14)}-${Math.floor(1000 + Math.random() * 9000)}`;
+    const executedAt = now.toLocaleString("en-US", {
+      month: "short",
+      day: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: true,
+    });
+    const amount = Number(transferAmount.replace(/,/g, "")) || 0;
+    setTransferReceipt({
+      txId,
+      executedAt,
+      fromAccount: "Primary Checking •••• 8841",
+      toAccount: transferAccount,
+      amountUsd: amount.toLocaleString("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      }),
+      feeUsd: "0.00",
+      note: transferContent || defaultTransferContent,
+      status: "Completed",
+    });
+    setTransactionHistory((prev) => [
+      {
+        entity: `Transfer to •••• ${transferAccount.slice(-4)}`,
+        date: executedAt,
+        status: "Completed",
+        amount: `-$${amount.toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })}`,
+        amountTone: "negative",
+      },
+      ...prev,
+    ]);
+    setTransferStep(4);
+    toast("Transfer completed successfully");
   };
 
   return (
-    <>
-      <section className="grid grid-wallet">
-        <div className="card wallet-balance-card">
-          <h3>Wallet Balance</h3>
-          <div className="wallet-balance-big">{walletBalance.current}</div>
-          <div className="wallet-balance-change">▲{walletBalance.change}</div>
-          <div className="wallet-mini-stats">
+    <section className="dashboard-v2">
+      <div className="dashboard-v2-top">
+        <article className="dashboard-wallet-card">
+          <div className="dashboard-wallet-head">
             <div>
-              <span className="dot blue" /> Income{" "}
-              <strong>{walletBalance.income}</strong>
+              <div className="dashboard-wallet-label">Total Wallet Balance</div>
+              <h2>$45,230.85</h2>
             </div>
+          </div>
+          <div className="dashboard-wallet-foot">
             <div>
-              <span className="dot cyan" /> Expense{" "}
-              <strong>{walletBalance.expense}</strong>
+              <div className="dashboard-wallet-id-label">Wallet ID</div>
+              <div className="dashboard-wallet-id-row">
+                <div className="dashboard-wallet-id">
+                  {walletGroups.map((group, idx) => (
+                    <span key={idx} className="dashboard-wallet-id-group">
+                      {group}
+                    </span>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  className="dashboard-wallet-toggle-btn"
+                  onClick={() => setShowWalletId((v) => !v)}
+                  aria-label={
+                    showWalletId ? "Hide wallet ID" : "Show wallet ID"
+                  }
+                  title={showWalletId ? "Hide wallet ID" : "Show wallet ID"}
+                >
+                  {showWalletId ? "🙈" : "👁"}
+                </button>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="dashboard-wallet-detail-btn"
+              onClick={openDetailsModal}
+            >
+              View Details
+            </button>
+          </div>
+        </article>
+
+        <aside className="dashboard-actions-card">
+          <h3>Quick Actions</h3>
+          <div className="dashboard-actions-list">
+            {dashboardQuickActions.map((action) => (
+              <button
+                type="button"
+                className="dashboard-action-item"
+                key={action.title}
+                onClick={() => {
+                  if (action.id === "transfer") {
+                    openTransferModal();
+                  } else {
+                    toast("Deposit feature is coming soon.", "info");
+                  }
+                }}
+              >
+                <span className="dashboard-action-icon">{action.icon}</span>
+                <span className="dashboard-action-text">
+                  <strong>{action.title}</strong>
+                  <small>{action.detail}</small>
+                </span>
+                <span className="dashboard-action-arrow">›</span>
+              </button>
+            ))}
+          </div>
+          <button type="button" className="dashboard-all-actions">
+            View all actions
+          </button>
+        </aside>
+      </div>
+
+      <section className="dashboard-block">
+        <div className="dashboard-block-head">
+          <h3>Security Alerts</h3>
+          <span className="dashboard-tag">AI MONITORED</span>
+          <button type="button" className="dashboard-link">
+            Full Audit Log
+          </button>
+        </div>
+        <div className="dashboard-alert-list">
+          {dashboardSecurityAlerts.map((alert) => (
+            <article
+              className={`dashboard-alert-item ${alert.tone}`}
+              key={alert.title}
+            >
+              <div className="dashboard-alert-icon">
+                {alert.tone === "safe"
+                  ? "✓"
+                  : alert.tone === "info"
+                    ? "i"
+                    : "!"}
+              </div>
+              <div className="dashboard-alert-content">
+                <div className="dashboard-alert-title-row">
+                  <strong>{alert.title}</strong>
+                  <span className="dashboard-alert-location">
+                    {alert.location}
+                  </span>
+                </div>
+                <p>{alert.detail}</p>
+              </div>
+              <div className="dashboard-alert-time">{alert.time}</div>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="dashboard-block">
+        <div className="dashboard-block-head">
+          <h3>Transaction History</h3>
+          <button
+            type="button"
+            className="dashboard-link"
+            onClick={() => setHistoryModalOpen(true)}
+          >
+            View All Transactions
+          </button>
+        </div>
+        <div className="dashboard-tx-wrap">
+          <table className="dashboard-tx-table">
+            <thead>
+              <tr>
+                <th>Entity</th>
+                <th>Date</th>
+                <th>Status</th>
+                <th>Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {transactionHistory.slice(0, 3).map((tx) => (
+                <tr key={tx.entity + tx.date}>
+                  <td>{tx.entity}</td>
+                  <td>{tx.date}</td>
+                  <td>
+                    <span className="dashboard-status-pill">{tx.status}</span>
+                  </td>
+                  <td
+                    className={
+                      tx.amountTone === "positive"
+                        ? "amount-positive"
+                        : "amount-negative"
+                    }
+                  >
+                    {tx.amount}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {historyModalOpen && (
+        <div
+          className="modal-overlay"
+          onClick={() => setHistoryModalOpen(false)}
+        >
+          <div
+            className="modal-card tx-history-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="card-details-head">
+              <h3>Full Transaction History</h3>
+              <button
+                type="button"
+                className="card-details-close"
+                onClick={() => setHistoryModalOpen(false)}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="dashboard-tx-wrap">
+              <table className="dashboard-tx-table">
+                <thead>
+                  <tr>
+                    <th>Entity</th>
+                    <th>Date</th>
+                    <th>Status</th>
+                    <th>Amount</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {transactionHistory.map((tx) => (
+                    <tr key={`modal-${tx.entity}-${tx.date}`}>
+                      <td>{tx.entity}</td>
+                      <td>{tx.date}</td>
+                      <td>
+                        <span className="dashboard-status-pill">
+                          {tx.status}
+                        </span>
+                      </td>
+                      <td
+                        className={
+                          tx.amountTone === "positive"
+                            ? "amount-positive"
+                            : "amount-negative"
+                        }
+                      >
+                        {tx.amount}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="transfer-actions" style={{ marginTop: 12 }}>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => setHistoryModalOpen(false)}
+              >
+                Close
+              </button>
             </div>
           </div>
         </div>
-        <div className="card usage-card">
-          <h3>Usage Statistics</h3>
-          <DonutChart
-            percent={usageStats.percent}
-            segments={usageStats.segments}
-          />
-        </div>
-        <div className="card wallet-actions-card">
-          <h3>Wallet Actions</h3>
-          <form className="wallet-action-form" onSubmit={submitDeposit}>
-            <h4>Deposit funds</h4>
-            <label>
-              Method
-              <select
-                value={depositMethod}
-                onChange={(e) => setDepositMethod(e.target.value)}
+      )}
+
+      {detailsModalOpen && (
+        <div className="modal-overlay" onClick={closeDetailsModal}>
+          <div
+            className="modal-card card-details-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="card-details-head">
+              <h3>Card Security Verification</h3>
+              <button
+                type="button"
+                className="card-details-close"
+                onClick={closeDetailsModal}
               >
-                <option value="bank">
-                  Bank transfer (ETA: ~2 min, Fee: $0)
-                </option>
-                <option value="card">
-                  Debit/Credit card (ETA: instant, Fee: 1.2%)
-                </option>
-                <option value="qr">QR wallet (ETA: instant, Fee: $0)</option>
-              </select>
-            </label>
-            <label>
-              Amount (USD)
-              <input
-                type="number"
-                min="1"
-                step="1"
-                value={depositAmount}
-                onChange={(e) => setDepositAmount(e.target.value)}
-                required
-              />
-            </label>
-            <button type="submit" className="btn-primary">
-              Deposit (demo)
-            </button>
-          </form>
-          <form className="wallet-action-form" onSubmit={submitTransfer}>
-            <h4>Transfer funds</h4>
-            <label>
-              Recipient email
-              <input
-                type="email"
-                value={transfer.to}
-                onChange={(e) =>
-                  setTransfer((t) => ({ ...t, to: e.target.value }))
-                }
-                placeholder="user@example.com"
-                required
-              />
-              <div className="saved-recips">
-                {savedRecipients.map((r) => (
+                ✕
+              </button>
+            </div>
+
+            {detailsStep === "otp" ? (
+              <div className="card-otp-step">
+                <p className="muted">
+                  To view full card details, enter the 6-digit OTP sent to your
+                  registered phone number.
+                </p>
+                <label className="form-group">
+                  <span>Enter OTP</span>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={otpInput}
+                    onChange={(e) =>
+                      setOtpInput(e.target.value.replace(/\D/g, "").slice(0, 6))
+                    }
+                    placeholder="6-digit OTP"
+                  />
+                </label>
+                {otpError && <div className="card-otp-error">{otpError}</div>}
+                <div className="card-otp-actions">
+                  <button type="button" className="pill" onClick={generateOtp}>
+                    Resend OTP
+                  </button>
                   <button
-                    key={r}
+                    type="button"
+                    className="btn-primary"
+                    onClick={verifyOtpAndShowDetails}
+                  >
+                    Verify & Continue
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="card-details-content">
+                <p className="muted">
+                  Verified session. Full card information is shown below.
+                </p>
+                <div className="card-details-grid">
+                  <div className="card-details-item">
+                    <span>Card Holder</span>
+                    <strong>{cardProfile.holder}</strong>
+                  </div>
+                  <div className="card-details-item">
+                    <span>Card Type</span>
+                    <strong>{cardProfile.type}</strong>
+                  </div>
+                  <div className="card-details-item span-2">
+                    <span>Card Number</span>
+                    <strong>{cardProfile.number}</strong>
+                  </div>
+                  <div className="card-details-item">
+                    <span>Expiry Date</span>
+                    <strong>{cardProfile.expiry}</strong>
+                  </div>
+                  <div className="card-details-item">
+                    <span>CVV</span>
+                    <strong>{cardProfile.cvv}</strong>
+                  </div>
+                  <div className="card-details-item">
+                    <span>Status</span>
+                    <strong>{cardProfile.status}</strong>
+                  </div>
+                  <div className="card-details-item">
+                    <span>Issued At</span>
+                    <strong>{cardProfile.issuedAt}</strong>
+                  </div>
+                  <div className="card-details-item">
+                    <span>Linked Account</span>
+                    <strong>{cardProfile.linkedAccount}</strong>
+                  </div>
+                  <div className="card-details-item">
+                    <span>Daily Limit</span>
+                    <strong>{cardProfile.dailyLimit}</strong>
+                  </div>
+                  <div className="card-details-item">
+                    <span>Contactless</span>
+                    <strong>{cardProfile.contactless}</strong>
+                  </div>
+                  <div className="card-details-item">
+                    <span>Online Payment</span>
+                    <strong>{cardProfile.onlinePayment}</strong>
+                  </div>
+                  <div className="card-details-item span-2">
+                    <span>Last Activity</span>
+                    <strong>{cardProfile.lastActivity}</strong>
+                  </div>
+                </div>
+                <div className="card-details-actions">
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={closeDetailsModal}
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {transferOpen && (
+        <div className="modal-overlay" onClick={closeTransferModal}>
+          <div
+            className="modal-card transfer-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="transfer-head">
+              <h3>Secure Bank Transfer</h3>
+              <button
+                type="button"
+                className="card-details-close"
+                onClick={closeTransferModal}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="transfer-steps">
+              <span className={transferStep >= 1 ? "active" : ""}>
+                Recipient
+              </span>
+              <span className={transferStep >= 2 ? "active" : ""}>Amount</span>
+              <span className={transferStep >= 3 ? "active" : ""}>OTP</span>
+              <span className={transferStep >= 4 ? "active" : ""}>Done</span>
+            </div>
+
+            {transferStep === 1 && (
+              <div className="transfer-body">
+                <div className="transfer-method-tabs">
+                  <button
+                    type="button"
+                    className={transferMethod === "account" ? "active" : ""}
+                    onClick={() => setTransferMethod("account")}
+                  >
+                    Account Number
+                  </button>
+                  <button
+                    type="button"
+                    className={transferMethod === "qr" ? "active" : ""}
+                    onClick={() => setTransferMethod("qr")}
+                  >
+                    Scan QR
+                  </button>
+                </div>
+
+                {transferMethod === "account" ? (
+                  <label className="form-group">
+                    <span>Recipient Account Number</span>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      placeholder="Enter bank account number"
+                      value={transferAccount}
+                      onChange={(e) =>
+                        setTransferAccount(
+                          e.target.value.replace(/\D/g, "").slice(0, 19),
+                        )
+                      }
+                    />
+                  </label>
+                ) : (
+                  <div className="transfer-qr-zone">
+                    <label className="transfer-qr-upload">
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (!file) return;
+                          setTransferQrFile(file.name);
+                          const generated = `9704${String(Date.now()).slice(-10)}`;
+                          setTransferAccount(generated);
+                          setTransferReceiverName(
+                            `QR Recipient •••• ${generated.slice(-4)}`,
+                          );
+                          toast("QR scanned successfully (demo).");
+                        }}
+                      />
+                      <span>Upload transfer QR image</span>
+                    </label>
+                    <div className="muted">
+                      {transferQrFile
+                        ? `QR file: ${transferQrFile}`
+                        : "No QR file selected yet."}
+                    </div>
+                    {transferAccount && (
+                      <div className="transfer-qr-result">
+                        Extracted account: <strong>{transferAccount}</strong>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="transfer-actions">
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={continueTransferRecipient}
+                  >
+                    Continue
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {transferStep === 2 && (
+              <div className="transfer-body">
+                <div className="transfer-summary">
+                  <span>To Account</span>
+                  <strong>{transferAccount}</strong>
+                  <small>{transferReceiverName}</small>
+                </div>
+                <label className="form-group">
+                  <span>Amount (USD)</span>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    placeholder="Enter transfer amount"
+                    value={transferAmount}
+                    onChange={(e) =>
+                      setTransferAmount(e.target.value.replace(/[^0-9.]/g, ""))
+                    }
+                  />
+                </label>
+                <label className="form-group">
+                  <span>Transfer Content</span>
+                  <input
+                    type="text"
+                    value={transferContent}
+                    onChange={(e) => setTransferContent(e.target.value)}
+                  />
+                </label>
+                <div className="transfer-actions">
+                  <button
                     type="button"
                     className="pill"
-                    onClick={() => setTransfer((t) => ({ ...t, to: r }))}
+                    onClick={() => setTransferStep(1)}
                   >
-                    {r}
+                    Back
                   </button>
-                ))}
-              </div>
-            </label>
-            <label>
-              Amount (USD)
-              <input
-                type="number"
-                min="1"
-                step="1"
-                value={transfer.amount}
-                onChange={(e) =>
-                  setTransfer((t) => ({ ...t, amount: e.target.value }))
-                }
-                required
-              />
-            </label>
-            <label>
-              Method
-              <select
-                value={transfer.method}
-                onChange={(e) =>
-                  setTransfer((t) => ({ ...t, method: e.target.value }))
-                }
-              >
-                <option value="wallet">Wallet to wallet (instant)</option>
-                <option value="bank">Bank transfer (ETA: 5-10 min)</option>
-                <option value="card">Card payout (ETA: 1-2 days)</option>
-              </select>
-            </label>
-            <div className="fee-hint muted">
-              Estimated fee: {transfer.method === "card" ? "2.0%" : "0"} · ETA
-              shown above
-            </div>
-            <button type="submit" className="btn-primary">
-              Transfer (demo)
-            </button>
-          </form>
-          <p className="muted" style={{ marginTop: 8 }}>
-            These actions are UI-only for now; API wiring will be added later.
-          </p>
-        </div>
-        <div className="card invoices-card">
-          <h3>Invoices List</h3>
-          <div className="invoices-list">
-            {invoicesList.map((inv) => (
-              <div key={inv.name} className="invoice-row">
-                <img
-                  src={`https://i.pravatar.cc/40?img=${inv.img}`}
-                  alt=""
-                  className="invoice-avatar"
-                />
-                <div className="invoice-info">
-                  <span className="invoice-name">{inv.name}</span>
-                  <span className="invoice-time muted">{inv.time}</span>
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={continueTransferAmount}
+                  >
+                    Continue to OTP
+                  </button>
                 </div>
-                <span className="invoice-amount">{inv.amount}</span>
               </div>
-            ))}
-          </div>
-        </div>
-        <div className="card span-2 debit-credit-card">
-          <div className="card-head">
-            <h3>Debit & Credit History</h3>
-            <div className="legend">
-              <span className="dot blue" /> Debit
-              <span className="dot cyan" /> Credit
-            </div>
-          </div>
-          <div className="history-tabs">
-            <button className="history-tab active">Monthly</button>
-            <button className="history-tab">Weekly</button>
-            <button className="history-tab">All Time</button>
-          </div>
-          <div className="chart-placeholder chart-bars">
-            <BarChart labels={debitCreditMonths} data={debitCreditData} />
-          </div>
-        </div>
-        <div className="card span-2 payment-history-card">
-          <div className="card-head">
-            <h3>Payment History</h3>
-            <button className="pill">This Week ▼</button>
-          </div>
-          <div className="payment-history-list">
-            {paymentHistory.map((p) => (
-              <div key={p.name + p.date} className="payment-row">
-                <img
-                  src={`https://i.pravatar.cc/48?img=${p.img}`}
-                  alt=""
-                  className="payment-avatar"
-                />
-                <div className="payment-user">
-                  <span className="payment-name">{p.name}</span>
-                  <span className="muted payment-id">{p.id}</span>
+            )}
+
+            {transferStep === 3 && (
+              <div className="transfer-body">
+                <div className="transfer-confirm-card">
+                  <div>
+                    <span>Recipient</span>
+                    <strong>{transferAccount}</strong>
+                  </div>
+                  <div>
+                    <span>Amount</span>
+                    <strong>${transferAmount}</strong>
+                  </div>
+                  <div>
+                    <span>Content</span>
+                    <strong>{transferContent || defaultTransferContent}</strong>
+                  </div>
                 </div>
-                <span className="muted payment-date">{p.date}</span>
-                <span
-                  className={`payment-amount ${p.amount.startsWith("+") ? "positive" : "negative"}`}
-                >
-                  {p.amount}
-                </span>
-                <span className="muted payment-method">{p.method}</span>
-                <span className={`status-badge status-${p.statusType}`}>
-                  {p.status}
-                </span>
-                <span className="payment-dots">⋮</span>
+                <label className="form-group">
+                  <span>Enter OTP</span>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={transferOtpInput}
+                    onChange={(e) =>
+                      setTransferOtpInput(
+                        e.target.value.replace(/\D/g, "").slice(0, 6),
+                      )
+                    }
+                    placeholder="6-digit OTP"
+                  />
+                </label>
+                {transferOtpError && (
+                  <div className="card-otp-error">{transferOtpError}</div>
+                )}
+                <div className="transfer-actions">
+                  <button
+                    type="button"
+                    className="pill"
+                    onClick={generateTransferOtp}
+                  >
+                    Resend OTP
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={verifyTransferOtpAndSubmit}
+                  >
+                    Confirm Transfer
+                  </button>
+                </div>
               </div>
-            ))}
+            )}
+
+            {transferStep === 4 && (
+              <div className="transfer-body transfer-success">
+                <div className="transfer-success-icon">✓</div>
+                <h4>Transfer Successful</h4>
+                {transferReceipt && (
+                  <div className="transfer-receipt">
+                    <div className="transfer-receipt-row">
+                      <span>Transaction ID</span>
+                      <strong>{transferReceipt.txId}</strong>
+                    </div>
+                    <div className="transfer-receipt-row">
+                      <span>Execution Time</span>
+                      <strong>{transferReceipt.executedAt}</strong>
+                    </div>
+                    <div className="transfer-receipt-row">
+                      <span>From Account</span>
+                      <strong>{transferReceipt.fromAccount}</strong>
+                    </div>
+                    <div className="transfer-receipt-row">
+                      <span>To Account</span>
+                      <strong>{transferReceipt.toAccount}</strong>
+                    </div>
+                    <div className="transfer-receipt-row">
+                      <span>Amount</span>
+                      <strong>${transferReceipt.amountUsd}</strong>
+                    </div>
+                    <div className="transfer-receipt-row">
+                      <span>Transfer Fee</span>
+                      <strong>${transferReceipt.feeUsd}</strong>
+                    </div>
+                    <div className="transfer-receipt-row">
+                      <span>Content</span>
+                      <strong>{transferReceipt.note}</strong>
+                    </div>
+                    <div className="transfer-receipt-row">
+                      <span>Status</span>
+                      <strong className="transfer-receipt-status">
+                        {transferReceipt.status}
+                      </strong>
+                    </div>
+                  </div>
+                )}
+                <div className="transfer-actions">
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={closeTransferModal}
+                  >
+                    Finish
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
-      </section>
-    </>
+      )}
+    </section>
   );
 }
 
@@ -1405,13 +1810,13 @@ function AccountsView() {
           <button className="pill">All Time ▼</button>
         </div>
         <div className="txn-list">
-          {transactions.map((t, i) => (
+          {accountsRecentTransactions.map((t, i) => (
             <div key={i} className="txn-row">
-              <span className="txn-icon">{t.icon}</span>
-              <span>{t.title}</span>
-              <span className="muted">{t.type}</span>
+              <span className="txn-icon">💳</span>
+              <span>{t.name}</span>
+              <span className="muted">{t.status}</span>
               <span className="muted">{t.date}</span>
-              <span className="muted">{t.time}</span>
+              <span className="muted">{t.card}</span>
               <span>{t.amount}</span>
               <span className="muted">⋮</span>
             </div>
@@ -1552,6 +1957,7 @@ function Toggle({
 }
 
 function SettingView() {
+  const { updateUser } = useAuth();
   const { toast } = useToast();
   const { theme, setTheme, toggle: toggleTheme } = useTheme();
   const [settingTab, setSettingTab] = useState<SettingTabId>("preferences");
@@ -1661,6 +2067,7 @@ function SettingView() {
 
   const saveProfile = () => {
     localStorage.setItem(SETTING_PROFILE_KEY, JSON.stringify(profile));
+    updateUser({ name: profile.name, email: profile.email });
     toast("Profile saved successfully");
   };
 
@@ -2019,25 +2426,41 @@ function SettingView() {
 }
 
 function MyProfileView() {
+  const { user, updateUser } = useAuth();
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [profile, setProfile] = useState<ProfileForm>(() => {
-    try {
-      const s = localStorage.getItem(SETTING_PROFILE_KEY);
-      return s ? { ...defaultProfile, ...JSON.parse(s) } : defaultProfile;
-    } catch {
-      return defaultProfile;
-    }
+    const baseProfile = (() => {
+      try {
+        const s = localStorage.getItem(SETTING_PROFILE_KEY);
+        return s ? { ...defaultProfile, ...JSON.parse(s) } : defaultProfile;
+      } catch {
+        return defaultProfile;
+      }
+    })();
+    return user
+      ? { ...baseProfile, name: user.name, email: user.email }
+      : baseProfile;
   });
   const [avatarUrl, setAvatarUrl] = useState(() => {
-    return (
-      localStorage.getItem(PROFILE_AVATAR_KEY) ??
-      "https://i.pravatar.cc/120?img=12"
-    );
+    try {
+      return (
+        localStorage.getItem(PROFILE_AVATAR_KEY) ??
+        user?.avatar ??
+        "https://i.pravatar.cc/120?img=12"
+      );
+    } catch {
+      return user?.avatar ?? "https://i.pravatar.cc/120?img=12";
+    }
   });
 
   const saveProfile = () => {
     localStorage.setItem(SETTING_PROFILE_KEY, JSON.stringify(profile));
+    updateUser({
+      name: profile.name,
+      email: profile.email,
+      avatar: avatarUrl,
+    });
     toast("Profile saved successfully");
   };
 
@@ -2057,7 +2480,17 @@ function MyProfileView() {
       const next = String(reader.result ?? "");
       if (!next) return;
       setAvatarUrl(next);
-      localStorage.setItem(PROFILE_AVATAR_KEY, next);
+      try {
+        localStorage.setItem(PROFILE_AVATAR_KEY, next);
+      } catch (err) {
+        console.error(err);
+        toast(
+          "Image too large to store locally. Please choose a smaller one.",
+          "error",
+        );
+        return;
+      }
+      updateUser({ avatar: next });
       toast("Profile image updated");
     };
     reader.readAsDataURL(file);
@@ -2339,206 +2772,6 @@ function LicenseView() {
   );
 }
 
-type PeriodFilter = "This Week" | "All Time";
-
-function TransactionsView() {
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [period, setPeriod] = useState<PeriodFilter>("This Week");
-  const [periodOpen, setPeriodOpen] = useState(false);
-  const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<
-    "all" | "Pending" | "Completed" | "Canceled"
-  >("all");
-  const [showReceipt, setShowReceipt] = useState<string | null>(null);
-  const { toast } = useToast();
-
-  const filtered = transactionsHistory.filter((t) => {
-    if (
-      period === "This Week" &&
-      !(t.date.includes("February 18") || t.date.includes("February 19"))
-    ) {
-      return false;
-    }
-    if (statusFilter !== "all" && t.status !== statusFilter) return false;
-    const term = search.trim().toLowerCase();
-    if (
-      term &&
-      !(
-        t.name.toLowerCase().includes(term) || t.id.toLowerCase().includes(term)
-      )
-    ) {
-      return false;
-    }
-    return true;
-  });
-
-  const toggle = (id: string) => {
-    setSelected((s) => {
-      const next = new Set(s);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-  const toggleAll = () => {
-    if (selected.size === filtered.length) setSelected(new Set());
-    else setSelected(new Set(filtered.map((t) => t.id)));
-  };
-
-  const exportSelected = () => {
-    if (selected.size === 0) {
-      toast("No transactions selected", "error");
-      return;
-    }
-    const list = transactionsHistory.filter((t) => selected.has(t.id));
-    const total = list.reduce(
-      (sum, t) =>
-        sum + parseMoney(t.amount) * (t.amount.startsWith("-") ? -1 : 1),
-      0,
-    );
-    toast(`Exported ${list.length} items. Net: ${formatMoney(total)}`);
-  };
-
-  return (
-    <section className="transactions-section">
-      <div className="card transactions-history-card">
-        <div className="transactions-history-head">
-          <div>
-            <h3>Transactions History</h3>
-            <p className="transactions-history-subtitle muted">
-              Lorem ipsum dolor sit amet
-            </p>
-          </div>
-          <div className="tx-filters">
-            <div className="filter-dropdown-wrap">
-              <button
-                type="button"
-                className="pill"
-                onClick={() => setPeriodOpen(!periodOpen)}
-              >
-                {period} ▼
-              </button>
-              {periodOpen && (
-                <div className="filter-dropdown">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setPeriod("This Week");
-                      setPeriodOpen(false);
-                    }}
-                  >
-                    This Week
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setPeriod("All Time");
-                      setPeriodOpen(false);
-                    }}
-                  >
-                    All Time
-                  </button>
-                </div>
-              )}
-            </div>
-            <select
-              className="pill tx-status-filter"
-              value={statusFilter}
-              onChange={(e) =>
-                setStatusFilter(e.target.value as typeof statusFilter)
-              }
-            >
-              <option value="all">Status: All</option>
-              <option value="Completed">Completed</option>
-              <option value="Pending">Pending</option>
-              <option value="Canceled">Canceled</option>
-            </select>
-            <input
-              className="tx-search"
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search by ID or recipient"
-            />
-            <button type="button" className="pill" onClick={exportSelected}>
-              Export Selected
-            </button>
-          </div>
-        </div>
-        <div className="transactions-table-wrap">
-          <table className="transactions-table">
-            <thead>
-              <tr>
-                <th>
-                  <input
-                    type="checkbox"
-                    checked={
-                      filtered.length > 0 && selected.size === filtered.length
-                    }
-                    onChange={toggleAll}
-                    aria-label="Select all"
-                  />
-                </th>
-                <th>Transaction ID</th>
-                <th>Recipient</th>
-                <th>Date</th>
-                <th>Amount</th>
-                <th>Card Name</th>
-                <th>Status</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((t) => (
-                <tr key={t.id}>
-                  <td>
-                    <input
-                      type="checkbox"
-                      checked={selected.has(t.id)}
-                      onChange={() => toggle(t.id)}
-                      aria-label={`Select ${t.name}`}
-                    />
-                  </td>
-                  <td className="tx-id">{t.id}</td>
-                  <td>
-                    <div className="tx-recipient">
-                      <img
-                        src={`https://i.pravatar.cc/40?img=${t.img}`}
-                        alt=""
-                        className="tx-recipient-avatar"
-                      />
-                      <span>{t.name}</span>
-                    </div>
-                  </td>
-                  <td className="muted">{t.date}</td>
-                  <td className="tx-amount">
-                    <span className="tx-amount-arrow">↑</span> {t.amount}
-                  </td>
-                  <td className="muted">{t.card}</td>
-                  <td>
-                    <span className={`status-badge status-${t.statusType}`}>
-                      {t.status}
-                    </span>
-                  </td>
-                  <td>
-                    <button
-                      type="button"
-                      className="pill"
-                      onClick={() => setShowReceipt(t.id)}
-                    >
-                      View
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </section>
-  );
-}
-
 function NotificationsView({
   notifications,
 }: {
@@ -2665,31 +2898,29 @@ const PAGE_TITLE: Record<string, string> = {
 function App() {
   const { user, logout, login, signUp } = useAuth();
   const [activeTab, setActiveTab] = useState("Dashboard");
-  const [search, setSearch] = useState("");
-  const [searchResults, setSearchResults] = useState<string[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
   const [notificationFilter, setNotificationFilter] = useState<
     "all" | "transactions" | "security" | "offers"
   >("all");
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
+  const supportMenuRef = useRef<HTMLDivElement>(null);
   const [invoicesExpanded, setInvoicesExpanded] = useState(false);
   const [utilitiesExpanded, setUtilitiesExpanded] = useState(false);
 
   const isInvoicesActive =
     activeTab === "Invoice List" || activeTab === "Create Invoices";
   const invoicesExpandedShow = invoicesExpanded || isInvoicesActive;
-  const utilitiesIds = ["Knowledge base"];
-  const isUtilitiesActive = utilitiesIds.includes(activeTab);
-  const utilitiesExpandedShow = utilitiesExpanded || isUtilitiesActive;
+  const utilitiesExpandedShow = utilitiesExpanded;
 
   useEffect(() => {
     const close = (e: MouseEvent) => {
-      if (
-        userMenuRef.current &&
-        !userMenuRef.current.contains(e.target as Node)
-      )
+      const target = e.target as Node;
+      if (userMenuRef.current && !userMenuRef.current.contains(target))
         setUserMenuOpen(false);
+      if (supportMenuRef.current && !supportMenuRef.current.contains(target)) {
+        setUtilitiesExpanded(false);
+      }
     };
     document.addEventListener("click", close);
     return () => document.removeEventListener("click", close);
@@ -2717,21 +2948,6 @@ function App() {
     if (item.id === "Support") setUtilitiesExpanded(!utilitiesExpandedShow);
   };
 
-  const doSearch = (term: string) => {
-    setSearch(term);
-    const t = term.trim().toLowerCase();
-    if (!t) {
-      setSearchResults([]);
-      return;
-    }
-    const pool = NAV_ITEMS.flatMap((i) =>
-      i.children ? [i.label, ...i.children.map((c) => c.label)] : [i.label],
-    );
-    setSearchResults(
-      pool.filter((p) => p.toLowerCase().includes(t)).slice(0, 6),
-    );
-  };
-
   const notifications = [
     { type: "security", message: "New login from Chrome on MacOS" },
     { type: "transactions", message: "Invoice INV-42015 paid" },
@@ -2748,7 +2964,11 @@ function App() {
             if (item.children) {
               const isExpanded = expanded(item);
               return (
-                <div key={item.id} className="nav-group">
+                <div
+                  key={item.id}
+                  className="nav-group"
+                  ref={item.id === "Support" ? supportMenuRef : undefined}
+                >
                   <div
                     className={`nav-item nav-item-parent ${activeTab === item.id ? "active" : ""} ${isExpanded ? "expanded" : ""}`}
                     onClick={() => toggleExpanded(item)}
@@ -2766,9 +2986,16 @@ function App() {
                       <div
                         key={child.id}
                         className={`nav-item nav-item-child ${activeTab === child.id ? "active" : ""}`}
-                        onClick={() => setActiveTab(child.id)}
+                        onClick={() => {
+                          setActiveTab(child.id);
+                          setUtilitiesExpanded(false);
+                        }}
                         onKeyDown={(e) =>
-                          e.key === "Enter" && setActiveTab(child.id)
+                          e.key === "Enter" &&
+                          (() => {
+                            setActiveTab(child.id);
+                            setUtilitiesExpanded(false);
+                          })()
                         }
                         role="button"
                         tabIndex={0}
@@ -2783,8 +3010,17 @@ function App() {
               <div
                 key={item.id}
                 className={`nav-item ${activeTab === item.id ? "active" : ""}`}
-                onClick={() => setActiveTab(item.id)}
-                onKeyDown={(e) => e.key === "Enter" && setActiveTab(item.id)}
+                onClick={() => {
+                  setActiveTab(item.id);
+                  setUtilitiesExpanded(false);
+                }}
+                onKeyDown={(e) =>
+                  e.key === "Enter" &&
+                  (() => {
+                    setActiveTab(item.id);
+                    setUtilitiesExpanded(false);
+                  })()
+                }
                 role="button"
                 tabIndex={0}
               >
@@ -2793,148 +3029,117 @@ function App() {
             );
           })}
         </nav>
+        <div className="top-actions top-actions-inline">
+          <div className="bell-wrap">
+            <button
+              type="button"
+              className="bell"
+              onClick={() => setShowNotifications((v) => !v)}
+              aria-haspopup="true"
+              aria-expanded={showNotifications}
+            >
+              🔔<span className="badge">{notifications.length}</span>
+            </button>
+            {showNotifications && (
+              <div className="notif-dropdown">
+                <div className="notif-filter">
+                  <select
+                    value={notificationFilter}
+                    onChange={(e) =>
+                      setNotificationFilter(
+                        e.target.value as typeof notificationFilter,
+                      )
+                    }
+                  >
+                    <option value="all">All</option>
+                    <option value="transactions">Transactions</option>
+                    <option value="security">Security</option>
+                    <option value="offers">Offers</option>
+                  </select>
+                </div>
+                {notifications
+                  .filter(
+                    (n) =>
+                      notificationFilter === "all" ||
+                      n.type === notificationFilter,
+                  )
+                  .map((n, i) => (
+                    <div key={i} className="notif-row">
+                      <strong style={{ textTransform: "capitalize" }}>
+                        {n.type}
+                      </strong>
+                      <div>{n.message}</div>
+                    </div>
+                  ))}
+                <button
+                  type="button"
+                  className="pill"
+                  onClick={() => setShowNotifications(false)}
+                >
+                  Mark read & close
+                </button>
+              </div>
+            )}
+          </div>
+          <div className="user-menu-wrap" ref={userMenuRef}>
+            <button
+              type="button"
+              className="user-menu-trigger"
+              onClick={() => setUserMenuOpen(!userMenuOpen)}
+              aria-expanded={userMenuOpen}
+              aria-haspopup="true"
+            >
+              <img className="avatar" src={displayUser.avatar} alt="" />
+              <span className="avatar-chevron">▼</span>
+            </button>
+            {userMenuOpen && (
+              <div className="user-menu-dropdown">
+                <span
+                  className="muted"
+                  style={{
+                    padding: "8px 14px",
+                    display: "block",
+                    fontSize: 13,
+                  }}
+                >
+                  {displayUser.email}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab("My Profile");
+                    setUserMenuOpen(false);
+                  }}
+                >
+                  My profile
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab("Setting");
+                    setUserMenuOpen(false);
+                  }}
+                >
+                  Setting
+                </button>
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={() => {
+                    logout();
+                    setUserMenuOpen(false);
+                  }}
+                >
+                  Logout
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
       </aside>
 
       <main className="content">
-        <header className="topbar">
-          <h1>{PAGE_TITLE[activeTab] ?? activeTab}</h1>
-          <div className="top-actions">
-            <input
-              type="search"
-              placeholder="Search here ..."
-              aria-label="Search"
-              value={search}
-              onChange={(e) => doSearch(e.target.value)}
-            />
-            {searchResults.length > 0 && (
-              <div className="search-dropdown">
-                {searchResults.map((r) => (
-                  <button
-                    key={r}
-                    type="button"
-                    className="search-result"
-                    onClick={() => {
-                      setActiveTab(r);
-                      setSearch("");
-                      setSearchResults([]);
-                    }}
-                  >
-                    {r}
-                  </button>
-                ))}
-              </div>
-            )}
-            <div className="bell-wrap">
-              <button
-                type="button"
-                className="bell"
-                onClick={() => setShowNotifications((v) => !v)}
-                aria-haspopup="true"
-                aria-expanded={showNotifications}
-              >
-                🔔<span className="badge">{notifications.length}</span>
-              </button>
-              {showNotifications && (
-                <div className="notif-dropdown">
-                  <div className="notif-filter">
-                    <select
-                      value={notificationFilter}
-                      onChange={(e) =>
-                        setNotificationFilter(
-                          e.target.value as typeof notificationFilter,
-                        )
-                      }
-                    >
-                      <option value="all">All</option>
-                      <option value="transactions">Transactions</option>
-                      <option value="security">Security</option>
-                      <option value="offers">Offers</option>
-                    </select>
-                  </div>
-                  {notifications
-                    .filter(
-                      (n) =>
-                        notificationFilter === "all" ||
-                        n.type === notificationFilter,
-                    )
-                    .map((n, i) => (
-                      <div key={i} className="notif-row">
-                        <strong style={{ textTransform: "capitalize" }}>
-                          {n.type}
-                        </strong>
-                        <div>{n.message}</div>
-                      </div>
-                    ))}
-                  <button
-                    type="button"
-                    className="pill"
-                    onClick={() => setShowNotifications(false)}
-                  >
-                    Mark read & close
-                  </button>
-                </div>
-              )}
-            </div>
-            <div className="user-menu-wrap" ref={userMenuRef}>
-              <button
-                type="button"
-                className="user-menu-trigger"
-                onClick={() => setUserMenuOpen(!userMenuOpen)}
-                aria-expanded={userMenuOpen}
-                aria-haspopup="true"
-              >
-                <img className="avatar" src={displayUser.avatar} alt="" />
-                <span className="avatar-chevron">▼</span>
-              </button>
-              {userMenuOpen && (
-                <div className="user-menu-dropdown">
-                  <span
-                    className="muted"
-                    style={{
-                      padding: "8px 14px",
-                      display: "block",
-                      fontSize: 13,
-                    }}
-                  >
-                    {displayUser.email}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setActiveTab("My Profile");
-                      setUserMenuOpen(false);
-                    }}
-                  >
-                    My profile
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setActiveTab("Setting");
-                      setUserMenuOpen(false);
-                    }}
-                  >
-                    Setting
-                  </button>
-                  <button
-                    type="button"
-                    className="danger"
-                    onClick={() => {
-                      logout();
-                      setUserMenuOpen(false);
-                    }}
-                  >
-                    Logout
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-        </header>
-
         {activeTab === "Dashboard" && <DashboardView />}
-        {activeTab === "My Wallet" && <MyWalletView />}
-        {activeTab === "Transactions" && <TransactionsView />}
         {activeTab === "Invoice List" && <InvoiceListView />}
         {activeTab === "Create Invoices" && <CreateInvoicesView />}
         {activeTab === "Card Center" && <CardCenterView />}
@@ -2948,8 +3153,6 @@ function App() {
         {activeTab === "KYC Verification" && <KycView />}
         {![
           "Dashboard",
-          "My Wallet",
-          "Transactions",
           "Invoice List",
           "Create Invoices",
           "Card Center",

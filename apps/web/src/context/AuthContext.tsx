@@ -15,6 +15,7 @@ const AuthContext = createContext<{
   user: User | null;
   login: (email: string, password: string) => boolean;
   signUp: (name: string, email: string, password: string) => boolean;
+  updateUser: (patch: Partial<User>) => void;
   logout: () => void;
 } | null>(null);
 
@@ -35,8 +36,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   });
 
   useEffect(() => {
-    if (user) localStorage.setItem(STORAGE_KEY, JSON.stringify(user));
-    else localStorage.removeItem(STORAGE_KEY);
+    try {
+      if (user) localStorage.setItem(STORAGE_KEY, JSON.stringify(user));
+      else localStorage.removeItem(STORAGE_KEY);
+    } catch (err) {
+      // Avoid crashing the app if storage is full (e.g., large avatar data URL).
+      console.warn("Cannot persist auth user to localStorage", err);
+    }
   }, [user]);
 
   const login = useCallback((email: string, password: string) => {
@@ -54,10 +60,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const updateUser = useCallback((patch: Partial<User>) => {
+    setUser((prev) => (prev ? { ...prev, ...patch } : prev));
+  }, []);
+
   const logout = useCallback(() => setUser(null), []);
 
   return (
-    <AuthContext.Provider value={{ user, login, signUp, logout }}>
+    <AuthContext.Provider value={{ user, login, signUp, updateUser, logout }}>
       {children}
     </AuthContext.Provider>
   );
