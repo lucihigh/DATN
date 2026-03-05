@@ -125,6 +125,132 @@ type Transaction = {
   reference: string;
 };
 
+type AuditLogDoc = {
+  _id: string;
+  userId: string | null;
+  actor?: string | null;
+  action: string;
+  details?: string | Record<string, unknown> | null;
+  ipAddress?: string | null;
+  createdAt: string;
+};
+
+type AuditLogView = {
+  id: string;
+  ts: string;
+  admin: string;
+  category: string;
+  categoryClass: "um" | "tx" | "acc" | "login" | "sec";
+  detail: string;
+  ip: string;
+  status: "Success" | "Pending" | "Failed";
+  statusClass: "ok" | "pending" | "fail";
+  userAgent?: string;
+  requestId?: string;
+  location?: string;
+};
+
+const prettyAction = (action: string) =>
+  action
+    .toLowerCase()
+    .split("_")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+
+const inferAuditCategoryClass = (
+  action: string,
+): AuditLogView["categoryClass"] => {
+  const a = action.toUpperCase();
+  if (a.includes("LOGIN") || a.includes("MFA")) return "login";
+  if (
+    a.includes("TRANSFER") ||
+    a.includes("TRANSACTION") ||
+    a.includes("WITHDRAW") ||
+    a.includes("DEPOSIT") ||
+    a.includes("PAYMENT") ||
+    a.includes("REFUND")
+  ) {
+    return "tx";
+  }
+  if (a.includes("USER") || a.includes("ROLE")) return "um";
+  if (
+    a.includes("PROFILE") ||
+    a.includes("PASSWORD") ||
+    a.includes("ACCOUNT")
+  ) {
+    return "acc";
+  }
+  return "sec";
+};
+
+const inferAuditStatusClass = (
+  action: string,
+  details?: AuditLogDoc["details"],
+): AuditLogView["statusClass"] => {
+  const a = action.toUpperCase();
+  const d =
+    typeof details === "string"
+      ? details.toUpperCase()
+      : JSON.stringify(details ?? {}).toUpperCase();
+  if (
+    a.includes("FAIL") ||
+    a.includes("BLOCK") ||
+    a.includes("DENY") ||
+    a.includes("ALERT") ||
+    d.includes("FAIL") ||
+    d.includes("BLOCK")
+  ) {
+    return "fail";
+  }
+  if (
+    a.includes("PENDING") ||
+    a.includes("REVIEW") ||
+    d.includes("PENDING") ||
+    d.includes("REVIEW")
+  ) {
+    return "pending";
+  }
+  return "ok";
+};
+
+const mapAuditDocToView = (doc: AuditLogDoc): AuditLogView => {
+  const detailsObj =
+    doc.details && typeof doc.details === "object" ? doc.details : undefined;
+  const detail =
+    typeof doc.details === "string"
+      ? doc.details
+      : (typeof detailsObj?.message === "string" && detailsObj.message) ||
+        (typeof detailsObj?.reason === "string" && detailsObj.reason) ||
+        (typeof detailsObj?.description === "string" &&
+          detailsObj.description) ||
+        prettyAction(doc.action);
+  const categoryClass = inferAuditCategoryClass(doc.action);
+  const statusClass = inferAuditStatusClass(doc.action, doc.details);
+  const status =
+    statusClass === "ok"
+      ? "Success"
+      : statusClass === "pending"
+        ? "Pending"
+        : "Failed";
+  return {
+    id: doc._id,
+    ts: doc.createdAt,
+    admin: doc.actor || "system",
+    category: prettyAction(doc.action),
+    categoryClass,
+    detail,
+    ip: doc.ipAddress || "unknown",
+    status,
+    statusClass,
+    userAgent:
+      typeof detailsObj?.userAgent === "string" ? detailsObj.userAgent : "",
+    requestId:
+      typeof detailsObj?.requestId === "string" ? detailsObj.requestId : "",
+    location:
+      typeof detailsObj?.location === "string" ? detailsObj.location : "",
+  };
+};
+
 const USERS_STORE_KEY = "ewallet_admin_users";
 
 const styles = `
@@ -439,12 +565,6 @@ const styles = `
   .theme-dark .user-search { background:#0f1934; border:1px solid #1b2748; color:#e7ecff; }
   .theme-dark .user-btn { background:#0f1934; border:1px solid #1b2748; color:#e7ecff; }
   .theme-dark .user-btn.primary { background:#1f6bff; border-color:#1f6bff; color:#fff; }
-  .theme-dark .audit-input, .theme-dark .audit-select { background:#0f1934; border:1px solid #1b2748; color:#e7ecff; }
-  .theme-dark .audit-row:hover { background:#162143; }
-  .theme-dark .audit-title h1 { color:#e7ecff; }
-  .audit-title p { display:none; }
-  .theme-dark .audit-admin { color:#e7ecff; }
-  .audit-head { margin-bottom: 12px; }
   .theme-dark .user-head h2 { color:#e7ecff; }
   .theme-dark .user-name { color:#e7ecff; }
   .theme-dark .user-title { color:#a3b1d6; }
@@ -464,9 +584,7 @@ const styles = `
 
   /* Light inputs stay white with dark text */
   .theme-light input,
-  .theme-light .user-search,
-  .theme-light .audit-input,
-  .theme-light .audit-select { background:#ffffff; color:#0f172a; border:1px solid #dfe3ea; }
+  .theme-light .user-search { background:#ffffff; color:#0f172a; border:1px solid #dfe3ea; }
 
   /* Dark dashboard panels */
   .theme-dark .ana-page { background:#0b1224; color:#e7ecff; }
@@ -545,38 +663,111 @@ const styles = `
   .tx-chip.failed { background:#fef2f2; color:#b91c1c; border:1px solid #fecdd3; }
 
   /* Audit log */
-  .audit-card { background:#fff; border-radius:16px; box-shadow:0 8px 30px rgba(0,0,0,0.08); padding:18px; }
-  .audit-head { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }
-  .audit-title h1 { margin:0; font-size:28px; color:#0f172a; }
-  .audit-title p { margin:4px 0 0; color:#6b7280; }
-  .audit-filters { display:grid; grid-template-columns:1.1fr 0.8fr 0.8fr 0.8fr; gap:10px; width:100%; }
-  .audit-input, .audit-select { width:100%; padding:10px 12px; border:1px solid #e5e7eb; border-radius:12px; background:#f8fafc; color:#1f2937; }
-  .audit-table { width:100%; border-collapse:collapse; margin-top:14px; }
-  .audit-table th, .audit-table td { padding:14px 12px; border-bottom:1px solid #eef2ff; text-align:left; vertical-align:middle; }
-  .audit-table th { font-size:13px; letter-spacing:0.2px; color:#94a3b8; text-transform:uppercase; }
-  .audit-row { transition:background 0.12s; }
-  .audit-row:hover { background:#f8fafc; }
-  .audit-row.main { cursor:pointer; }
-  .audit-admin { display:flex; align-items:center; gap:10px; font-weight:700; color:#0f172a; }
-  .audit-avatar { width:40px; height:40px; border-radius:50%; object-fit:cover; background:#e0e7ff; display:grid; place-items:center; font-weight:800; color:#1f2937; }
-  .audit-chip { display:inline-flex; align-items:center; padding:6px 10px; border-radius:12px; font-weight:700; font-size:12px; }
-  .audit-chip.um { background:#fef3c7; color:#92400e; }
-  .audit-chip.tx { background:#e0e7ff; color:#312e81; }
-  .audit-chip.acc { background:#f3e8ff; color:#6b21a8; }
-  .audit-chip.login { background:#e0f2fe; color:#075985; }
-  .audit-chip.sec { background:#dcfce7; color:#166534; }
-  .audit-status { display:inline-flex; align-items:center; gap:8px; padding:6px 10px; border-radius:999px; font-weight:700; font-size:12px; }
-  .audit-status.ok { background:#ecfdf3; color:#166534; border:1px solid #bbf7d0; }
-  .audit-status.fail { background:#fef2f2; color:#b91c1c; border:1px solid #fecdd3; }
-  .audit-meta { font-size:13px; color:#475569; display:grid; gap:6px; margin-top:10px; }
-  .audit-meta strong { display:block; font-size:12px; color:#6b7280; letter-spacing:0.2px; }
-  .audit-location { display:flex; align-items:center; gap:6px; color:#6b7280; }
-  .audit-expand { background:#f8fafc; }
-  .audit-pagination { display:flex; justify-content:space-between; align-items:center; margin-top:12px; color:#6b7280; }
-  .audit-pager { display:flex; gap:8px; }
-  .audit-pager button { border:1px solid #e5e7eb; background:#fff; color:#0f172a; border-radius:8px; padding:6px 10px; cursor:pointer; }
-  .audit-pager button.active { background:#1f6bff; color:#fff; border-color:#1f6bff; }
-  .theme-dark .audit-pager button { background:#162143; border:1px solid #1b2748; color:#e7ecff; }
+  .audit-card {
+    background: radial-gradient(circle at 8% -30%, rgba(36, 113, 255, 0.25), transparent 35%), #061527;
+    border: 1px solid #1a3351;
+    border-radius: 16px;
+    box-shadow: 0 22px 40px rgba(4, 11, 24, 0.45);
+    padding: 18px;
+    color: #d6e6ff;
+  }
+  .audit-tabs { display:flex; align-items:center; gap:18px; border-bottom:1px solid #1d3552; padding-bottom:10px; margin-bottom:16px; }
+  .audit-tab {
+    border:none;
+    background:transparent;
+    color:#7a95b8;
+    font-size:18px;
+    font-weight:700;
+    padding:4px 0 10px;
+    cursor:pointer;
+    position:relative;
+  }
+  .audit-tab.active { color:#1e90ff; }
+  .audit-tab.active::after {
+    content:"";
+    position:absolute;
+    left:0;
+    right:0;
+    bottom:-11px;
+    height:2px;
+    background:#1e90ff;
+    border-radius:2px;
+  }
+  .audit-head { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:16px; }
+  .audit-filters { display:flex; gap:10px; flex-wrap:wrap; }
+  .audit-select {
+    appearance:none;
+    min-width:170px;
+    padding:10px 34px 10px 12px;
+    border:1px solid #2a4767;
+    border-radius:10px;
+    background:#0f243d;
+    color:#e8f1ff;
+    font-weight:600;
+    cursor:pointer;
+  }
+  .audit-count { color:#7089a9; font-size:12px; letter-spacing:1.2px; text-transform:uppercase; font-weight:700; }
+  .audit-table-wrap { border:1px solid #1f3857; border-radius:14px; overflow:hidden; background:#0a1a2f; }
+  .audit-table { width:100%; border-collapse:collapse; }
+  .audit-table th, .audit-table td { padding:14px 12px; text-align:left; vertical-align:middle; border-bottom:1px solid #1a3350; }
+  .audit-table th { background:#0d2139; color:#87a7cd; font-size:12px; letter-spacing:0.8px; text-transform:uppercase; }
+  .audit-table td { color:#d8e7ff; }
+  .audit-row.main { transition:background 0.15s; }
+  .audit-row.main:hover { background:#102947; }
+  .audit-time { display:grid; gap:2px; }
+  .audit-date-label { font-weight:700; color:#edf4ff; }
+  .audit-time-label { font-size:13px; color:#7992b3; }
+  .audit-type { display:inline-flex; align-items:center; gap:8px; font-weight:700; }
+  .audit-type-ico { width:20px; color:#41a6ff; text-align:center; }
+  .audit-admin { display:grid; gap:3px; }
+  .audit-admin-name { font-weight:700; color:#e7f1ff; }
+  .audit-admin-sub { font-size:13px; color:#7992b3; }
+  .audit-status { display:inline-flex; align-items:center; gap:8px; padding:6px 12px; border-radius:999px; font-weight:700; font-size:12px; border:1px solid transparent; }
+  .audit-status::before { content:""; width:7px; height:7px; border-radius:50%; background:currentColor; }
+  .audit-status.ok { background:#103a2d; border-color:#1a644b; color:#2bd27f; }
+  .audit-status.pending { background:#3c3218; border-color:#665422; color:#f3c742; }
+  .audit-status.fail { background:#41202a; border-color:#6b2d3b; color:#ff7a95; }
+  .audit-detail-btn { border:none; background:transparent; color:#2c9bff; font-weight:700; cursor:pointer; }
+  .audit-expand { background:#0c2240; }
+  .audit-meta {
+    padding:2px 0;
+    display:grid;
+    grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));
+    gap:12px;
+    color:#9cb5d6;
+    font-size:13px;
+  }
+  .audit-meta strong { display:block; color:#d7e7ff; font-size:12px; margin-bottom:4px; }
+  .audit-pagination {
+    display:grid;
+    grid-template-columns:1fr auto 1fr;
+    align-items:center;
+    margin-top:14px;
+    color:#6e89ad;
+    gap:8px;
+  }
+  .audit-page-nav {
+    border:none;
+    background:transparent;
+    color:#2c9bff;
+    font-weight:700;
+    cursor:pointer;
+    justify-self:start;
+  }
+  .audit-page-nav.next { justify-self:end; }
+  .audit-page-nav:disabled { color:#4c607c; cursor:not-allowed; }
+  .audit-pager { display:flex; justify-content:center; gap:8px; }
+  .audit-pager button {
+    min-width:32px;
+    height:32px;
+    border:1px solid #274667;
+    border-radius:8px;
+    background:#0f243d;
+    color:#a8c1e2;
+    cursor:pointer;
+    font-weight:700;
+  }
+  .audit-pager button.active { background:#1f8fff; border-color:#1f8fff; color:#fff; }
 
   /* Compact desktop layout for 16:9 screens */
   @media (min-width: 1280px) and (min-aspect-ratio: 16/9) {
@@ -608,9 +799,16 @@ const styles = `
     .prof-name { font-size: 20px; }
     .prof-field input { padding: 10px 12px; }
 
-    .audit-title h1 { font-size: 24px; }
     .audit-table th, .audit-table td { padding: 10px 8px; }
-    .audit-avatar { width: 36px; height: 36px; }
+    .audit-select { min-width: 150px; }
+  }
+  @media (max-width: 900px) {
+    .audit-filters { width: 100%; }
+    .audit-select { flex: 1 1 170px; min-width: 0; }
+    .audit-table-wrap { overflow-x: auto; }
+    .audit-table { min-width: 780px; }
+    .audit-pagination { grid-template-columns: 1fr; }
+    .audit-page-nav, .audit-page-nav.next { justify-self: center; }
   }
 `;
 
@@ -775,208 +973,117 @@ function AdminApp() {
     },
   ];
 
-  const auditLogs = [
+  const auditLogDocs: AuditLogDoc[] = [
     {
-      id: "log-1",
-      ts: "2026-02-24 14:32:01",
-      admin: "Alex Rivera",
-      avatar: "https://i.pravatar.cc/80?img=12",
-      category: "User Management",
-      categoryClass: "um",
-      detail: "Locked user: John Doe",
-      ip: "192.168.1.45",
-      status: "Success",
-      statusClass: "ok",
-      userAgent:
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
-      requestId: "req_88294_af92-01xx-9281",
-      location: "San Francisco, USA",
-      extraImg:
-        "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=200&q=60",
+      _id: "699f98aa1ae0d9039da45276",
+      userId: null,
+      actor: "ai-service",
+      action: "AI_LOGIN_ALERT",
+      details: {
+        message: "Impossible travel pattern detected.",
+        requestId: "req_ai_45276",
+        userAgent: "risk-engine/1.8",
+        location: "Singapore",
+      },
+      ipAddress: "88.88.88.88",
+      createdAt: "2026-02-26T00:49:46.897Z",
     },
     {
-      id: "log-2",
-      ts: "2026-02-24 13:15:22",
-      admin: "Sarah Chen",
-      avatar: "https://i.pravatar.cc/80?img=47",
-      category: "Transaction",
-      categoryClass: "tx",
-      detail: "Refund processed: #TRX-990",
-      ip: "203.0.113.12",
-      status: "Success",
-      statusClass: "ok",
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      requestId: "req_77211_tx-990",
-      location: "New York, USA",
-      extraImg:
-        "https://images.unsplash.com/photo-1460925895917-afdab827c52f?auto=format&fit=crop&w=200&q=60",
+      _id: "699f98aa1ae0d9039da45277",
+      userId: "65f8fb0a8d7bb2218a12ab10",
+      actor: "alex.rivera@company.com",
+      action: "USER_LOCKED",
+      details: {
+        message: "Locked user account after repeated fraud signals.",
+        requestId: "req_admin_1001",
+        userAgent: "Mozilla/5.0",
+        location: "San Francisco, USA",
+      },
+      ipAddress: "192.168.1.45",
+      createdAt: "2026-02-25T14:32:01.000Z",
     },
     {
-      id: "log-3",
-      ts: "2026-02-24 11:05:40",
-      admin: "Michael Scott",
-      avatar: "https://i.pravatar.cc/80?img=6",
-      category: "Account Edit",
-      categoryClass: "acc",
-      detail: "Changed role for Pam Beesly",
-      ip: "172.16.254.1",
-      status: "Success",
-      statusClass: "ok",
-      userAgent:
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
-      requestId: "req_66101_acc-455",
-      location: "Scranton, USA",
-      extraImg:
-        "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=200&q=60",
+      _id: "699f98aa1ae0d9039da45278",
+      userId: "65f8fb0a8d7bb2218a12ab11",
+      actor: "sarah.chen@company.com",
+      action: "TRANSACTION_REFUND_APPROVED",
+      details: {
+        message: "Refund approved for trx #TRX-990",
+        requestId: "req_tx_990",
+        userAgent: "Mozilla/5.0",
+        location: "New York, USA",
+      },
+      ipAddress: "203.0.113.12",
+      createdAt: "2026-02-25T13:15:22.000Z",
     },
     {
-      id: "log-4",
-      ts: "2026-02-24 09:45:12",
-      admin: "Alex Rivera",
-      avatar: "https://i.pravatar.cc/80?img=12",
-      category: "Login",
-      categoryClass: "login",
-      detail: "Failed login attempt",
-      ip: "192.168.1.45",
-      status: "Failed",
-      statusClass: "fail",
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
-      requestId: "req_55890_login-fail",
-      location: "San Francisco, USA",
+      _id: "699f98aa1ae0d9039da45279",
+      userId: "65f8fb0a8d7bb2218a12ab12",
+      actor: "michael.scott@company.com",
+      action: "ACCOUNT_ROLE_UPDATED",
+      details: "Changed role from Viewer to Support",
+      ipAddress: "172.16.254.1",
+      createdAt: "2026-02-25T11:05:40.000Z",
     },
     {
-      id: "log-5",
-      ts: "2026-02-24 08:20:05",
-      admin: "Sarah Chen",
-      avatar: "https://i.pravatar.cc/80?img=47",
-      category: "Security",
-      categoryClass: "sec",
-      detail: "Updated firewall rules",
-      ip: "203.0.113.12",
-      status: "Success",
-      statusClass: "ok",
-      userAgent:
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 12_6_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-      requestId: "req_44021_fw-update",
-      location: "Los Angeles, USA",
-      extraImg:
-        "https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&w=200&q=60",
+      _id: "699f98aa1ae0d9039da45280",
+      userId: null,
+      actor: "ai-service",
+      action: "AI_LOGIN_REVIEW_PENDING",
+      details: {
+        message: "Login flagged and queued for manual review.",
+        requestId: "req_ai_review_042",
+        userAgent: "risk-engine/1.8",
+        location: "Tokyo, Japan",
+      },
+      ipAddress: "45.76.11.20",
+      createdAt: "2026-02-25T09:45:12.000Z",
     },
     {
-      id: "log-6",
-      ts: "2026-02-23 19:40:11",
-      admin: "Alex Rivera",
-      avatar: "https://i.pravatar.cc/80?img=12",
-      category: "User Management",
-      categoryClass: "um",
-      detail: "Unlocked user: Maria Gonzales",
-      ip: "192.168.1.45",
-      status: "Success",
-      statusClass: "ok",
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      requestId: "req_55220_unlock",
-      location: "San Francisco, USA",
+      _id: "699f98aa1ae0d9039da45281",
+      userId: "65f8fb0a8d7bb2218a12ab13",
+      actor: "sarah.chen@company.com",
+      action: "SECURITY_POLICY_UPDATED",
+      details: {
+        message: "Updated lockout policy and rate limit.",
+        requestId: "req_sec_778",
+        userAgent: "Mozilla/5.0",
+        location: "Los Angeles, USA",
+      },
+      ipAddress: "203.0.113.12",
+      createdAt: "2026-02-24T08:20:05.000Z",
     },
     {
-      id: "log-7",
-      ts: "2026-02-23 08:05:44",
-      admin: "Michael Scott",
-      avatar: "https://i.pravatar.cc/80?img=6",
-      category: "Login",
-      categoryClass: "login",
-      detail: "MFA challenge passed",
-      ip: "172.16.254.1",
-      status: "Success",
-      statusClass: "ok",
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
-      requestId: "req_33012_mfa",
-      location: "Scranton, USA",
+      _id: "699f98aa1ae0d9039da45282",
+      userId: null,
+      actor: "alex.rivera@company.com",
+      action: "LOGIN_FAILED",
+      details: {
+        message: "Failed login attempt from unknown browser.",
+        requestId: "req_login_fail_11",
+        userAgent: "Mozilla/5.0 Firefox/123.0",
+        location: "New York, USA",
+      },
+      ipAddress: "203.0.113.12",
+      createdAt: "2026-02-24T07:12:54.000Z",
     },
     {
-      id: "log-8",
-      ts: "2026-02-22 22:10:05",
-      admin: "Sarah Chen",
-      avatar: "https://i.pravatar.cc/80?img=47",
-      category: "Transaction",
-      categoryClass: "tx",
-      detail: "Chargeback reviewed: #CB-204",
-      ip: "203.0.113.12",
-      status: "Success",
-      statusClass: "ok",
-      userAgent:
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
-      requestId: "req_22041_cb",
-      location: "New York, USA",
-    },
-    {
-      id: "log-9",
-      ts: "2026-02-22 07:55:12",
-      admin: "Alex Rivera",
-      avatar: "https://i.pravatar.cc/80?img=12",
-      category: "Security",
-      categoryClass: "sec",
-      detail: "Blocked IP range 203.0.113.0/24",
-      ip: "192.168.1.45",
-      status: "Success",
-      statusClass: "ok",
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      requestId: "req_88211_block",
-      location: "San Francisco, USA",
-    },
-    {
-      id: "log-10",
-      ts: "2026-02-21 18:33:27",
-      admin: "Michael Scott",
-      avatar: "https://i.pravatar.cc/80?img=6",
-      category: "Account Edit",
-      categoryClass: "acc",
-      detail: "Updated billing contact for Dunder",
-      ip: "172.16.254.1",
-      status: "Success",
-      statusClass: "ok",
-      userAgent:
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
-      requestId: "req_11021_billing",
-      location: "Scranton, USA",
-    },
-    {
-      id: "log-11",
-      ts: "2026-02-21 09:12:54",
-      admin: "Sarah Chen",
-      avatar: "https://i.pravatar.cc/80?img=47",
-      category: "Login",
-      categoryClass: "login",
-      detail: "Failed login attempt",
-      ip: "203.0.113.12",
-      status: "Failed",
-      statusClass: "fail",
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
-      requestId: "req_99102_fail",
-      location: "New York, USA",
-    },
-    {
-      id: "log-12",
-      ts: "2026-02-20 16:44:10",
-      admin: "Alex Rivera",
-      avatar: "https://i.pravatar.cc/80?img=12",
-      category: "Transaction",
-      categoryClass: "tx",
-      detail: "High-value payout approved: $25,000",
-      ip: "192.168.1.45",
-      status: "Success",
-      statusClass: "ok",
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      requestId: "req_77299_payout",
-      location: "San Francisco, USA",
+      _id: "699f98aa1ae0d9039da45283",
+      userId: "65f8fb0a8d7bb2218a12ab14",
+      actor: "alex.rivera@company.com",
+      action: "TRANSFER_HIGH_VALUE_APPROVED",
+      details: {
+        message: "Approved payout over threshold: $25,000",
+        requestId: "req_tx_high_25000",
+        userAgent: "Mozilla/5.0",
+        location: "San Francisco, USA",
+      },
+      ipAddress: "192.168.1.45",
+      createdAt: "2026-02-23T16:44:10.000Z",
     },
   ];
+
+  const auditLogs = auditLogDocs.map(mapAuditDocToView);
 
   const [users, setUsers] = useState<AdminUser[]>(() => {
     try {
@@ -1014,12 +1121,13 @@ function AdminApp() {
   const [userSort, setUserSort] = useState<"latest" | "oldest">("latest");
   const [txUser, setTxUser] = useState<AdminUser | null>(null);
   const [expandedAudit, setExpandedAudit] = useState<string | null>(null);
-  const [auditSearch, setAuditSearch] = useState("");
   const [auditRange, setAuditRange] = useState<"7" | "30" | "90">("7");
   const [auditActivity, setAuditActivity] = useState<
     "all" | "um" | "tx" | "acc" | "login" | "sec"
   >("all");
-  const [auditAdmin, setAuditAdmin] = useState<string>("all");
+  const [auditStatus, setAuditStatus] = useState<
+    "all" | "ok" | "pending" | "fail"
+  >("all");
   const [auditPage, setAuditPage] = useState(1);
   const auditPageSize = 5;
 
@@ -1077,12 +1185,11 @@ function AdminApp() {
 
   useEffect(() => {
     setAuditPage(1);
-  }, [auditSearch, auditRange, auditActivity, auditAdmin]);
+  }, [auditRange, auditActivity, auditStatus]);
 
   const filteredAuditLogs = useMemo(() => {
     const maxAgeDays = Number(auditRange);
     const now = new Date();
-    const term = auditSearch.trim().toLowerCase();
     const list = auditLogs.filter((log) => {
       const logDate = new Date(log.ts.replace(" ", "T"));
       if (!Number.isNaN(maxAgeDays)) {
@@ -1096,25 +1203,15 @@ function AdminApp() {
       }
       if (auditActivity !== "all" && log.categoryClass !== auditActivity)
         return false;
-      if (auditAdmin !== "all" && log.admin !== auditAdmin) return false;
-      if (term) {
-        const blob = `${log.admin} ${log.category} ${log.detail}`.toLowerCase();
-        if (!blob.includes(term)) return false;
-      }
+      if (auditStatus !== "all" && log.statusClass !== auditStatus)
+        return false;
       return true;
     });
     if (expandedAudit && !list.some((l) => l.id === expandedAudit)) {
       setExpandedAudit(null);
     }
     return list;
-  }, [
-    auditLogs,
-    auditSearch,
-    auditRange,
-    auditActivity,
-    auditAdmin,
-    expandedAudit,
-  ]);
+  }, [auditLogs, auditRange, auditActivity, auditStatus, expandedAudit]);
 
   const totalAuditPages = Math.max(
     1,
@@ -1882,203 +1979,200 @@ function AdminApp() {
 
         {active === "audit" && (
           <div className="audit-card">
-            <div className="audit-head">
-              <div className="audit-title">
-                <h1>Audit Log</h1>
-                <p>
-                  Monitor and track all administrative actions across the
-                  system.
-                </p>
-              </div>
-              <button
-                className="user-btn primary"
-                type="button"
-                onClick={handleExportCsv}
-              >
-                Export CSV
+            <div className="audit-tabs">
+              <button className="audit-tab active" type="button">
+                Audit History
+              </button>
+              <button className="audit-tab" type="button" aria-disabled="true">
+                Security Logs
               </button>
             </div>
 
-            <div className="audit-filters">
-              <input
-                className="audit-input"
-                placeholder="Search by user or action..."
-                value={auditSearch}
-                onChange={(e) => setAuditSearch(e.target.value)}
-              />
-              <select
-                className="audit-select"
-                value={auditRange}
-                onChange={(e) =>
-                  setAuditRange(e.target.value as typeof auditRange)
-                }
-              >
-                <option value="7">Last 7 Days</option>
-                <option value="30">Last 30 Days</option>
-                <option value="90">Last 90 Days</option>
-              </select>
-              <select
-                className="audit-select"
-                value={auditActivity}
-                onChange={(e) =>
-                  setAuditActivity(e.target.value as typeof auditActivity)
-                }
-              >
-                <option value="all">Activity: All</option>
-                <option value="um">User Management</option>
-                <option value="tx">Transaction</option>
-                <option value="acc">Account Edit</option>
-                <option value="login">Login</option>
-                <option value="sec">Security</option>
-              </select>
-              <select
-                className="audit-select"
-                value={auditAdmin}
-                onChange={(e) => setAuditAdmin(e.target.value)}
-              >
-                <option value="all">Admin: All</option>
-                <option value="Alex Rivera">Alex Rivera</option>
-                <option value="Sarah Chen">Sarah Chen</option>
-                <option value="Michael Scott">Michael Scott</option>
-              </select>
+            <div className="audit-head">
+              <div className="audit-filters">
+                <select
+                  className="audit-select"
+                  value={auditRange}
+                  onChange={(e) =>
+                    setAuditRange(e.target.value as typeof auditRange)
+                  }
+                >
+                  <option value="7">Last 7 Days</option>
+                  <option value="30">Last 30 Days</option>
+                  <option value="90">Last 90 Days</option>
+                </select>
+                <select
+                  className="audit-select"
+                  value={auditActivity}
+                  onChange={(e) =>
+                    setAuditActivity(e.target.value as typeof auditActivity)
+                  }
+                >
+                  <option value="all">All Types</option>
+                  <option value="um">User Management</option>
+                  <option value="tx">Transaction</option>
+                  <option value="acc">Account Edit</option>
+                  <option value="login">Login</option>
+                  <option value="sec">Security</option>
+                </select>
+                <select
+                  className="audit-select"
+                  value={auditStatus}
+                  onChange={(e) =>
+                    setAuditStatus(e.target.value as typeof auditStatus)
+                  }
+                >
+                  <option value="all">Status: All</option>
+                  <option value="ok">Success</option>
+                  <option value="pending">Pending</option>
+                  <option value="fail">Failed</option>
+                </select>
+              </div>
+              <span className="audit-count">
+                Showing {filteredAuditLogs.length} logs
+              </span>
             </div>
 
-            <table className="audit-table">
-              <thead>
-                <tr>
-                  <th>Timestamp</th>
-                  <th>Admin Name</th>
-                  <th>Action Category</th>
-                  <th>Details</th>
-                  <th>IP Address</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {paginatedAuditLogs.map((log) => (
-                  <React.Fragment key={log.id}>
-                    <tr
-                      className={`audit-row main ${expandedAudit === log.id ? "open" : ""}`}
-                      onClick={() =>
-                        setExpandedAudit((prev) =>
-                          prev === log.id ? null : log.id,
-                        )
-                      }
-                      style={{ cursor: "pointer" }}
-                    >
-                      <td>{log.ts}</td>
-                      <td>
-                        <div className="audit-admin">
-                          <span
-                            className="audit-avatar"
-                            style={{
-                              backgroundImage: log.avatar
-                                ? `url(${log.avatar})`
-                                : undefined,
-                              backgroundSize: "cover",
-                            }}
-                          >
-                            {!log.avatar && log.admin.slice(0, 2).toUpperCase()}
-                          </span>
-                          {log.admin}
-                        </div>
-                      </td>
-                      <td>
-                        <span className={`audit-chip ${log.categoryClass}`}>
-                          {log.category}
-                        </span>
-                      </td>
-                      <td>{log.detail}</td>
-                      <td>{log.ip}</td>
-                      <td>
-                        <span className={`audit-status ${log.statusClass}`}>
-                          <span aria-hidden="true">•</span> {log.status}
-                        </span>
-                      </td>
-                    </tr>
-                    {log.userAgent && expandedAudit === log.id && (
-                      <tr className="audit-row audit-expand">
-                        <td colSpan={6}>
-                          <div className="audit-meta" style={{ gap: 12 }}>
-                            <div
-                              style={{
-                                display: "grid",
-                                gridTemplateColumns: "1.2fr 1fr",
-                                gap: 12,
-                                alignItems: "start",
-                              }}
+            <div className="audit-table-wrap">
+              <table className="audit-table">
+                <thead>
+                  <tr>
+                    <th>Date & Time</th>
+                    <th>Type</th>
+                    <th>Admin / Source</th>
+                    <th>Details</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {paginatedAuditLogs.map((log) => {
+                    const dt = new Date(log.ts.replace(" ", "T"));
+                    const isDateValid = !Number.isNaN(dt.getTime());
+                    const dateLabel = isDateValid
+                      ? dt.toLocaleDateString("en-US", {
+                          month: "short",
+                          day: "2-digit",
+                          year: "numeric",
+                        })
+                      : log.ts;
+                    const timeLabel = isDateValid
+                      ? dt.toLocaleTimeString("en-US", {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                          second: "2-digit",
+                        })
+                      : "--:--:--";
+                    const typeIcon =
+                      log.categoryClass === "tx"
+                        ? "⇄"
+                        : log.categoryClass === "um"
+                          ? "👤"
+                          : log.categoryClass === "acc"
+                            ? "✎"
+                            : log.categoryClass === "login"
+                              ? "🔐"
+                              : "🛡";
+                    return (
+                      <React.Fragment key={log.id}>
+                        <tr className="audit-row main">
+                          <td>
+                            <div className="audit-time">
+                              <span className="audit-date-label">
+                                {dateLabel}
+                              </span>
+                              <span className="audit-time-label">
+                                {timeLabel}
+                              </span>
+                            </div>
+                          </td>
+                          <td>
+                            <span className="audit-type">
+                              <span
+                                className="audit-type-ico"
+                                aria-hidden="true"
+                              >
+                                {typeIcon}
+                              </span>
+                              {log.category}
+                            </span>
+                          </td>
+                          <td>
+                            <div className="audit-admin">
+                              <span className="audit-admin-name">
+                                {log.admin}
+                              </span>
+                              <span className="audit-admin-sub">{log.ip}</span>
+                            </div>
+                          </td>
+                          <td>{log.detail}</td>
+                          <td>
+                            <span className={`audit-status ${log.statusClass}`}>
+                              {log.status}
+                            </span>
+                          </td>
+                          <td>
+                            <button
+                              className="audit-detail-btn"
+                              type="button"
+                              onClick={() =>
+                                setExpandedAudit((prev) =>
+                                  prev === log.id ? null : log.id,
+                                )
+                              }
                             >
-                              <div>
-                                <strong>User Agent</strong>
-                                {log.userAgent}
-                              </div>
-                              {log.extraImg && (
-                                <div style={{ justifySelf: "end" }}>
-                                  <img
-                                    src={log.extraImg}
-                                    alt="thumb"
-                                    style={{
-                                      width: 140,
-                                      height: 60,
-                                      objectFit: "cover",
-                                      borderRadius: 12,
-                                    }}
-                                  />
+                              {expandedAudit === log.id ? "Hide" : "Details"}
+                            </button>
+                          </td>
+                        </tr>
+                        {expandedAudit === log.id && (
+                          <tr className="audit-row audit-expand">
+                            <td colSpan={6}>
+                              <div className="audit-meta">
+                                <div>
+                                  <strong>Request ID</strong>
+                                  <span>{log.requestId ?? "-"}</span>
                                 </div>
-                              )}
-                            </div>
-                            <div
-                              style={{
-                                display: "grid",
-                                gridTemplateColumns:
-                                  "repeat(2, minmax(180px, 1fr))",
-                                gap: 12,
-                              }}
-                            >
-                              <div>
-                                <strong>Request ID</strong>
-                                {log.requestId}
+                                <div>
+                                  <strong>Location</strong>
+                                  <span>{log.location ?? "-"}</span>
+                                </div>
+                                <div>
+                                  <strong>User Agent</strong>
+                                  <span>{log.userAgent ?? "-"}</span>
+                                </div>
+                                <div>
+                                  <strong>Export</strong>
+                                  <button
+                                    type="button"
+                                    className="audit-detail-btn"
+                                    onClick={handleExportCsv}
+                                  >
+                                    Export CSV
+                                  </button>
+                                </div>
                               </div>
-                              <div>
-                                <strong>Location</strong>
-                                <span className="audit-location">
-                                  📍 {log.location}
-                                </span>
-                              </div>
-                            </div>
-                          </div>
-                        </td>
-                      </tr>
-                    )}
-                  </React.Fragment>
-                ))}
-              </tbody>
-            </table>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
 
             <div className="audit-pagination">
-              <span>
-                Showing{" "}
-                {filteredAuditLogs.length
-                  ? (currentAuditPage - 1) * auditPageSize + 1
-                  : 0}
-                {"-"}
-                {filteredAuditLogs.length
-                  ? Math.min(
-                      filteredAuditLogs.length,
-                      currentAuditPage * auditPageSize,
-                    )
-                  : 0}{" "}
-                of {filteredAuditLogs.length} logs
-              </span>
+              <button
+                className="audit-page-nav"
+                disabled={currentAuditPage === 1}
+                onClick={() => setAuditPage((p) => Math.max(1, p - 1))}
+              >
+                Previous
+              </button>
               <div className="audit-pager">
-                <button
-                  disabled={currentAuditPage === 1}
-                  onClick={() => setAuditPage((p) => Math.max(1, p - 1))}
-                >
-                  Previous
-                </button>
                 {Array.from(
-                  { length: Math.min(totalAuditPages, 3) },
+                  { length: Math.min(totalAuditPages, 5) },
                   (_, i) => i + 1,
                 ).map((n) => (
                   <button
@@ -2089,18 +2183,18 @@ function AdminApp() {
                     {n}
                   </button>
                 ))}
-                <button
-                  disabled={
-                    currentAuditPage === totalAuditPages ||
-                    totalAuditPages === 0
-                  }
-                  onClick={() =>
-                    setAuditPage((p) => Math.min(totalAuditPages, p + 1))
-                  }
-                >
-                  Next
-                </button>
               </div>
+              <button
+                className="audit-page-nav next"
+                disabled={
+                  currentAuditPage === totalAuditPages || totalAuditPages === 0
+                }
+                onClick={() =>
+                  setAuditPage((p) => Math.min(totalAuditPages, p + 1))
+                }
+              >
+                Next
+              </button>
             </div>
           </div>
         )}
