@@ -105,7 +105,7 @@ type AdminUser = {
   id: string;
   name: string;
   email: string;
-  role: "Admin" | "Support" | "Viewer";
+  role: "Admin" | "User";
   title: string;
   phone: string;
   birthday: string;
@@ -383,12 +383,36 @@ const styles = `
   .ana-dual-label { margin-top:6px; font-size:12px; color:#6b7280; text-align:center; }
 
   /* Lighten admin shell */
-  .mf-main { background: #f6f7fb; }
+  .mf-main {
+    background: #f6f7fb;
+    margin-left: 260px;
+    width: calc(100% - 260px);
+    min-height: 100vh;
+  }
+  .mf-main.no-scroll {
+    overflow: hidden;
+    height: 100dvh;
+  }
+  .ana-page.no-scroll { padding: 0; }
   .mf-sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 20;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
     background: #ffffff;
     border-right: 1px solid #e5e7eb;
     color: #111827;
   }
+  .mf-menu {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+  }
+  .mf-menu li:last-child { margin-top: auto; }
 
   /* Sidebar icons */
   .mf-menu button {
@@ -463,19 +487,28 @@ const styles = `
   .pager button.active { background:#1f6bff; color:#fff; border-color:#1f6bff; }
 
   /* Profile */
-  .prof-page { padding: 24px; display:flex; justify-content:center; }
+  .prof-page { padding: 16px; display:flex; justify-content:center; }
+  .no-scroll .prof-page {
+    height: 100%;
+    overflow: hidden;
+    align-items: center;
+  }
   .prof-card {
     background: #ffffff;
     color: #0f172a;
     border-radius: 18px;
-    padding: 36px;
+    padding: 16px;
     box-shadow: 0 18px 46px rgba(15,23,42,0.08);
     border: 1px solid #e5e7eb;
-    width: min(1100px, 100%);
+    width: min(840px, 100%);
   }
-  .prof-header { display:flex; flex-direction:column; align-items:center; gap:10px; margin-bottom:24px; color:#0f172a; }
-  .prof-avatar-wrap { position:relative; width:120px; height:120px; }
-  .prof-avatar { width:120px; height:120px; border-radius:50%; object-fit:cover; border:4px solid #182449; cursor:pointer; }
+  .no-scroll .prof-card {
+    max-height: calc(100dvh - 32px);
+    overflow: hidden;
+  }
+  .prof-header { display:flex; flex-direction:column; align-items:center; gap:6px; margin-bottom:10px; color:#0f172a; }
+  .prof-avatar-wrap { position:relative; width:84px; height:84px; }
+  .prof-avatar { width:84px; height:84px; border-radius:50%; object-fit:cover; border:3px solid #182449; cursor:pointer; }
   .prof-avatar-btn {
     position:absolute; right:6px; bottom:6px;
     width:34px; height:34px; border-radius:50%;
@@ -483,23 +516,23 @@ const styles = `
     display:grid; place-items:center; cursor:pointer;
     box-shadow:0 10px 20px rgba(31,107,255,0.4);
   }
-  .prof-name { font-size:22px; margin:4px 0 0; font-weight:700; color:#0f172a; }
+  .prof-name { font-size:16px; margin:2px 0 0; font-weight:700; color:#0f172a; }
   .prof-email { margin:0; color:#475569; }
   .prof-grid {
     display:grid;
     grid-template-columns: repeat(2, minmax(280px, 1fr));
-    gap:18px 20px;
-    margin-bottom:22px;
+    gap:10px 12px;
+    margin-bottom:10px;
   }
   .prof-field { display:flex; flex-direction:column; gap:6px; }
-  .prof-field label { color:#6b7280; font-size:13px; }
+  .prof-field label { color:#6b7280; font-size:12px; }
   .prof-field input {
     background:#f8fafc;
     border:1px solid #dfe3ea;
     color:#0f172a;
-    padding:12px 14px;
+    padding:8px 10px;
     border-radius:12px;
-    font-size:14px;
+    font-size:13px;
   }
   .prof-actions { display:flex; justify-content:flex-end; margin-top:6px; }
   .prof-save {
@@ -516,6 +549,7 @@ const styles = `
   /* Admin theme helpers */
   .theme-light { background: #f6f7fb; color: #0f172a; }
   .theme-dark { background: #0b1224; color: #e7ecff; }
+  body.admin-profile-no-scroll { overflow: hidden; }
   .theme-light h1, .theme-light h2, .theme-light h3, .theme-light h4, .theme-light h5, .theme-light h6,
   .theme-light p, .theme-light span, .theme-light label, .theme-light td, .theme-light th, .theme-light li, .theme-light strong { color:#0f172a; }
   .theme-dark h1, .theme-dark h2, .theme-dark h3, .theme-dark h4, .theme-dark h5, .theme-dark h6,
@@ -676,7 +710,7 @@ const styles = `
     border:none;
     background:transparent;
     color:#7a95b8;
-    font-size:18px;
+    font-size:16px;
     font-weight:700;
     padding:4px 0 10px;
     cursor:pointer;
@@ -704,14 +738,19 @@ const styles = `
     background:#0f243d;
     color:#e8f1ff;
     font-weight:600;
+    font-size:14px;
     cursor:pointer;
   }
-  .audit-count { color:#7089a9; font-size:12px; letter-spacing:1.2px; text-transform:uppercase; font-weight:700; }
+  .audit-input {
+    min-width:220px;
+    padding-right:12px;
+  }
+  .audit-count { color:#7089a9; font-size:13px; letter-spacing:0.4px; text-transform:uppercase; font-weight:700; }
   .audit-table-wrap { border:1px solid #1f3857; border-radius:14px; overflow:hidden; background:#0a1a2f; }
   .audit-table { width:100%; border-collapse:collapse; }
   .audit-table th, .audit-table td { padding:14px 12px; text-align:left; vertical-align:middle; border-bottom:1px solid #1a3350; }
-  .audit-table th { background:#0d2139; color:#87a7cd; font-size:12px; letter-spacing:0.8px; text-transform:uppercase; }
-  .audit-table td { color:#d8e7ff; }
+  .audit-table th { background:#0d2139; color:#87a7cd; font-size:14px; letter-spacing:0.2px; text-transform:none; }
+  .audit-table td { color:#d8e7ff; font-size:14px; }
   .audit-row.main { transition:background 0.15s; }
   .audit-row.main:hover { background:#102947; }
   .audit-time { display:grid; gap:2px; }
@@ -739,39 +778,53 @@ const styles = `
   }
   .audit-meta strong { display:block; color:#d7e7ff; font-size:12px; margin-bottom:4px; }
   .audit-pagination {
-    display:grid;
-    grid-template-columns:1fr auto 1fr;
-    align-items:center;
+    display:flex;
+    justify-content:flex-end;
     margin-top:14px;
     color:#6e89ad;
-    gap:8px;
   }
-  .audit-page-nav {
-    border:none;
-    background:transparent;
-    color:#2c9bff;
-    font-weight:700;
-    cursor:pointer;
-    justify-self:start;
+
+  /* Light theme overrides for audit log */
+  .theme-light .audit-card {
+    background: radial-gradient(circle at 8% -30%, rgba(59, 130, 246, 0.12), transparent 35%), #ffffff;
+    border: 1px solid #dbe5f3;
+    box-shadow: 0 16px 32px rgba(15, 23, 42, 0.08);
+    color: #0f172a;
   }
-  .audit-page-nav.next { justify-self:end; }
-  .audit-page-nav:disabled { color:#4c607c; cursor:not-allowed; }
-  .audit-pager { display:flex; justify-content:center; gap:8px; }
-  .audit-pager button {
-    min-width:32px;
-    height:32px;
-    border:1px solid #274667;
-    border-radius:8px;
-    background:#0f243d;
-    color:#a8c1e2;
-    cursor:pointer;
-    font-weight:700;
+  .theme-light .audit-tabs { border-bottom-color: #dbe5f3; }
+  .theme-light .audit-tab { color: #64748b; }
+  .theme-light .audit-tab.active { color: #2563eb; }
+  .theme-light .audit-tab.active::after { background: #2563eb; }
+  .theme-light .audit-select {
+    border-color: #cbd5e1;
+    background: #ffffff;
+    color: #0f172a;
   }
-  .audit-pager button.active { background:#1f8fff; border-color:#1f8fff; color:#fff; }
+  .theme-light .audit-count { color: #64748b; }
+  .theme-light .audit-table-wrap { border-color: #dbe5f3; background: #ffffff; }
+  .theme-light .audit-table th,
+  .theme-light .audit-table td { border-bottom-color: #e7edf7; }
+  .theme-light .audit-table th { background: #f8fbff; color: #475569; }
+  .theme-light .audit-table td { color: #0f172a; }
+  .theme-light .audit-row.main:hover { background: #f4f8ff; }
+  .theme-light .audit-date-label { color: #0f172a; }
+  .theme-light .audit-time-label { color: #64748b; }
+  .theme-light .audit-type-ico { color: #2563eb; }
+  .theme-light .audit-admin-name { color: #0f172a; }
+  .theme-light .audit-admin-sub { color: #64748b; }
+  .theme-light .audit-status.ok { background: #ecfdf3; border-color: #bbf7d0; color: #15803d; }
+  .theme-light .audit-status.pending { background: #fff7ed; border-color: #fed7aa; color: #c2410c; }
+  .theme-light .audit-status.fail { background: #fef2f2; border-color: #fecdd3; color: #b91c1c; }
+  .theme-light .audit-detail-btn { color: #2563eb; }
+  .theme-light .audit-expand { background: #f8fbff; }
+  .theme-light .audit-meta { color: #475569; }
+  .theme-light .audit-meta strong { color: #0f172a; }
+  .theme-light .audit-pagination { color: #64748b; }
 
   /* Compact desktop layout for 16:9 screens */
   @media (min-width: 1280px) and (min-aspect-ratio: 16/9) {
     .mf-sidebar { width: 220px; padding: 20px 14px; gap: 14px; }
+    .mf-main { margin-left: 220px; width: calc(100% - 220px); }
     .mf-logo { font-size: 20px; margin-bottom: 20px; }
     .mf-menu button { gap: 10px; padding: 10px 12px; font-size: 14px; border-radius: 10px; }
     .mf-ico { width: 28px; height: 28px; font-size: 14px; border-radius: 10px; }
@@ -805,10 +858,10 @@ const styles = `
   @media (max-width: 900px) {
     .audit-filters { width: 100%; }
     .audit-select { flex: 1 1 170px; min-width: 0; }
+    .audit-input { flex: 1 1 220px; min-width: 0; }
     .audit-table-wrap { overflow-x: auto; }
     .audit-table { min-width: 780px; }
-    .audit-pagination { grid-template-columns: 1fr; }
-    .audit-page-nav, .audit-page-nav.next { justify-self: center; }
+    .audit-pagination { justify-content: center; }
   }
 `;
 
@@ -861,6 +914,18 @@ function AdminApp() {
       localStorage.setItem("admin-theme", theme);
     }
   }, [theme]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    if (active === "profile") {
+      document.body.classList.add("admin-profile-no-scroll");
+    } else {
+      document.body.classList.remove("admin-profile-no-scroll");
+    }
+    return () => {
+      document.body.classList.remove("admin-profile-no-scroll");
+    };
+  }, [active]);
   const defaultUsers: AdminUser[] = [
     {
       id: "u001",
@@ -879,7 +944,7 @@ function AdminApp() {
       id: "u002",
       name: "Devon Lane",
       email: "devon@example.com",
-      role: "Support",
+      role: "User",
       title: "Security Lead",
       phone: "+1 (510) 555-2345",
       birthday: "1988-11-22",
@@ -892,7 +957,7 @@ function AdminApp() {
       id: "u003",
       name: "Courtney Henry",
       email: "courtney@example.com",
-      role: "Viewer",
+      role: "User",
       title: "Former Engineer",
       phone: "+1 (303) 555-9876",
       birthday: "1992-03-10",
@@ -905,7 +970,7 @@ function AdminApp() {
       id: "u004",
       name: "Eleanor Pena",
       email: "eleanor@example.com",
-      role: "Support",
+      role: "User",
       title: "UX Researcher",
       phone: "+1 (206) 555-4567",
       birthday: "1995-07-01",
@@ -913,6 +978,110 @@ function AdminApp() {
       avatar: "https://i.pravatar.cc/80?img=67",
       status: "Active",
       lastLogin: "2026-02-23 10:18",
+    },
+    {
+      id: "u005",
+      name: "Wade Warren",
+      email: "wade@example.com",
+      role: "User",
+      title: "Support Agent",
+      phone: "+1 (718) 555-1920",
+      birthday: "1991-01-19",
+      address: "81 Park Blvd, Brooklyn, NY",
+      avatar: "https://i.pravatar.cc/80?img=22",
+      status: "Active",
+      lastLogin: "2026-03-05 09:14",
+    },
+    {
+      id: "u006",
+      name: "Savannah Nguyen",
+      email: "savannah@example.com",
+      role: "Admin",
+      title: "Operations Admin",
+      phone: "+1 (617) 555-3012",
+      birthday: "1989-08-03",
+      address: "54 Harbor St, Boston, MA",
+      avatar: "https://i.pravatar.cc/80?img=47",
+      status: "Active",
+      lastLogin: "2026-03-05 14:42",
+    },
+    {
+      id: "u007",
+      name: "Marvin McKinney",
+      email: "marvin@example.com",
+      role: "User",
+      title: "QA Analyst",
+      phone: "+1 (312) 555-8801",
+      birthday: "1993-11-27",
+      address: "200 Lake Shore Dr, Chicago, IL",
+      avatar: "https://i.pravatar.cc/80?img=60",
+      status: "Locked",
+      lastLogin: "2026-03-04 17:05",
+    },
+    {
+      id: "u008",
+      name: "Kristin Watson",
+      email: "kristin@example.com",
+      role: "User",
+      title: "Finance Specialist",
+      phone: "+1 (214) 555-7719",
+      birthday: "1994-06-15",
+      address: "701 Main St, Dallas, TX",
+      avatar: "https://i.pravatar.cc/80?img=5",
+      status: "Active",
+      lastLogin: "2026-03-05 08:33",
+    },
+    {
+      id: "u009",
+      name: "Cameron Williamson",
+      email: "cameron@example.com",
+      role: "Admin",
+      title: "Compliance Admin",
+      phone: "+1 (702) 555-2234",
+      birthday: "1987-02-09",
+      address: "909 Fremont Ave, Las Vegas, NV",
+      avatar: "https://i.pravatar.cc/80?img=13",
+      status: "Active",
+      lastLogin: "2026-03-06 07:21",
+    },
+    {
+      id: "u010",
+      name: "Guy Hawkins",
+      email: "guy@example.com",
+      role: "User",
+      title: "Customer Success",
+      phone: "+1 (305) 555-4450",
+      birthday: "1990-10-10",
+      address: "110 Ocean Dr, Miami, FL",
+      avatar: "https://i.pravatar.cc/80?img=18",
+      status: "Locked",
+      lastLogin: "2026-03-03 12:19",
+    },
+    {
+      id: "u011",
+      name: "Leslie Alexander",
+      email: "leslie@example.com",
+      role: "User",
+      title: "Risk Analyst",
+      phone: "+1 (602) 555-6621",
+      birthday: "1992-12-01",
+      address: "33 Camelback Rd, Phoenix, AZ",
+      avatar: "https://i.pravatar.cc/80?img=33",
+      status: "Active",
+      lastLogin: "2026-03-06 11:09",
+    },
+    {
+      id: "u012",
+      name: "Darlene Robertson",
+      email: "darlene@example.com",
+      role: "User",
+      title: "Fraud Investigator",
+      phone: "+1 (404) 555-9938",
+      birthday: "1986-04-25",
+      address: "420 Peachtree St, Atlanta, GA",
+      avatar: "https://i.pravatar.cc/80?img=41",
+      status: "Active",
+      lastLogin: "2026-03-04 15:47",
     },
   ];
 
@@ -986,7 +1155,7 @@ function AdminApp() {
         location: "Singapore",
       },
       ipAddress: "88.88.88.88",
-      createdAt: "2026-02-26T00:49:46.897Z",
+      createdAt: "2026-03-06T10:49:46.897Z",
     },
     {
       _id: "699f98aa1ae0d9039da45277",
@@ -1000,7 +1169,7 @@ function AdminApp() {
         location: "San Francisco, USA",
       },
       ipAddress: "192.168.1.45",
-      createdAt: "2026-02-25T14:32:01.000Z",
+      createdAt: "2026-03-06T06:32:01.000Z",
     },
     {
       _id: "699f98aa1ae0d9039da45278",
@@ -1014,16 +1183,16 @@ function AdminApp() {
         location: "New York, USA",
       },
       ipAddress: "203.0.113.12",
-      createdAt: "2026-02-25T13:15:22.000Z",
+      createdAt: "2026-03-05T19:15:22.000Z",
     },
     {
       _id: "699f98aa1ae0d9039da45279",
       userId: "65f8fb0a8d7bb2218a12ab12",
       actor: "michael.scott@company.com",
       action: "ACCOUNT_ROLE_UPDATED",
-      details: "Changed role from Viewer to Support",
+      details: "Changed role from User to Admin",
       ipAddress: "172.16.254.1",
-      createdAt: "2026-02-25T11:05:40.000Z",
+      createdAt: "2026-03-05T11:05:40.000Z",
     },
     {
       _id: "699f98aa1ae0d9039da45280",
@@ -1037,7 +1206,7 @@ function AdminApp() {
         location: "Tokyo, Japan",
       },
       ipAddress: "45.76.11.20",
-      createdAt: "2026-02-25T09:45:12.000Z",
+      createdAt: "2026-03-04T21:45:12.000Z",
     },
     {
       _id: "699f98aa1ae0d9039da45281",
@@ -1051,7 +1220,7 @@ function AdminApp() {
         location: "Los Angeles, USA",
       },
       ipAddress: "203.0.113.12",
-      createdAt: "2026-02-24T08:20:05.000Z",
+      createdAt: "2026-03-03T08:20:05.000Z",
     },
     {
       _id: "699f98aa1ae0d9039da45282",
@@ -1065,7 +1234,7 @@ function AdminApp() {
         location: "New York, USA",
       },
       ipAddress: "203.0.113.12",
-      createdAt: "2026-02-24T07:12:54.000Z",
+      createdAt: "2026-03-02T07:12:54.000Z",
     },
     {
       _id: "699f98aa1ae0d9039da45283",
@@ -1079,7 +1248,7 @@ function AdminApp() {
         location: "San Francisco, USA",
       },
       ipAddress: "192.168.1.45",
-      createdAt: "2026-02-23T16:44:10.000Z",
+      createdAt: "2026-03-01T16:44:10.000Z",
     },
   ];
 
@@ -1088,7 +1257,17 @@ function AdminApp() {
   const [users, setUsers] = useState<AdminUser[]>(() => {
     try {
       const raw = localStorage.getItem(USERS_STORE_KEY);
-      if (raw) return JSON.parse(raw) as AdminUser[];
+      if (raw) {
+        const parsed = JSON.parse(raw) as AdminUser[];
+        // Keep role values constrained to Admin/User for old local data.
+        const normalized: AdminUser[] = parsed.map((u): AdminUser => ({
+          ...u,
+          role: u.role === "Admin" ? "Admin" : "User",
+        }));
+        return normalized.length >= defaultUsers.length
+          ? normalized
+          : defaultUsers;
+      }
     } catch {
       /* ignore */
     }
@@ -1119,6 +1298,8 @@ function AdminApp() {
     "all" | "Admin" | "User"
   >("all");
   const [userSort, setUserSort] = useState<"latest" | "oldest">("latest");
+  const [userPage, setUserPage] = useState(1);
+  const userPageSize = 7;
   const [txUser, setTxUser] = useState<AdminUser | null>(null);
   const [expandedAudit, setExpandedAudit] = useState<string | null>(null);
   const [auditRange, setAuditRange] = useState<"7" | "30" | "90">("7");
@@ -1128,6 +1309,7 @@ function AdminApp() {
   const [auditStatus, setAuditStatus] = useState<
     "all" | "ok" | "pending" | "fail"
   >("all");
+  const [auditAccountQuery, setAuditAccountQuery] = useState("");
   const [auditPage, setAuditPage] = useState(1);
   const auditPageSize = 5;
 
@@ -1168,7 +1350,7 @@ function AdminApp() {
           (userTab === "locked" && u.status === "Locked")) &&
         (userRoleFilter === "all" ||
           (userRoleFilter === "Admin" && u.role === "Admin") ||
-          (userRoleFilter === "User" && u.role !== "Admin")),
+          (userRoleFilter === "User" && u.role === "User")),
     );
 
     return list.sort((a, b) => {
@@ -1178,6 +1360,20 @@ function AdminApp() {
     });
   }, [users, userSearch, userTab, userRoleFilter, userSort]);
 
+  useEffect(() => {
+    setUserPage(1);
+  }, [userSearch, userTab, userRoleFilter, userSort]);
+
+  const totalUserPages = Math.max(
+    1,
+    Math.ceil(filteredUsers.length / userPageSize),
+  );
+  const currentUserPage = Math.min(userPage, totalUserPages);
+  const paginatedUsers = useMemo(() => {
+    const start = (currentUserPage - 1) * userPageSize;
+    return filteredUsers.slice(start, start + userPageSize);
+  }, [filteredUsers, currentUserPage]);
+
   const userTransactions = useMemo(
     () => (txUser ? transactions.filter((t) => t.userId === txUser.id) : []),
     [transactions, txUser],
@@ -1185,10 +1381,11 @@ function AdminApp() {
 
   useEffect(() => {
     setAuditPage(1);
-  }, [auditRange, auditActivity, auditStatus]);
+  }, [auditRange, auditActivity, auditStatus, auditAccountQuery]);
 
   const filteredAuditLogs = useMemo(() => {
     const maxAgeDays = Number(auditRange);
+    const accountQuery = auditAccountQuery.trim().toLowerCase();
     const now = new Date();
     const list = auditLogs.filter((log) => {
       const logDate = new Date(log.ts.replace(" ", "T"));
@@ -1205,13 +1402,25 @@ function AdminApp() {
         return false;
       if (auditStatus !== "all" && log.statusClass !== auditStatus)
         return false;
+      if (
+        accountQuery &&
+        !log.admin.toLowerCase().includes(accountQuery)
+      )
+        return false;
       return true;
     });
     if (expandedAudit && !list.some((l) => l.id === expandedAudit)) {
       setExpandedAudit(null);
     }
     return list;
-  }, [auditLogs, auditRange, auditActivity, auditStatus, expandedAudit]);
+  }, [
+    auditLogs,
+    auditRange,
+    auditActivity,
+    auditStatus,
+    auditAccountQuery,
+    expandedAudit,
+  ]);
 
   const totalAuditPages = Math.max(
     1,
@@ -1365,7 +1574,7 @@ function AdminApp() {
         </ul>
       </aside>
 
-      <div className="mf-main ana-page">
+      <div className={`mf-main ana-page ${active === "profile" ? "no-scroll" : ""}`}>
         {active === "dashboard" && (
           <>
             <header className="ana-header">
@@ -1817,6 +2026,7 @@ function AdminApp() {
                     <tr>
                       <th>Full name</th>
                       <th>Contact details</th>
+                      <th>Role</th>
                       <th>Birthday</th>
                       <th>Address</th>
                       <th>Status</th>
@@ -1824,7 +2034,7 @@ function AdminApp() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredUsers.map((u) => (
+                    {paginatedUsers.map((u) => (
                       <tr key={u.id} className="user-row">
                         <td>
                           <div
@@ -1849,6 +2059,7 @@ function AdminApp() {
                           <div>{u.email}</div>
                           <div className="user-title">{u.phone}</div>
                         </td>
+                        <td style={{ color: "var(--text)" }}>{u.role}</td>
                         <td style={{ color: "var(--text)" }}>
                           {new Date(u.birthday).toLocaleDateString("en-US", {
                             month: "short",
@@ -1906,15 +2117,43 @@ function AdminApp() {
               </div>
               <div className="user-footer">
                 <span>
-                  Showing {filteredUsers.length ? 1 : 0} to{" "}
-                  {filteredUsers.length} of {filteredUsers.length} users
+                  Showing{" "}
+                  {filteredUsers.length
+                    ? (currentUserPage - 1) * userPageSize + 1
+                    : 0}{" "}
+                  to {Math.min(currentUserPage * userPageSize, filteredUsers.length)}{" "}
+                  of {filteredUsers.length} users
                 </span>
-                <div className="pager" aria-hidden="true">
-                  <button disabled>{"<"}</button>
-                  <button className="active">1</button>
-                  <button disabled>2</button>
-                  <button disabled>3</button>
-                  <button disabled>{">"}</button>
+                <div className="pager">
+                  <button
+                    disabled={currentUserPage === 1}
+                    onClick={() => setUserPage((p) => Math.max(1, p - 1))}
+                  >
+                    {"<"}
+                  </button>
+                  {Array.from(
+                    { length: Math.min(totalUserPages, 5) },
+                    (_, i) => i + 1,
+                  ).map((n) => (
+                    <button
+                      key={n}
+                      className={n === currentUserPage ? "active" : ""}
+                      onClick={() => setUserPage(n)}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                  <button
+                    disabled={
+                      currentUserPage === totalUserPages ||
+                      filteredUsers.length === 0
+                    }
+                    onClick={() =>
+                      setUserPage((p) => Math.min(totalUserPages, p + 1))
+                    }
+                  >
+                    {">"}
+                  </button>
                 </div>
               </div>
             </div>
@@ -1981,10 +2220,7 @@ function AdminApp() {
           <div className="audit-card">
             <div className="audit-tabs">
               <button className="audit-tab active" type="button">
-                Audit History
-              </button>
-              <button className="audit-tab" type="button" aria-disabled="true">
-                Security Logs
+                Audit Logs
               </button>
             </div>
 
@@ -2001,6 +2237,14 @@ function AdminApp() {
                   <option value="30">Last 30 Days</option>
                   <option value="90">Last 90 Days</option>
                 </select>
+                <input
+                  className="audit-select audit-input"
+                  type="text"
+                  value={auditAccountQuery}
+                  onChange={(e) => setAuditAccountQuery(e.target.value)}
+                  placeholder="Account name"
+                  aria-label="Filter by account name"
+                />
                 <select
                   className="audit-select"
                   value={auditActivity}
@@ -2063,16 +2307,6 @@ function AdminApp() {
                           second: "2-digit",
                         })
                       : "--:--:--";
-                    const typeIcon =
-                      log.categoryClass === "tx"
-                        ? "⇄"
-                        : log.categoryClass === "um"
-                          ? "👤"
-                          : log.categoryClass === "acc"
-                            ? "✎"
-                            : log.categoryClass === "login"
-                              ? "🔐"
-                              : "🛡";
                     return (
                       <React.Fragment key={log.id}>
                         <tr className="audit-row main">
@@ -2088,12 +2322,6 @@ function AdminApp() {
                           </td>
                           <td>
                             <span className="audit-type">
-                              <span
-                                className="audit-type-ico"
-                                aria-hidden="true"
-                              >
-                                {typeIcon}
-                              </span>
                               {log.category}
                             </span>
                           </td>
@@ -2163,14 +2391,13 @@ function AdminApp() {
             </div>
 
             <div className="audit-pagination">
-              <button
-                className="audit-page-nav"
-                disabled={currentAuditPage === 1}
-                onClick={() => setAuditPage((p) => Math.max(1, p - 1))}
-              >
-                Previous
-              </button>
-              <div className="audit-pager">
+              <div className="pager">
+                <button
+                  disabled={currentAuditPage === 1}
+                  onClick={() => setAuditPage((p) => Math.max(1, p - 1))}
+                >
+                  {"<"}
+                </button>
                 {Array.from(
                   { length: Math.min(totalAuditPages, 5) },
                   (_, i) => i + 1,
@@ -2183,18 +2410,18 @@ function AdminApp() {
                     {n}
                   </button>
                 ))}
+                <button
+                  disabled={
+                    currentAuditPage === totalAuditPages ||
+                    totalAuditPages === 0
+                  }
+                  onClick={() =>
+                    setAuditPage((p) => Math.min(totalAuditPages, p + 1))
+                  }
+                >
+                  {">"}
+                </button>
               </div>
-              <button
-                className="audit-page-nav next"
-                disabled={
-                  currentAuditPage === totalAuditPages || totalAuditPages === 0
-                }
-                onClick={() =>
-                  setAuditPage((p) => Math.min(totalAuditPages, p + 1))
-                }
-              >
-                Next
-              </button>
             </div>
           </div>
         )}
