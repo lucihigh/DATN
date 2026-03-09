@@ -1,12 +1,9 @@
-import { ObjectId } from "mongodb";
-import type { OptionalUnlessRequiredId } from "mongodb";
+﻿import crypto from "crypto";
 
-import { BaseRepository } from "../baseRepository";
-import { db, writeToMongo } from "../mongo";
-import type { AuditLogDoc } from "../schemas";
+import { prisma } from "../prisma";
 
 export type CreateAuditLogInput = {
-  userId?: string | ObjectId;
+  userId?: string;
   actor?: string;
   action: string;
   details?: string | Record<string, unknown>;
@@ -14,24 +11,60 @@ export type CreateAuditLogInput = {
   metadata?: Record<string, unknown>;
 };
 
-export class AuditLogRepository extends BaseRepository<AuditLogDoc> {
-  constructor() {
-    super(db.auditLogs);
+export type AuditLogEntity = {
+  id: string;
+  userId?: string;
+  actor: string;
+  action: string;
+  details?: string | Record<string, unknown>;
+  ipAddress?: string;
+  createdAt: Date;
+  metadata?: Record<string, unknown>;
+};
+
+const toEntity = (log: {
+  id: string;
+  userId: string | null;
+  actor: string;
+  action: string;
+  details: unknown;
+  ipAddress: string | null;
+  createdAt: Date;
+  metadata: unknown;
+}): AuditLogEntity => ({
+  id: log.id,
+  userId: log.userId ?? undefined,
+  actor: log.actor,
+  action: log.action,
+  details: (log.details as string | Record<string, unknown> | null) ?? undefined,
+  ipAddress: log.ipAddress ?? undefined,
+  createdAt: log.createdAt,
+  metadata: (log.metadata as Record<string, unknown> | null) ?? undefined,
+});
+
+export class AuditLogRepository {
+  async createAuditLog(input: CreateAuditLogInput) {
+    return prisma.auditLog.create({
+      data: {
+        id: crypto.randomUUID(),
+        userId: input.userId,
+        actor: input.actor || "system",
+        action: input.action,
+        details: input.details as never,
+        ipAddress: input.ipAddress,
+        metadata: input.metadata as never,
+      },
+    });
   }
 
-  async createAuditLog(input: CreateAuditLogInput) {
-    const payload = writeToMongo.auditLog({
-      userId: input.userId,
-      actor: input.actor,
-      action: input.action,
-      details: input.details,
-      ipAddress: input.ipAddress,
-      createdAt: new Date(),
-      metadata: input.metadata ?? {},
+  async findLatest(limit = 100) {
+    const logs = await prisma.auditLog.findMany({
+      orderBy: { createdAt: "desc" },
+      take: limit,
     });
-
-    return this.insertOne(payload as OptionalUnlessRequiredId<AuditLogDoc>);
+    return logs.map(toEntity);
   }
 }
 
 export const createAuditLogRepository = () => new AuditLogRepository();
+

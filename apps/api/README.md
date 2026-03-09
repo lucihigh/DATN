@@ -5,7 +5,7 @@
 - `pnpm prisma:migrate` - run migrations
 - `pnpm prisma:generate` - generate Prisma client
 - Contract flow: `pnpm contract:validate` then `pnpm contract:gen` to refresh shared client types.
-- `pnpm --filter @secure-wallet/api db:init` - ensure MongoDB collections/indexes (needs `MONGODB_URI`)
+- `pnpm --filter @secure-wallet/api db:migrate-mongo` - migrate MongoDB data into PostgreSQL (needs `MONGODB_URI` and `DATABASE_URL`)
 
 ## Env
 - `DATABASE_URL` - Postgres connection
@@ -17,20 +17,14 @@
 - `MONGODB_URI` - Mongo connection string
 - `MONGODB_DB` - Mongo database name (default `ComputerResearchProject`)
 
-## DB/Collections
-- Schemas/types: `src/db/schemas.ts`
-- Collections ensured by `db:init`: users, wallets, transactions, loginEvents, auditLogs, securityPolicies
-- Key indexes:
-  - `users.email` (unique)
-  - `transactions.fromUserId + createdAt`
-  - `transactions.toUserId + createdAt`
-  - `loginEvents.email + createdAt`
-  - `loginEvents.userId + createdAt`
-  - `auditLogs.createdAt`
-- Collection accessor pattern: `db.users()`, `db.wallets()`, ... from `src/db/mongo.ts`
-- Base repository: `src/db/baseRepository.ts`
-- Example concrete repo: `src/db/repositories/userRepository.ts`
-- Team handover doc: `docs/mongo-deliverables.md`
+## DB (PostgreSQL via Prisma)
+- Schema source: `prisma/schema.prisma`
+- Prisma client: `src/db/prisma.ts`
+- Repository layer: `src/db/repositories/*.ts`
+- Migration path:
+  - Run Prisma migrations first: `pnpm prisma:migrate`
+  - Then import legacy Mongo data once: `pnpm --filter @secure-wallet/api db:migrate-mongo`
+- Legacy Mongo helper files are kept only for reference/backward compatibility.
 
 ## Routes (contract-driven, stubbed)
 See `contracts/openapi.yaml` for the authoritative contract covering auth, wallet, transfer, security, and admin routes.
@@ -40,3 +34,4 @@ Encryption helpers live in `src/security/encryption.ts`.
 Use `encryptFields(...)` and `decryptFields(...)` for field-level encryption helpers.
 Audit logging service in `src/services/audit.ts`.
 Passwords are hashed with scrypt in `src/security/password.ts`.
+
