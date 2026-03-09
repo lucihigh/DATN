@@ -6,6 +6,7 @@ import express, { type ErrorRequestHandler } from "express";
 import fetch from "node-fetch";
 import helmet from "helmet";
 import morgan from "morgan";
+import type { Wallet } from "@prisma/client";
 
 import { loginSchema, registerSchema } from "@secure-wallet/shared";
 import type { components } from "@secure-wallet/shared/api-client/types";
@@ -117,19 +118,83 @@ const toPositiveAmount = (value: unknown) => {
   return parsed;
 };
 
+const buildAccountNumber = (userId: string) => {
+  const hash = crypto.createHash("sha256").update(userId).digest();
+  let digits = "";
+  for (const byte of hash) {
+    digits += String(byte % 10);
+    if (digits.length >= 10) break;
+  }
+  return `97${digits.padEnd(10, "0")}`;
+};
+
+const buildWalletQrPayload = (accountNumber: string) =>
+  `EWALLET|ACC:${accountNumber}|BANK:SECURE-WALLET`;
+
+const buildWalletQrImageUrl = (qrPayload: string) =>
+  `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(qrPayload)}`;
+
+const findWalletByAccountNumber = (accountNumber: string) =>
+  prisma.wallet.findFirst({
+    where: {
+      metadata: {
+        path: ["accountNumber"],
+        equals: accountNumber,
+      },
+    },
+  });
+
+const attachWalletIdentity = async (wallet: Wallet): Promise<Wallet> => {
+  if (!wallet.userId) return wallet;
+  const metadata =
+    wallet.metadata && typeof wallet.metadata === "object"
+      ? (wallet.metadata as Record<string, unknown>)
+      : {};
+  const existingAccountNumber =
+    typeof metadata.accountNumber === "string" ? metadata.accountNumber : "";
+  const existingQrPayload =
+    typeof metadata.qrPayload === "string" ? metadata.qrPayload : "";
+  const existingQrImageUrl =
+    typeof metadata.qrImageUrl === "string" ? metadata.qrImageUrl : "";
+
+  if (existingAccountNumber && existingQrPayload && existingQrImageUrl) {
+    return wallet;
+  }
+
+  const accountNumber = existingAccountNumber || buildAccountNumber(wallet.userId);
+  const qrPayload = existingQrPayload || buildWalletQrPayload(accountNumber);
+  const qrImageUrl = existingQrImageUrl || buildWalletQrImageUrl(qrPayload);
+
+  return prisma.wallet.update({
+    where: { id: wallet.id },
+    data: {
+      metadata: {
+        ...metadata,
+        accountNumber,
+        qrPayload,
+        qrImageUrl,
+      } as never,
+    },
+  });
+};
+
 const getOrCreateWalletByUserId = async (userId: string) => {
   const existing = await prisma.wallet.findFirst({ where: { userId } });
-  if (existing) return existing;
+  if (existing) return attachWalletIdentity(existing);
 
-  return prisma.wallet.create({
+  const created = await prisma.wallet.create({
     data: {
       id: crypto.randomUUID(),
       userId,
       balance: 0,
       currency: "USD",
       status: "ACTIVE",
+      metadata: {
+        accountNumber: buildAccountNumber(userId),
+      } as never,
     },
   });
+  return attachWalletIdentity(created);
 };
 
 const registerShutdownHooks = () => {
@@ -191,7 +256,9 @@ app.post("/auth/register", async (req, res) => {
       email,
       passwordHash,
       role: "USER",
+      fullName: parsed.data.fullName?.trim(),
     });
+    await getOrCreateWalletByUserId(created.id);
 
     const user: components["schemas"]["User"] = {
       id: created.id,
@@ -444,14 +511,75 @@ app.get("/wallet/me", requireAuth, async (req, res) => {
 
   try {
     const wallet = await getOrCreateWalletByUserId(userId);
+    const metadata =
+      wallet.metadata && typeof wallet.metadata === "object"
+        ? (wallet.metadata as Record<string, unknown>)
+        : {};
     const payload: components["schemas"]["Wallet"] = {
       id: wallet.id,
       balance: Number(wallet.balance),
       currency: wallet.currency,
     };
-    return res.json(payload);
+    return res.json({
+      ...payload,
+      accountNumber:
+        typeof metadata.accountNumber === "string"
+          ? metadata.accountNumber
+          : "",
+      qrPayload: typeof metadata.qrPayload === "string" ? metadata.qrPayload : "",
+      qrImageUrl:
+        typeof metadata.qrImageUrl === "string" ? metadata.qrImageUrl : "",
+    });
   } catch (err) {
     console.error("Failed to get wallet", err);
+    return res.status(500).json({ error: "Internal error" });
+  }
+});
+
+app.get("/wallet/resolve/:accountNumber", requireAuth, async (req, res) => {
+  const requesterId = req.user?.sub;
+  if (!requesterId) return res.status(401).json({ error: "Unauthorized" });
+
+  const accountNumber = String(req.params.accountNumber || "")
+    .replace(/\D/g, "")
+    .slice(0, 19);
+  if (!/^\d{8,19}$/.test(accountNumber)) {
+    return res.status(400).json({ error: "Invalid account number" });
+  }
+
+  try {
+    const wallet = await findWalletByAccountNumber(accountNumber);
+    if (!wallet?.userId) {
+      return res.status(404).json({ error: "Recipient account not found" });
+    }
+    if (wallet.userId === requesterId) {
+      return res.status(400).json({ error: "Cannot transfer to self" });
+    }
+
+    const receiver = await prisma.user.findUnique({
+      where: { id: wallet.userId },
+      select: {
+        id: true,
+        email: true,
+        fullName: true,
+        status: true,
+      },
+    });
+    if (!receiver) {
+      return res.status(404).json({ error: "Recipient account not found" });
+    }
+    if (receiver.status !== "ACTIVE") {
+      return res.status(423).json({ error: "Recipient account is locked" });
+    }
+
+    return res.json({
+      accountNumber,
+      userId: receiver.id,
+      holderName: receiver.fullName || receiver.email.split("@")[0] || "User",
+      holderEmail: receiver.email,
+    });
+  } catch (err) {
+    console.error("Failed to resolve account", err);
     return res.status(500).json({ error: "Internal error" });
   }
 });
@@ -514,19 +642,61 @@ app.post("/transfer", requireAuth, async (req, res) => {
   const senderUserId = req.user?.sub;
   if (!senderUserId) return res.status(401).json({ error: "Unauthorized" });
 
-  const body = req.body as { toUserId?: string; amount?: unknown };
+  const body = req.body as {
+    toUserId?: string;
+    toAccount?: string;
+    amount?: unknown;
+    note?: string;
+  };
   const toUserId =
     typeof body.toUserId === "string" ? body.toUserId.trim() : "";
+  const toAccount =
+    typeof body.toAccount === "string"
+      ? body.toAccount.replace(/\D/g, "").slice(0, 19)
+      : "";
+  const note = typeof body.note === "string" ? body.note.trim() : "";
   const amount = toPositiveAmount(body.amount);
 
-  if (!toUserId) return res.status(400).json({ error: "Missing toUserId" });
-  if (!amount) return res.status(400).json({ error: "Invalid amount" });
-  if (toUserId === senderUserId) {
-    return res.status(400).json({ error: "Cannot transfer to self" });
+  if (!toUserId && !toAccount) {
+    return res.status(400).json({ error: "Missing recipient account" });
   }
+  if (!amount) return res.status(400).json({ error: "Invalid amount" });
 
   try {
-    const receiver = await prisma.user.findUnique({ where: { id: toUserId } });
+    const senderWallet = await getOrCreateWalletByUserId(senderUserId);
+    const senderMeta =
+      senderWallet.metadata && typeof senderWallet.metadata === "object"
+        ? (senderWallet.metadata as Record<string, unknown>)
+        : {};
+    const senderAccountNumber =
+      typeof senderMeta.accountNumber === "string"
+        ? senderMeta.accountNumber
+        : "";
+
+    let resolvedReceiverUserId = toUserId;
+    let receiverWalletByAccount:
+      | { id: string; userId: string | null; metadata: unknown }
+      | null = null;
+
+    if (toAccount) {
+      receiverWalletByAccount = await findWalletByAccountNumber(toAccount);
+      if (!receiverWalletByAccount?.userId) {
+        return res.status(404).json({ error: "Recipient account not found" });
+      }
+      resolvedReceiverUserId = receiverWalletByAccount.userId;
+    }
+
+    if (resolvedReceiverUserId === senderUserId) {
+      return res.status(400).json({ error: "Cannot transfer to self" });
+    }
+
+    if (!resolvedReceiverUserId) {
+      return res.status(404).json({ error: "Recipient not found" });
+    }
+
+    const receiver = await prisma.user.findUnique({
+      where: { id: resolvedReceiverUserId },
+    });
     if (!receiver) return res.status(404).json({ error: "Recipient not found" });
 
     const transferResult = await prisma.$transaction(async (tx) => {
@@ -538,16 +708,32 @@ app.post("/transfer", requireAuth, async (req, res) => {
         throw new Error("INSUFFICIENT_BALANCE");
 
       const receiverWallet =
-        (await tx.wallet.findFirst({ where: { userId: toUserId } })) ??
+        (receiverWalletByAccount
+          ? await tx.wallet.findFirst({ where: { id: receiverWalletByAccount.id } })
+          : null) ??
+        (await tx.wallet.findFirst({ where: { userId: resolvedReceiverUserId } })) ??
         (await tx.wallet.create({
           data: {
             id: crypto.randomUUID(),
-            userId: toUserId,
+            userId: resolvedReceiverUserId,
             balance: 0,
             currency: senderWallet.currency,
             status: "ACTIVE",
+            metadata: {
+              accountNumber: buildAccountNumber(resolvedReceiverUserId),
+            } as never,
           },
         }));
+
+      const receiverMeta =
+        receiverWallet.metadata && typeof receiverWallet.metadata === "object"
+          ? (receiverWallet.metadata as Record<string, unknown>)
+          : {};
+      const receiverAccountNumber =
+        typeof receiverMeta.accountNumber === "string"
+          ? receiverMeta.accountNumber
+          : buildAccountNumber(resolvedReceiverUserId);
+      const reconciliationId = crypto.randomUUID();
 
       await tx.wallet.update({
         where: { id: senderWallet.id },
@@ -558,30 +744,63 @@ app.post("/transfer", requireAuth, async (req, res) => {
         data: { balance: { increment: amount } },
       });
 
-      const transaction = await tx.transaction.create({
+      const debitTx = await tx.transaction.create({
         data: {
           id: crypto.randomUUID(),
           walletId: senderWallet.id,
+          counterpartyWalletId: receiverWallet.id,
           amount,
           type: "TRANSFER",
           status: "COMPLETED",
-          description: `Transfer to ${toUserId}`,
+          description: note || `Transfer to ${receiverAccountNumber}`,
           fromUserId: senderUserId,
-          toUserId,
+          toUserId: resolvedReceiverUserId,
+          metadata: {
+            entry: "DEBIT",
+            reconciliationId,
+            fromAccount: senderAccountNumber,
+            toAccount: receiverAccountNumber,
+          } as never,
         },
       });
 
-      return transaction;
+      await tx.transaction.create({
+        data: {
+          id: crypto.randomUUID(),
+          walletId: receiverWallet.id,
+          counterpartyWalletId: senderWallet.id,
+          amount,
+          type: "TRANSFER",
+          status: "COMPLETED",
+          description: note || `Receive from ${senderAccountNumber}`,
+          fromUserId: senderUserId,
+          toUserId: resolvedReceiverUserId,
+          metadata: {
+            entry: "CREDIT",
+            reconciliationId,
+            fromAccount: senderAccountNumber,
+            toAccount: receiverAccountNumber,
+          } as never,
+        },
+      });
+
+      return {
+        transaction: debitTx,
+        reconciliationId,
+        receiverAccountNumber,
+      };
     });
 
     return res.json({
       status: "ok",
+      reconciliationId: transferResult.reconciliationId,
       transaction: {
-        id: transferResult.id,
-        amount: Number(transferResult.amount),
-        type: transferResult.type,
-        description: transferResult.description ?? undefined,
-        createdAt: transferResult.createdAt.toISOString(),
+        id: transferResult.transaction.id,
+        amount: Number(transferResult.transaction.amount),
+        type: transferResult.transaction.type,
+        description: transferResult.transaction.description ?? undefined,
+        createdAt: transferResult.transaction.createdAt.toISOString(),
+        toAccount: transferResult.receiverAccountNumber,
       },
     });
   } catch (err) {
@@ -626,6 +845,10 @@ app.get("/transactions", requireAuth, async (req, res) => {
         type: txn.type,
         description: txn.description ?? undefined,
         createdAt: txn.createdAt.toISOString(),
+        metadata:
+          txn.metadata && typeof txn.metadata === "object"
+            ? (txn.metadata as Record<string, unknown>)
+            : undefined,
       })),
     );
   } catch (err) {

@@ -193,7 +193,14 @@ function BarChart({
 function DashboardView() {
   const { user, token } = useAuth();
   const { toast } = useToast();
-  const [wallet, setWallet] = useState<{ id: string; balance: number; currency: string } | null>(null);
+  const [wallet, setWallet] = useState<{
+    id: string;
+    balance: number;
+    currency: string;
+    accountNumber?: string;
+    qrPayload?: string;
+    qrImageUrl?: string;
+  } | null>(null);
   const [showWalletId, setShowWalletId] = useState(false);
   const [detailsModalOpen, setDetailsModalOpen] = useState(false);
   const [detailsStep, setDetailsStep] = useState<"otp" | "details">("otp");
@@ -211,6 +218,7 @@ function DashboardView() {
   const [transferAmount, setTransferAmount] = useState("");
   const [transferContent, setTransferContent] = useState("");
   const [transferQrFile, setTransferQrFile] = useState("");
+  const [transferQrRaw, setTransferQrRaw] = useState("");
   const [transferOtpCode, setTransferOtpCode] = useState("");
   const [transferOtpInput, setTransferOtpInput] = useState("");
   const [transferOtpError, setTransferOtpError] = useState("");
@@ -245,12 +253,15 @@ function DashboardView() {
     lastActivity: "Mar 05, 2026 · 09:42 AM",
   };
 
-  const walletRaw = wallet?.id || "";
-  const walletDigits = walletRaw.replace(/\W+/g, "").slice(-16);
-  const padded = walletDigits.padStart(16, "0");
-  const walletGroups = showWalletId
-    ? [padded.slice(0, 4), padded.slice(4, 8), padded.slice(8, 12), padded.slice(12, 16)]
-    : ["****", "****", "****", padded.slice(12, 16)];
+  const walletRaw = wallet?.accountNumber || wallet?.id || "";
+  const walletDigits = walletRaw.replace(/\D/g, "").slice(0, 19);
+  const maskedDigits =
+    showWalletId || walletDigits.length <= 4
+      ? walletDigits
+      : `${"*".repeat(walletDigits.length - 4)}${walletDigits.slice(-4)}`;
+  const walletGroups = (maskedDigits.match(/.{1,4}/g) ?? []).map((group) =>
+    group.replace(/\*/g, "•"),
+  );
   const defaultTransferContent = `${user?.name ?? "User"} transfer`;
 
   useEffect(() => {
@@ -267,6 +278,9 @@ function DashboardView() {
             id: string;
             balance: number;
             currency: string;
+            accountNumber?: string;
+            qrPayload?: string;
+            qrImageUrl?: string;
           };
           setWallet(w);
         }
@@ -277,10 +291,16 @@ function DashboardView() {
             type: string;
             description?: string;
             createdAt: string;
+            metadata?: {
+              entry?: "DEBIT" | "CREDIT";
+              fromAccount?: string;
+              toAccount?: string;
+            };
           }>;
           setTransactionHistory(
             txs.map((tx) => {
-              const isCredit = tx.type === "DEPOSIT";
+              const isCredit =
+                tx.type === "DEPOSIT" || tx.metadata?.entry === "CREDIT";
               return {
                 entity: tx.description || tx.type,
                 date: new Date(tx.createdAt).toLocaleString("en-US"),
@@ -355,6 +375,7 @@ function DashboardView() {
     setTransferAmount("");
     setTransferContent(defaultTransferContent);
     setTransferQrFile("");
+    setTransferQrRaw("");
     setTransferOtpCode("");
     setTransferOtpInput("");
     setTransferOtpError("");
@@ -380,20 +401,46 @@ function DashboardView() {
     setTransferOtpAttempts(0);
     toast(`Transfer OTP sent (demo OTP: ${next})`, "info");
   };
+  const continueTransferRecipient = async () => {
+    if (!token) {
+      toast("Session expired. Please login again.", "error");
+      return;
+    }
 
-  const continueTransferRecipient = () => {
     if (transferMethod === "account") {
       if (!/^\d{8,19}$/.test(transferAccount)) {
         toast("Please enter a valid account number (8-19 digits).", "error");
         return;
       }
-      setTransferReceiverName(
-        `Account Holder •••• ${transferAccount.slice(-4)}`,
-      );
     } else if (!transferAccount) {
-      toast("Please upload QR to extract account number first.", "error");
+      toast("Please paste QR payload to extract account number first.", "error");
       return;
     }
+
+    try {
+      const resp = await fetch(
+        `${API_BASE}/wallet/resolve/${encodeURIComponent(transferAccount)}`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
+      const data = (await resp.json().catch(() => null)) as
+        | { error?: string; holderName?: string; accountNumber?: string }
+        | null;
+      if (!resp.ok || !data?.accountNumber) {
+        toast(data?.error || "Recipient account not found", "error");
+        return;
+      }
+
+      setTransferAccount(data.accountNumber);
+      setTransferReceiverName(
+        data.holderName || `Account ���� ${data.accountNumber.slice(-4)}`,
+      );
+    } catch {
+      toast("Cannot verify account with server", "error");
+      return;
+    }
+
     setTransferStep(2);
   };
 
@@ -454,8 +501,9 @@ function DashboardView() {
         Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({
-        toUserId: transferAccount,
+        toAccount: transferAccount,
         amount,
+        note: transferContent || defaultTransferContent,
       }),
     });
     if (!transferResp.ok) {
@@ -468,16 +516,19 @@ function DashboardView() {
 
     const transferPayload = (await transferResp.json().catch(() => null)) as
       | {
+          reconciliationId?: string;
           transaction?: {
             id: string;
+            toAccount?: string;
           };
         }
       | null;
+    const targetAccount = transferPayload?.transaction?.toAccount || transferAccount;
     setTransferReceipt({
       txId: transferPayload?.transaction?.id || txId,
       executedAt,
-      fromAccount: "Primary Checking •••• 8841",
-      toAccount: transferAccount,
+      fromAccount: wallet?.accountNumber || "Primary Checking",
+      toAccount: targetAccount,
       amountUsd: amount.toLocaleString("en-US", {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
@@ -488,7 +539,7 @@ function DashboardView() {
     });
     setTransactionHistory((prev) => [
       {
-        entity: `Transfer to •••• ${transferAccount.slice(-4)}`,
+        entity: `Transfer to •••• ${targetAccount.slice(-4)}`,
         date: executedAt,
         status: "Completed",
         amount: `-$${amount.toLocaleString("en-US", {
@@ -522,7 +573,7 @@ function DashboardView() {
           </div>
           <div className="dashboard-wallet-foot">
             <div>
-              <div className="dashboard-wallet-id-label">Wallet ID</div>
+              <div className="dashboard-wallet-id-label">Account Number</div>
               <div className="dashboard-wallet-id-row">
                 <div className="dashboard-wallet-id">
                   {walletGroups.map((group, idx) => (
@@ -536,9 +587,9 @@ function DashboardView() {
                   className="dashboard-wallet-toggle-btn"
                   onClick={() => setShowWalletId((v) => !v)}
                   aria-label={
-                    showWalletId ? "Hide wallet ID" : "Show wallet ID"
+                    showWalletId ? "Hide account number" : "Show account number"
                   }
-                  title={showWalletId ? "Hide wallet ID" : "Show wallet ID"}
+                  title={showWalletId ? "Hide account number" : "Show account number"}
                 >
                   {showWalletId ? "🙈" : "👁"}
                 </button>
@@ -590,6 +641,9 @@ function DashboardView() {
                         id: string;
                         balance: number;
                         currency: string;
+                        accountNumber?: string;
+                        qrPayload?: string;
+                        qrImageUrl?: string;
                       };
                       setWallet(w);
                     }
@@ -603,20 +657,23 @@ function DashboardView() {
                         type: string;
                         description?: string;
                         createdAt: string;
+                        metadata?: { entry?: "DEBIT" | "CREDIT" };
                       }>;
                       setTransactionHistory(
                         txs.map((tx) => ({
                           entity: tx.description || tx.type,
                           date: new Date(tx.createdAt).toLocaleString("en-US"),
                           status: "Completed",
-                          amount: `${tx.type === "DEPOSIT" ? "+" : "-"}$${Math.abs(
+                          amount: `${tx.type === "DEPOSIT" || tx.metadata?.entry === "CREDIT" ? "+" : "-"}$${Math.abs(
                             Number(tx.amount || 0),
                           ).toLocaleString("en-US", {
                             minimumFractionDigits: 2,
                             maximumFractionDigits: 2,
                           })}`,
                           amountTone:
-                            tx.type === "DEPOSIT" ? "positive" : "negative",
+                            tx.type === "DEPOSIT" || tx.metadata?.entry === "CREDIT"
+                              ? "positive"
+                              : "negative",
                         })),
                       );
                     }
@@ -872,7 +929,11 @@ function DashboardView() {
                   </div>
                   <div className="card-details-item">
                     <span>Linked Account</span>
-                    <strong>{cardProfile.linkedAccount}</strong>
+                    <strong>
+                      {wallet?.accountNumber
+                        ? `Wallet ${wallet.accountNumber}`
+                        : cardProfile.linkedAccount}
+                    </strong>
                   </div>
                   <div className="card-details-item">
                     <span>Daily Limit</span>
@@ -889,6 +950,28 @@ function DashboardView() {
                   <div className="card-details-item span-2">
                     <span>Last Activity</span>
                     <strong>{cardProfile.lastActivity}</strong>
+                  </div>
+                  <div className="card-details-item span-2">
+                    <span>Transfer QR (fixed by account)</span>
+                    {wallet?.qrImageUrl ? (
+                      <img
+                        src={wallet.qrImageUrl}
+                        alt={`QR ${wallet.accountNumber ?? "account"}`}
+                        style={{
+                          width: 132,
+                          height: 132,
+                          borderRadius: 10,
+                          border: "1px solid rgba(255,255,255,0.18)",
+                        }}
+                      />
+                    ) : (
+                      <strong>No QR yet</strong>
+                    )}
+                    {wallet?.qrPayload && (
+                      <small className="muted" style={{ marginTop: 6 }}>
+                        {wallet.qrPayload}
+                      </small>
+                    )}
                   </div>
                 </div>
                 <div className="card-details-actions">
@@ -975,12 +1058,6 @@ function DashboardView() {
                           const file = e.target.files?.[0];
                           if (!file) return;
                           setTransferQrFile(file.name);
-                          const generated = `9704${String(Date.now()).slice(-10)}`;
-                          setTransferAccount(generated);
-                          setTransferReceiverName(
-                            `QR Recipient •••• ${generated.slice(-4)}`,
-                          );
-                          toast("QR scanned successfully (demo).");
                         }}
                       />
                       <span>Upload transfer QR image</span>
@@ -990,6 +1067,35 @@ function DashboardView() {
                         ? `QR file: ${transferQrFile}`
                         : "No QR file selected yet."}
                     </div>
+                    <label className="form-group" style={{ marginTop: 10 }}>
+                      <span>QR payload</span>
+                      <input
+                        type="text"
+                        placeholder="EWALLET|ACC:971234567890|BANK:SECURE-WALLET"
+                        value={transferQrRaw}
+                        onChange={(e) => setTransferQrRaw(e.target.value)}
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      className="pill"
+                      onClick={() => {
+                        const extracted =
+                          transferQrRaw.match(/ACC:(\d{8,19})/i)?.[1] ||
+                          transferQrRaw.replace(/\D/g, "").slice(0, 19);
+                        if (!/^\d{8,19}$/.test(extracted)) {
+                          toast("Invalid QR payload.", "error");
+                          return;
+                        }
+                        setTransferAccount(extracted);
+                        setTransferReceiverName(
+                          `QR Recipient •••• ${extracted.slice(-4)}`,
+                        );
+                        toast("QR payload parsed successfully.");
+                      }}
+                    >
+                      Extract account from QR
+                    </button>
                     {transferAccount && (
                       <div className="transfer-qr-result">
                         Extracted account: <strong>{transferAccount}</strong>
@@ -2086,7 +2192,7 @@ function Toggle({
 function SettingView() {
   const { updateUser } = useAuth();
   const { toast } = useToast();
-  const { theme, setTheme, toggle: toggleTheme } = useTheme();
+  const { theme } = useTheme();
   const [settingTab, setSettingTab] = useState<SettingTabId>("preferences");
   const [profile, setProfile] = useState<ProfileForm>(() => {
     try {
@@ -2336,13 +2442,13 @@ function SettingView() {
             <h3 className="setting-panel-title">Preference Setting</h3>
             <div className="setting-block">
               <h4 className="setting-block-head">Theme</h4>
-              <p className="muted">Switch between light and dark mode.</p>
+              <p className="muted">Dark mode is fixed for this project.</p>
               <div className="setting-row toggle-row">
                 <span>Enable dark mode</span>
                 <Toggle
                   id="pref-theme"
-                  checked={theme === "dark"}
-                  onChange={(v) => (v ? setTheme("dark") : setTheme("light"))}
+                  checked
+                  onChange={() => {}}
                 />
               </div>
             </div>
@@ -3313,7 +3419,7 @@ type AuthShellProps = {
 };
 
 function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
-  const { theme, toggle: toggleTheme } = useTheme();
+  useTheme();
 
   const { toast } = useToast();
   const [mode, setMode] = useState<"signin" | "signup" | "forgot" | null>(null);
@@ -3799,3 +3905,5 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
     </div>
   );
 }
+
+
