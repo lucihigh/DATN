@@ -1,30 +1,27 @@
+﻿import crypto from "crypto";
+
 import cors from "cors";
 import dotenv from "dotenv";
 import express, { type ErrorRequestHandler } from "express";
 import fetch from "node-fetch";
 import helmet from "helmet";
-import { MongoServerError, ObjectId } from "mongodb";
 import morgan from "morgan";
 
 import { loginSchema, registerSchema } from "@secure-wallet/shared";
 import type { components } from "@secure-wallet/shared/api-client/types";
 
-import type { LoginEventDoc } from "./db/schemas";
+import { prisma } from "./db/prisma";
 import {
-  connectMongo,
-  disconnectMongo,
-  getDb,
-  readFromMongo,
-} from "./db/mongo";
-import {
+  createAuditLogRepository,
   createLoginEventRepository,
   createUserRepository,
+  type LoginEventEntity,
+  type UserEntity,
 } from "./db/repositories";
 import { applySecurityHeaders } from "./middleware/secureHeaders";
 import { lockoutGuard } from "./middleware/lockout";
 import { loginRateLimiter } from "./middleware/rateLimit";
 import { requireAuth, requireRole } from "./middleware/auth";
-import { decryptUserPII } from "./security/encryption";
 import { signAuthToken } from "./security/jwt";
 import { hashPassword, verifyPassword } from "./security/password";
 import {
@@ -45,15 +42,10 @@ app.use(lockoutGuard);
 
 const PORT = process.env.PORT_API || 4000;
 const AI_URL = process.env.AI_SERVICE_URL || "http://localhost:8000";
-const DUPLICATE_KEY_ERROR_CODE = 11000;
+const ADMIN_EMAIL = "ledanhdat56@gmail.com";
+const ADMIN_PASSWORD = "Ledanhdat2005@";
 
 const normalizeEmail = (email: string) => email.trim().toLowerCase();
-
-const toEntityId = (value: unknown, fallback: string) => {
-  if (value instanceof ObjectId) return value.toHexString();
-  if (typeof value === "string" && value.trim()) return value;
-  return fallback;
-};
 
 const toAnomalyScore = (value: unknown) =>
   typeof value === "number" && Number.isFinite(value) ? value : 0;
@@ -63,49 +55,32 @@ type AnomalyResponse = Partial<components["schemas"]["AnomalyScore"]> &
 
 const DEFAULT_SECURITY_POLICY = getDefaultSecurityPolicy();
 
-const sanitizeUser = (doc: unknown) => {
-  const validated = readFromMongo.user(doc);
-  if (!validated) return null;
-  const decrypted = decryptUserPII(validated);
-  const { passwordHash, _id, ...rest } = decrypted;
+const sanitizeUser = (user: UserEntity | null) => {
+  if (!user) return null;
+  const { passwordHash, ...rest } = user;
   void passwordHash;
-
-  return {
-    ...rest,
-    id: toEntityId(_id, decrypted.email),
-    email: decrypted.email,
-    role: decrypted.role,
-    status: decrypted.status,
-    lastLoginAt: decrypted.lastLoginAt,
-    createdAt: decrypted.createdAt,
-  };
+  return rest;
 };
 
 const countRecentFailedAttempts = async (email: string, minutes: number) => {
   const loginEventRepository = createLoginEventRepository();
   const windowStart = new Date(Date.now() - minutes * 60 * 1000);
-  return loginEventRepository.count({
-    email,
-    success: false,
-    createdAt: { $gte: windowStart },
-  } as never);
+  return loginEventRepository.countRecentFailures(email, windowStart);
 };
 
 const lockUserAccount = async (
-  userId: ObjectId | undefined,
+  userId: string | undefined,
   email: string,
   reason: string,
   ipAddress?: string,
 ) => {
   if (!userId) return;
   const userRepository = createUserRepository();
-  await userRepository.updateOne({ _id: userId } as never, {
-    $set: { status: "DISABLED", updatedAt: new Date() },
-  });
+  await userRepository.setStatus(userId, "DISABLED");
 
   await logAuditEvent({
     actor: email || "system",
-    userId: userId.toHexString(),
+    userId,
     action: "ACCOUNT_LOCKED",
     details: reason,
     ipAddress,
@@ -113,7 +88,7 @@ const lockUserAccount = async (
 };
 
 const buildAlertFromLoginEvent = (
-  event: LoginEventDoc,
+  event: LoginEventEntity,
   anomalyThreshold: number,
 ) => {
   const reasons: string[] = [];
@@ -125,7 +100,7 @@ const buildAlertFromLoginEvent = (
   if (!event.ipAddress) reasons.push("Missing IP address");
 
   return {
-    id: toEntityId(event._id, event.email ?? "unknown"),
+    id: event.id,
     email: event.email ?? "unknown",
     ipAddress: event.ipAddress ?? "unknown",
     userAgent: event.userAgent ?? "unknown",
@@ -136,6 +111,27 @@ const buildAlertFromLoginEvent = (
   };
 };
 
+const toPositiveAmount = (value: unknown) => {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed;
+};
+
+const getOrCreateWalletByUserId = async (userId: string) => {
+  const existing = await prisma.wallet.findFirst({ where: { userId } });
+  if (existing) return existing;
+
+  return prisma.wallet.create({
+    data: {
+      id: crypto.randomUUID(),
+      userId,
+      balance: 0,
+      currency: "USD",
+      status: "ACTIVE",
+    },
+  });
+};
+
 const registerShutdownHooks = () => {
   let shuttingDown = false;
 
@@ -143,9 +139,9 @@ const registerShutdownHooks = () => {
     if (shuttingDown) return;
     shuttingDown = true;
 
-    console.log(`Received ${signal}. Closing MongoDB connection...`);
+    console.log(`Received ${signal}. Closing PostgreSQL connection...`);
     try {
-      await disconnectMongo();
+      await prisma.$disconnect();
     } finally {
       process.exit(0);
     }
@@ -163,12 +159,11 @@ app.get("/health", async (_req, res) => {
   const timestamp = new Date().toISOString();
 
   try {
-    await connectMongo();
-    await getDb().command({ ping: 1 });
+    await prisma.$queryRaw`SELECT 1`;
 
     res.json({ status: "ok", service: "api", db: "ok", timestamp });
   } catch (err) {
-    console.error("Health-check failed (MongoDB)", err);
+    console.error("Health-check failed (PostgreSQL)", err);
     res
       .status(503)
       .json({ status: "degraded", service: "api", db: "down", timestamp });
@@ -195,13 +190,13 @@ app.post("/auth/register", async (req, res) => {
     const created = await userRepository.createUser({
       email,
       passwordHash,
-      role: parsed.data.role,
+      role: "USER",
     });
 
     const user: components["schemas"]["User"] = {
-      id: created.insertedId.toString(),
+      id: created.id,
       email,
-      role: parsed.data.role,
+      role: "USER",
     };
 
     const token = signAuthToken({
@@ -218,10 +213,11 @@ app.post("/auth/register", async (req, res) => {
 
     return res.status(201).json({ token, user });
   } catch (err) {
-    if (
-      err instanceof MongoServerError &&
-      err.code === DUPLICATE_KEY_ERROR_CODE
-    ) {
+    const errorCode =
+      typeof err === "object" && err !== null && "code" in err
+        ? (err as { code?: string }).code
+        : undefined;
+    if (errorCode === "P2002") {
       return res.status(409).json({ error: "Email already registered" });
     }
     console.error("Failed to register user", err);
@@ -270,7 +266,7 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
 
     if (userDoc?.status === "DISABLED") {
       await loginEventRepository.createLoginEvent({
-        userId: userDoc._id,
+        userId: userDoc.id,
         email,
         ipAddress: req.ip,
         userAgent,
@@ -280,7 +276,7 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
       });
       await logAuditEvent({
         actor: email,
-        userId: toEntityId(userDoc._id, email),
+        userId: userDoc.id,
         action: "LOGIN_BLOCKED",
         details: "account disabled",
         ipAddress: req.ip,
@@ -295,16 +291,16 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
       policy.lockoutMinutes,
     );
     if (failedBefore >= policy.maxLoginAttempts) {
-      if (userDoc?._id) {
+      if (userDoc?.id) {
         await lockUserAccount(
-          userDoc._id,
+          userDoc.id,
           email,
           "Too many failed attempts",
           req.ip,
         );
       }
       await loginEventRepository.createLoginEvent({
-        userId: userDoc?._id,
+        userId: userDoc?.id,
         email,
         ipAddress: req.ip,
         userAgent,
@@ -322,7 +318,7 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
       : false;
 
     await loginEventRepository.createLoginEvent({
-      userId: userDoc?._id,
+      userId: userDoc?.id,
       email,
       ipAddress: req.ip,
       userAgent,
@@ -334,7 +330,7 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
     if (score >= policy.anomalyAlertThreshold) {
       await logAuditEvent({
         actor: email,
-        userId: userDoc?._id ? userDoc._id.toHexString() : undefined,
+        userId: userDoc?.id,
         action: "AI_ALERT",
         details: { score, reasons: aiResult?.reasons ?? [] },
         ipAddress: req.ip,
@@ -350,9 +346,9 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
       });
 
       const failedAttempts = failedBefore + 1;
-      if (userDoc?._id && failedAttempts >= policy.maxLoginAttempts) {
+      if (userDoc?.id && failedAttempts >= policy.maxLoginAttempts) {
         await lockUserAccount(
-          userDoc._id,
+          userDoc.id,
           email,
           "Exceeded failed attempts",
           req.ip,
@@ -371,7 +367,7 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
     if (userDoc.status !== "ACTIVE") {
       await logAuditEvent({
         actor: email,
-        userId: userDoc._id?.toHexString(),
+        userId: userDoc.id,
         action: "LOGIN_BLOCKED",
         details: `status=${userDoc.status}`,
         ipAddress: req.ip,
@@ -381,12 +377,10 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
         .json({ error: "Account is not active", anomaly: aiResult });
     }
 
-    if (userDoc._id) {
-      await userRepository.touchLastLogin(userDoc._id);
-    }
+    await userRepository.touchLastLogin(userDoc.id);
 
     const user: components["schemas"]["User"] = {
-      id: toEntityId(userDoc._id, email),
+      id: userDoc.id,
       email,
       role: userDoc.role,
     };
@@ -432,11 +426,11 @@ app.post("/auth/change-password", requireAuth, async (req, res) => {
   if (!isValid) return res.status(401).json({ error: "Invalid credentials" });
 
   const passwordHash = await hashPassword(newPassword);
-  await userRepository.updatePassword(userDoc._id!, passwordHash);
+  await userRepository.updatePassword(userDoc.id, passwordHash);
 
   await logAuditEvent({
     actor: req.user?.email,
-    userId: userDoc._id?.toHexString(),
+    userId: userDoc.id,
     action: "CHANGE_PASSWORD",
     ipAddress: req.ip,
   });
@@ -444,34 +438,200 @@ app.post("/auth/change-password", requireAuth, async (req, res) => {
   return res.status(204).send();
 });
 
-// Contract placeholders below
-app.get("/wallet/me", requireAuth, (_req, res) => {
-  const wallet: components["schemas"]["Wallet"] = {
-    id: "wallet1",
-    balance: 0,
-    currency: "USD",
-  };
-  res.json(wallet);
+app.get("/wallet/me", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  try {
+    const wallet = await getOrCreateWalletByUserId(userId);
+    const payload: components["schemas"]["Wallet"] = {
+      id: wallet.id,
+      balance: Number(wallet.balance),
+      currency: wallet.currency,
+    };
+    return res.json(payload);
+  } catch (err) {
+    console.error("Failed to get wallet", err);
+    return res.status(500).json({ error: "Internal error" });
+  }
 });
 
-app.post("/wallet/deposit", requireAuth, (_req, res) => {
-  res.json({ id: "wallet1", balance: 100, currency: "USD" });
+app.post("/wallet/deposit", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const amount = toPositiveAmount((req.body as { amount?: unknown })?.amount);
+  if (!amount) return res.status(400).json({ error: "Invalid amount" });
+
+  try {
+    const updatedWallet = await prisma.$transaction(async (tx) => {
+      const wallet = await tx.wallet.findFirst({ where: { userId } });
+      const nextWallet =
+        wallet ??
+        (await tx.wallet.create({
+          data: {
+            id: crypto.randomUUID(),
+            userId,
+            balance: 0,
+            currency: "USD",
+            status: "ACTIVE",
+          },
+        }));
+
+      const updated = await tx.wallet.update({
+        where: { id: nextWallet.id },
+        data: { balance: { increment: amount } },
+      });
+
+      await tx.transaction.create({
+        data: {
+          id: crypto.randomUUID(),
+          walletId: updated.id,
+          amount,
+          type: "DEPOSIT",
+          status: "COMPLETED",
+          description: "Wallet deposit",
+          fromUserId: userId,
+          toUserId: userId,
+        },
+      });
+
+      return updated;
+    });
+
+    return res.json({
+      id: updatedWallet.id,
+      balance: Number(updatedWallet.balance),
+      currency: updatedWallet.currency,
+    });
+  } catch (err) {
+    console.error("Failed to deposit", err);
+    return res.status(500).json({ error: "Internal error" });
+  }
 });
 
-app.post("/transfer", requireAuth, (_req, res) => {
-  res.json({
-    status: "ok",
-    transaction: {
-      id: "txn1",
-      amount: 10,
-      type: "TRANSFER",
-      createdAt: new Date().toISOString(),
-    },
-  });
+app.post("/transfer", requireAuth, async (req, res) => {
+  const senderUserId = req.user?.sub;
+  if (!senderUserId) return res.status(401).json({ error: "Unauthorized" });
+
+  const body = req.body as { toUserId?: string; amount?: unknown };
+  const toUserId =
+    typeof body.toUserId === "string" ? body.toUserId.trim() : "";
+  const amount = toPositiveAmount(body.amount);
+
+  if (!toUserId) return res.status(400).json({ error: "Missing toUserId" });
+  if (!amount) return res.status(400).json({ error: "Invalid amount" });
+  if (toUserId === senderUserId) {
+    return res.status(400).json({ error: "Cannot transfer to self" });
+  }
+
+  try {
+    const receiver = await prisma.user.findUnique({ where: { id: toUserId } });
+    if (!receiver) return res.status(404).json({ error: "Recipient not found" });
+
+    const transferResult = await prisma.$transaction(async (tx) => {
+      const senderWallet = await tx.wallet.findFirst({
+        where: { userId: senderUserId },
+      });
+      if (!senderWallet) throw new Error("SENDER_WALLET_NOT_FOUND");
+      if (Number(senderWallet.balance) < amount)
+        throw new Error("INSUFFICIENT_BALANCE");
+
+      const receiverWallet =
+        (await tx.wallet.findFirst({ where: { userId: toUserId } })) ??
+        (await tx.wallet.create({
+          data: {
+            id: crypto.randomUUID(),
+            userId: toUserId,
+            balance: 0,
+            currency: senderWallet.currency,
+            status: "ACTIVE",
+          },
+        }));
+
+      await tx.wallet.update({
+        where: { id: senderWallet.id },
+        data: { balance: { decrement: amount } },
+      });
+      await tx.wallet.update({
+        where: { id: receiverWallet.id },
+        data: { balance: { increment: amount } },
+      });
+
+      const transaction = await tx.transaction.create({
+        data: {
+          id: crypto.randomUUID(),
+          walletId: senderWallet.id,
+          amount,
+          type: "TRANSFER",
+          status: "COMPLETED",
+          description: `Transfer to ${toUserId}`,
+          fromUserId: senderUserId,
+          toUserId,
+        },
+      });
+
+      return transaction;
+    });
+
+    return res.json({
+      status: "ok",
+      transaction: {
+        id: transferResult.id,
+        amount: Number(transferResult.amount),
+        type: transferResult.type,
+        description: transferResult.description ?? undefined,
+        createdAt: transferResult.createdAt.toISOString(),
+      },
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === "SENDER_WALLET_NOT_FOUND") {
+      return res.status(400).json({ error: "Sender wallet not found" });
+    }
+    if (err instanceof Error && err.message === "INSUFFICIENT_BALANCE") {
+      return res.status(400).json({ error: "Insufficient balance" });
+    }
+    console.error("Failed to transfer", err);
+    return res.status(500).json({ error: "Internal error" });
+  }
 });
 
-app.get("/transactions", requireAuth, (_req, res) => {
-  res.json([]);
+app.get("/transactions", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  try {
+    const wallets = await prisma.wallet.findMany({
+      where: { userId },
+      select: { id: true },
+    });
+    const walletIds = wallets.map((w) => w.id);
+
+    const txns = await prisma.transaction.findMany({
+      where: {
+        OR: [
+          { fromUserId: userId },
+          { toUserId: userId },
+          ...(walletIds.length ? [{ walletId: { in: walletIds } }] : []),
+        ],
+      },
+      orderBy: { createdAt: "desc" },
+      take: 200,
+    });
+
+    return res.json(
+      txns.map((txn) => ({
+        id: txn.id,
+        amount: Number(txn.amount),
+        type: txn.type,
+        description: txn.description ?? undefined,
+        createdAt: txn.createdAt.toISOString(),
+      })),
+    );
+  } catch (err) {
+    console.error("Failed to list transactions", err);
+    return res.status(500).json({ error: "Internal error" });
+  }
 });
 
 app.post("/security/login-events", (_req, res) => {
@@ -482,14 +642,8 @@ app.get("/security/alerts", async (_req, res) => {
   const policy = await getSecurityPolicy();
   const repo = createLoginEventRepository();
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const events = await repo.findMany({ createdAt: { $gte: since } } as never, {
-    sort: { createdAt: -1 },
-    limit: 100,
-  });
-  const normalized = events
-    .map((e) => readFromMongo.loginEvent(e))
-    .filter(Boolean) as LoginEventDoc[];
-  const alerts = normalized
+  const events = await repo.findSince(since, 100);
+  const alerts = events
     .filter(
       (evt) =>
         !evt.success || (evt.anomaly ?? 0) >= policy.anomalyAlertThreshold,
@@ -507,10 +661,7 @@ app.get(
   requireRole(["ADMIN"]),
   async (_req, res) => {
     const userRepository = createUserRepository();
-    const docs = await userRepository.findMany(
-      {},
-      { sort: { createdAt: -1 }, limit: 200 },
-    );
+    const docs = await userRepository.findMany(200);
     const users = docs.map(sanitizeUser).filter(Boolean);
     res.json(users);
   },
@@ -531,17 +682,14 @@ app.patch(
     }
 
     try {
-      const id = new ObjectId(req.params.id);
       const userRepository = createUserRepository();
-      await userRepository.updateOne({ _id: id } as never, {
-        $set: { status: statusNormalized as UserStatus, updatedAt: new Date() },
-      });
-      const updated = await userRepository.findValidatedById(id);
+      await userRepository.setStatus(req.params.id, statusNormalized as UserStatus);
+      const updated = await userRepository.findValidatedById(req.params.id);
       const sanitized = sanitizeUser(updated);
 
       await logAuditEvent({
         actor: "admin",
-        userId: id.toHexString(),
+        userId: req.params.id,
         action:
           statusNormalized === "DISABLED"
             ? "ACCOUNT_LOCKED"
@@ -568,20 +716,17 @@ app.get(
       200,
     );
     const repo = createLoginEventRepository();
-    const events = await repo.findMany({}, { sort: { createdAt: -1 }, limit });
-    const normalized = events
-      .map((e) => readFromMongo.loginEvent(e))
-      .filter(Boolean)
-      .map((evt) => ({
-        id: toEntityId(evt?._id, evt?.email ?? "unknown"),
-        email: evt?.email ?? "unknown",
-        ipAddress: evt?.ipAddress ?? "unknown",
-        userAgent: evt?.userAgent ?? "unknown",
-        success: evt?.success ?? false,
-        anomaly: evt?.anomaly ?? 0,
-        createdAt: evt?.createdAt ?? new Date(),
-        metadata: evt?.metadata ?? {},
-      }));
+    const events = await repo.findLatest(limit);
+    const normalized = events.map((evt) => ({
+      id: evt.id,
+      email: evt.email ?? "unknown",
+      ipAddress: evt.ipAddress ?? "unknown",
+      userAgent: evt.userAgent ?? "unknown",
+      success: evt.success,
+      anomaly: evt.anomaly,
+      createdAt: evt.createdAt,
+      metadata: evt.metadata ?? {},
+    }));
     res.json(normalized);
   },
 );
@@ -595,23 +740,20 @@ app.get(
       parseInt(String(req.query.limit ?? "50"), 10) || 50,
       200,
     );
-    const docs = await getDb()
-      .collection("transactions")
-      .find({}, { sort: { createdAt: -1 }, limit })
-      .toArray();
-    const normalized = docs
-      .map((d) => readFromMongo.transaction(d))
-      .filter(Boolean)
-      .map((txn) => ({
-        id: toEntityId(txn?._id, "txn"),
-        amount: txn?.amount ?? 0,
-        type: txn?.type ?? "TRANSFER",
-        status: txn?.status ?? "COMPLETED",
-        description: txn?.description ?? "",
-        createdAt: txn?.createdAt ?? new Date(),
-        fromUserId: txn?.fromUserId?.toHexString?.() ?? undefined,
-        toUserId: txn?.toUserId?.toHexString?.() ?? undefined,
-      }));
+    const txns = await prisma.transaction.findMany({
+      orderBy: { createdAt: "desc" },
+      take: limit,
+    });
+    const normalized = txns.map((txn) => ({
+      id: txn.id,
+      amount: Number(txn.amount),
+      type: txn.type,
+      status: txn.status,
+      description: txn.description ?? "",
+      createdAt: txn.createdAt,
+      fromUserId: txn.fromUserId ?? undefined,
+      toUserId: txn.toUserId ?? undefined,
+    }));
     res.json(normalized);
   },
 );
@@ -624,17 +766,8 @@ app.get(
     const policy = await getSecurityPolicy();
     const repo = createLoginEventRepository();
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const events = await repo.findMany(
-      { createdAt: { $gte: since } } as never,
-      {
-        sort: { createdAt: -1 },
-        limit: 100,
-      },
-    );
-    const normalized = events
-      .map((e) => readFromMongo.loginEvent(e))
-      .filter(Boolean) as LoginEventDoc[];
-    const alerts = normalized
+    const events = await repo.findSince(since, 100);
+    const alerts = events
       .filter(
         (evt) =>
           !evt.success || (evt.anomaly ?? 0) >= policy.anomalyAlertThreshold,
@@ -656,22 +789,16 @@ app.get(
       parseInt(String(req.query.limit ?? "100"), 10) || 100,
       300,
     );
-    const docs = await getDb()
-      .collection("auditLogs")
-      .find({}, { sort: { createdAt: -1 }, limit })
-      .toArray();
-    const logs = docs
-      .map((d) => readFromMongo.auditLog(d))
-      .filter(Boolean)
-      .map((log) => ({
-        id: toEntityId(log?._id, log?.actor ?? "system"),
-        actor: log?.actor ?? "system",
-        action: log?.action ?? "UNKNOWN",
-        details: log?.details ?? "",
-        ipAddress: log?.ipAddress ?? "unknown",
-        createdAt: log?.createdAt ?? new Date(),
-      }));
-    res.json(logs);
+    const logs = await createAuditLogRepository().findLatest(limit);
+    const normalized = logs.map((log) => ({
+      id: log.id,
+      actor: log.actor,
+      action: log.action,
+      details: log.details ?? "",
+      ipAddress: log.ipAddress ?? "unknown",
+      createdAt: log.createdAt,
+    }));
+    res.json(normalized);
   },
 );
 
@@ -697,9 +824,16 @@ app.post(
       updatedAt: new Date(),
       createdAt: new Date(),
     };
-    await getDb()
-      .collection("securityPolicies")
-      .insertOne(policy as never);
+
+    await prisma.securityPolicy.create({
+      data: {
+        id: crypto.randomUUID(),
+        maxLoginAttempts: policy.maxLoginAttempts,
+        lockoutMinutes: policy.lockoutMinutes,
+        anomalyAlertThreshold: policy.anomalyAlertThreshold,
+      },
+    });
+
     res.json({ status: "updated", policy });
   },
 );
@@ -717,7 +851,7 @@ app.post(
     const repo = createLoginEventRepository();
     const userRepo = createUserRepository();
     const userDoc = await userRepo.findByEmail(email);
-    const userId = userDoc?._id;
+    const userId = userDoc?.id;
 
     const entries = Array.from({ length: 6 }).map((_, i) => ({
       userId,
@@ -750,7 +884,7 @@ app.post(
     const repo = createLoginEventRepository();
     const userRepo = createUserRepository();
     const userDoc = await userRepo.findByEmail(email);
-    const userId = userDoc?._id;
+    const userId = userDoc?.id;
 
     const payload = {
       userId,
@@ -767,7 +901,7 @@ app.post(
     await repo.createLoginEvent(payload);
     await logAuditEvent({
       actor: email,
-      userId: userId?.toHexString(),
+      userId,
       action: "AI_ALERT",
       details: payload.metadata,
       ipAddress: payload.ipAddress,
@@ -784,17 +918,59 @@ const errorHandler: ErrorRequestHandler = (err, _req, res, next) => {
 
 app.use(errorHandler);
 
+const sleep = (ms: number) =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+const initializeDatabase = async () => {
+  const maxAttempts = 8;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await prisma.$connect();
+      const adminPasswordHash = await hashPassword(ADMIN_PASSWORD);
+      await prisma.user.upsert({
+        where: { email: ADMIN_EMAIL },
+        update: {
+          passwordHash: adminPasswordHash,
+          role: "ADMIN",
+          status: "ACTIVE",
+        },
+        create: {
+          id: crypto.randomUUID(),
+          email: ADMIN_EMAIL,
+          passwordHash: adminPasswordHash,
+          role: "ADMIN",
+          status: "ACTIVE",
+        },
+      });
+      console.log(`Default admin ready. email=${ADMIN_EMAIL}`);
+      return;
+    } catch (err) {
+      console.error(
+        `Database init failed (attempt ${attempt}/${maxAttempts})`,
+        err,
+      );
+      if (attempt < maxAttempts) {
+        await sleep(3000);
+      }
+    }
+  }
+  console.error("Database init failed after max retries.");
+};
+
 const start = async () => {
   try {
-    await connectMongo();
     registerShutdownHooks();
     app.listen(PORT, () => {
       console.log(`API listening on http://localhost:${PORT}`);
     });
+    void initializeDatabase();
   } catch (err) {
-    console.error("Failed to start API (MongoDB connection)", err);
+    console.error("Failed to start API server", err);
     process.exit(1);
   }
 };
 
 start();
+

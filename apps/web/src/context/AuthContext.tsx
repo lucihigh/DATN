@@ -42,7 +42,7 @@ const toDisplayName = (email: string) => {
 
 const parseApiError = (err: unknown) => {
   if (err instanceof TypeError) {
-    return "Cannot connect to API server (http://localhost:4000). Start backend first.";
+    return `Cannot connect to API server (${API_BASE}). Start backend first.`;
   }
   if (err instanceof Error) return err.message;
   return "Request failed";

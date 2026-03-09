@@ -1,4 +1,4 @@
-# Secure Simulated E-Wallet Banking System (Monorepo Scaffold)
+ï»¿# Secure Simulated E-Wallet Banking System (Monorepo Scaffold)
 
 This repository is a pnpm-powered monorepo scaffold for a student project: **"Secure Simulated E-Wallet Banking System with Data Encryption & AI-based Anomalous Login Detection"**.
 
@@ -10,14 +10,14 @@ This repository is a pnpm-powered monorepo scaffold for a student project: **"Se
 - After updating the spec, rerun generation and update implementations as needed.
 
 ## Structure
-- apps/web – React (Vite) frontend for user + admin
-- apps/api – Node.js + Express REST API with Prisma ORM
-- apps/ai-service – Python FastAPI microservice for login anomaly scoring
-- packages/shared – TypeScript shared types, Zod schemas, generated API client placeholder
-- packages/config – Shared lint/format configs
-- infra – docker-compose, Postgres, service wiring
-- prisma – Prisma schema & migration entrypoint
-- contracts – OpenAPI contract (single source of truth)
+- apps/web â€“ React (Vite) frontend for user + admin
+- apps/api â€“ Node.js + Express REST API with Prisma ORM
+- apps/ai-service â€“ Python FastAPI microservice for login anomaly scoring
+- packages/shared â€“ TypeScript shared types, Zod schemas, generated API client placeholder
+- packages/config â€“ Shared lint/format configs
+- infra â€“ docker-compose, Postgres, service wiring
+- prisma â€“ Prisma schema & migration entrypoint
+- contracts â€“ OpenAPI contract (single source of truth)
 
 ## Getting Started
 1. Install pnpm (>=9) and Node.js >= 18.18, plus Python 3.10+.
@@ -29,15 +29,15 @@ This repository is a pnpm-powered monorepo scaffold for a student project: **"Se
 7. Contract flow: edit `contracts/openapi.yaml` -> `pnpm contract:validate` -> `pnpm contract:gen`.
 
 ## Scripts (root)
-- `pnpm dev` – runs all workspace `dev` scripts in parallel
+- `pnpm dev` â€“ runs all workspace `dev` scripts in parallel
 - `pnpm lint` / `pnpm format` / `pnpm typecheck` / `pnpm test`
 - `pnpm contract:validate` / `pnpm contract:gen`
-- `pnpm --filter @secure-wallet/api db:init` – prepare Mongo collections/indexes (needs `MONGODB_URI`)
-- `pnpm prepare` – installs husky hooks
+- `pnpm --filter @secure-wallet/api db:migrate-mongo` â€“ migrate legacy MongoDB data into PostgreSQL (needs `MONGODB_URI` + `DATABASE_URL`)
+- `pnpm prepare` â€“ installs husky hooks
 
 ## Branching strategy
-- `main` – stable releases
-- `dev` – integration branch
+- `main` â€“ stable releases
+- `dev` â€“ integration branch
 - Feature branches: `feature/frontend-ui`, `feature/backend-auth`, `feature/db-encrypt`, `feature/ai-service`, `feature/admin-audit`
 
 ## Code ownership (see CODEOWNERS)
@@ -50,7 +50,7 @@ This repository is a pnpm-powered monorepo scaffold for a student project: **"Se
 ## OpenAPI & Client
 - Spec: `contracts/openapi.yaml`
 - Generate client: `pnpm contract:gen` (into packages/shared/api-client)
-- Database (MongoDB option): set `MONGODB_URI` (Atlas URI) and `MONGODB_DB`; run `pnpm --filter @secure-wallet/api db:init` once.
+- Database migration path: keep PostgreSQL as primary DB; if you have legacy MongoDB data, set `MONGODB_URI` + `MONGODB_DB` then run `pnpm --filter @secure-wallet/api db:migrate-mongo`.
 
 ## Security & Compliance Notes
 - Env-based key management only (no secrets committed).
@@ -68,3 +68,4 @@ This repository is a pnpm-powered monorepo scaffold for a student project: **"Se
 - Update compose env if ports change.
 
 Happy building!
+
