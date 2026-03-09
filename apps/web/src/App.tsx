@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import jsQR from "jsqr";
 
 import { useAuth } from "./context/AuthContext";
 import { useToast } from "./context/ToastContext";
@@ -193,6 +194,9 @@ function BarChart({
 function DashboardView() {
   const { user, token } = useAuth();
   const { toast } = useToast();
+  const transferQrVideoRef = useRef<HTMLVideoElement>(null);
+  const transferQrStreamRef = useRef<MediaStream | null>(null);
+  const transferQrScanTimerRef = useRef<number | null>(null);
   const [wallet, setWallet] = useState<{
     id: string;
     balance: number;
@@ -219,6 +223,16 @@ function DashboardView() {
   const [transferContent, setTransferContent] = useState("");
   const [transferQrFile, setTransferQrFile] = useState("");
   const [transferQrRaw, setTransferQrRaw] = useState("");
+  const [transferQrCameraOn, setTransferQrCameraOn] = useState(false);
+  const [transferQrCameraError, setTransferQrCameraError] = useState("");
+  const [transferQrFacingMode, setTransferQrFacingMode] = useState<
+    "environment" | "user"
+  >("environment");
+  const [transferQrDevices, setTransferQrDevices] = useState<MediaDeviceInfo[]>(
+    [],
+  );
+  const [transferQrDeviceId, setTransferQrDeviceId] = useState("");
+  const [transferShowMyQr, setTransferShowMyQr] = useState(false);
   const [transferOtpCode, setTransferOtpCode] = useState("");
   const [transferOtpInput, setTransferOtpInput] = useState("");
   const [transferOtpError, setTransferOtpError] = useState("");
@@ -263,6 +277,475 @@ function DashboardView() {
     group.replace(/\*/g, "•"),
   );
   const defaultTransferContent = `${user?.name ?? "User"} transfer`;
+  const transferAmountNumber = Number(transferAmount.replace(/,/g, ""));
+  const isInsufficientBalance =
+    wallet !== null &&
+    transferAmount.trim().length > 0 &&
+    Number.isFinite(transferAmountNumber) &&
+    transferAmountNumber > Number(wallet.balance);
+  const canContinueTransferAmount =
+    wallet !== null &&
+    transferAmount.trim().length > 0 &&
+    Number.isFinite(transferAmountNumber) &&
+    transferAmountNumber > 0 &&
+    !isInsufficientBalance;
+  const ownQrPayload =
+    wallet?.qrPayload ||
+    (wallet?.accountNumber
+      ? `EWALLET|ACC:${wallet.accountNumber}|BANK:SECURE-WALLET`
+      : "");
+  const ownQrImageUrl =
+    wallet?.qrImageUrl ||
+    (ownQrPayload
+      ? `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(ownQrPayload)}`
+      : "");
+
+  const extractAccountFromQrPayload = (payload: string) =>
+    payload.match(/ACC:(\d{8,19})/i)?.[1] || payload.replace(/\D/g, "").slice(0, 19);
+
+  const stopTransferQrCameraScan = () => {
+    if (transferQrScanTimerRef.current !== null) {
+      window.clearInterval(transferQrScanTimerRef.current);
+      transferQrScanTimerRef.current = null;
+    }
+
+    const stream = transferQrStreamRef.current;
+    if (stream) {
+      for (const track of stream.getTracks()) {
+        track.stop();
+      }
+      transferQrStreamRef.current = null;
+    }
+
+    if (transferQrVideoRef.current) {
+      transferQrVideoRef.current.srcObject = null;
+    }
+    setTransferQrCameraOn(false);
+  };
+
+  const loadTransferQrDevices = async () => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cameras = devices.filter((d) => d.kind === "videoinput");
+      setTransferQrDevices(cameras);
+      if (cameras.length > 0) {
+        setTransferQrDeviceId((prev) =>
+          prev && cameras.some((d) => d.deviceId === prev)
+            ? prev
+            : cameras[0].deviceId,
+        );
+      } else {
+        setTransferQrDeviceId("");
+      }
+    } catch {
+      setTransferQrDevices([]);
+      setTransferQrDeviceId("");
+    }
+  };
+
+  const handleTransferQrPayloadDetected = (payload: string) => {
+    setTransferQrRaw(payload);
+    const extracted = extractAccountFromQrPayload(payload);
+    if (!/^\d{8,19}$/.test(extracted)) {
+      toast("Cannot detect a valid account number from QR payload.", "error");
+      return;
+    }
+    setTransferAccount(extracted);
+    setTransferReceiverName(`QR Recipient •••• ${extracted.slice(-4)}`);
+    toast("QR scanned successfully.");
+  };
+
+  const startTransferQrCameraScan = async (
+    preferredFacingMode: "environment" | "user" = transferQrFacingMode,
+  ) => {
+    const BarcodeDetectorCtor = (
+      window as Window & {
+        BarcodeDetector?: new (opts?: {
+          formats?: string[];
+        }) => { detect: (source: ImageBitmapSource) => Promise<Array<{ rawValue?: string }>> };
+      }
+    ).BarcodeDetector;
+
+    stopTransferQrCameraScan();
+
+    const constraintsList: MediaStreamConstraints[] = [
+      { video: true },
+      ...(transferQrDeviceId
+        ? [
+            {
+              video: {
+                deviceId: { exact: transferQrDeviceId },
+              },
+            } as MediaStreamConstraints,
+          ]
+        : []),
+      ...(transferQrDeviceId
+        ? [
+            {
+              video: {
+                deviceId: transferQrDeviceId,
+              },
+            } as MediaStreamConstraints,
+          ]
+        : []),
+      {
+        video: {
+          facingMode: { ideal: preferredFacingMode },
+        },
+      },
+      {
+        video: {
+          facingMode: { ideal: preferredFacingMode === "environment" ? "user" : "environment" },
+        },
+      },
+    ];
+    for (const cam of transferQrDevices) {
+      if (!cam.deviceId || cam.deviceId === transferQrDeviceId) continue;
+      constraintsList.push({
+        video: {
+          deviceId: { exact: cam.deviceId },
+        },
+      });
+    }
+
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setTransferQrCameraError(
+          "This browser does not support camera API (getUserMedia). Please use Chrome/Edge/Firefox latest.",
+        );
+        return;
+      }
+
+      setTransferQrCameraError("Opening camera...");
+      let activeStream: MediaStream | null = null;
+      const attemptErrors: string[] = [];
+      for (const constraints of constraintsList) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia(constraints);
+          const video = transferQrVideoRef.current;
+          if (!video) {
+            stream.getTracks().forEach((track) => track.stop());
+            continue;
+          }
+          video.srcObject = stream;
+          video.muted = true;
+          video.playsInline = true;
+          video.setAttribute("playsinline", "true");
+          await video.play().catch(() => {
+            // Some environments may block autoplay preview but stream is still usable.
+          });
+          activeStream = stream;
+          const activeTrack = stream.getVideoTracks()[0];
+          const activeDeviceId = activeTrack?.getSettings().deviceId;
+          if (activeDeviceId) {
+            setTransferQrDeviceId(activeDeviceId);
+          }
+          setTransferQrCameraError("");
+          break;
+        } catch (openErr) {
+          const n =
+            openErr && typeof openErr === "object" && "name" in openErr
+              ? String((openErr as { name?: unknown }).name || "Error")
+              : "Error";
+          const m =
+            openErr && typeof openErr === "object" && "message" in openErr
+              ? String((openErr as { message?: unknown }).message || "")
+              : "";
+          const shortConstraints =
+            typeof constraints.video === "boolean"
+              ? "video:true"
+              : constraints.video &&
+                  typeof constraints.video === "object" &&
+                  "deviceId" in constraints.video &&
+                  constraints.video.deviceId
+                ? "deviceId"
+                : constraints.video &&
+                    typeof constraints.video === "object" &&
+                    "facingMode" in constraints.video
+                  ? "facingMode"
+                  : "video";
+          attemptErrors.push(`${shortConstraints}:${n}${m ? `(${m})` : ""}`);
+        }
+      }
+      if (!activeStream) {
+        setTransferQrCameraError(
+          attemptErrors.length > 0
+            ? `Cannot open camera. Attempts failed: ${attemptErrors.join(" | ")}`
+            : "Cannot open camera. Browser returned no device stream.",
+        );
+        return;
+      }
+      transferQrStreamRef.current = activeStream;
+
+      const detector = BarcodeDetectorCtor
+        ? new BarcodeDetectorCtor({ formats: ["qr_code"] })
+        : null;
+      const frameCanvas = document.createElement("canvas");
+      const frameCtx = frameCanvas.getContext("2d");
+      const activeTrack = activeStream.getVideoTracks()[0] ?? null;
+      const ImageCaptureCtor = (window as Window & { ImageCapture?: unknown })
+        .ImageCapture as
+        | (new (track: MediaStreamTrack) => { grabFrame: () => Promise<ImageBitmap> })
+        | undefined;
+      setTransferQrCameraOn(true);
+      transferQrScanTimerRef.current = window.setInterval(async () => {
+        const video = transferQrVideoRef.current;
+        if (!video) return;
+        try {
+          let raw = "";
+
+          if (detector && video.readyState >= 2 && video.videoWidth > 0) {
+            const results = await detector.detect(video);
+            raw = results[0]?.rawValue?.trim() || "";
+          }
+
+          if (!raw && frameCtx && video.readyState >= 2) {
+            const vw = video.videoWidth || video.clientWidth;
+            const vh = video.videoHeight || video.clientHeight;
+            if (vw > 0 && vh > 0) {
+              frameCanvas.width = vw;
+              frameCanvas.height = vh;
+              frameCtx.drawImage(video, 0, 0, vw, vh);
+              const imageData = frameCtx.getImageData(0, 0, vw, vh);
+              const decoded = jsQR(imageData.data, imageData.width, imageData.height, {
+                inversionAttempts: "attemptBoth",
+              });
+              raw = decoded?.data?.trim() || "";
+            }
+          }
+
+          if (!raw && activeTrack && ImageCaptureCtor && activeTrack.readyState === "live") {
+            const imageCapture = new ImageCaptureCtor(activeTrack);
+            const bitmap = await imageCapture.grabFrame();
+            try {
+              if (detector) {
+                const results = await detector.detect(bitmap);
+                raw = results[0]?.rawValue?.trim() || "";
+              }
+              if (!raw && frameCtx) {
+                frameCanvas.width = bitmap.width;
+                frameCanvas.height = bitmap.height;
+                frameCtx.drawImage(bitmap, 0, 0, bitmap.width, bitmap.height);
+                const imageData = frameCtx.getImageData(
+                  0,
+                  0,
+                  bitmap.width,
+                  bitmap.height,
+                );
+                const decoded = jsQR(
+                  imageData.data,
+                  imageData.width,
+                  imageData.height,
+                  {
+                    inversionAttempts: "attemptBoth",
+                  },
+                );
+                raw = decoded?.data?.trim() || "";
+              }
+            } finally {
+              bitmap.close();
+            }
+          }
+
+          if (!raw) return;
+          stopTransferQrCameraScan();
+          handleTransferQrPayloadDetected(raw);
+        } catch {
+          // keep scanning
+        }
+      }, 500);
+    } catch (err) {
+      stopTransferQrCameraScan();
+      const name =
+        err && typeof err === "object" && "name" in err
+          ? String((err as { name?: unknown }).name || "")
+          : "";
+      const message =
+        err && typeof err === "object" && "message" in err
+          ? String((err as { message?: unknown }).message || "")
+          : "";
+      if (name === "NotAllowedError") {
+        setTransferQrCameraError("Camera permission denied. Please allow camera access.");
+      } else if (name === "NotFoundError") {
+        setTransferQrCameraError("No camera device found on this machine.");
+      } else if (name === "NotReadableError") {
+        setTransferQrCameraError(
+          "Camera is in use by another app (Zoom/Meet/Zalo/OBS). Close it and try again.",
+        );
+      } else if (name === "OverconstrainedError") {
+        setTransferQrCameraError(
+          "Camera constraints are not supported on this device. Press Reload cameras and try again.",
+        );
+      } else if (name === "SecurityError") {
+        setTransferQrCameraError(
+          "Browser blocked camera due to security policy. Open from localhost only and allow camera.",
+        );
+      } else if (name === "AbortError") {
+        setTransferQrCameraError(
+          "Camera start was interrupted. Please try Scan QR by camera again.",
+        );
+      } else {
+        setTransferQrCameraError(
+          `Cannot open camera on this browser/device.${name ? ` [${name}]` : ""}${message ? ` ${message}` : ""}`,
+        );
+      }
+    }
+  };
+
+  const detectQrFromImageFile = async (file: File) => {
+    const BarcodeDetectorCtor = (
+      window as Window & {
+        BarcodeDetector?: new (opts?: {
+          formats?: string[];
+        }) => { detect: (source: ImageBitmapSource) => Promise<Array<{ rawValue?: string }>> };
+      }
+    ).BarcodeDetector;
+
+    let bitmap: ImageBitmap | null = null;
+    try {
+      if (BarcodeDetectorCtor) {
+        const detector = new BarcodeDetectorCtor({ formats: ["qr_code"] });
+        bitmap = await createImageBitmap(file);
+        const results = await detector.detect(bitmap);
+        const raw = results[0]?.rawValue?.trim();
+        if (raw) {
+          handleTransferQrPayloadDetected(raw);
+          return;
+        }
+      }
+
+      const objectUrl = URL.createObjectURL(file);
+      try {
+        const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+          const image = new Image();
+          image.onload = () => resolve(image);
+          image.onerror = () => reject(new Error("load-failed"));
+          image.src = objectUrl;
+        });
+        const canvas = document.createElement("canvas");
+        canvas.width = img.naturalWidth || img.width;
+        canvas.height = img.naturalHeight || img.height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) throw new Error("canvas-context-failed");
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const rotateCanvas = (
+          sourceCanvas: HTMLCanvasElement,
+          angle: 0 | 90 | 180 | 270,
+        ) => {
+          if (angle === 0) return sourceCanvas;
+          const out = document.createElement("canvas");
+          const srcW = sourceCanvas.width;
+          const srcH = sourceCanvas.height;
+          out.width = angle === 90 || angle === 270 ? srcH : srcW;
+          out.height = angle === 90 || angle === 270 ? srcW : srcH;
+          const outCtx = out.getContext("2d");
+          if (!outCtx) return sourceCanvas;
+          outCtx.translate(out.width / 2, out.height / 2);
+          outCtx.rotate((angle * Math.PI) / 180);
+          outCtx.drawImage(sourceCanvas, -srcW / 2, -srcH / 2);
+          return out;
+        };
+        const decodeCanvasRegion = (
+          sourceCanvas: HTMLCanvasElement,
+          region?: { x: number; y: number; w: number; h: number },
+          scale = 1,
+        ) => {
+          const srcX = region?.x ?? 0;
+          const srcY = region?.y ?? 0;
+          const srcW = region?.w ?? sourceCanvas.width;
+          const srcH = region?.h ?? sourceCanvas.height;
+          if (srcW <= 0 || srcH <= 0) return "";
+
+          const work = document.createElement("canvas");
+          work.width = Math.max(1, Math.floor(srcW * scale));
+          work.height = Math.max(1, Math.floor(srcH * scale));
+          const workCtx = work.getContext("2d");
+          if (!workCtx) return "";
+          workCtx.imageSmoothingEnabled = false;
+          workCtx.drawImage(
+            sourceCanvas,
+            srcX,
+            srcY,
+            srcW,
+            srcH,
+            0,
+            0,
+            work.width,
+            work.height,
+          );
+          const imageData = workCtx.getImageData(0, 0, work.width, work.height);
+          const decoded = jsQR(imageData.data, imageData.width, imageData.height, {
+            inversionAttempts: "attemptBoth",
+          });
+          return decoded?.data?.trim() || "";
+        };
+
+        const buildScanRegions = (sourceCanvas: HTMLCanvasElement) => {
+          const cw = sourceCanvas.width;
+          const ch = sourceCanvas.height;
+          const regions: Array<
+            | undefined
+            | {
+                x: number;
+                y: number;
+                w: number;
+                h: number;
+              }
+          > = [undefined];
+
+          const ratioWindows = [0.9, 0.75, 0.6, 0.45, 0.35];
+          const anchors = [0, 0.25, 0.5, 0.75, 1];
+
+          for (const ratio of ratioWindows) {
+            const w = Math.max(96, Math.floor(cw * ratio));
+            const h = Math.max(96, Math.floor(ch * ratio));
+            const maxX = Math.max(0, cw - w);
+            const maxY = Math.max(0, ch - h);
+            for (const fx of anchors) {
+              for (const fy of anchors) {
+                const x = Math.floor(maxX * fx);
+                const y = Math.floor(maxY * fy);
+                regions.push({ x, y, w, h });
+              }
+            }
+          }
+
+          return regions;
+        };
+
+        const scales = [1, 1.5, 2, 3];
+        let raw = "";
+        const rotations: Array<0 | 90 | 180 | 270> = [0, 90, 180, 270];
+        for (const angle of rotations) {
+          const rotated = rotateCanvas(canvas, angle);
+          const regions = buildScanRegions(rotated);
+          for (const region of regions) {
+            for (const scale of scales) {
+              raw = decodeCanvasRegion(rotated, region, scale);
+              if (raw) break;
+            }
+            if (raw) break;
+          }
+          if (raw) break;
+        }
+
+        if (!raw) {
+          toast(
+            "Cannot detect QR from this image. Please try another image angle or higher resolution.",
+            "error",
+          );
+          return;
+        }
+        handleTransferQrPayloadDetected(raw);
+      } finally {
+        URL.revokeObjectURL(objectUrl);
+      }
+    } catch {
+      toast("Failed to decode QR image.", "error");
+    } finally {
+      bitmap?.close();
+    }
+  };
 
   useEffect(() => {
     if (!token) return;
@@ -368,6 +851,7 @@ function DashboardView() {
   };
 
   const resetTransferFlow = () => {
+    stopTransferQrCameraScan();
     setTransferStep(1);
     setTransferMethod("account");
     setTransferAccount("");
@@ -376,6 +860,9 @@ function DashboardView() {
     setTransferContent(defaultTransferContent);
     setTransferQrFile("");
     setTransferQrRaw("");
+    setTransferQrCameraError("");
+    setTransferQrFacingMode("environment");
+    setTransferShowMyQr(false);
     setTransferOtpCode("");
     setTransferOtpInput("");
     setTransferOtpError("");
@@ -392,6 +879,17 @@ function DashboardView() {
     setTransferOpen(false);
     resetTransferFlow();
   };
+
+  useEffect(() => {
+    return () => {
+      stopTransferQrCameraScan();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!transferOpen || transferStep !== 1 || transferMethod !== "qr") return;
+    void loadTransferQrDevices();
+  }, [transferOpen, transferStep, transferMethod]);
 
   const generateTransferOtp = () => {
     const next = String(Math.floor(100000 + Math.random() * 900000));
@@ -413,7 +911,7 @@ function DashboardView() {
         return;
       }
     } else if (!transferAccount) {
-      toast("Please paste QR payload to extract account number first.", "error");
+      toast("Please scan QR by camera or extract account from QR payload first.", "error");
       return;
     }
 
@@ -448,6 +946,9 @@ function DashboardView() {
     const amount = Number(transferAmount.replace(/,/g, ""));
     if (!transferAmount || Number.isNaN(amount) || amount <= 0) {
       toast("Please enter a valid transfer amount.", "error");
+      return;
+    }
+    if (!canContinueTransferAmount) {
       return;
     }
     if (!transferContent.trim()) {
@@ -1020,7 +1521,10 @@ function DashboardView() {
                   <button
                     type="button"
                     className={transferMethod === "account" ? "active" : ""}
-                    onClick={() => setTransferMethod("account")}
+                    onClick={() => {
+                      setTransferMethod("account");
+                      stopTransferQrCameraScan();
+                    }}
                   >
                     Account Number
                   </button>
@@ -1050,23 +1554,138 @@ function DashboardView() {
                   </label>
                 ) : (
                   <div className="transfer-qr-zone">
-                    <label className="transfer-qr-upload">
-                      <input
-                        type="file"
-                        accept="image/*"
-                        onChange={(e) => {
-                          const file = e.target.files?.[0];
-                          if (!file) return;
-                          setTransferQrFile(file.name);
-                        }}
-                      />
-                      <span>Upload transfer QR image</span>
-                    </label>
+                    <div className="transfer-qr-actions">
+                      <label className="transfer-qr-upload">
+                        <input
+                          type="file"
+                          accept="image/*"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            if (!file) return;
+                            setTransferQrFile(file.name);
+                            void detectQrFromImageFile(file);
+                            e.currentTarget.value = "";
+                          }}
+                        />
+                        <span>Upload transfer QR image</span>
+                      </label>
+                      {!transferQrCameraOn ? (
+                        <button
+                          type="button"
+                          className="pill"
+                          onClick={() => void startTransferQrCameraScan()}
+                        >
+                          Scan QR by camera
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            className="pill"
+                            onClick={stopTransferQrCameraScan}
+                          >
+                            Stop camera
+                          </button>
+                          <button
+                            type="button"
+                            className="pill"
+                            onClick={() => {
+                              const nextMode =
+                                transferQrFacingMode === "environment"
+                                  ? "user"
+                                  : "environment";
+                              setTransferQrFacingMode(nextMode);
+                              void startTransferQrCameraScan(nextMode);
+                            }}
+                          >
+                            Switch camera
+                          </button>
+                        </>
+                      )}
+                      <button
+                        type="button"
+                        className="pill"
+                        onClick={() => setTransferShowMyQr((v) => !v)}
+                      >
+                        {transferShowMyQr ? "Hide my QR" : "Show my QR"}
+                      </button>
+                    </div>
                     <div className="muted">
                       {transferQrFile
                         ? `QR file: ${transferQrFile}`
                         : "No QR file selected yet."}
                     </div>
+                    {transferQrCameraError && (
+                      <small className="transfer-input-error">
+                        {transferQrCameraError}
+                      </small>
+                    )}
+                    <div className="transfer-qr-device-row">
+                      <label className="transfer-qr-device-label">
+                        Camera
+                        <select
+                          value={transferQrDeviceId}
+                          onChange={(e) => setTransferQrDeviceId(e.target.value)}
+                          disabled={transferQrDevices.length === 0}
+                        >
+                          {transferQrDevices.length === 0 ? (
+                            <option value="">No camera found</option>
+                          ) : (
+                            transferQrDevices.map((cam, idx) => (
+                              <option key={cam.deviceId || String(idx)} value={cam.deviceId}>
+                                {cam.label || `Camera ${idx + 1}`}
+                              </option>
+                            ))
+                          )}
+                        </select>
+                      </label>
+                      <button
+                        type="button"
+                        className="pill"
+                        onClick={() => void loadTransferQrDevices()}
+                      >
+                        Reload cameras
+                      </button>
+                    </div>
+                    {transferQrCameraOn && (
+                      <div className="transfer-qr-camera">
+                        <video
+                          ref={transferQrVideoRef}
+                          className="transfer-qr-video"
+                          autoPlay
+                          playsInline
+                          muted
+                        />
+                        <small className="muted">
+                          Align QR code inside camera frame to auto-detect. Current camera:{" "}
+                          {transferQrFacingMode === "environment" ? "Back" : "Front"}.
+                        </small>
+                      </div>
+                    )}
+                    {transferShowMyQr && (
+                      <div className="transfer-my-qr-card">
+                        <span>My account QR</span>
+                        {ownQrImageUrl ? (
+                          <img
+                            src={ownQrImageUrl}
+                            alt={`My QR ${wallet?.accountNumber ?? ""}`}
+                            className="transfer-my-qr-image"
+                          />
+                        ) : (
+                          <small className="muted">
+                            Wallet QR is not available yet.
+                          </small>
+                        )}
+                        {wallet?.accountNumber && (
+                          <strong>Account: {wallet.accountNumber}</strong>
+                        )}
+                        {ownQrPayload && (
+                          <small className="muted transfer-my-qr-payload">
+                            {ownQrPayload}
+                          </small>
+                        )}
+                      </div>
+                    )}
                     <label className="form-group" style={{ marginTop: 10 }}>
                       <span>QR payload</span>
                       <input
@@ -1080,9 +1699,7 @@ function DashboardView() {
                       type="button"
                       className="pill"
                       onClick={() => {
-                        const extracted =
-                          transferQrRaw.match(/ACC:(\d{8,19})/i)?.[1] ||
-                          transferQrRaw.replace(/\D/g, "").slice(0, 19);
+                        const extracted = extractAccountFromQrPayload(transferQrRaw);
                         if (!/^\d{8,19}$/.test(extracted)) {
                           toast("Invalid QR payload.", "error");
                           return;
@@ -1134,6 +1751,10 @@ function DashboardView() {
                       setTransferAmount(e.target.value.replace(/[^0-9.]/g, ""))
                     }
                   />
+                  {isInsufficientBalance && (
+                    <small className="transfer-input-error">
+                      Insufficient balance</small>
+                  )}
                 </label>
                 <label className="form-group">
                   <span>Transfer Content</span>
@@ -1155,6 +1776,7 @@ function DashboardView() {
                     type="button"
                     className="btn-primary"
                     onClick={continueTransferAmount}
+                    disabled={!canContinueTransferAmount}
                   >
                     Continue to OTP
                   </button>
@@ -2117,21 +2739,36 @@ type ProfileForm = {
   name: string;
   userName: string;
   email: string;
+  phone: string;
   password: string;
   dateOfBirth: string;
-  presentAddress: string;
-  permanentAddress: string;
-  postalCode: string;
+  address: string;
 };
 const defaultProfile: ProfileForm = {
   name: "John Doe",
   userName: "johndoe",
   email: "johndoe@mail.com",
+  phone: "",
   password: "**********",
-  dateOfBirth: "25 January, 1990",
-  presentAddress: "San Jose, California, USA",
-  permanentAddress: "San Jose, California, USA",
-  postalCode: "45962",
+  dateOfBirth: "25/01/1990",
+  address: "San Jose, California, USA",
+};
+
+const formatDobInput = (raw: string) => {
+  const digits = raw.replace(/\D/g, "").slice(0, 8);
+  if (digits.length <= 2) return digits;
+  if (digits.length <= 4) return `${digits.slice(0, 2)}/${digits.slice(2)}`;
+  return `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
+};
+
+const normalizeDobForForm = (value: string) => {
+  const v = value.trim();
+  if (!v) return "";
+  const dmy = v.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (dmy) return v;
+  const ymd = v.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (ymd) return `${ymd[3]}/${ymd[2]}/${ymd[1]}`;
+  return formatDobInput(v);
 };
 
 type SettingTabId = "profile" | "preferences" | "security" | "notification";
@@ -2383,21 +3020,13 @@ function SettingView() {
                 <label>Date of Birth</label>
                 <input
                   type="text"
+                  inputMode="numeric"
+                  placeholder="dd/mm/yyyy"
                   value={profile.dateOfBirth}
-                  onChange={(e) =>
-                    setProfile((p) => ({ ...p, dateOfBirth: e.target.value }))
-                  }
-                />
-              </div>
-              <div className="form-group">
-                <label>Present Address</label>
-                <input
-                  type="text"
-                  value={profile.presentAddress}
                   onChange={(e) =>
                     setProfile((p) => ({
                       ...p,
-                      presentAddress: e.target.value,
+                      dateOfBirth: formatDobInput(e.target.value),
                     }))
                   }
                 />
@@ -2406,22 +3035,12 @@ function SettingView() {
                 <label>Permanent Address</label>
                 <input
                   type="text"
-                  value={profile.permanentAddress}
+                  value={profile.address}
                   onChange={(e) =>
                     setProfile((p) => ({
                       ...p,
-                      permanentAddress: e.target.value,
+                      address: e.target.value,
                     }))
-                  }
-                />
-              </div>
-              <div className="form-group">
-                <label>Postal Code</label>
-                <input
-                  type="text"
-                  value={profile.postalCode}
-                  onChange={(e) =>
-                    setProfile((p) => ({ ...p, postalCode: e.target.value }))
                   }
                 />
               </div>
@@ -2659,9 +3278,14 @@ function SettingView() {
 }
 
 function MyProfileView() {
-  const { user, updateUser } = useAuth();
+  const { user, token, updateUser, logout } = useAuth();
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const isAuthExpired = (status: number, message?: string) =>
+    status === 401 ||
+    status === 403 ||
+    /invalid|expired|token|jwt/i.test((message || "").toLowerCase());
+  const [accountNumber, setAccountNumber] = useState("");
   const [profile, setProfile] = useState<ProfileForm>(() => {
     const baseProfile = (() => {
       try {
@@ -2687,14 +3311,128 @@ function MyProfileView() {
     }
   });
 
-  const saveProfile = () => {
-    localStorage.setItem(SETTING_PROFILE_KEY, JSON.stringify(profile));
-    updateUser({
-      name: profile.name,
-      email: profile.email,
-      avatar: avatarUrl,
-    });
-    toast("Profile saved successfully");
+  useEffect(() => {
+    if (!token) return;
+    const loadProfile = async () => {
+      try {
+        const resp = await fetch(`${API_BASE}/auth/me`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const data = (await resp.json().catch(() => null)) as
+          | {
+              error?: string;
+              fullName?: string;
+              email?: string;
+              phone?: string;
+              address?: string;
+              dob?: string;
+              avatar?: string;
+              metadata?: Record<string, unknown>;
+            }
+          | null;
+        if (!resp.ok) {
+          if (isAuthExpired(resp.status, data?.error)) {
+            toast("Session expired. Please sign in again.", "error");
+            logout();
+          }
+          return;
+        }
+        if (!data) return;
+        const metadata = data.metadata ?? {};
+        setProfile((prev) => ({
+          ...prev,
+          name: data.fullName || user?.name || prev.name,
+          userName:
+            (typeof metadata.userName === "string" && metadata.userName) ||
+            (data.email?.split("@")[0] ?? prev.userName),
+          email: data.email || user?.email || prev.email,
+          phone: data.phone || "",
+          dateOfBirth: normalizeDobForForm(data.dob || ""),
+          address: data.address || "",
+          password: "**********",
+        }));
+        const nextAvatar =
+          (typeof data.avatar === "string" && data.avatar) ||
+          (typeof metadata.avatar === "string" && metadata.avatar) ||
+          "";
+        if (nextAvatar) {
+          setAvatarUrl(nextAvatar);
+          updateUser({ avatar: nextAvatar });
+        }
+        const walletResp = await fetch(`${API_BASE}/wallet/me`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!walletResp.ok) {
+          const walletErr = (await walletResp.json().catch(() => null)) as
+            | { error?: string }
+            | null;
+          if (isAuthExpired(walletResp.status, walletErr?.error)) {
+            toast("Session expired. Please sign in again.", "error");
+            logout();
+          }
+          setAccountNumber("");
+          return;
+        }
+        if (walletResp.ok) {
+          const walletData = (await walletResp.json().catch(() => null)) as
+            | { accountNumber?: string }
+            | null;
+          setAccountNumber(walletData?.accountNumber || "");
+        }
+      } catch {
+        // keep current local profile when API is unavailable
+      }
+    };
+    void loadProfile();
+  }, [token, user?.email, user?.name]);
+
+  const saveProfile = async () => {
+    if (!token) {
+      toast("Session expired. Please login again.", "error");
+      return;
+    }
+
+    try {
+      const resp = await fetch(`${API_BASE}/auth/me`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          fullName: profile.name,
+          phone: profile.phone,
+          address: profile.address,
+          dob: profile.dateOfBirth,
+          metadata: {
+            userName: profile.userName,
+            avatar: avatarUrl,
+          },
+        }),
+      });
+      const data = (await resp.json().catch(() => null)) as
+        | { error?: string; fullName?: string; email?: string }
+        | null;
+      if (!resp.ok) {
+        if (isAuthExpired(resp.status, data?.error)) {
+          toast("Session expired. Please sign in again.", "error");
+          logout();
+          return;
+        }
+        toast(data?.error || "Failed to save profile", "error");
+        return;
+      }
+
+      localStorage.setItem(SETTING_PROFILE_KEY, JSON.stringify(profile));
+      updateUser({
+        name: data?.fullName || profile.name,
+        email: data?.email || profile.email,
+        avatar: avatarUrl,
+      });
+      toast("Profile saved successfully");
+    } catch {
+      toast("Cannot connect to API server.", "error");
+    }
   };
 
   const openAvatarPicker = () => {
@@ -2731,19 +3469,15 @@ function MyProfileView() {
   };
 
   return (
-    <section className="card setting-detail-card">
-      <div className="setting-profile-header">
+    <section className="card setting-detail-card user-profile-shell">
+      <div className="user-profile-header">
         <button
           type="button"
           className="setting-avatar-wrap"
           onClick={openAvatarPicker}
           aria-label="Change profile image"
         >
-          <img
-            src={avatarUrl}
-            alt="Profile avatar"
-            className="setting-avatar"
-          />
+          <img src={avatarUrl} alt="Profile avatar" className="setting-avatar" />
           <span className="setting-avatar-edit">Edit</span>
           <input
             ref={fileInputRef}
@@ -2753,26 +3487,33 @@ function MyProfileView() {
             onChange={handleAvatarChange}
           />
         </button>
+        <div className="user-profile-identity">
+          <h2>{profile.name || "User"}</h2>
+          <p>{profile.email}</p>
+          <div className="user-profile-meta">
+            <span className="user-profile-pill">Role: {user?.role ?? "USER"}</span>
+            <span className="user-profile-pill">
+              Account: {accountNumber || "Not available"}
+            </span>
+          </div>
+        </div>
       </div>
-      <div className="form-grid setting-form">
+
+      <div className="user-profile-grid">
         <div className="form-group">
-          <label>Name</label>
+          <label>Full Name</label>
           <input
             type="text"
             value={profile.name}
-            onChange={(e) =>
-              setProfile((p) => ({ ...p, name: e.target.value }))
-            }
+            onChange={(e) => setProfile((p) => ({ ...p, name: e.target.value }))}
           />
         </div>
         <div className="form-group">
-          <label>User Name</label>
+          <label>Username</label>
           <input
             type="text"
             value={profile.userName}
-            onChange={(e) =>
-              setProfile((p) => ({ ...p, userName: e.target.value }))
-            }
+            onChange={(e) => setProfile((p) => ({ ...p, userName: e.target.value }))}
           />
         </div>
         <div className="form-group">
@@ -2780,68 +3521,42 @@ function MyProfileView() {
           <input
             type="email"
             value={profile.email}
-            onChange={(e) =>
-              setProfile((p) => ({ ...p, email: e.target.value }))
-            }
+            onChange={(e) => setProfile((p) => ({ ...p, email: e.target.value }))}
           />
         </div>
         <div className="form-group">
-          <label>Password</label>
+          <label>Phone Number</label>
           <input
-            type="password"
-            value={profile.password}
-            onChange={(e) =>
-              setProfile((p) => ({ ...p, password: e.target.value }))
-            }
+            type="text"
+            value={profile.phone}
+            onChange={(e) => setProfile((p) => ({ ...p, phone: e.target.value }))}
           />
         </div>
         <div className="form-group">
           <label>Date of Birth</label>
           <input
             type="text"
+            inputMode="numeric"
+            placeholder="dd/mm/yyyy"
             value={profile.dateOfBirth}
-            onChange={(e) =>
-              setProfile((p) => ({ ...p, dateOfBirth: e.target.value }))
-            }
-          />
-        </div>
-        <div className="form-group">
-          <label>Present Address</label>
-          <input
-            type="text"
-            value={profile.presentAddress}
             onChange={(e) =>
               setProfile((p) => ({
                 ...p,
-                presentAddress: e.target.value,
+                dateOfBirth: formatDobInput(e.target.value),
               }))
             }
           />
         </div>
-        <div className="form-group">
+        <div className="form-group profile-address">
           <label>Permanent Address</label>
           <input
             type="text"
-            value={profile.permanentAddress}
-            onChange={(e) =>
-              setProfile((p) => ({
-                ...p,
-                permanentAddress: e.target.value,
-              }))
-            }
-          />
-        </div>
-        <div className="form-group">
-          <label>Postal Code</label>
-          <input
-            type="text"
-            value={profile.postalCode}
-            onChange={(e) =>
-              setProfile((p) => ({ ...p, postalCode: e.target.value }))
-            }
+            value={profile.address}
+            onChange={(e) => setProfile((p) => ({ ...p, address: e.target.value }))}
           />
         </div>
       </div>
+
       <div className="setting-actions">
         <button type="button" className="btn-primary" onClick={saveProfile}>
           Save Changes
@@ -3159,6 +3874,12 @@ function App() {
     return () => document.removeEventListener("click", close);
   }, []);
 
+  useEffect(() => {
+    if (user) {
+      setActiveTab("Dashboard");
+    }
+  }, [user?.id]);
+
   const displayUser = user ?? {
     name: "Guest User",
     email: "guest@moneyfarm.app",
@@ -3415,7 +4136,15 @@ export default App;
 // -------- Auth Shell (shown when user is null) ----------
 type AuthShellProps = {
   onLogin: (email: string, password: string) => Promise<void>;
-  onSignUp: (name: string, email: string, password: string) => Promise<void>;
+  onSignUp: (payload: {
+    fullName: string;
+    userName: string;
+    email: string;
+    phone: string;
+    address: string;
+    dob: string;
+    password: string;
+  }) => Promise<void>;
 };
 
 function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
@@ -3493,7 +4222,15 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
     }
     setAuthBusy(true);
     try {
-      await onSignUp(fullName, email, password);
+      await onSignUp({
+        fullName,
+        userName: username,
+        email,
+        phone,
+        address,
+        dob,
+        password,
+      });
       toast("Account created successfully");
       setSigninForm({ email, password });
     } catch (err) {
@@ -3905,5 +4642,6 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
     </div>
   );
 }
+
 
 

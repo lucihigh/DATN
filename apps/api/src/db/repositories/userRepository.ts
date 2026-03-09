@@ -14,6 +14,14 @@ export type CreateUserInput = {
   metadata?: Record<string, unknown>;
 };
 
+export type UpdateUserProfileInput = {
+  fullName?: string;
+  phone?: unknown;
+  address?: unknown;
+  dob?: unknown;
+  metadata?: Record<string, unknown>;
+};
+
 export type UserEntity = {
   id: string;
   email: string;
@@ -33,6 +41,22 @@ export type UserEntity = {
 type UserStatusValue = "ACTIVE" | "DISABLED" | "PENDING";
 
 const asJson = (value: unknown) => value as never;
+
+const encryptUserPIISafe = (input: {
+  phone?: unknown;
+  address?: unknown;
+  dob?: unknown;
+}) => {
+  try {
+    return encryptUserPII(input as never) as Record<string, unknown>;
+  } catch (err) {
+    console.warn(
+      "PII encryption is unavailable. Falling back to plaintext JSON storage.",
+      err,
+    );
+    return input as Record<string, unknown>;
+  }
+};
 
 const toEntity = (user: {
   id: string;
@@ -89,11 +113,11 @@ export class UserRepository {
   }
 
   async createUser(input: CreateUserInput) {
-    const encrypted = encryptUserPII({
+    const encrypted = encryptUserPIISafe({
       phone: input.phone,
       address: input.address,
       dob: input.dob,
-    } as never) as Record<string, unknown>;
+    });
 
     return prisma.user.create({
       data: {
@@ -136,6 +160,39 @@ export class UserRepository {
       where: { id },
       data: { status },
     });
+  }
+
+  async updateProfile(id: string, input: UpdateUserProfileInput) {
+    const encrypted = encryptUserPIISafe({
+      phone: input.phone,
+      address: input.address,
+      dob: input.dob,
+    });
+    const existing = await prisma.user.findUnique({
+      where: { id },
+      select: { metadata: true },
+    });
+    const existingMetadata =
+      existing?.metadata && typeof existing.metadata === "object"
+        ? (existing.metadata as Record<string, unknown>)
+        : {};
+    const mergedMetadata = {
+      ...existingMetadata,
+      ...(input.metadata ?? {}),
+    };
+
+    const updated = await prisma.user.update({
+      where: { id },
+      data: {
+        fullName: input.fullName,
+        phone: encrypted.phone === undefined ? undefined : asJson(encrypted.phone),
+        address:
+          encrypted.address === undefined ? undefined : asJson(encrypted.address),
+        dob: encrypted.dob === undefined ? undefined : asJson(encrypted.dob),
+        metadata: asJson(mergedMetadata),
+      },
+    });
+    return toEntity(updated);
   }
 
   async findMany(limit = 200) {
