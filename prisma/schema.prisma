@@ -8,65 +8,135 @@ datasource db {
 }
 
 model User {
-  id           String        @id @default(cuid())
-  email        String        @unique
+  id           String      @id
+  email        String      @unique
   passwordHash String
-  role         Role          @default(USER)
-  createdAt    DateTime      @default(now())
-  wallets      Wallet[]
-  logins       LoginEvent[]
-  audits       AuditLog[]
+  role         Role        @default(USER)
+  status       UserStatus  @default(ACTIVE)
+  fullName     String?
+  phone        Json?
+  address      Json?
+  dob          Json?
+  lastLoginAt  DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  metadata     Json?
+
+  wallets     Wallet[]
+  loginEvents LoginEvent[]
+  auditLogs   AuditLog[]
 }
 
 model Wallet {
-  id        String        @id @default(cuid())
-  user      User          @relation(fields: [userId], references: [id])
-  userId    String
-  balance   Decimal       @default(0)
-  currency  String        @default("USD")
-  updatedAt DateTime      @updatedAt
-  createdAt DateTime      @default(now())
-  txns      Transaction[]
+  id        String   @id
+  userId    String?
+  balance   Decimal  @default(0) @db.Decimal(18, 2)
+  currency  String   @default("USD")
+  status    String   @default("ACTIVE")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  tags      Json?
+  metadata  Json?
+
+  user         User?          @relation(fields: [userId], references: [id])
+  transactions Transaction[]
+
+  @@index([userId])
+  @@index([createdAt])
 }
 
 model Transaction {
-  id          String   @id @default(cuid())
-  wallet      Wallet   @relation(fields: [walletId], references: [id])
-  walletId    String
-  amount      Decimal
-  type        String
-  description String?
-  createdAt   DateTime @default(now())
+  id                   String            @id
+  walletId             String?
+  counterpartyWalletId String?
+  fromUserId           String?
+  toUserId             String?
+  amount               Decimal           @db.Decimal(18, 2)
+  type                 TransactionType   @default(TRANSFER)
+  status               TransactionStatus @default(COMPLETED)
+  description          String?
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+  metadata             Json?
+
+  wallet Wallet? @relation(fields: [walletId], references: [id])
+
+  @@index([walletId, createdAt])
+  @@index([fromUserId, createdAt])
+  @@index([toUserId, createdAt])
 }
 
 model LoginEvent {
-  id        String   @id @default(cuid())
-  user      User?    @relation(fields: [userId], references: [id])
+  id        String   @id
   userId    String?
-  ipAddress String
+  email     String?
+  ipAddress String?
   userAgent String?
-  anomaly   Float?
+  success   Boolean  @default(false)
+  anomaly   Float    @default(0)
+  location  String?
   createdAt DateTime @default(now())
+  metadata  Json?
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([email, createdAt])
+  @@index([createdAt])
 }
 
 model AuditLog {
-  id        String   @id @default(cuid())
-  user      User?    @relation(fields: [userId], references: [id])
+  id        String   @id
   userId    String?
+  actor     String   @default("system")
   action    String
-  details   String?
+  details   Json?
+  ipAddress String?
   createdAt DateTime @default(now())
+  metadata  Json?
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+  @@index([createdAt])
 }
 
 model SecurityPolicy {
-  id                String   @id @default(cuid())
-  maxLoginAttempts  Int      @default(5)
-  lockoutMinutes    Int      @default(15)
-  rateLimitPerMin   Int      @default(60)
-  createdAt         DateTime @default(now())
+  id                    String   @id
+  maxLoginAttempts      Int      @default(5)
+  lockoutMinutes        Int      @default(15)
+  rateLimitPerMin       Int      @default(60)
+  passwordMinLength     Int      @default(12)
+  mfaRequired           Boolean  @default(false)
+  anomalyAlertThreshold Float    @default(0.7)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([createdAt])
 }
 
 enum Role {
   USER
   ADMIN
 }
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+  PENDING
+}
+
+enum TransactionType {
+  DEPOSIT
+  WITHDRAW
+  TRANSFER
+}
+
+enum TransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REVERSED
+}
+

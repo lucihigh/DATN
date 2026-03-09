@@ -4,15 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
+    "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src --ext .ts",
     "format": "prettier --check \"src/**/*.ts\"",
     "test": "echo 'tests pending'",
-    "db:init": "tsx src/scripts/initMongo.ts",
-    "prisma:migrate": "prisma migrate dev --name init",
-    "prisma:generate": "prisma generate"
+    "db:migrate-mongo": "tsx src/scripts/migrateMongoToPostgres.ts",
+    "prisma:migrate": "prisma migrate dev --schema ../../prisma/schema.prisma --name init",
+    "prisma:generate": "prisma generate --schema ../../prisma/schema.prisma"
   },
   "dependencies": {
     "@secure-wallet/shared": "workspace:*",

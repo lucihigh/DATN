@@ -5,6 +5,10 @@ import { useToast } from "./context/ToastContext";
 import { useTheme } from "./context/ThemeContext";
 import "./index.css";
 
+const API_BASE =
+  (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ||
+  "http://localhost:4000";
+
 const NAV_ITEMS: {
   id: string;
   label: string;
@@ -61,30 +65,6 @@ const dashboardSecurityAlerts = [
       "AI detection engine automatically blocked a login attempt from a known malicious proxy server. No data compromised.",
     time: "Yesterday, 11:20 PM",
     tone: "warn",
-  },
-];
-
-const dashboardHistorySeed = [
-  {
-    entity: "Apple Store Online",
-    date: "Oct 24, 2023",
-    status: "AI Cleared",
-    amount: "-$1,299.00",
-    amountTone: "negative",
-  },
-  {
-    entity: "Dividend Payment",
-    date: "Oct 25, 2023",
-    status: "Verified",
-    amount: "+$450.25",
-    amountTone: "positive",
-  },
-  {
-    entity: "Utility Bill Pay",
-    date: "Oct 21, 2023",
-    status: "Scheduled",
-    amount: "-$85.00",
-    amountTone: "negative",
   },
 ];
 
@@ -211,8 +191,9 @@ function BarChart({
 }
 
 function DashboardView() {
-  const { user } = useAuth();
+  const { user, token } = useAuth();
   const { toast } = useToast();
+  const [wallet, setWallet] = useState<{ id: string; balance: number; currency: string } | null>(null);
   const [showWalletId, setShowWalletId] = useState(false);
   const [detailsModalOpen, setDetailsModalOpen] = useState(false);
   const [detailsStep, setDetailsStep] = useState<"otp" | "details">("otp");
@@ -234,8 +215,9 @@ function DashboardView() {
   const [transferOtpInput, setTransferOtpInput] = useState("");
   const [transferOtpError, setTransferOtpError] = useState("");
   const [transferOtpAttempts, setTransferOtpAttempts] = useState(0);
-  const [transactionHistory, setTransactionHistory] =
-    useState(dashboardHistorySeed);
+  const [transactionHistory, setTransactionHistory] = useState<
+    { entity: string; date: string; status: string; amount: string; amountTone: "positive" | "negative" }[]
+  >([]);
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
   const [transferReceipt, setTransferReceipt] = useState<{
     txId: string;
@@ -263,10 +245,64 @@ function DashboardView() {
     lastActivity: "Mar 05, 2026 · 09:42 AM",
   };
 
+  const walletRaw = wallet?.id || "";
+  const walletDigits = walletRaw.replace(/\W+/g, "").slice(-16);
+  const padded = walletDigits.padStart(16, "0");
   const walletGroups = showWalletId
-    ? ["1234", "5678", "9012", "5678"]
-    : ["****", "****", "****", "5678"];
+    ? [padded.slice(0, 4), padded.slice(4, 8), padded.slice(8, 12), padded.slice(12, 16)]
+    : ["****", "****", "****", padded.slice(12, 16)];
   const defaultTransferContent = `${user?.name ?? "User"} transfer`;
+
+  useEffect(() => {
+    if (!token) return;
+    const headers = { Authorization: `Bearer ${token}` };
+    const load = async () => {
+      try {
+        const [walletResp, txResp] = await Promise.all([
+          fetch(`${API_BASE}/wallet/me`, { headers }),
+          fetch(`${API_BASE}/transactions`, { headers }),
+        ]);
+        if (walletResp.ok) {
+          const w = (await walletResp.json()) as {
+            id: string;
+            balance: number;
+            currency: string;
+          };
+          setWallet(w);
+        }
+        if (txResp.ok) {
+          const txs = (await txResp.json()) as Array<{
+            id: string;
+            amount: number;
+            type: string;
+            description?: string;
+            createdAt: string;
+          }>;
+          setTransactionHistory(
+            txs.map((tx) => {
+              const isCredit = tx.type === "DEPOSIT";
+              return {
+                entity: tx.description || tx.type,
+                date: new Date(tx.createdAt).toLocaleString("en-US"),
+                status: "Completed",
+                amount: `${isCredit ? "+" : "-"}$${Math.abs(
+                  Number(tx.amount || 0),
+                ).toLocaleString("en-US", {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}`,
+                amountTone: isCredit ? "positive" : "negative",
+              };
+            }),
+          );
+        }
+      } catch {
+        setWallet(null);
+        setTransactionHistory([]);
+      }
+    };
+    void load();
+  }, [token]);
 
   const generateOtp = () => {
     const next = String(Math.floor(100000 + Math.random() * 900000));
@@ -374,7 +410,7 @@ function DashboardView() {
     setTransferStep(3);
   };
 
-  const verifyTransferOtpAndSubmit = () => {
+  const verifyTransferOtpAndSubmit = async () => {
     if (!/^\d{6}$/.test(transferOtpInput)) {
       setTransferOtpError("OTP must be exactly 6 digits.");
       return;
@@ -407,8 +443,38 @@ function DashboardView() {
       hour12: true,
     });
     const amount = Number(transferAmount.replace(/,/g, "")) || 0;
+    if (!token) {
+      toast("Session expired. Please login again.", "error");
+      return;
+    }
+    const transferResp = await fetch(`${API_BASE}/transfer`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        toUserId: transferAccount,
+        amount,
+      }),
+    });
+    if (!transferResp.ok) {
+      const err = (await transferResp.json().catch(() => null)) as
+        | { error?: string }
+        | null;
+      toast(err?.error || "Transfer failed", "error");
+      return;
+    }
+
+    const transferPayload = (await transferResp.json().catch(() => null)) as
+      | {
+          transaction?: {
+            id: string;
+          };
+        }
+      | null;
     setTransferReceipt({
-      txId,
+      txId: transferPayload?.transaction?.id || txId,
       executedAt,
       fromAccount: "Primary Checking •••• 8841",
       toAccount: transferAccount,
@@ -444,7 +510,14 @@ function DashboardView() {
           <div className="dashboard-wallet-head">
             <div>
               <div className="dashboard-wallet-label">Total Wallet Balance</div>
-              <h2>$45,230.85</h2>
+              <h2>
+                {wallet
+                  ? `${wallet.currency} ${Number(wallet.balance).toLocaleString(
+                      "en-US",
+                      { minimumFractionDigits: 2, maximumFractionDigits: 2 },
+                    )}`
+                  : "USD 0.00"}
+              </h2>
             </div>
           </div>
           <div className="dashboard-wallet-foot">
@@ -489,11 +562,65 @@ function DashboardView() {
                 type="button"
                 className="dashboard-action-item"
                 key={action.title}
-                onClick={() => {
+                onClick={async () => {
                   if (action.id === "transfer") {
                     openTransferModal();
                   } else {
-                    toast("Deposit feature is coming soon.", "info");
+                    if (!token) {
+                      toast("Session expired. Please login again.", "error");
+                      return;
+                    }
+                    const resp = await fetch(`${API_BASE}/wallet/deposit`, {
+                      method: "POST",
+                      headers: {
+                        "Content-Type": "application/json",
+                        Authorization: `Bearer ${token}`,
+                      },
+                      body: JSON.stringify({ amount: 100 }),
+                    });
+                    if (!resp.ok) {
+                      toast("Deposit failed", "error");
+                      return;
+                    }
+                    const walletResp = await fetch(`${API_BASE}/wallet/me`, {
+                      headers: { Authorization: `Bearer ${token}` },
+                    });
+                    if (walletResp.ok) {
+                      const w = (await walletResp.json()) as {
+                        id: string;
+                        balance: number;
+                        currency: string;
+                      };
+                      setWallet(w);
+                    }
+                    const txResp = await fetch(`${API_BASE}/transactions`, {
+                      headers: { Authorization: `Bearer ${token}` },
+                    });
+                    if (txResp.ok) {
+                      const txs = (await txResp.json()) as Array<{
+                        id: string;
+                        amount: number;
+                        type: string;
+                        description?: string;
+                        createdAt: string;
+                      }>;
+                      setTransactionHistory(
+                        txs.map((tx) => ({
+                          entity: tx.description || tx.type,
+                          date: new Date(tx.createdAt).toLocaleString("en-US"),
+                          status: "Completed",
+                          amount: `${tx.type === "DEPOSIT" ? "+" : "-"}$${Math.abs(
+                            Number(tx.amount || 0),
+                          ).toLocaleString("en-US", {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}`,
+                          amountTone:
+                            tx.type === "DEPOSIT" ? "positive" : "negative",
+                        })),
+                      );
+                    }
+                    toast("Deposited $100 successfully");
                   }
                 }}
               >

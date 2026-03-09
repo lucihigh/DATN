@@ -1,4 +1,4 @@
-import { getDb, readFromMongo } from "../db/mongo";
+﻿import { prisma } from "../db/prisma";
 
 const DEFAULT_SECURITY_POLICY = {
   maxLoginAttempts: 5,
@@ -10,11 +10,17 @@ export type SecurityPolicy = typeof DEFAULT_SECURITY_POLICY;
 
 export const getSecurityPolicy = async (): Promise<SecurityPolicy> => {
   try {
-    const raw = await getDb()
-      .collection("securityPolicies")
-      .findOne({}, { sort: { createdAt: -1 } });
-    const validated = raw ? readFromMongo.securityPolicy(raw) : null;
-    return { ...DEFAULT_SECURITY_POLICY, ...(validated ?? {}) };
+    const policy = await prisma.securityPolicy.findFirst({
+      orderBy: { createdAt: "desc" },
+    });
+
+    if (!policy) return { ...DEFAULT_SECURITY_POLICY };
+
+    return {
+      maxLoginAttempts: policy.maxLoginAttempts,
+      lockoutMinutes: policy.lockoutMinutes,
+      anomalyAlertThreshold: policy.anomalyAlertThreshold,
+    };
   } catch (err) {
     console.warn("Falling back to default security policy", err);
     return { ...DEFAULT_SECURITY_POLICY };
@@ -22,3 +28,4 @@ export const getSecurityPolicy = async (): Promise<SecurityPolicy> => {
 };
 
 export const getDefaultSecurityPolicy = () => ({ ...DEFAULT_SECURITY_POLICY });
+

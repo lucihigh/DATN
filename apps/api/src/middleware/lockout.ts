@@ -1,10 +1,9 @@
-import { Request, Response, NextFunction } from "express";
+﻿import { Request, Response, NextFunction } from "express";
 
 import {
   createLoginEventRepository,
   createUserRepository,
 } from "../db/repositories";
-import { readFromMongo } from "../db/mongo";
 import { getSecurityPolicy } from "../services/securityPolicy";
 
 export const lockoutGuard = async (
@@ -23,20 +22,13 @@ export const lockoutGuard = async (
   const policy = await getSecurityPolicy();
   const repo = createLoginEventRepository();
   const windowStart = new Date(Date.now() - policy.lockoutMinutes * 60 * 1000);
-  const recentFailures = await repo.count({
-    email,
-    success: false,
-    createdAt: { $gte: windowStart },
-  } as never);
+  const recentFailures = await repo.countRecentFailures(email, windowStart);
 
   if (recentFailures >= policy.maxLoginAttempts) {
     const userRepo = createUserRepository();
-    const userDoc = await userRepo.findByEmail(email);
-    const user = userDoc ? readFromMongo.user(userDoc) : null;
-    if (user?._id) {
-      await userRepo.updateOne({ _id: user._id } as never, {
-        $set: { status: "DISABLED", updatedAt: new Date() },
-      });
+    const user = await userRepo.findByEmail(email);
+    if (user?.id) {
+      await userRepo.setStatus(user.id, "DISABLED");
     }
     return res
       .status(423)
@@ -45,3 +37,4 @@ export const lockoutGuard = async (
 
   return next();
 };
+

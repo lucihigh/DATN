@@ -11,54 +11,7 @@ type KpiCard = {
   items: { label: string; value: string; color: string }[];
 };
 
-const kpiCards: KpiCard[] = [
-  {
-    title: "Active users",
-    value: "68,200",
-    delta: "+8.2%",
-    items: [
-      { label: "App MAU", value: "52,400", color: "#5b21b6" },
-      { label: "Web MAU", value: "9,860", color: "#6366f1" },
-      { label: "New signups (7d)", value: "5,940", color: "#f59e0b" },
-    ],
-  },
-  {
-    title: "Top-up success rate",
-    value: "97.6%",
-    delta: "+1.4%",
-    items: [
-      { label: "Bank transfer", value: "99%", color: "#5b21b6" },
-      { label: "Cards", value: "96%", color: "#6366f1" },
-      { label: "Wallet/mini-app partners", value: "95%", color: "#f59e0b" },
-    ],
-  },
-  {
-    title: "KYC completion",
-    value: "91.3%",
-    delta: "-0.8%",
-    items: [
-      { label: "Tier 1 verified", value: "55%", color: "#5b21b6" },
-      { label: "Tier 2 verified", value: "29%", color: "#6366f1" },
-      { label: "Pending review", value: "16%", color: "#f59e0b" },
-    ],
-  },
-  {
-    title: "Monthly GMV",
-    value: "$12,450,320",
-    delta: "+18.3%",
-    items: [
-      { label: "P2P transfers", value: "$5,980,000", color: "#5b21b6" },
-      { label: "Bill payments", value: "$3,210,000", color: "#6366f1" },
-      { label: "Offline QR", value: "$2,180,000", color: "#f59e0b" },
-    ],
-  },
-];
-
-// Monthly GMV (k USD)
-const monthlyKpi = [
-  920, 1140, 1280, 1360, 1520, 1480, 1210, 1600, 1710, 1820, 1760, 1940,
-];
-const monthlyLabels = [
+const MONTH_LABELS = [
   "Jan",
   "Feb",
   "Mar",
@@ -73,33 +26,9 @@ const monthlyLabels = [
   "Dec",
 ];
 
-const engagementChannels = [
-  { name: "Mobile app", now: 32000, prev: 28800 },
-  { name: "Web portal", now: 14800, prev: 13100 },
-  { name: "Partner mini app", now: 17200, prev: 15400 },
-  { name: "Agent network", now: 9200, prev: 8100 },
-];
-
-// Average ticket size (VND thousand)
-const revenueTrend = [
-  { month: "Jan", now: 182, prev: 169 },
-  { month: "Feb", now: 188, prev: 174 },
-  { month: "Mar", now: 194, prev: 176 },
-  { month: "Apr", now: 201, prev: 182 },
-  { month: "May", now: 214, prev: 190 },
-  { month: "Jun", now: 208, prev: 193 },
-  { month: "Jul", now: 202, prev: 195 },
-  { month: "Aug", now: 225, prev: 204 },
-];
-
-const categories = [
-  { name: "P2P transfers", value: 34, count: 1_280_000 },
-  { name: "Bill payments", value: 26, count: 620_000 },
-  { name: "Offline QR", value: 18, count: 410_000 },
-  { name: "Mobile data top-up", value: 12, count: 290_000 },
-  { name: "Gaming vouchers", value: 6, count: 140_000 },
-  { name: "Ride-hailing", value: 4, count: 95_000 },
-];
+const API_BASE =
+  (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ||
+  "http://localhost:4000";
 
 type AdminUser = {
   id: string;
@@ -123,6 +52,29 @@ type Transaction = {
   amount: string;
   status: "Completed" | "Pending" | "Failed";
   reference: string;
+};
+
+type AdminUserApi = {
+  id: string;
+  email: string;
+  role: "USER" | "ADMIN";
+  status?: "ACTIVE" | "DISABLED" | "PENDING";
+  fullName?: string;
+  phone?: string;
+  address?: string;
+  createdAt?: string;
+  lastLoginAt?: string;
+};
+
+type AdminTransactionApi = {
+  id: string;
+  amount: number;
+  type: string;
+  status: string;
+  description?: string;
+  createdAt: string;
+  fromUserId?: string;
+  toUserId?: string;
 };
 
 type AuditLogDoc = {
@@ -251,7 +203,17 @@ const mapAuditDocToView = (doc: AuditLogDoc): AuditLogView => {
   };
 };
 
-const USERS_STORE_KEY = "ewallet_admin_users";
+const parseCurrencyAmount = (value: string): number => {
+  const parsed = Number(value.replace(/[^0-9.-]/g, ""));
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const parseDateLoose = (value: string): Date | null => {
+  const date = new Date(value);
+  if (!Number.isNaN(date.getTime())) return date;
+  const fallback = new Date(value.replace(" ", "T"));
+  return Number.isNaN(fallback.getTime()) ? null : fallback;
+};
 
 const styles = `
   .ana-page {
@@ -891,7 +853,7 @@ function KpiCard({ card }: { card: KpiCard }) {
 }
 
 function AdminApp() {
-  const { user, logout } = useAuth();
+  const { user, token, logout } = useAuth();
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     if (typeof window === "undefined") return "light";
     return (localStorage.getItem("admin-theme") as "light" | "dark") || "light";
@@ -926,353 +888,97 @@ function AdminApp() {
       document.body.classList.remove("admin-profile-no-scroll");
     };
   }, [active]);
-  const defaultUsers: AdminUser[] = [
-    {
-      id: "u001",
-      name: "Jenny Wilson",
-      email: "jenny@example.com",
-      role: "Admin",
-      title: "Product Manager",
-      phone: "+1 (415) 555-0101",
-      birthday: "1990-05-12",
-      address: "123 Tech Avenue, San Francisco, CA",
-      avatar: "https://i.pravatar.cc/80?img=32",
-      status: "Active",
-      lastLogin: "2026-02-23 21:40",
-    },
-    {
-      id: "u002",
-      name: "Devon Lane",
-      email: "devon@example.com",
-      role: "User",
-      title: "Security Lead",
-      phone: "+1 (510) 555-2345",
-      birthday: "1988-11-22",
-      address: "456 Data Drive, New York, NY",
-      avatar: "https://i.pravatar.cc/80?img=48",
-      status: "Active",
-      lastLogin: "2026-02-22 18:12",
-    },
-    {
-      id: "u003",
-      name: "Courtney Henry",
-      email: "courtney@example.com",
-      role: "User",
-      title: "Former Engineer",
-      phone: "+1 (303) 555-9876",
-      birthday: "1992-03-10",
-      address: "789 Cloud St, Austin, TX",
-      avatar: "https://i.pravatar.cc/80?img=15",
-      status: "Locked",
-      lastLogin: "2026-02-24 08:05",
-    },
-    {
-      id: "u004",
-      name: "Eleanor Pena",
-      email: "eleanor@example.com",
-      role: "User",
-      title: "UX Researcher",
-      phone: "+1 (206) 555-4567",
-      birthday: "1995-07-01",
-      address: "101 Logic Ave, Seattle, WA",
-      avatar: "https://i.pravatar.cc/80?img=67",
-      status: "Active",
-      lastLogin: "2026-02-23 10:18",
-    },
-    {
-      id: "u005",
-      name: "Wade Warren",
-      email: "wade@example.com",
-      role: "User",
-      title: "Support Agent",
-      phone: "+1 (718) 555-1920",
-      birthday: "1991-01-19",
-      address: "81 Park Blvd, Brooklyn, NY",
-      avatar: "https://i.pravatar.cc/80?img=22",
-      status: "Active",
-      lastLogin: "2026-03-05 09:14",
-    },
-    {
-      id: "u006",
-      name: "Savannah Nguyen",
-      email: "savannah@example.com",
-      role: "Admin",
-      title: "Operations Admin",
-      phone: "+1 (617) 555-3012",
-      birthday: "1989-08-03",
-      address: "54 Harbor St, Boston, MA",
-      avatar: "https://i.pravatar.cc/80?img=47",
-      status: "Active",
-      lastLogin: "2026-03-05 14:42",
-    },
-    {
-      id: "u007",
-      name: "Marvin McKinney",
-      email: "marvin@example.com",
-      role: "User",
-      title: "QA Analyst",
-      phone: "+1 (312) 555-8801",
-      birthday: "1993-11-27",
-      address: "200 Lake Shore Dr, Chicago, IL",
-      avatar: "https://i.pravatar.cc/80?img=60",
-      status: "Locked",
-      lastLogin: "2026-03-04 17:05",
-    },
-    {
-      id: "u008",
-      name: "Kristin Watson",
-      email: "kristin@example.com",
-      role: "User",
-      title: "Finance Specialist",
-      phone: "+1 (214) 555-7719",
-      birthday: "1994-06-15",
-      address: "701 Main St, Dallas, TX",
-      avatar: "https://i.pravatar.cc/80?img=5",
-      status: "Active",
-      lastLogin: "2026-03-05 08:33",
-    },
-    {
-      id: "u009",
-      name: "Cameron Williamson",
-      email: "cameron@example.com",
-      role: "Admin",
-      title: "Compliance Admin",
-      phone: "+1 (702) 555-2234",
-      birthday: "1987-02-09",
-      address: "909 Fremont Ave, Las Vegas, NV",
-      avatar: "https://i.pravatar.cc/80?img=13",
-      status: "Active",
-      lastLogin: "2026-03-06 07:21",
-    },
-    {
-      id: "u010",
-      name: "Guy Hawkins",
-      email: "guy@example.com",
-      role: "User",
-      title: "Customer Success",
-      phone: "+1 (305) 555-4450",
-      birthday: "1990-10-10",
-      address: "110 Ocean Dr, Miami, FL",
-      avatar: "https://i.pravatar.cc/80?img=18",
-      status: "Locked",
-      lastLogin: "2026-03-03 12:19",
-    },
-    {
-      id: "u011",
-      name: "Leslie Alexander",
-      email: "leslie@example.com",
-      role: "User",
-      title: "Risk Analyst",
-      phone: "+1 (602) 555-6621",
-      birthday: "1992-12-01",
-      address: "33 Camelback Rd, Phoenix, AZ",
-      avatar: "https://i.pravatar.cc/80?img=33",
-      status: "Active",
-      lastLogin: "2026-03-06 11:09",
-    },
-    {
-      id: "u012",
-      name: "Darlene Robertson",
-      email: "darlene@example.com",
-      role: "User",
-      title: "Fraud Investigator",
-      phone: "+1 (404) 555-9938",
-      birthday: "1986-04-25",
-      address: "420 Peachtree St, Atlanta, GA",
-      avatar: "https://i.pravatar.cc/80?img=41",
-      status: "Active",
-      lastLogin: "2026-03-04 15:47",
-    },
-  ];
+  const [users, setUsers] = useState<AdminUser[]>([]);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditLogView[]>([]);
 
-  const transactions: Transaction[] = [
-    {
-      id: "tx-1001",
-      userId: "u001",
-      date: "2026-02-24 09:15",
-      type: "Payment",
-      amount: "$120.50",
-      status: "Completed",
-      reference: "INV-42015",
-    },
-    {
-      id: "tx-1002",
-      userId: "u001",
-      date: "2026-02-23 21:05",
-      type: "Transfer",
-      amount: "$980.00",
-      status: "Completed",
-      reference: "TRF-88421",
-    },
-    {
-      id: "tx-1003",
-      userId: "u002",
-      date: "2026-02-22 14:44",
-      type: "Refund",
-      amount: "$35.20",
-      status: "Pending",
-      reference: "RF-33812",
-    },
-    {
-      id: "tx-1004",
-      userId: "u003",
-      date: "2026-02-21 18:07",
-      type: "Payment",
-      amount: "$260.00",
-      status: "Failed",
-      reference: "INV-42001",
-    },
-    {
-      id: "tx-1005",
-      userId: "u004",
-      date: "2026-02-20 11:32",
-      type: "Transfer",
-      amount: "$1,240.00",
-      status: "Completed",
-      reference: "TRF-88310",
-    },
-    {
-      id: "tx-1006",
-      userId: "u002",
-      date: "2026-02-24 07:55",
-      type: "Payment",
-      amount: "$72.15",
-      status: "Completed",
-      reference: "INV-42050",
-    },
-  ];
+  useEffect(() => {
+    if (!token || user?.role !== "ADMIN") return;
 
-  const auditLogDocs: AuditLogDoc[] = [
-    {
-      _id: "699f98aa1ae0d9039da45276",
-      userId: null,
-      actor: "ai-service",
-      action: "AI_LOGIN_ALERT",
-      details: {
-        message: "Impossible travel pattern detected.",
-        requestId: "req_ai_45276",
-        userAgent: "risk-engine/1.8",
-        location: "Singapore",
-      },
-      ipAddress: "88.88.88.88",
-      createdAt: "2026-03-06T10:49:46.897Z",
-    },
-    {
-      _id: "699f98aa1ae0d9039da45277",
-      userId: "65f8fb0a8d7bb2218a12ab10",
-      actor: "alex.rivera@company.com",
-      action: "USER_LOCKED",
-      details: {
-        message: "Locked user account after repeated fraud signals.",
-        requestId: "req_admin_1001",
-        userAgent: "Mozilla/5.0",
-        location: "San Francisco, USA",
-      },
-      ipAddress: "192.168.1.45",
-      createdAt: "2026-03-06T06:32:01.000Z",
-    },
-    {
-      _id: "699f98aa1ae0d9039da45278",
-      userId: "65f8fb0a8d7bb2218a12ab11",
-      actor: "sarah.chen@company.com",
-      action: "TRANSACTION_REFUND_APPROVED",
-      details: {
-        message: "Refund approved for trx #TRX-990",
-        requestId: "req_tx_990",
-        userAgent: "Mozilla/5.0",
-        location: "New York, USA",
-      },
-      ipAddress: "203.0.113.12",
-      createdAt: "2026-03-05T19:15:22.000Z",
-    },
-    {
-      _id: "699f98aa1ae0d9039da45279",
-      userId: "65f8fb0a8d7bb2218a12ab12",
-      actor: "michael.scott@company.com",
-      action: "ACCOUNT_ROLE_UPDATED",
-      details: "Changed role from User to Admin",
-      ipAddress: "172.16.254.1",
-      createdAt: "2026-03-05T11:05:40.000Z",
-    },
-    {
-      _id: "699f98aa1ae0d9039da45280",
-      userId: null,
-      actor: "ai-service",
-      action: "AI_LOGIN_REVIEW_PENDING",
-      details: {
-        message: "Login flagged and queued for manual review.",
-        requestId: "req_ai_review_042",
-        userAgent: "risk-engine/1.8",
-        location: "Tokyo, Japan",
-      },
-      ipAddress: "45.76.11.20",
-      createdAt: "2026-03-04T21:45:12.000Z",
-    },
-    {
-      _id: "699f98aa1ae0d9039da45281",
-      userId: "65f8fb0a8d7bb2218a12ab13",
-      actor: "sarah.chen@company.com",
-      action: "SECURITY_POLICY_UPDATED",
-      details: {
-        message: "Updated lockout policy and rate limit.",
-        requestId: "req_sec_778",
-        userAgent: "Mozilla/5.0",
-        location: "Los Angeles, USA",
-      },
-      ipAddress: "203.0.113.12",
-      createdAt: "2026-03-03T08:20:05.000Z",
-    },
-    {
-      _id: "699f98aa1ae0d9039da45282",
-      userId: null,
-      actor: "alex.rivera@company.com",
-      action: "LOGIN_FAILED",
-      details: {
-        message: "Failed login attempt from unknown browser.",
-        requestId: "req_login_fail_11",
-        userAgent: "Mozilla/5.0 Firefox/123.0",
-        location: "New York, USA",
-      },
-      ipAddress: "203.0.113.12",
-      createdAt: "2026-03-02T07:12:54.000Z",
-    },
-    {
-      _id: "699f98aa1ae0d9039da45283",
-      userId: "65f8fb0a8d7bb2218a12ab14",
-      actor: "alex.rivera@company.com",
-      action: "TRANSFER_HIGH_VALUE_APPROVED",
-      details: {
-        message: "Approved payout over threshold: $25,000",
-        requestId: "req_tx_high_25000",
-        userAgent: "Mozilla/5.0",
-        location: "San Francisco, USA",
-      },
-      ipAddress: "192.168.1.45",
-      createdAt: "2026-03-01T16:44:10.000Z",
-    },
-  ];
+    const headers = { Authorization: `Bearer ${token}` };
 
-  const auditLogs = auditLogDocs.map(mapAuditDocToView);
+    const mapUser = (u: AdminUserApi): AdminUser => ({
+      id: u.id,
+      name: u.fullName?.trim() || (u.email.split("@")[0] || "User"),
+      email: u.email,
+      role: u.role === "ADMIN" ? "Admin" : "User",
+      title: u.role === "ADMIN" ? "System Admin" : "Customer",
+      phone: u.phone || "-",
+      birthday: u.createdAt ? new Date(u.createdAt).toISOString().slice(0, 10) : "",
+      address: u.address || "-",
+      avatar: `https://i.pravatar.cc/80?u=${encodeURIComponent(u.email)}`,
+      status: u.status === "ACTIVE" ? "Active" : "Locked",
+      lastLogin: u.lastLoginAt || u.createdAt || new Date().toISOString(),
+    });
 
-  const [users, setUsers] = useState<AdminUser[]>(() => {
-    try {
-      const raw = localStorage.getItem(USERS_STORE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as AdminUser[];
-        // Keep role values constrained to Admin/User for old local data.
-        const normalized: AdminUser[] = parsed.map((u): AdminUser => ({
-          ...u,
-          role: u.role === "Admin" ? "Admin" : "User",
-        }));
-        return normalized.length >= defaultUsers.length
-          ? normalized
-          : defaultUsers;
+    const mapTxn = (t: AdminTransactionApi): Transaction => ({
+      id: t.id,
+      userId: t.fromUserId || t.toUserId || "",
+      date: new Date(t.createdAt).toLocaleString("en-US"),
+      type:
+        t.type === "REFUND"
+          ? "Refund"
+          : t.type === "TRANSFER"
+            ? "Transfer"
+            : "Payment",
+      amount: `$${Number(t.amount || 0).toLocaleString("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })}`,
+      status:
+        t.status === "FAILED"
+          ? "Failed"
+          : t.status === "PENDING"
+            ? "Pending"
+            : "Completed",
+      reference: t.description || t.id,
+    });
+
+    const load = async () => {
+      try {
+        const [usersResp, txResp, auditResp] = await Promise.all([
+          fetch(`${API_BASE}/admin/users`, { headers }),
+          fetch(`${API_BASE}/admin/transactions`, { headers }),
+          fetch(`${API_BASE}/admin/audit-logs`, { headers }),
+        ]);
+
+        const usersData = (await usersResp.json().catch(() => [])) as AdminUserApi[];
+        const txData = (await txResp.json().catch(() => [])) as AdminTransactionApi[];
+        const auditData = (await auditResp.json().catch(() => [])) as Array<{
+          id: string;
+          actor?: string;
+          action?: string;
+          details?: string | Record<string, unknown>;
+          ipAddress?: string;
+          createdAt?: string;
+        }>;
+
+        if (usersResp.ok) setUsers(usersData.map(mapUser));
+        if (txResp.ok) setTransactions(txData.map(mapTxn));
+        if (auditResp.ok) {
+          const mapped = auditData.map((d) =>
+            mapAuditDocToView({
+              _id: d.id,
+              userId: null,
+              actor: d.actor,
+              action: d.action || "UNKNOWN",
+              details: d.details,
+              ipAddress: d.ipAddress,
+              createdAt: d.createdAt || new Date().toISOString(),
+            }),
+          );
+          setAuditLogs(mapped);
+        }
+      } catch {
+        setUsers([]);
+        setTransactions([]);
+        setAuditLogs([]);
       }
-    } catch {
-      /* ignore */
-    }
-    return defaultUsers;
-  });
+    };
+
+    void load();
+  }, [token, user?.role]);
+
   const [settings, setSettings] = useState({
     notifications: true,
     twofa: false,
@@ -1470,43 +1176,268 @@ function AdminApp() {
     URL.revokeObjectURL(url);
   };
 
-  const filteredBars = useMemo(() => {
-    if (period === "year") return { data: monthlyKpi, labels: monthlyLabels };
-    if (period === "month") {
-      return {
-        data: monthlyKpi.slice(-6),
-        labels: monthlyLabels.slice(-6),
-      };
+  const analytics = useMemo(() => {
+    const txRows = transactions.map((t) => {
+      const amountNum = parseCurrencyAmount(t.amount);
+      const dateObj = parseDateLoose(t.date);
+      const month = dateObj?.getMonth() ?? -1;
+      return { ...t, amountNum, dateObj, month };
+    });
+
+    const completedTx = txRows.filter((t) => t.status === "Completed");
+    const monthlyGmv = Array.from({ length: 12 }, () => 0);
+    const monthlyTxCount = Array.from({ length: 12 }, () => 0);
+    const monthlyAvgTx = Array.from({ length: 12 }, () => 0);
+
+    for (const tx of completedTx) {
+      if (tx.month >= 0 && tx.month < 12) {
+        monthlyGmv[tx.month] += tx.amountNum;
+        monthlyTxCount[tx.month] += 1;
+      }
     }
-    // week -> last 4 points
+    monthlyAvgTx.forEach((_, idx) => {
+      monthlyAvgTx[idx] =
+        monthlyTxCount[idx] > 0 ? monthlyGmv[idx] / monthlyTxCount[idx] : 0;
+    });
+
+    const selectedMonth = (() => {
+      const d = new Date(selectedDate);
+      return Number.isNaN(d.getTime()) ? new Date().getMonth() : d.getMonth();
+    })();
+    const prevMonth = selectedMonth === 0 ? 11 : selectedMonth - 1;
+
+    const totalUsers = users.length;
+    const activeUsers = users.filter((u) => u.status === "Active").length;
+    const lockedUsers = users.filter((u) => u.status === "Locked").length;
+    const adminUsers = users.filter((u) => u.role === "Admin").length;
+    const userUsers = users.filter((u) => u.role === "User").length;
+
+    const successCount = txRows.filter((t) => t.status === "Completed").length;
+    const pendingCount = txRows.filter((t) => t.status === "Pending").length;
+    const failedCount = txRows.filter((t) => t.status === "Failed").length;
+    const totalTx = txRows.length;
+    const successRate = totalTx > 0 ? (successCount / totalTx) * 100 : 0;
+
+    const profileCompleted = users.filter(
+      (u) => u.phone !== "-" && u.address !== "-",
+    ).length;
+    const profileCompletionRate =
+      totalUsers > 0 ? (profileCompleted / totalUsers) * 100 : 0;
+
+    const currentMonthGmv = monthlyGmv[selectedMonth];
+    const prevMonthGmv = monthlyGmv[prevMonth];
+    const gmvDelta =
+      prevMonthGmv > 0
+        ? ((currentMonthGmv - prevMonthGmv) / prevMonthGmv) * 100
+        : currentMonthGmv > 0
+          ? 100
+          : 0;
+
+    const txTypeMap = new Map<string, { count: number; amount: number }>();
+    for (const tx of completedTx) {
+      const key = tx.type;
+      const current = txTypeMap.get(key) ?? { count: 0, amount: 0 };
+      current.count += 1;
+      current.amount += tx.amountNum;
+      txTypeMap.set(key, current);
+    }
+    const totalTypeCount = Array.from(txTypeMap.values()).reduce(
+      (sum, t) => sum + t.count,
+      0,
+    );
+    const categories = Array.from(txTypeMap.entries())
+      .map(([name, info]) => ({
+        name,
+        count: info.count,
+        value:
+          totalTypeCount > 0
+            ? Math.round((info.count / totalTypeCount) * 100)
+            : 0,
+      }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 6);
+
+    const now = new Date();
+    const thisMonthAudit = auditLogs.filter((log) => {
+      const d = parseDateLoose(log.ts);
+      return (
+        d &&
+        d.getFullYear() === now.getFullYear() &&
+        d.getMonth() === selectedMonth
+      );
+    });
+    const prevMonthAudit = auditLogs.filter((log) => {
+      const d = parseDateLoose(log.ts);
+      return (
+        d &&
+        d.getFullYear() === now.getFullYear() &&
+        d.getMonth() === prevMonth
+      );
+    });
+    const thisMonthLogin = thisMonthAudit.filter(
+      (l) => l.categoryClass === "login",
+    ).length;
+    const prevMonthLogin = prevMonthAudit.filter(
+      (l) => l.categoryClass === "login",
+    ).length;
+    const thisMonthSecurity = thisMonthAudit.filter(
+      (l) => l.statusClass === "fail",
+    ).length;
+    const prevMonthSecurity = prevMonthAudit.filter(
+      (l) => l.statusClass === "fail",
+    ).length;
+
+    const engagementChannels = [
+      {
+        name: "Active users",
+        now: activeUsers,
+        prev: Math.max(totalUsers - activeUsers, 0),
+      },
+      {
+        name: "Transactions",
+        now: monthlyTxCount[selectedMonth],
+        prev: monthlyTxCount[prevMonth],
+      },
+      {
+        name: "Login events",
+        now: thisMonthLogin,
+        prev: prevMonthLogin,
+      },
+      {
+        name: "Security alerts",
+        now: thisMonthSecurity,
+        prev: prevMonthSecurity,
+      },
+    ];
+
+    const revenueTrend = (() => {
+      const out: { month: string; now: number; prev: number }[] = [];
+      for (let i = 7; i >= 0; i -= 1) {
+        const idx = (selectedMonth - i + 12) % 12;
+        const prevIdx = (idx - 1 + 12) % 12;
+        out.push({
+          month: MONTH_LABELS[idx],
+          now: monthlyAvgTx[idx],
+          prev: monthlyAvgTx[prevIdx],
+        });
+      }
+      return out;
+    })();
+
+    const kpiCards: KpiCard[] = [
+      {
+        title: "Active users",
+        value: activeUsers.toLocaleString("en-US"),
+        delta: `${totalUsers > 0 ? ((activeUsers / totalUsers) * 100).toFixed(1) : "0.0"}%`,
+        items: [
+          { label: "Total users", value: totalUsers.toLocaleString("en-US"), color: "#5b21b6" },
+          { label: "Admin", value: adminUsers.toLocaleString("en-US"), color: "#2563eb" },
+          { label: "Customer", value: userUsers.toLocaleString("en-US"), color: "#f59e0b" },
+        ],
+      },
+      {
+        title: "Transaction success rate",
+        value: `${successRate.toFixed(1)}%`,
+        delta: `${totalTx.toLocaleString("en-US")} tx`,
+        items: [
+          { label: "Completed", value: successCount.toLocaleString("en-US"), color: "#5b21b6" },
+          { label: "Pending", value: pendingCount.toLocaleString("en-US"), color: "#6366f1" },
+          { label: "Failed", value: failedCount.toLocaleString("en-US"), color: "#f59e0b" },
+        ],
+      },
+      {
+        title: "Profile completion",
+        value: `${profileCompletionRate.toFixed(1)}%`,
+        delta: `${lockedUsers.toLocaleString("en-US")} locked`,
+        items: [
+          { label: "Completed profile", value: profileCompleted.toLocaleString("en-US"), color: "#5b21b6" },
+          { label: "Incomplete", value: Math.max(totalUsers - profileCompleted, 0).toLocaleString("en-US"), color: "#6366f1" },
+          { label: "Locked", value: lockedUsers.toLocaleString("en-US"), color: "#f59e0b" },
+        ],
+      },
+      {
+        title: "Monthly GMV",
+        value: `$${currentMonthGmv.toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })}`,
+        delta: `${gmvDelta >= 0 ? "+" : ""}${gmvDelta.toFixed(1)}%`,
+        items: [
+          {
+            label: "Transfer",
+            value: `$${(txTypeMap.get("Transfer")?.amount ?? 0).toLocaleString("en-US", {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            })}`,
+            color: "#5b21b6",
+          },
+          {
+            label: "Payment",
+            value: `$${(txTypeMap.get("Payment")?.amount ?? 0).toLocaleString("en-US", {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            })}`,
+            color: "#6366f1",
+          },
+          {
+            label: "Refund",
+            value: `$${(txTypeMap.get("Refund")?.amount ?? 0).toLocaleString("en-US", {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            })}`,
+            color: "#f59e0b",
+          },
+        ],
+      },
+    ];
+
     return {
-      data: monthlyKpi.slice(-4),
-      labels: monthlyLabels.slice(-4),
+      kpiCards,
+      monthlyGmv,
+      categories,
+      engagementChannels,
+      revenueTrend,
+      selectedMonth,
     };
-  }, [period]);
+  }, [transactions, users, auditLogs, selectedDate]);
+
+  const filteredBars = useMemo(() => {
+    const { monthlyGmv, selectedMonth } = analytics;
+    if (period === "year") return { data: monthlyGmv, labels: MONTH_LABELS };
+
+    const len = period === "month" ? 6 : 4;
+    const data: number[] = [];
+    const labels: string[] = [];
+    for (let i = len - 1; i >= 0; i -= 1) {
+      const idx = (selectedMonth - i + 12) % 12;
+      data.push(monthlyGmv[idx]);
+      labels.push(MONTH_LABELS[idx]);
+    }
+    return { data, labels };
+  }, [analytics, period]);
 
   const maxMonthly = useMemo(
-    () => Math.max(...filteredBars.data),
+    () => Math.max(1, ...filteredBars.data),
     [filteredBars],
   );
 
   const maxChannel = useMemo(
-    () => Math.max(...engagementChannels.map((c) => Math.max(c.now, c.prev))),
-    [],
+    () =>
+      Math.max(
+        1,
+        ...analytics.engagementChannels.map((c) => Math.max(c.now, c.prev)),
+      ),
+    [analytics.engagementChannels],
   );
 
   const maxRevenue = useMemo(
-    () => Math.max(...revenueTrend.map((r) => Math.max(r.now, r.prev))),
-    [],
+    () =>
+      Math.max(
+        1,
+        ...analytics.revenueTrend.map((r) => Math.max(r.now, r.prev)),
+      ),
+    [analytics.revenueTrend],
   );
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(USERS_STORE_KEY, JSON.stringify(users));
-    } catch {
-      /* ignore storage failures */
-    }
-  }, [users]);
 
   return (
     <div className={`mf-shell theme-${theme}`}>
@@ -1608,7 +1539,7 @@ function AdminApp() {
             </header>
 
             <section className="ana-kpi-grid">
-              {kpiCards.map((card) => (
+              {analytics.kpiCards.map((card) => (
                 <KpiCard key={card.title} card={card} />
               ))}
             </section>
@@ -1641,7 +1572,7 @@ function AdminApp() {
                     <div className="ana-pie-center">Sales</div>
                   </div>
                   <ul className="ana-legend">
-                    {categories.map((c, i) => (
+                    {analytics.categories.map((c, i) => (
                       <li key={c.name}>
                         <span
                           className="ana-dot"
@@ -1682,7 +1613,7 @@ function AdminApp() {
                   </div>
                 </div>
                 <div className="ana-hbar-list">
-                  {engagementChannels.map((c) => (
+                  {analytics.engagementChannels.map((c) => (
                     <div key={c.name} className="ana-hbar-row">
                       <span className="label">{c.name}</span>
                       <div className="ana-hbar-track">
@@ -1720,7 +1651,7 @@ function AdminApp() {
                   </div>
                 </div>
                 <div className="ana-dual-chart">
-                  {revenueTrend.map((r) => (
+                  {analytics.revenueTrend.map((r) => (
                     <div key={r.month} className="ana-bar-item">
                       <div className="ana-dual-bars">
                         <div
@@ -2061,11 +1992,13 @@ function AdminApp() {
                         </td>
                         <td style={{ color: "var(--text)" }}>{u.role}</td>
                         <td style={{ color: "var(--text)" }}>
-                          {new Date(u.birthday).toLocaleDateString("en-US", {
-                            month: "short",
-                            day: "2-digit",
-                            year: "numeric",
-                          })}
+                          {u.birthday
+                            ? new Date(u.birthday).toLocaleDateString("en-US", {
+                                month: "short",
+                                day: "2-digit",
+                                year: "numeric",
+                              })
+                            : "-"}
                         </td>
                         <td style={{ color: "var(--text)" }}>{u.address}</td>
                         <td>
@@ -2085,21 +2018,39 @@ function AdminApp() {
                         >
                           <button
                             className="user-btn danger"
-                            onClick={() =>
+                            onClick={async () => {
+                              if (!token) return;
+                              const targetStatus =
+                                u.status === "Locked" ? "ACTIVE" : "DISABLED";
+                              const resp = await fetch(
+                                `${API_BASE}/admin/users/${u.id}/status`,
+                                {
+                                  method: "PATCH",
+                                  headers: {
+                                    "Content-Type": "application/json",
+                                    Authorization: `Bearer ${token}`,
+                                  },
+                                  body: JSON.stringify({
+                                    status: targetStatus,
+                                    reason: "manual update from admin panel",
+                                  }),
+                                },
+                              );
+                              if (!resp.ok) return;
                               setUsers((list) =>
                                 list.map((x) =>
                                   x.id === u.id
                                     ? {
                                         ...x,
                                         status:
-                                          x.status === "Locked"
+                                          targetStatus === "ACTIVE"
                                             ? "Active"
                                             : "Locked",
                                       }
                                     : x,
                                 ),
-                              )
-                            }
+                              );
+                            }}
                           >
                             {u.status === "Locked" ? "Unlock" : "Lock"}
                           </button>
@@ -2431,3 +2382,4 @@ function AdminApp() {
 }
 
 export default AdminApp;
+
