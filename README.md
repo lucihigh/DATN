@@ -28,6 +28,16 @@ This repository is a pnpm-powered monorepo scaffold for a student project: **"Se
 6. Run Prisma migrate: `pnpm --filter @secure-wallet/api prisma:migrate`.
 7. Contract flow: edit `contracts/openapi.yaml` -> `pnpm contract:validate` -> `pnpm contract:gen`.
 
+## Team Setup (Important)
+If teammates pull this repo and web cannot connect to backend:
+1. Enable Corepack once: `corepack enable`
+2. From repo root: `corepack pnpm install`
+3. Ensure `.env` exists at repo root (copy from `.env.example`)
+4. Run API first: `corepack pnpm --filter @secure-wallet/api dev`
+5. Run Web second: `corepack pnpm --filter @secure-wallet/web dev`
+
+Note: VS Code tasks now use `corepack pnpm` and no longer depend on a machine-specific path like `C:\\Users\\...\\pnpm.cmd`.
+
 ## Scripts (root)
 - `pnpm dev` – runs all workspace `dev` scripts in parallel
 - `pnpm lint` / `pnpm format` / `pnpm typecheck` / `pnpm test`

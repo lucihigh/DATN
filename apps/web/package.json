@@ -13,19 +13,20 @@
     "test": "echo 'tests pending'"
   },
   "dependencies": {
+    "@secure-wallet/shared": "workspace:*",
+    "jsqr": "^1.4.0",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "@secure-wallet/shared": "workspace:*"
+    "react-dom": "^18.2.0"
   },
   "devDependencies": {
     "@types/react": "^18.2.21",
     "@types/react-dom": "^18.2.7",
+    "@typescript-eslint/eslint-plugin": "^6.13.2",
+    "@typescript-eslint/parser": "^6.13.2",
     "@vitejs/plugin-react": "^4.2.0",
     "eslint": "^8.56.0",
     "prettier": "^3.1.1",
     "typescript": "^5.3.3",
-    "vite": "^5.0.10",
-    "@typescript-eslint/eslint-plugin": "^6.13.2",
-    "@typescript-eslint/parser": "^6.13.2"
+    "vite": "^5.0.10"
   }
 }

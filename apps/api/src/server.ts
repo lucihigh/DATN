@@ -1,4 +1,5 @@
-﻿import crypto from "crypto";
+import crypto from "crypto";
+import path from "path";
 
 import cors from "cors";
 import dotenv from "dotenv";
@@ -31,7 +32,9 @@ import {
 } from "./services/securityPolicy";
 import { logAuditEvent } from "./services/audit";
 
-dotenv.config();
+// Support running from both repo root and apps/api folders.
+dotenv.config({ path: path.resolve(process.cwd(), ".env") });
+dotenv.config({ path: path.resolve(process.cwd(), "../../.env") });
 
 const app = express();
 app.use(cors());
@@ -43,6 +46,7 @@ app.use(lockoutGuard);
 
 const PORT = process.env.PORT_API || 4000;
 const AI_URL = process.env.AI_SERVICE_URL || "http://localhost:8000";
+const APP_TIMEZONE = process.env.APP_TIMEZONE || "Asia/Ho_Chi_Minh";
 const ADMIN_EMAIL = "ledanhdat56@gmail.com";
 const ADMIN_PASSWORD = "Ledanhdat2005@";
 
@@ -257,6 +261,12 @@ app.post("/auth/register", async (req, res) => {
       passwordHash,
       role: "USER",
       fullName: parsed.data.fullName?.trim(),
+      phone: parsed.data.phone?.trim(),
+      address: parsed.data.address?.trim(),
+      dob: parsed.data.dob?.trim(),
+      metadata: parsed.data.userName
+        ? { userName: parsed.data.userName.trim() }
+        : undefined,
     });
     await getOrCreateWalletByUserId(created.id);
 
@@ -503,6 +513,114 @@ app.post("/auth/change-password", requireAuth, async (req, res) => {
   });
 
   return res.status(204).send();
+});
+
+app.get("/auth/me", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  try {
+    const userRepository = createUserRepository();
+    const userDoc = await userRepository.findValidatedById(userId);
+    if (!userDoc) return res.status(404).json({ error: "User not found" });
+
+    const metadata =
+      userDoc.metadata && typeof userDoc.metadata === "object"
+        ? (userDoc.metadata as Record<string, unknown>)
+        : {};
+
+    return res.json({
+      id: userDoc.id,
+      email: userDoc.email,
+      role: userDoc.role,
+      fullName: userDoc.fullName ?? "",
+      phone: typeof userDoc.phone === "string" ? userDoc.phone : "",
+      address: typeof userDoc.address === "string" ? userDoc.address : "",
+      dob: typeof userDoc.dob === "string" ? userDoc.dob : "",
+      avatar:
+        typeof metadata.avatar === "string" ? metadata.avatar : undefined,
+      metadata,
+    });
+  } catch (err) {
+    console.error("Failed to get profile", err);
+    return res.status(500).json({ error: "Internal error" });
+  }
+});
+
+app.patch("/auth/me", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const body = req.body as {
+    fullName?: unknown;
+    phone?: unknown;
+    address?: unknown;
+    dob?: unknown;
+    metadata?: unknown;
+  };
+
+  const fullName =
+    typeof body.fullName === "string" ? body.fullName.trim().slice(0, 120) : "";
+  const phone = typeof body.phone === "string" ? body.phone.trim() : "";
+  const address = typeof body.address === "string" ? body.address.trim() : "";
+  const dob = typeof body.dob === "string" ? body.dob.trim() : "";
+  const metadata =
+    body.metadata && typeof body.metadata === "object"
+      ? (body.metadata as Record<string, unknown>)
+      : {};
+  const avatar =
+    typeof metadata.avatar === "string" &&
+    metadata.avatar.length > 0 &&
+    metadata.avatar.length <= 2_000_000
+      ? metadata.avatar
+      : undefined;
+  const safeMetadata = {
+    ...metadata,
+    ...(avatar ? { avatar } : {}),
+  };
+
+  try {
+    const userRepository = createUserRepository();
+    const updated = await userRepository.updateProfile(userId, {
+      fullName: fullName || undefined,
+      phone: phone || undefined,
+      address: address || undefined,
+      dob: dob || undefined,
+      metadata: safeMetadata,
+    });
+
+    await logAuditEvent({
+      actor: req.user?.email,
+      userId,
+      action: "PROFILE_UPDATED",
+      details: { fullName: Boolean(fullName), phone: Boolean(phone) },
+      ipAddress: req.ip,
+    });
+
+    return res.json({
+      id: updated.id,
+      email: updated.email,
+      role: updated.role,
+      fullName: updated.fullName ?? "",
+      phone: typeof updated.phone === "string" ? updated.phone : "",
+      address: typeof updated.address === "string" ? updated.address : "",
+      dob: typeof updated.dob === "string" ? updated.dob : "",
+      avatar:
+        updated.metadata &&
+        typeof updated.metadata === "object" &&
+        typeof (updated.metadata as Record<string, unknown>).avatar ===
+          "string"
+          ? ((updated.metadata as Record<string, unknown>).avatar as string)
+          : undefined,
+      metadata:
+        updated.metadata && typeof updated.metadata === "object"
+          ? (updated.metadata as Record<string, unknown>)
+          : {},
+    });
+  } catch (err) {
+    console.error("Failed to update profile", err);
+    return res.status(500).json({ error: "Internal error" });
+  }
 });
 
 app.get("/wallet/me", requireAuth, async (req, res) => {
@@ -828,11 +946,9 @@ app.get("/transactions", requireAuth, async (req, res) => {
 
     const txns = await prisma.transaction.findMany({
       where: {
-        OR: [
-          { fromUserId: userId },
-          { toUserId: userId },
-          ...(walletIds.length ? [{ walletId: { in: walletIds } }] : []),
-        ],
+        ...(walletIds.length
+          ? { walletId: { in: walletIds } }
+          : { walletId: "__NO_WALLET__" }),
       },
       orderBy: { createdAt: "desc" },
       take: 200,
@@ -925,6 +1041,88 @@ app.patch(
     } catch (err) {
       console.error("Failed to update user status", err);
       return res.status(400).json({ error: "Invalid user id" });
+    }
+  },
+);
+
+app.post(
+  "/admin/users/:id/deposit",
+  requireAuth,
+  requireRole(["ADMIN"]),
+  async (req, res) => {
+    const adminUserId = req.user?.sub;
+    const targetUserId = req.params.id;
+    const amount = toPositiveAmount((req.body as { amount?: unknown })?.amount);
+    if (!amount) return res.status(400).json({ error: "Invalid amount" });
+
+    try {
+      const targetUser = await prisma.user.findUnique({
+        where: { id: targetUserId },
+        select: { id: true, email: true, status: true },
+      });
+      if (!targetUser) return res.status(404).json({ error: "User not found" });
+      if (targetUser.status !== "ACTIVE") {
+        return res.status(423).json({ error: "Target user is not active" });
+      }
+
+      const wallet = await getOrCreateWalletByUserId(targetUserId);
+      const updated = await prisma.$transaction(async (tx) => {
+        const nextWallet = await tx.wallet.update({
+          where: { id: wallet.id },
+          data: { balance: { increment: amount } },
+        });
+
+        const transaction = await tx.transaction.create({
+          data: {
+            id: crypto.randomUUID(),
+            walletId: nextWallet.id,
+            amount,
+            type: "DEPOSIT",
+            status: "COMPLETED",
+            description: `Admin top-up for ${targetUser.email}`,
+            fromUserId: adminUserId,
+            toUserId: targetUser.id,
+            metadata: {
+              entry: "CREDIT",
+              source: "ADMIN_TOPUP",
+            } as never,
+          },
+        });
+
+        return { nextWallet, transaction };
+      });
+
+      await logAuditEvent({
+        actor: req.user?.email ?? "admin",
+        userId: targetUserId,
+        action: "ADMIN_DEPOSIT",
+        details: {
+          amount,
+          currency: updated.nextWallet.currency,
+        },
+        ipAddress: req.ip,
+      });
+
+      return res.json({
+        wallet: {
+          id: updated.nextWallet.id,
+          balance: Number(updated.nextWallet.balance),
+          currency: updated.nextWallet.currency,
+        },
+        transaction: {
+          id: updated.transaction.id,
+          amount: Number(updated.transaction.amount),
+          type: updated.transaction.type,
+          status: updated.transaction.status,
+          description: updated.transaction.description ?? "",
+          createdAt: updated.transaction.createdAt.toISOString(),
+          fromUserId: updated.transaction.fromUserId ?? undefined,
+          toUserId: updated.transaction.toUserId ?? undefined,
+        },
+      });
+    } catch (err) {
+      console.error("Failed to deposit for user", err);
+      return res.status(500).json({ error: "Internal error" });
     }
   },
 );
@@ -1146,11 +1344,39 @@ const sleep = (ms: number) =>
     setTimeout(resolve, ms);
   });
 
+const normalizeTimezone = (value: string) => {
+  const trimmed = value.trim();
+  if (/^[A-Za-z0-9_+\-/:]+$/.test(trimmed)) {
+    return trimmed;
+  }
+  return "Asia/Ho_Chi_Minh";
+};
+
+const configureDatabaseTimezone = async () => {
+  const tz = normalizeTimezone(APP_TIMEZONE);
+  const escapedTz = tz.replace(/'/g, "''");
+
+  await prisma.$executeRawUnsafe(`SET TIME ZONE '${escapedTz}'`);
+
+  try {
+    await prisma.$executeRawUnsafe(
+      `ALTER ROLE CURRENT_USER SET timezone TO '${escapedTz}'`,
+    );
+    console.log(`Database role timezone set to ${tz}`);
+  } catch (err) {
+    console.warn(
+      `Cannot persist DB role timezone (${tz}). Session timezone is still applied.`,
+      err,
+    );
+  }
+};
+
 const initializeDatabase = async () => {
   const maxAttempts = 8;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       await prisma.$connect();
+      await configureDatabaseTimezone();
       const adminPasswordHash = await hashPassword(ADMIN_PASSWORD);
       await prisma.user.upsert({
         where: { email: ADMIN_EMAIL },
@@ -1196,4 +1422,6 @@ const start = async () => {
 };
 
 start();
+
+
 

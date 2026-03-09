@@ -889,6 +889,32 @@ function AdminApp() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLogView[]>([]);
 
+  const mapAdminTxnToView = (t: AdminTransactionApi): Transaction => ({
+    id: t.id,
+    userId:
+      t.type === "DEPOSIT"
+        ? t.toUserId || t.fromUserId || ""
+        : t.fromUserId || t.toUserId || "",
+    date: new Date(t.createdAt).toLocaleString("en-US"),
+    type:
+      t.type === "REFUND"
+        ? "Refund"
+        : t.type === "TRANSFER"
+          ? "Transfer"
+          : "Payment",
+    amount: `$${Number(t.amount || 0).toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`,
+    status:
+      t.status === "FAILED"
+        ? "Failed"
+        : t.status === "PENDING"
+          ? "Pending"
+          : "Completed",
+    reference: t.description || t.id,
+  });
+
   useEffect(() => {
     if (!token || user?.role !== "ADMIN") return;
 
@@ -906,29 +932,6 @@ function AdminApp() {
       avatar: `https://i.pravatar.cc/80?u=${encodeURIComponent(u.email)}`,
       status: u.status === "ACTIVE" ? "Active" : "Locked",
       lastLogin: u.lastLoginAt || u.createdAt || new Date().toISOString(),
-    });
-
-    const mapTxn = (t: AdminTransactionApi): Transaction => ({
-      id: t.id,
-      userId: t.fromUserId || t.toUserId || "",
-      date: new Date(t.createdAt).toLocaleString("en-US"),
-      type:
-        t.type === "REFUND"
-          ? "Refund"
-          : t.type === "TRANSFER"
-            ? "Transfer"
-            : "Payment",
-      amount: `$${Number(t.amount || 0).toLocaleString("en-US", {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      })}`,
-      status:
-        t.status === "FAILED"
-          ? "Failed"
-          : t.status === "PENDING"
-            ? "Pending"
-            : "Completed",
-      reference: t.description || t.id,
     });
 
     const load = async () => {
@@ -951,7 +954,7 @@ function AdminApp() {
         }>;
 
         if (usersResp.ok) setUsers(usersData.map(mapUser));
-        if (txResp.ok) setTransactions(txData.map(mapTxn));
+        if (txResp.ok) setTransactions(txData.map(mapAdminTxnToView));
         if (auditResp.ok) {
           const mapped = auditData.map((d) =>
             mapAuditDocToView({
@@ -2011,6 +2014,59 @@ function AdminApp() {
                             alignItems: "center",
                           }}
                         >
+                          <button
+                            className="user-btn primary"
+                            onClick={async () => {
+                              if (!token) return;
+                              const value = window.prompt(
+                                `Enter amount to top up for ${u.email}`,
+                                "100",
+                              );
+                              if (value === null) return;
+                              const amount = Number(value);
+                              if (!Number.isFinite(amount) || amount <= 0) {
+                                window.alert("Amount must be a positive number.");
+                                return;
+                              }
+
+                              const resp = await fetch(
+                                `${API_BASE}/admin/users/${u.id}/deposit`,
+                                {
+                                  method: "POST",
+                                  headers: {
+                                    "Content-Type": "application/json",
+                                    Authorization: `Bearer ${token}`,
+                                  },
+                                  body: JSON.stringify({ amount }),
+                                },
+                              );
+                              const payload = (await resp
+                                .json()
+                                .catch(() => null)) as
+                                | {
+                                    error?: string;
+                                    transaction?: AdminTransactionApi;
+                                  }
+                                | null;
+                              if (!resp.ok || !payload?.transaction) {
+                                window.alert(payload?.error || "Top up failed.");
+                                return;
+                              }
+
+                              setTransactions((list) => [
+                                mapAdminTxnToView(payload.transaction!),
+                                ...list,
+                              ]);
+                              window.alert(
+                                `Added $${amount.toLocaleString("en-US", {
+                                  minimumFractionDigits: 2,
+                                  maximumFractionDigits: 2,
+                                })} to ${u.email}`,
+                              );
+                            }}
+                          >
+                            Add Money
+                          </button>
                           <button
                             className="user-btn danger"
                             onClick={async () => {
