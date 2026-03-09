@@ -21,11 +21,7 @@ type ThemeContextValue = {
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setThemeState] = useState<Theme>(() => {
-    if (typeof window === "undefined") return "light";
-    const stored = localStorage.getItem(STORAGE_KEY) as Theme | null;
-    return stored === "dark" ? "dark" : "light";
-  });
+  const [theme, setThemeState] = useState<Theme>("dark");
 
   const applyTheme = useCallback((next: Theme) => {
     if (typeof document !== "undefined") {
@@ -43,21 +39,17 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
-      if (e.key === STORAGE_KEY && e.newValue) {
-        const next = (e.newValue as Theme) ?? "light";
-        setThemeState(next);
-        applyTheme(next);
+      if (e.key === STORAGE_KEY) {
+        setThemeState("dark");
+        applyTheme("dark");
       }
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }, [applyTheme]);
 
-  const setTheme = useCallback((next: Theme) => setThemeState(next), []);
-  const toggle = useCallback(
-    () => setThemeState((prev) => (prev === "dark" ? "light" : "dark")),
-    [],
-  );
+  const setTheme = useCallback((_next: Theme) => setThemeState("dark"), []);
+  const toggle = useCallback(() => setThemeState("dark"), []);
 
   const value = useMemo(
     () => ({ theme, toggle, setTheme }),
