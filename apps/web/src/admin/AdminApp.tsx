@@ -854,10 +854,7 @@ function KpiCard({ card }: { card: KpiCard }) {
 
 function AdminApp() {
   const { user, token, logout } = useAuth();
-  const [theme, setTheme] = useState<"light" | "dark">(() => {
-    if (typeof window === "undefined") return "light";
-    return (localStorage.getItem("admin-theme") as "light" | "dark") || "light";
-  });
+  const theme: "dark" = "dark";
   const [period, setPeriod] = useState<"year" | "month" | "week">("year");
   const [selectedDate, setSelectedDate] = useState(() => {
     // default to current date for realistic demo
@@ -1813,13 +1810,11 @@ function AdminApp() {
             <div className="set-row">
               <div>
                 <h4>Theme</h4>
-                <p>Switch between light and dark mode.</p>
+                <p>Dark mode is fixed for admin.</p>
               </div>
               <button
                 className={`set-toggle ${theme === "dark" ? "on" : ""}`}
-                onClick={() =>
-                  setTheme((t) => (t === "dark" ? "light" : "dark"))
-                }
+                onClick={() => {}}
                 aria-label="Toggle theme"
               />
             </div>
