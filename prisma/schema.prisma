@@ -25,6 +25,7 @@ model User {
   wallets     Wallet[]
   loginEvents LoginEvent[]
   auditLogs   AuditLog[]
+  otpChallenges OtpChallenge[]
 }
 
 model Wallet {
@@ -116,6 +117,27 @@ model SecurityPolicy {
   @@index([createdAt])
 }
 
+model OtpChallenge {
+  id          String     @id
+  userId      String
+  channel     OtpChannel @default(EMAIL)
+  purpose     String
+  destination String
+  codeHash    String
+  attempts    Int        @default(0)
+  maxAttempts Int        @default(5)
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  metadata    Json?
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, purpose, createdAt])
+  @@index([expiresAt])
+}
+
 enum Role {
   USER
   ADMIN
@@ -138,5 +160,9 @@ enum TransactionStatus {
   COMPLETED
   FAILED
   REVERSED
+}
+
+enum OtpChannel {
+  EMAIL
 }
 

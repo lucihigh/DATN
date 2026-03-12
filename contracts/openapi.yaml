@@ -8,11 +8,13 @@ paths:
   /health:
     get:
       summary: Health check
+      security: []
       responses:
         "200": { description: OK }
   /auth/register:
     post:
       summary: Register user
+      security: []
       requestBody:
         required: true
         content:
@@ -29,6 +31,7 @@ paths:
   /auth/login:
     post:
       summary: Login
+      security: []
       requestBody:
         required: true
         content:
@@ -45,6 +48,7 @@ paths:
   /auth/logout:
     post:
       summary: Logout (invalidate token)
+      security: []
       responses:
         "204": { description: Logged out }
   /wallet/me:
@@ -75,6 +79,40 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Wallet"
+  /ai/deposit-agent:
+    post:
+      summary: Get AI-guided deposit recommendation
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DepositAgentRequest"
+      responses:
+        "200":
+          description: Deposit recommendation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DepositAgentResponse"
+  /ai/copilot-chat:
+    post:
+      summary: Chat with the wallet AI copilot
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CopilotChatRequest"
+      responses:
+        "200":
+          description: Copilot response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CopilotChatResponse"
   /transfer:
     post:
       summary: Transfer funds to another user
@@ -111,6 +149,7 @@ paths:
   /security/login-events:
     post:
       summary: Record login event and request anomaly score
+      security: []
       requestBody:
         required: true
         content:
@@ -248,6 +287,33 @@ components:
       required: [amount]
       properties:
         amount: { type: number, format: double, minimum: 0 }
+    DepositAgentRequest:
+      type: object
+      required: [goal]
+      properties:
+        goal: { type: string, minLength: 1 }
+        currentBalance: { type: number, format: double, default: 0 }
+        currency: { type: string, default: USD }
+        monthlyIncome: { type: number, format: double }
+        monthlyExpenses: { type: number, format: double }
+    DepositAgentResponse:
+      type: object
+      required:
+        [
+          recommendedAmount,
+          reasoning,
+          riskLevel,
+          nextAction,
+          confidence,
+        ]
+      properties:
+        recommendedAmount: { type: number, format: double }
+        reasoning:
+          type: array
+          items: { type: string }
+        riskLevel: { type: string, enum: [low, medium, high] }
+        nextAction: { type: string }
+        confidence: { type: number, format: double, minimum: 0, maximum: 1 }
     TransferRequest:
       type: object
       required: [toUserId, amount]
@@ -274,6 +340,49 @@ components:
         reasons:
           type: array
           items: { type: string }
+    CopilotMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role: { type: string, enum: [user, assistant, system] }
+        content: { type: string }
+    CopilotTransaction:
+      type: object
+      required: [amount, type, createdAt, direction]
+      properties:
+        amount: { type: number, format: double }
+        type: { type: string }
+        description: { type: string }
+        createdAt: { type: string, format: date-time }
+        direction: { type: string, enum: [credit, debit] }
+    CopilotChatRequest:
+      type: object
+      required: [messages]
+      properties:
+        currency: { type: string, default: USD }
+        currentBalance: { type: number, format: double, default: 0 }
+        monthlyIncome: { type: number, format: double }
+        monthlyExpenses: { type: number, format: double }
+        recentTransactions:
+          type: array
+          items: { $ref: "#/components/schemas/CopilotTransaction" }
+        messages:
+          type: array
+          items: { $ref: "#/components/schemas/CopilotMessage" }
+    CopilotChatResponse:
+      type: object
+      required:
+        [reply, topic, suggestedActions, riskLevel, confidence]
+      properties:
+        reply: { type: string }
+        topic: { type: string }
+        suggestedActions:
+          type: array
+          items: { type: string }
+        suggestedDepositAmount: { type: number, format: double, nullable: true }
+        riskLevel: { type: string, enum: [low, medium, high] }
+        confidence: { type: number, format: double, minimum: 0, maximum: 1 }
+        followUpQuestion: { type: string, nullable: true }
     SecurityAlert:
       type: object
       properties:

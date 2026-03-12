@@ -30,9 +30,15 @@ const NAV_ITEMS: {
 const dashboardQuickActions = [
   {
     id: "deposit",
-    title: "Deposit (Demo)",
-    detail: "Add funds instantly",
+    title: "AI Deposit Agent",
+    detail: "Plan and fund with AI guidance",
     icon: "💳",
+  },
+  {
+    id: "copilot",
+    title: "AI Copilot",
+    detail: "Ask about budget, savings, and market context",
+    icon: "AI",
   },
   {
     id: "transfer",
@@ -101,6 +107,28 @@ const accountsRecentTransactions = [
     img: 13,
   },
 ];
+
+type RecentTransaction = {
+  amount: number;
+  type: string;
+  description?: string;
+  createdAt: string;
+  direction: "credit" | "debit";
+};
+
+type CopilotMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+type CopilotInsight = {
+  topic: string;
+  suggestedActions: string[];
+  suggestedDepositAmount?: number | null;
+  riskLevel: string;
+  confidence: number;
+  followUpQuestion?: string | null;
+};
 
 function Ring({ value }: { value: number }) {
   const r = 36;
@@ -197,6 +225,7 @@ function DashboardView() {
   const transferQrVideoRef = useRef<HTMLVideoElement>(null);
   const transferQrStreamRef = useRef<MediaStream | null>(null);
   const transferQrScanTimerRef = useRef<number | null>(null);
+  const copilotThreadRef = useRef<HTMLDivElement>(null);
   const [wallet, setWallet] = useState<{
     id: string;
     balance: number;
@@ -213,6 +242,31 @@ function DashboardView() {
   const [otpError, setOtpError] = useState("");
   const [otpAttempts, setOtpAttempts] = useState(0);
   const [transferOpen, setTransferOpen] = useState(false);
+  const [depositAgentOpen, setDepositAgentOpen] = useState(false);
+  const [depositAgentBusy, setDepositAgentBusy] = useState(false);
+  const [depositGoal, setDepositGoal] = useState("");
+  const [depositIncome, setDepositIncome] = useState("");
+  const [depositExpenses, setDepositExpenses] = useState("");
+  const [depositAgentPlan, setDepositAgentPlan] = useState<{
+    recommendedAmount: number;
+    reasoning: string[];
+    riskLevel: string;
+    nextAction: string;
+    confidence: number;
+  } | null>(null);
+  const [copilotOpen, setCopilotOpen] = useState(false);
+  const [copilotBusy, setCopilotBusy] = useState(false);
+  const [copilotInput, setCopilotInput] = useState("");
+  const [copilotMessages, setCopilotMessages] = useState<CopilotMessage[]>([
+    {
+      role: "assistant",
+      content:
+        "I can help with budget, spending, savings targets, and market context. Ask me what you want to improve.",
+    },
+  ]);
+  const [copilotInsight, setCopilotInsight] = useState<CopilotInsight | null>(
+    null,
+  );
   const [transferStep, setTransferStep] = useState<1 | 2 | 3 | 4>(1);
   const [transferMethod, setTransferMethod] = useState<"account" | "qr">(
     "account",
@@ -233,10 +287,16 @@ function DashboardView() {
   );
   const [transferQrDeviceId, setTransferQrDeviceId] = useState("");
   const [transferShowMyQr, setTransferShowMyQr] = useState(false);
-  const [transferOtpCode, setTransferOtpCode] = useState("");
   const [transferOtpInput, setTransferOtpInput] = useState("");
   const [transferOtpError, setTransferOtpError] = useState("");
-  const [transferOtpAttempts, setTransferOtpAttempts] = useState(0);
+  const [transferOtpChallengeId, setTransferOtpChallengeId] = useState("");
+  const [transferOtpDestination, setTransferOtpDestination] = useState("");
+  const [transferOtpExpiresAt, setTransferOtpExpiresAt] = useState("");
+  const [transferOtpResendAt, setTransferOtpResendAt] = useState(0);
+  const [transferOtpClock, setTransferOtpClock] = useState(Date.now());
+  const [recentTransactions, setRecentTransactions] = useState<
+    RecentTransaction[]
+  >([]);
   const [transactionHistory, setTransactionHistory] = useState<
     { entity: string; date: string; status: string; amount: string; amountTone: "positive" | "negative" }[]
   >([]);
@@ -299,9 +359,280 @@ function DashboardView() {
     (ownQrPayload
       ? `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(ownQrPayload)}`
       : "");
+  const transferOtpCooldownSeconds = Math.max(
+    0,
+    Math.ceil((transferOtpResendAt - transferOtpClock) / 1000),
+  );
+  const monthlyIncomeValue = Number(depositIncome || 0);
+  const monthlyExpensesValue = Number(depositExpenses || 0);
+
+  const refreshWalletSnapshot = async () => {
+    if (!token) return;
+    const headers = { Authorization: `Bearer ${token}` };
+    const [walletResp, txResp] = await Promise.all([
+      fetch(`${API_BASE}/wallet/me`, { headers }),
+      fetch(`${API_BASE}/transactions`, { headers }),
+    ]);
+
+    if (walletResp.ok) {
+      const w = (await walletResp.json()) as {
+        id: string;
+        balance: number;
+        currency: string;
+        accountNumber?: string;
+        qrPayload?: string;
+        qrImageUrl?: string;
+      };
+      setWallet(w);
+    }
+
+    if (txResp.ok) {
+      const txs = (await txResp.json()) as Array<{
+        id: string;
+        amount: number;
+        type: string;
+        description?: string;
+        createdAt: string;
+        metadata?: { entry?: "DEBIT" | "CREDIT" };
+      }>;
+      setRecentTransactions(
+        txs.slice(0, 12).map((tx) => ({
+          amount: Number(tx.amount || 0),
+          type: tx.type,
+          description: tx.description,
+          createdAt: tx.createdAt,
+          direction:
+            tx.type === "DEPOSIT" || tx.metadata?.entry === "CREDIT"
+              ? "credit"
+              : "debit",
+        })),
+      );
+      setTransactionHistory(
+        txs.map((tx) => ({
+          entity: tx.description || tx.type,
+          date: new Date(tx.createdAt).toLocaleString("en-US"),
+          status: "Completed",
+          amount: `${tx.type === "DEPOSIT" || tx.metadata?.entry === "CREDIT" ? "+" : "-"}$${Math.abs(
+            Number(tx.amount || 0),
+          ).toLocaleString("en-US", {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          })}`,
+          amountTone:
+            tx.type === "DEPOSIT" || tx.metadata?.entry === "CREDIT"
+              ? "positive"
+              : "negative",
+        })),
+      );
+    }
+  };
+
+  const executeDeposit = async (amount: number) => {
+    if (!token) {
+      toast("Session expired. Please login again.", "error");
+      return false;
+    }
+    const resp = await fetch(`${API_BASE}/wallet/deposit`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ amount }),
+    });
+    if (!resp.ok) {
+      const err = (await resp.json().catch(() => null)) as { error?: string } | null;
+      toast(err?.error || "Deposit failed", "error");
+      return false;
+    }
+    await refreshWalletSnapshot();
+    toast(`Deposited $${amount.toLocaleString("en-US")} successfully`);
+    return true;
+  };
+
+  const requestAiDepositPlan = async () => {
+    if (!token) {
+      toast("Session expired. Please login again.", "error");
+      return;
+    }
+    if (!depositGoal.trim()) {
+      toast("Enter a funding goal for the AI agent.", "error");
+      return;
+    }
+    setDepositAgentBusy(true);
+    try {
+      const resp = await fetch(`${API_BASE}/ai/deposit-agent`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          goal: depositGoal,
+          currentBalance: Number(wallet?.balance || 0),
+          currency: wallet?.currency || "USD",
+          monthlyIncome: Number(depositIncome || 0),
+          monthlyExpenses: Number(depositExpenses || 0),
+        }),
+      });
+      const data = (await resp.json().catch(() => null)) as
+        | {
+            error?: string;
+            recommendedAmount?: number;
+            reasoning?: string[];
+            riskLevel?: string;
+            nextAction?: string;
+            confidence?: number;
+          }
+        | null;
+      if (!resp.ok || !data?.recommendedAmount) {
+        toast(data?.error || "AI agent is unavailable", "error");
+        return;
+      }
+      setDepositAgentPlan({
+        recommendedAmount: Number(data.recommendedAmount),
+        reasoning: Array.isArray(data.reasoning) ? data.reasoning : [],
+        riskLevel: data.riskLevel || "low",
+        nextAction: data.nextAction || "Deposit the suggested amount now.",
+        confidence: Number(data.confidence || 0.75),
+      });
+    } catch {
+      toast("Cannot reach AI agent right now.", "error");
+    } finally {
+      setDepositAgentBusy(false);
+    }
+  };
+
+  const resetCopilotSession = () => {
+    setCopilotMessages([
+      {
+        role: "assistant",
+        content:
+          "I can help with budget, spending, savings targets, and market context. Ask me what you want to improve.",
+      },
+    ]);
+    setCopilotInsight(null);
+    setCopilotInput("");
+  };
+
+  const sendCopilotMessage = async (promptOverride?: string) => {
+    const content = (promptOverride ?? copilotInput).trim();
+    if (!token) {
+      toast("Session expired. Please login again.", "error");
+      return;
+    }
+    if (!content || copilotBusy) {
+      return;
+    }
+
+    const nextMessages: CopilotMessage[] = [
+      ...copilotMessages,
+      { role: "user", content },
+    ];
+    setCopilotMessages(nextMessages);
+    setCopilotInput("");
+    setCopilotBusy(true);
+
+    try {
+      const resp = await fetch(`${API_BASE}/ai/copilot-chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          currency: wallet?.currency || "USD",
+          currentBalance: Number(wallet?.balance || 0),
+          monthlyIncome: Number.isFinite(monthlyIncomeValue)
+            ? monthlyIncomeValue
+            : 0,
+          monthlyExpenses: Number.isFinite(monthlyExpensesValue)
+            ? monthlyExpensesValue
+            : 0,
+          recentTransactions,
+          messages: nextMessages,
+        }),
+      });
+      const data = (await resp.json().catch(() => null)) as
+        | {
+            error?: string;
+            reply?: string;
+            topic?: string;
+            suggestedActions?: string[];
+            suggestedDepositAmount?: number | null;
+            riskLevel?: string;
+            confidence?: number;
+            followUpQuestion?: string | null;
+          }
+        | null;
+      if (!resp.ok || !data?.reply) {
+        toast(data?.error || "AI copilot is unavailable", "error");
+        setCopilotMessages(nextMessages);
+        return;
+      }
+
+      const assistantMessage = data.followUpQuestion
+        ? `${data.reply}\n\n${data.followUpQuestion}`
+        : data.reply;
+      setCopilotMessages([
+        ...nextMessages,
+        { role: "assistant", content: assistantMessage },
+      ]);
+      setCopilotInsight({
+        topic: data.topic || "general",
+        suggestedActions: Array.isArray(data.suggestedActions)
+          ? data.suggestedActions
+          : [],
+        suggestedDepositAmount:
+          typeof data.suggestedDepositAmount === "number"
+            ? data.suggestedDepositAmount
+            : null,
+        riskLevel: data.riskLevel || "medium",
+        confidence: Number(data.confidence || 0.7),
+        followUpQuestion: data.followUpQuestion || null,
+      });
+    } catch {
+      toast("Cannot reach AI copilot right now.", "error");
+      setCopilotMessages(nextMessages);
+    } finally {
+      setCopilotBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!copilotOpen) return;
+    const thread = copilotThreadRef.current;
+    if (!thread) return;
+    thread.scrollTo({
+      top: thread.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [copilotMessages, copilotBusy, copilotOpen]);
 
   const extractAccountFromQrPayload = (payload: string) =>
     payload.match(/ACC:(\d{8,19})/i)?.[1] || payload.replace(/\D/g, "").slice(0, 19);
+
+  const decodeQrFromCanvasArea = (
+    source: HTMLCanvasElement,
+    area?: { x: number; y: number; size: number },
+  ) => {
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return "";
+
+    const srcX = area?.x ?? 0;
+    const srcY = area?.y ?? 0;
+    const srcW = area?.size ?? source.width;
+    const srcH = area?.size ?? source.height;
+    canvas.width = srcW;
+    canvas.height = srcH;
+    ctx.drawImage(source, srcX, srcY, srcW, srcH, 0, 0, srcW, srcH);
+    const imageData = ctx.getImageData(0, 0, srcW, srcH);
+    const decoded = jsQR(imageData.data, imageData.width, imageData.height, {
+      inversionAttempts: "attemptBoth",
+    });
+    return decoded?.data?.trim() || "";
+  };
 
   const stopTransferQrCameraScan = () => {
     if (transferQrScanTimerRef.current !== null) {
@@ -506,11 +837,15 @@ function DashboardView() {
               frameCanvas.width = vw;
               frameCanvas.height = vh;
               frameCtx.drawImage(video, 0, 0, vw, vh);
-              const imageData = frameCtx.getImageData(0, 0, vw, vh);
-              const decoded = jsQR(imageData.data, imageData.width, imageData.height, {
-                inversionAttempts: "attemptBoth",
-              });
-              raw = decoded?.data?.trim() || "";
+              const squareSize = Math.floor(Math.min(vw, vh) * 0.72);
+              const centerSquare = {
+                x: Math.max(0, Math.floor((vw - squareSize) / 2)),
+                y: Math.max(0, Math.floor((vh - squareSize) / 2)),
+                size: squareSize,
+              };
+              raw =
+                decodeQrFromCanvasArea(frameCanvas, centerSquare) ||
+                decodeQrFromCanvasArea(frameCanvas);
             }
           }
 
@@ -526,21 +861,17 @@ function DashboardView() {
                 frameCanvas.width = bitmap.width;
                 frameCanvas.height = bitmap.height;
                 frameCtx.drawImage(bitmap, 0, 0, bitmap.width, bitmap.height);
-                const imageData = frameCtx.getImageData(
-                  0,
-                  0,
-                  bitmap.width,
-                  bitmap.height,
+                const squareSize = Math.floor(
+                  Math.min(bitmap.width, bitmap.height) * 0.72,
                 );
-                const decoded = jsQR(
-                  imageData.data,
-                  imageData.width,
-                  imageData.height,
-                  {
-                    inversionAttempts: "attemptBoth",
-                  },
-                );
-                raw = decoded?.data?.trim() || "";
+                const centerSquare = {
+                  x: Math.max(0, Math.floor((bitmap.width - squareSize) / 2)),
+                  y: Math.max(0, Math.floor((bitmap.height - squareSize) / 2)),
+                  size: squareSize,
+                };
+                raw =
+                  decodeQrFromCanvasArea(frameCanvas, centerSquare) ||
+                  decodeQrFromCanvasArea(frameCanvas);
               }
             } finally {
               bitmap.close();
@@ -780,6 +1111,18 @@ function DashboardView() {
               toAccount?: string;
             };
           }>;
+          setRecentTransactions(
+            txs.slice(0, 12).map((tx) => ({
+              amount: Number(tx.amount || 0),
+              type: tx.type,
+              description: tx.description,
+              createdAt: tx.createdAt,
+              direction:
+                tx.type === "DEPOSIT" || tx.metadata?.entry === "CREDIT"
+                  ? "credit"
+                  : "debit",
+            })),
+          );
           setTransactionHistory(
             txs.map((tx) => {
               const isCredit =
@@ -801,6 +1144,7 @@ function DashboardView() {
         }
       } catch {
         setWallet(null);
+        setRecentTransactions([]);
         setTransactionHistory([]);
       }
     };
@@ -863,10 +1207,12 @@ function DashboardView() {
     setTransferQrCameraError("");
     setTransferQrFacingMode("environment");
     setTransferShowMyQr(false);
-    setTransferOtpCode("");
     setTransferOtpInput("");
     setTransferOtpError("");
-    setTransferOtpAttempts(0);
+    setTransferOtpChallengeId("");
+    setTransferOtpDestination("");
+    setTransferOtpExpiresAt("");
+    setTransferOtpResendAt(0);
     setTransferReceipt(null);
   };
 
@@ -891,13 +1237,56 @@ function DashboardView() {
     void loadTransferQrDevices();
   }, [transferOpen, transferStep, transferMethod]);
 
-  const generateTransferOtp = () => {
-    const next = String(Math.floor(100000 + Math.random() * 900000));
-    setTransferOtpCode(next);
+  useEffect(() => {
+    if (transferOtpResendAt <= Date.now()) return;
+    const timer = window.setInterval(() => setTransferOtpClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [transferOtpResendAt]);
+
+  const generateTransferOtp = async () => {
+    if (!token) {
+      toast("Session expired. Please login again.", "error");
+      return false;
+    }
+    const amount = Number(transferAmount.replace(/,/g, "")) || 0;
+    const resp = await fetch(`${API_BASE}/transfer/otp/send`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        toAccount: transferAccount,
+        amount,
+        note: transferContent || defaultTransferContent,
+      }),
+    });
+    const data = (await resp.json().catch(() => null)) as
+      | {
+          error?: string;
+          challengeId?: string;
+          destination?: string;
+          expiresAt?: string;
+          retryAfterSeconds?: number;
+        }
+      | null;
+    if (!resp.ok || !data?.challengeId) {
+      toast(data?.error || "Failed to send OTP email", "error");
+      return false;
+    }
+    setTransferOtpChallengeId(data.challengeId);
+    setTransferOtpDestination(data.destination || "");
+    setTransferOtpExpiresAt(data.expiresAt || "");
+    setTransferOtpResendAt(Date.now() + Number(data.retryAfterSeconds || 60) * 1000);
     setTransferOtpInput("");
     setTransferOtpError("");
-    setTransferOtpAttempts(0);
-    toast(`Transfer OTP sent (demo OTP: ${next})`, "info");
+    toast(
+      data.destination
+        ? `OTP sent to ${data.destination}`
+        : "OTP sent to your email",
+      "info",
+    );
+    return true;
   };
   const continueTransferRecipient = async () => {
     if (!token) {
@@ -942,7 +1331,7 @@ function DashboardView() {
     setTransferStep(2);
   };
 
-  const continueTransferAmount = () => {
+  const continueTransferAmount = async () => {
     const amount = Number(transferAmount.replace(/,/g, ""));
     if (!transferAmount || Number.isNaN(amount) || amount <= 0) {
       toast("Please enter a valid transfer amount.", "error");
@@ -954,8 +1343,10 @@ function DashboardView() {
     if (!transferContent.trim()) {
       setTransferContent(defaultTransferContent);
     }
-    generateTransferOtp();
-    setTransferStep(3);
+    const sent = await generateTransferOtp();
+    if (sent) {
+      setTransferStep(3);
+    }
   };
 
   const verifyTransferOtpAndSubmit = async () => {
@@ -963,16 +1354,8 @@ function DashboardView() {
       setTransferOtpError("OTP must be exactly 6 digits.");
       return;
     }
-    if (transferOtpInput !== transferOtpCode) {
-      const nextAttempts = transferOtpAttempts + 1;
-      setTransferOtpAttempts(nextAttempts);
-      setTransferOtpError("Incorrect OTP. Please try again.");
-      if (nextAttempts >= 3) {
-        generateTransferOtp();
-        setTransferOtpError(
-          "Too many failed attempts. A new OTP has been sent.",
-        );
-      }
+    if (!transferOtpChallengeId) {
+      setTransferOtpError("OTP session is missing. Please resend OTP.");
       return;
     }
     setTransferOtpError("");
@@ -995,23 +1378,22 @@ function DashboardView() {
       toast("Session expired. Please login again.", "error");
       return;
     }
-    const transferResp = await fetch(`${API_BASE}/transfer`, {
+    const transferResp = await fetch(`${API_BASE}/transfer/confirm`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({
-        toAccount: transferAccount,
-        amount,
-        note: transferContent || defaultTransferContent,
+        challengeId: transferOtpChallengeId,
+        otp: transferOtpInput,
       }),
     });
     if (!transferResp.ok) {
       const err = (await transferResp.json().catch(() => null)) as
         | { error?: string }
         | null;
-      toast(err?.error || "Transfer failed", "error");
+      setTransferOtpError(err?.error || "OTP verification failed");
       return;
     }
 
@@ -1117,68 +1499,15 @@ function DashboardView() {
                 onClick={async () => {
                   if (action.id === "transfer") {
                     openTransferModal();
+                  } else if (action.id === "copilot") {
+                    resetCopilotSession();
+                    setCopilotOpen(true);
                   } else {
-                    if (!token) {
-                      toast("Session expired. Please login again.", "error");
-                      return;
-                    }
-                    const resp = await fetch(`${API_BASE}/wallet/deposit`, {
-                      method: "POST",
-                      headers: {
-                        "Content-Type": "application/json",
-                        Authorization: `Bearer ${token}`,
-                      },
-                      body: JSON.stringify({ amount: 100 }),
-                    });
-                    if (!resp.ok) {
-                      toast("Deposit failed", "error");
-                      return;
-                    }
-                    const walletResp = await fetch(`${API_BASE}/wallet/me`, {
-                      headers: { Authorization: `Bearer ${token}` },
-                    });
-                    if (walletResp.ok) {
-                      const w = (await walletResp.json()) as {
-                        id: string;
-                        balance: number;
-                        currency: string;
-                        accountNumber?: string;
-                        qrPayload?: string;
-                        qrImageUrl?: string;
-                      };
-                      setWallet(w);
-                    }
-                    const txResp = await fetch(`${API_BASE}/transactions`, {
-                      headers: { Authorization: `Bearer ${token}` },
-                    });
-                    if (txResp.ok) {
-                      const txs = (await txResp.json()) as Array<{
-                        id: string;
-                        amount: number;
-                        type: string;
-                        description?: string;
-                        createdAt: string;
-                        metadata?: { entry?: "DEBIT" | "CREDIT" };
-                      }>;
-                      setTransactionHistory(
-                        txs.map((tx) => ({
-                          entity: tx.description || tx.type,
-                          date: new Date(tx.createdAt).toLocaleString("en-US"),
-                          status: "Completed",
-                          amount: `${tx.type === "DEPOSIT" || tx.metadata?.entry === "CREDIT" ? "+" : "-"}$${Math.abs(
-                            Number(tx.amount || 0),
-                          ).toLocaleString("en-US", {
-                            minimumFractionDigits: 2,
-                            maximumFractionDigits: 2,
-                          })}`,
-                          amountTone:
-                            tx.type === "DEPOSIT" || tx.metadata?.entry === "CREDIT"
-                              ? "positive"
-                              : "negative",
-                        })),
-                      );
-                    }
-                    toast("Deposited $100 successfully");
+                    setDepositAgentPlan(null);
+                    setDepositGoal("");
+                    setDepositIncome("");
+                    setDepositExpenses("");
+                    setDepositAgentOpen(true);
                   }
                 }}
               >
@@ -1647,8 +1976,10 @@ function DashboardView() {
                         Reload cameras
                       </button>
                     </div>
-                    {transferQrCameraOn && (
-                      <div className="transfer-qr-camera">
+                    <div
+                      className={`transfer-qr-camera ${transferQrCameraOn ? "active" : ""}`}
+                    >
+                      <div className="transfer-qr-preview">
                         <video
                           ref={transferQrVideoRef}
                           className="transfer-qr-video"
@@ -1656,12 +1987,16 @@ function DashboardView() {
                           playsInline
                           muted
                         />
-                        <small className="muted">
-                          Align QR code inside camera frame to auto-detect. Current camera:{" "}
-                          {transferQrFacingMode === "environment" ? "Back" : "Front"}.
-                        </small>
+                        <div className="transfer-qr-target" aria-hidden="true" />
                       </div>
-                    )}
+                      <small className="muted">
+                        {transferQrCameraOn
+                          ? `Place the QR inside the square frame to auto-detect. Current camera: ${
+                              transferQrFacingMode === "environment" ? "Back" : "Front"
+                            }.`
+                          : "Camera preview will appear here after you start scanning."}
+                      </small>
+                    </div>
                     {transferShowMyQr && (
                       <div className="transfer-my-qr-card">
                         <span>My account QR</span>
@@ -1800,6 +2135,23 @@ function DashboardView() {
                     <strong>{transferContent || defaultTransferContent}</strong>
                   </div>
                 </div>
+                {transferOtpDestination && (
+                  <div className="transfer-summary">
+                    <span>OTP delivery</span>
+                    <strong>{transferOtpDestination}</strong>
+                    <small>
+                      {transferOtpExpiresAt
+                        ? `Expires at ${new Date(transferOtpExpiresAt).toLocaleTimeString(
+                            "en-US",
+                            {
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            },
+                          )}`
+                        : "Check your inbox for the 6-digit code."}
+                    </small>
+                  </div>
+                )}
                 <label className="form-group">
                   <span>Enter OTP</span>
                   <input
@@ -1822,9 +2174,12 @@ function DashboardView() {
                   <button
                     type="button"
                     className="pill"
-                    onClick={generateTransferOtp}
+                    disabled={transferOtpCooldownSeconds > 0}
+                    onClick={() => void generateTransferOtp()}
                   >
-                    Resend OTP
+                    {transferOtpCooldownSeconds > 0
+                      ? `Resend in ${transferOtpCooldownSeconds}s`
+                      : "Resend OTP"}
                   </button>
                   <button
                     type="button"
@@ -1890,6 +2245,271 @@ function DashboardView() {
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {copilotOpen && (
+        <div
+          className="modal-overlay"
+          onClick={() => {
+            if (copilotBusy) return;
+            setCopilotOpen(false);
+          }}
+        >
+          <div
+            className="modal-card ai-copilot-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="ai-copilot-head">
+              <div className="ai-copilot-head-copy">
+                <div className="ai-copilot-kicker">Live Financial Assistant</div>
+                <h3>Ask Financial Copilot</h3>
+                <div className="ai-agent-copy">
+                  Ask about exchange rates, gold, stocks, Bitcoin, spending, savings targets, or transfer readiness.
+                </div>
+                <div className="ai-copilot-status">
+                  Live quotes for FX, gold, crypto, and selected stocks
+                </div>
+              </div>
+              <button
+                type="button"
+                className="card-details-close ai-copilot-close"
+                onClick={() => setCopilotOpen(false)}
+                aria-label="Close AI Copilot"
+              >
+                Ã¢Å“â€¢
+              </button>
+            </div>
+
+            <div className="ai-copilot-body">
+            <div className="ai-copilot-thread-wrap">
+              <div className="ai-copilot-section-title">Conversation</div>
+              <div className="ai-copilot-thread" ref={copilotThreadRef}>
+                {copilotMessages.map((message, index) => (
+                  <div
+                    key={`${message.role}-${index}-${message.content.slice(0, 24)}`}
+                    className={`ai-copilot-bubble ai-copilot-bubble-${message.role}`}
+                  >
+                    <span>{message.role === "assistant" ? "Copilot" : "You"}</span>
+                    <p>{message.content}</p>
+                  </div>
+                ))}
+                {copilotBusy && (
+                  <div className="ai-copilot-bubble ai-copilot-bubble-assistant">
+                    <span>Copilot</span>
+                    <p>Checking your wallet context and live market data...</p>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {copilotInsight && (
+              <div className="ai-copilot-insight">
+                <div className="ai-copilot-insight-head">
+                  <div>
+                    <div className="ai-copilot-kicker">Latest Insight</div>
+                    <strong>{copilotInsight.topic}</strong>
+                  </div>
+                  <div className="ai-copilot-insight-metrics">
+                    <span>Risk {copilotInsight.riskLevel}</span>
+                    <span>{Math.round(copilotInsight.confidence * 100)}% confidence</span>
+                  </div>
+                  <span>
+                    Risk {copilotInsight.riskLevel} · {Math.round(copilotInsight.confidence * 100)}% confidence
+                  </span>
+                </div>
+                {copilotInsight.suggestedDepositAmount ? (
+                  <div className="ai-copilot-deposit-tip">
+                    Suggested deposit: $
+                    {copilotInsight.suggestedDepositAmount.toLocaleString("en-US")}
+                  </div>
+                ) : null}
+                <div className="ai-copilot-actions">
+                  {copilotInsight.suggestedActions.map((action) => (
+                    <p key={action}>{action}</p>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="ai-copilot-prompt-block">
+              <div className="ai-copilot-section-title">Try Asking</div>
+              <div className="ai-copilot-prompts">
+                {[
+                  "What is the USD/VND exchange rate today?",
+                  "What is the gold price today?",
+                  "How much is Bitcoin today?",
+                  "Review my cash flow this month",
+                ].map((prompt) => (
+                  <button
+                    key={prompt}
+                    type="button"
+                    className="pill ai-copilot-prompt"
+                    disabled={copilotBusy}
+                    onClick={() => void sendCopilotMessage(prompt)}
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="ai-copilot-compose">
+              <div className="ai-copilot-section-title">Your Question</div>
+              <textarea
+                value={copilotInput}
+                onChange={(e) => setCopilotInput(e.target.value)}
+                placeholder="Example: What is the USD/VND exchange rate today? Or: Should I build an emergency fund first?"
+                rows={4}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    void sendCopilotMessage();
+                  }
+                }}
+              />
+              <div className="ai-copilot-compose-hint">
+                Press Enter to send. Use Shift+Enter for a new line.
+              </div>
+              <div className="ai-copilot-compose-actions">
+                <button
+                  type="button"
+                  className="pill ai-copilot-secondary"
+                  disabled={copilotBusy}
+                  onClick={resetCopilotSession}
+                >
+                  New Chat
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary ai-copilot-primary"
+                  disabled={copilotBusy || !copilotInput.trim()}
+                  onClick={() => void sendCopilotMessage()}
+                >
+                  {copilotBusy ? "Thinking..." : "Ask Assistant"}
+                </button>
+              </div>
+            </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {depositAgentOpen && (
+        <div
+          className="modal-overlay"
+          onClick={() => {
+            if (depositAgentBusy) return;
+            setDepositAgentOpen(false);
+          }}
+        >
+          <div
+            className="modal-card ai-agent-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="transfer-head">
+              <h3>AI Deposit Agent</h3>
+              <button
+                type="button"
+                className="card-details-close"
+                onClick={() => setDepositAgentOpen(false)}
+              >
+                âœ•
+              </button>
+            </div>
+            <div className="ai-agent-copy">
+              Describe why you want to top up this wallet and the agent will suggest a practical amount.
+            </div>
+            <label className="form-group">
+              <span>Funding goal</span>
+              <input
+                type="text"
+                value={depositGoal}
+                onChange={(e) => setDepositGoal(e.target.value)}
+                placeholder="Example: build emergency fund for next 3 months"
+              />
+            </label>
+            <div className="ai-agent-grid">
+              <label className="form-group">
+                <span>Monthly income (optional)</span>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={depositIncome}
+                  onChange={(e) =>
+                    setDepositIncome(e.target.value.replace(/[^0-9.]/g, ""))
+                  }
+                  placeholder="2500"
+                />
+              </label>
+              <label className="form-group">
+                <span>Monthly expenses (optional)</span>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={depositExpenses}
+                  onChange={(e) =>
+                    setDepositExpenses(e.target.value.replace(/[^0-9.]/g, ""))
+                  }
+                  placeholder="1700"
+                />
+              </label>
+            </div>
+
+            {depositAgentPlan && (
+              <div className="ai-agent-plan">
+                <div className="ai-agent-plan-head">
+                  <div>
+                    <span>Recommended top-up</span>
+                    <strong>
+                      ${depositAgentPlan.recommendedAmount.toLocaleString("en-US")}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Confidence</span>
+                    <strong>{Math.round(depositAgentPlan.confidence * 100)}%</strong>
+                  </div>
+                  <div>
+                    <span>Risk</span>
+                    <strong>{depositAgentPlan.riskLevel}</strong>
+                  </div>
+                </div>
+                <div className="ai-agent-plan-body">
+                  {depositAgentPlan.reasoning.map((item) => (
+                    <p key={item}>{item}</p>
+                  ))}
+                </div>
+                <div className="ai-agent-next">{depositAgentPlan.nextAction}</div>
+              </div>
+            )}
+
+            <div className="transfer-actions">
+              <button
+                type="button"
+                className="pill"
+                disabled={depositAgentBusy}
+                onClick={() => void requestAiDepositPlan()}
+              >
+                {depositAgentBusy ? "Thinking..." : "Ask AI Agent"}
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={!depositAgentPlan || depositAgentBusy}
+                onClick={() =>
+                  void (async () => {
+                    if (!depositAgentPlan) return;
+                    const ok = await executeDeposit(depositAgentPlan.recommendedAmount);
+                    if (ok) {
+                      setDepositAgentOpen(false);
+                    }
+                  })()
+                }
+              >
+                Apply Suggested Deposit
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -3844,7 +4464,17 @@ const PAGE_TITLE: Record<string, string> = {
 };
 
 function App() {
-  const { user, logout, login, signUp } = useAuth();
+  const {
+    user,
+    logout,
+    requestLoginOtp,
+    verifyLoginOtp,
+    requestRegisterOtp,
+    verifyRegisterOtp,
+    requestPasswordResetOtp,
+    resetPasswordWithOtp,
+  } = useAuth();
+  const { toast } = useToast();
   const [activeTab, setActiveTab] = useState("Dashboard");
   const [showNotifications, setShowNotifications] = useState(false);
   const [notificationFilter, setNotificationFilter] = useState<
@@ -3880,6 +4510,16 @@ function App() {
     }
   }, [user?.id]);
 
+  useEffect(() => {
+    const onSessionExpired = () => {
+      toast("Your login session has expired. Please sign in again.", "error");
+    };
+    window.addEventListener("auth:session-expired", onSessionExpired);
+    return () => {
+      window.removeEventListener("auth:session-expired", onSessionExpired);
+    };
+  }, [toast]);
+
   const displayUser = user ?? {
     name: "Guest User",
     email: "guest@moneyfarm.app",
@@ -3888,7 +4528,16 @@ function App() {
 
   // If not logged in, show dedicated auth shell
   if (!user) {
-    return <AuthShell onLogin={login} onSignUp={signUp} />;
+    return (
+      <AuthShell
+        onRequestLoginOtp={requestLoginOtp}
+        onVerifyLoginOtp={verifyLoginOtp}
+        onRequestRegisterOtp={requestRegisterOtp}
+        onVerifyRegisterOtp={verifyRegisterOtp}
+        onRequestPasswordResetOtp={requestPasswordResetOtp}
+        onResetPasswordWithOtp={resetPasswordWithOtp}
+      />
+    );
   }
 
   const expanded = (item: { id: string }) =>
@@ -4135,8 +4784,17 @@ export default App;
 
 // -------- Auth Shell (shown when user is null) ----------
 type AuthShellProps = {
-  onLogin: (email: string, password: string) => Promise<void>;
-  onSignUp: (payload: {
+  onRequestLoginOtp: (
+    email: string,
+    password: string,
+  ) => Promise<{
+    challengeId: string;
+    destination: string;
+    expiresAt: string;
+    retryAfterSeconds: number;
+  }>;
+  onVerifyLoginOtp: (challengeId: string, otp: string) => Promise<void>;
+  onRequestRegisterOtp: (payload: {
     fullName: string;
     userName: string;
     email: string;
@@ -4144,19 +4802,46 @@ type AuthShellProps = {
     address: string;
     dob: string;
     password: string;
+  }) => Promise<{
+    challengeId: string;
+    destination: string;
+    expiresAt: string;
+    retryAfterSeconds: number;
+  }>;
+  onVerifyRegisterOtp: (challengeId: string, otp: string) => Promise<void>;
+  onRequestPasswordResetOtp: (email: string) => Promise<{
+    challengeId: string;
+    destination: string;
+    expiresAt: string;
+    retryAfterSeconds: number;
+  }>;
+  onResetPasswordWithOtp: (payload: {
+    email: string;
+    challengeId: string;
+    otp: string;
+    newPassword: string;
   }) => Promise<void>;
 };
 
-function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
+function AuthShell({
+  onRequestLoginOtp,
+  onVerifyLoginOtp,
+  onRequestRegisterOtp,
+  onVerifyRegisterOtp,
+  onRequestPasswordResetOtp,
+  onResetPasswordWithOtp,
+}: AuthShellProps) {
   useTheme();
 
   const { toast } = useToast();
-  const [mode, setMode] = useState<"signin" | "signup" | "forgot" | null>(null);
+  const [mode, setMode] = useState<
+    "signin" | "signinOtp" | "signup" | "signupOtp" | "forgot" | "forgotOtp" | null
+  >(null);
   const [showPassword, setShowPassword] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
+  const [authClock, setAuthClock] = useState(Date.now());
 
   const [signinForm, setSigninForm] = useState({ email: "", password: "" });
-  const [captchaToken, setCaptchaToken] = useState("");
   const [signupForm, setSignupForm] = useState({
     fullName: "",
     username: "",
@@ -4168,18 +4853,66 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
     confirm: "",
     agree: false,
   });
+  const [signupOtpInput, setSignupOtpInput] = useState("");
+  const [signupOtpChallengeId, setSignupOtpChallengeId] = useState("");
+  const [signupOtpDestination, setSignupOtpDestination] = useState("");
+  const [signupOtpExpiresAt, setSignupOtpExpiresAt] = useState("");
+  const [signupOtpResendAt, setSignupOtpResendAt] = useState(0);
   const [forgotEmail, setForgotEmail] = useState("");
+  const [loginOtpInput, setLoginOtpInput] = useState("");
+  const [loginOtpChallengeId, setLoginOtpChallengeId] = useState("");
+  const [loginOtpDestination, setLoginOtpDestination] = useState("");
+  const [loginOtpExpiresAt, setLoginOtpExpiresAt] = useState("");
+  const [loginOtpResendAt, setLoginOtpResendAt] = useState(0);
+  const [forgotOtpInput, setForgotOtpInput] = useState("");
+  const [forgotChallengeId, setForgotChallengeId] = useState("");
+  const [forgotDestination, setForgotDestination] = useState("");
+  const [forgotExpiresAt, setForgotExpiresAt] = useState("");
+  const [forgotResendAt, setForgotResendAt] = useState(0);
+  const [forgotNewPassword, setForgotNewPassword] = useState("");
+  const [forgotConfirmPassword, setForgotConfirmPassword] = useState("");
+
+  useEffect(() => {
+    if (
+      loginOtpResendAt <= Date.now() &&
+      signupOtpResendAt <= Date.now() &&
+      forgotResendAt <= Date.now()
+    ) {
+      return;
+    }
+    const timer = window.setInterval(() => setAuthClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [forgotResendAt, loginOtpResendAt, signupOtpResendAt]);
+
+  const loginOtpCooldownSeconds = Math.max(
+    0,
+    Math.ceil((loginOtpResendAt - authClock) / 1000),
+  );
+  const signupOtpCooldownSeconds = Math.max(
+    0,
+    Math.ceil((signupOtpResendAt - authClock) / 1000),
+  );
+  const forgotOtpCooldownSeconds = Math.max(
+    0,
+    Math.ceil((forgotResendAt - authClock) / 1000),
+  );
 
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!signinForm.email || !signinForm.password || !captchaToken) {
-      toast("Please enter email, password, and CAPTCHA", "error");
+    if (!signinForm.email || !signinForm.password) {
+      toast("Please enter email and password", "error");
       return;
     }
     setAuthBusy(true);
     try {
-      await onLogin(signinForm.email, signinForm.password);
-      toast("Signed in successfully");
+      const data = await onRequestLoginOtp(signinForm.email, signinForm.password);
+      setLoginOtpChallengeId(data.challengeId);
+      setLoginOtpDestination(data.destination);
+      setLoginOtpExpiresAt(data.expiresAt);
+      setLoginOtpResendAt(Date.now() + data.retryAfterSeconds * 1000);
+      setLoginOtpInput("");
+      setMode("signinOtp");
+      toast("A verification code has been sent to your email.");
     } catch (err) {
       toast(err instanceof Error ? err.message : "Sign in failed", "error");
     } finally {
@@ -4222,7 +4955,7 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
     }
     setAuthBusy(true);
     try {
-      await onSignUp({
+      const data = await onRequestRegisterOtp({
         fullName,
         userName: username,
         email,
@@ -4231,8 +4964,13 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
         dob,
         password,
       });
-      toast("Account created successfully");
-      setSigninForm({ email, password });
+      setSignupOtpChallengeId(data.challengeId);
+      setSignupOtpDestination(data.destination);
+      setSignupOtpExpiresAt(data.expiresAt);
+      setSignupOtpResendAt(Date.now() + data.retryAfterSeconds * 1000);
+      setSignupOtpInput("");
+      setMode("signupOtp");
+      toast("A verification code has been sent to your email.");
     } catch (err) {
       toast(err instanceof Error ? err.message : "Sign up failed", "error");
     } finally {
@@ -4240,15 +4978,173 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
     }
   };
 
-  const handleForgot = (e: React.FormEvent) => {
+  const handleVerifyRegisterOtp = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!forgotEmail) {
-      toast("Please enter your email", "error");
+    if (!signupOtpChallengeId || !/^\d{6}$/.test(signupOtpInput)) {
+      toast("Please enter the 6-digit verification code", "error");
       return;
     }
-    toast("Password reset link sent (demo)");
-    setForgotEmail("");
-    setMode("signin");
+    setAuthBusy(true);
+    try {
+      await onVerifyRegisterOtp(signupOtpChallengeId, signupOtpInput);
+      toast("Account created successfully");
+    } catch (err) {
+      toast(
+        err instanceof Error ? err.message : "OTP verification failed",
+        "error",
+      );
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleForgot = (e: React.FormEvent) => {
+    void (async () => {
+      e.preventDefault();
+      if (!forgotEmail) {
+        toast("Please enter your email", "error");
+        return;
+      }
+      setAuthBusy(true);
+      try {
+        const data = await onRequestPasswordResetOtp(forgotEmail);
+        setForgotChallengeId(data.challengeId);
+        setForgotDestination(data.destination);
+        setForgotExpiresAt(data.expiresAt);
+        setForgotResendAt(Date.now() + data.retryAfterSeconds * 1000);
+        setForgotOtpInput("");
+        setForgotNewPassword("");
+        setForgotConfirmPassword("");
+        setMode("forgotOtp");
+        toast("Password reset code sent to your email.");
+      } catch (err) {
+        toast(
+          err instanceof Error ? err.message : "Failed to send reset code",
+          "error",
+        );
+      } finally {
+        setAuthBusy(false);
+      }
+    })();
+  };
+
+  const handleVerifyLoginOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!loginOtpChallengeId || !/^\d{6}$/.test(loginOtpInput)) {
+      toast("Please enter the 6-digit verification code", "error");
+      return;
+    }
+    setAuthBusy(true);
+    try {
+      await onVerifyLoginOtp(loginOtpChallengeId, loginOtpInput);
+      toast("Signed in successfully");
+    } catch (err) {
+      toast(
+        err instanceof Error ? err.message : "OTP verification failed",
+        "error",
+      );
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const resendLoginOtp = async () => {
+    if (loginOtpCooldownSeconds > 0) return;
+    setAuthBusy(true);
+    try {
+      const data = await onRequestLoginOtp(signinForm.email, signinForm.password);
+      setLoginOtpChallengeId(data.challengeId);
+      setLoginOtpDestination(data.destination);
+      setLoginOtpExpiresAt(data.expiresAt);
+      setLoginOtpResendAt(Date.now() + data.retryAfterSeconds * 1000);
+      toast("A new verification code has been sent.");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Failed to resend OTP", "error");
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const resendRegisterOtp = async () => {
+    if (signupOtpCooldownSeconds > 0) return;
+    setAuthBusy(true);
+    try {
+      const data = await onRequestRegisterOtp({
+        fullName: signupForm.fullName,
+        userName: signupForm.username,
+        email: signupForm.email,
+        phone: signupForm.phone,
+        address: signupForm.address,
+        dob: signupForm.dob,
+        password: signupForm.password,
+      });
+      setSignupOtpChallengeId(data.challengeId);
+      setSignupOtpDestination(data.destination);
+      setSignupOtpExpiresAt(data.expiresAt);
+      setSignupOtpResendAt(Date.now() + data.retryAfterSeconds * 1000);
+      toast("A new verification code has been sent.");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Failed to resend OTP", "error");
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!forgotChallengeId || !/^\d{6}$/.test(forgotOtpInput)) {
+      toast("Please enter the 6-digit reset code", "error");
+      return;
+    }
+    if (forgotNewPassword.length < 8) {
+      toast("New password must be at least 8 characters", "error");
+      return;
+    }
+    if (forgotNewPassword !== forgotConfirmPassword) {
+      toast("Password confirmation does not match", "error");
+      return;
+    }
+    setAuthBusy(true);
+    try {
+      await onResetPasswordWithOtp({
+        email: forgotEmail,
+        challengeId: forgotChallengeId,
+        otp: forgotOtpInput,
+        newPassword: forgotNewPassword,
+      });
+      toast("Password reset successfully. Please sign in.");
+      setSigninForm({ email: forgotEmail, password: "" });
+      setForgotEmail("");
+      setForgotChallengeId("");
+      setForgotOtpInput("");
+      setForgotNewPassword("");
+      setForgotConfirmPassword("");
+      setMode("signin");
+    } catch (err) {
+      toast(
+        err instanceof Error ? err.message : "Failed to reset password",
+        "error",
+      );
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const resendForgotOtp = async () => {
+    if (forgotOtpCooldownSeconds > 0) return;
+    setAuthBusy(true);
+    try {
+      const data = await onRequestPasswordResetOtp(forgotEmail);
+      setForgotChallengeId(data.challengeId);
+      setForgotDestination(data.destination);
+      setForgotExpiresAt(data.expiresAt);
+      setForgotResendAt(Date.now() + data.retryAfterSeconds * 1000);
+      toast("A new reset code has been sent.");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Failed to resend OTP", "error");
+    } finally {
+      setAuthBusy(false);
+    }
   };
 
   const renderChoice = () => (
@@ -4413,18 +5309,6 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
               >
                 {authBusy ? "Signing in..." : "Sign In"}
               </button>
-              <label className="auth-label" style={{ marginTop: 12 }}>
-                CAPTCHA token (demo)
-                <input
-                  value={captchaToken}
-                  onChange={(e) => setCaptchaToken(e.target.value)}
-                  placeholder="Paste CAPTCHA token"
-                  required
-                />
-                <span className="muted" style={{ fontSize: 12 }}>
-                  UI placeholder; will be connected to CAPTCHA widget later.
-                </span>
-              </label>
               <p className="auth-switch">
                 Don&apos;t have an account?{" "}
                 <button
@@ -4441,6 +5325,65 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
                   onClick={() => setMode(null)}
                 >
                   Back
+                </button>
+              </p>
+            </form>
+          </div>
+        )}
+        {mode === "signinOtp" && (
+          <div className="auth-form-shell">
+            <form className="auth-form-modern" onSubmit={handleVerifyLoginOtp}>
+              <h2>Verify Sign In</h2>
+              <p className="muted">
+                Enter the 6-digit code sent to <strong>{loginOtpDestination}</strong>.
+              </p>
+              <label className="auth-label">
+                Verification Code
+                <input
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={loginOtpInput}
+                  onChange={(e) =>
+                    setLoginOtpInput(e.target.value.replace(/\D/g, "").slice(0, 6))
+                  }
+                  placeholder="Enter 6-digit OTP"
+                  required
+                />
+                <span className="muted" style={{ fontSize: 12 }}>
+                  {loginOtpExpiresAt
+                    ? `Code expires at ${new Date(loginOtpExpiresAt).toLocaleTimeString(
+                        "en-US",
+                        { hour: "2-digit", minute: "2-digit" },
+                      )}`
+                    : "Check your inbox for the latest code."}
+                </span>
+              </label>
+              <div className="auth-otp-actions">
+                <button
+                  type="button"
+                  className="pill"
+                  disabled={authBusy || loginOtpCooldownSeconds > 0}
+                  onClick={() => void resendLoginOtp()}
+                >
+                  {loginOtpCooldownSeconds > 0
+                    ? `Resend in ${loginOtpCooldownSeconds}s`
+                    : "Resend OTP"}
+                </button>
+                <button
+                  type="submit"
+                  className="btn-primary auth-submit"
+                  disabled={authBusy}
+                >
+                  {authBusy ? "Verifying..." : "Verify & Sign In"}
+                </button>
+              </div>
+              <p className="auth-switch">
+                <button
+                  type="button"
+                  className="link-btn"
+                  onClick={() => setMode("signin")}
+                >
+                  Back to credentials
                 </button>
               </p>
             </form>
@@ -4604,13 +5547,72 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
             </form>
           </div>
         )}
+        {mode === "signupOtp" && (
+          <div className="auth-form-shell">
+            <form className="auth-form-modern" onSubmit={handleVerifyRegisterOtp}>
+              <h2>Verify Email</h2>
+              <p className="muted">
+                Enter the 6-digit code sent to <strong>{signupOtpDestination}</strong> to activate your account.
+              </p>
+              <label className="auth-label">
+                Verification Code
+                <input
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={signupOtpInput}
+                  onChange={(e) =>
+                    setSignupOtpInput(e.target.value.replace(/\D/g, "").slice(0, 6))
+                  }
+                  placeholder="Enter 6-digit OTP"
+                  required
+                />
+                <span className="muted" style={{ fontSize: 12 }}>
+                  {signupOtpExpiresAt
+                    ? `Code expires at ${new Date(signupOtpExpiresAt).toLocaleTimeString(
+                        "en-US",
+                        { hour: "2-digit", minute: "2-digit" },
+                      )}`
+                    : "Check your inbox for the latest code."}
+                </span>
+              </label>
+              <div className="auth-otp-actions">
+                <button
+                  type="button"
+                  className="pill"
+                  disabled={authBusy || signupOtpCooldownSeconds > 0}
+                  onClick={() => void resendRegisterOtp()}
+                >
+                  {signupOtpCooldownSeconds > 0
+                    ? `Resend in ${signupOtpCooldownSeconds}s`
+                    : "Resend OTP"}
+                </button>
+                <button
+                  type="submit"
+                  className="btn-primary auth-submit"
+                  disabled={authBusy}
+                >
+                  {authBusy ? "Verifying..." : "Verify & Create Account"}
+                </button>
+              </div>
+              <p className="auth-switch">
+                <button
+                  type="button"
+                  className="link-btn"
+                  onClick={() => setMode("signup")}
+                >
+                  Back to sign up
+                </button>
+              </p>
+            </form>
+          </div>
+        )}
         {mode === "forgot" && (
           <div className="auth-form-shell">
             <form className="auth-form-modern" onSubmit={handleForgot}>
               <h2>Forgot Password</h2>
               <p className="muted">
                 Enter the email linked to your account and we&apos;ll email you
-                a reset link (demo).
+                a reset code.
               </p>
               <label className="auth-label">
                 Email Address
@@ -4622,11 +5624,94 @@ function AuthShell({ onLogin, onSignUp }: AuthShellProps) {
                   required
                 />
               </label>
-              <button type="submit" className="btn-primary auth-submit">
-                Send Reset Link
+              <button
+                type="submit"
+                className="btn-primary auth-submit"
+                disabled={authBusy}
+              >
+                {authBusy ? "Sending..." : "Send Reset Code"}
               </button>
               <p className="auth-switch">
                 Remembered it?{" "}
+                <button
+                  type="button"
+                  className="link-btn"
+                  onClick={() => setMode("signin")}
+                >
+                  Back to Sign In
+                </button>
+              </p>
+            </form>
+          </div>
+        )}
+        {mode === "forgotOtp" && (
+          <div className="auth-form-shell">
+            <form className="auth-form-modern" onSubmit={handleResetPassword}>
+              <h2>Reset Password</h2>
+              <p className="muted">
+                Enter the 6-digit code sent to <strong>{forgotDestination}</strong> and set a new password.
+              </p>
+              <label className="auth-label">
+                Reset Code
+                <input
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={forgotOtpInput}
+                  onChange={(e) =>
+                    setForgotOtpInput(e.target.value.replace(/\D/g, "").slice(0, 6))
+                  }
+                  placeholder="Enter 6-digit OTP"
+                  required
+                />
+                <span className="muted" style={{ fontSize: 12 }}>
+                  {forgotExpiresAt
+                    ? `Code expires at ${new Date(forgotExpiresAt).toLocaleTimeString(
+                        "en-US",
+                        { hour: "2-digit", minute: "2-digit" },
+                      )}`
+                    : "Check your inbox for the latest code."}
+                </span>
+              </label>
+              <label className="auth-label">
+                New Password
+                <input
+                  type="password"
+                  value={forgotNewPassword}
+                  onChange={(e) => setForgotNewPassword(e.target.value)}
+                  placeholder="Enter new password"
+                  required
+                />
+              </label>
+              <label className="auth-label">
+                Confirm New Password
+                <input
+                  type="password"
+                  value={forgotConfirmPassword}
+                  onChange={(e) => setForgotConfirmPassword(e.target.value)}
+                  placeholder="Confirm new password"
+                  required
+                />
+              </label>
+              <div className="auth-otp-actions">
+                <button
+                  type="button"
+                  className="pill"
+                  disabled={authBusy || forgotOtpCooldownSeconds > 0}
+                  onClick={() => void resendForgotOtp()}
+                >
+                  {forgotOtpCooldownSeconds > 0
+                    ? `Resend in ${forgotOtpCooldownSeconds}s`
+                    : "Resend OTP"}
+                </button>
+                <button
+                  type="submit"
+                  className="btn-primary auth-submit"
+                  disabled={authBusy}
+                >
+                  {authBusy ? "Resetting..." : "Reset Password"}
+                </button>
+              </div>
+              <p className="auth-switch">
                 <button
                   type="button"
                   className="link-btn"

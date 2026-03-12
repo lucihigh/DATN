@@ -7,6 +7,7 @@ export type CreateUserInput = {
   email: string;
   passwordHash: string;
   role?: "USER" | "ADMIN";
+  status?: "ACTIVE" | "DISABLED" | "PENDING";
   fullName?: string;
   phone?: unknown;
   address?: unknown;
@@ -125,7 +126,7 @@ export class UserRepository {
         email: input.email.trim().toLowerCase(),
         passwordHash: input.passwordHash,
         role: input.role ?? "USER",
-        status: "ACTIVE",
+        status: input.status ?? "ACTIVE",
         fullName: input.fullName,
         phone: encrypted.phone === undefined ? undefined : asJson(encrypted.phone),
         address:
