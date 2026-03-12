@@ -94,42 +94,6 @@ export interface paths {
       };
     };
   };
-  "/ai/deposit-agent": {
-    /** Get AI-guided deposit recommendation */
-    post: {
-      requestBody: {
-        content: {
-          "application/json": components["schemas"]["DepositAgentRequest"];
-        };
-      };
-      responses: {
-        /** @description Deposit recommendation */
-        200: {
-          content: {
-            "application/json": components["schemas"]["DepositAgentResponse"];
-          };
-        };
-      };
-    };
-  };
-  "/ai/copilot-chat": {
-    /** Chat with the wallet AI copilot */
-    post: {
-      requestBody: {
-        content: {
-          "application/json": components["schemas"]["CopilotChatRequest"];
-        };
-      };
-      responses: {
-        /** @description Copilot response */
-        200: {
-          content: {
-            "application/json": components["schemas"]["CopilotChatResponse"];
-          };
-        };
-      };
-    };
-  };
   "/transfer": {
     /** Transfer funds to another user */
     post: {
@@ -305,36 +269,20 @@ export interface components {
       password: string;
     };
     AuthResponse: {
+      /** @enum {string} */
+      status?: "authenticated" | "otp_required";
       token?: string;
       user?: components["schemas"]["User"];
+      challengeId?: string;
+      destination?: string;
+      /** Format: date-time */
+      expiresAt?: string;
+      retryAfterSeconds?: number;
+      notice?: string;
     };
     DepositRequest: {
       /** Format: double */
       amount: number;
-    };
-    DepositAgentRequest: {
-      goal: string;
-      /**
-       * Format: double
-       * @default 0
-       */
-      currentBalance?: number;
-      /** @default USD */
-      currency?: string;
-      /** Format: double */
-      monthlyIncome?: number;
-      /** Format: double */
-      monthlyExpenses?: number;
-    };
-    DepositAgentResponse: {
-      /** Format: double */
-      recommendedAmount: number;
-      reasoning: string[];
-      /** @enum {string} */
-      riskLevel: "low" | "medium" | "high";
-      nextAction: string;
-      /** Format: double */
-      confidence: number;
     };
     TransferRequest: {
       toUserId: string;
@@ -356,48 +304,6 @@ export interface components {
       /** Format: double */
       score?: number;
       reasons?: string[];
-    };
-    CopilotMessage: {
-      /** @enum {string} */
-      role: "user" | "assistant" | "system";
-      content: string;
-    };
-    CopilotTransaction: {
-      /** Format: double */
-      amount: number;
-      type: string;
-      description?: string;
-      /** Format: date-time */
-      createdAt: string;
-      /** @enum {string} */
-      direction: "credit" | "debit";
-    };
-    CopilotChatRequest: {
-      /** @default USD */
-      currency?: string;
-      /**
-       * Format: double
-       * @default 0
-       */
-      currentBalance?: number;
-      /** Format: double */
-      monthlyIncome?: number;
-      /** Format: double */
-      monthlyExpenses?: number;
-      recentTransactions?: components["schemas"]["CopilotTransaction"][];
-      messages: components["schemas"]["CopilotMessage"][];
-    };
-    CopilotChatResponse: {
-      reply: string;
-      topic: string;
-      suggestedActions: string[];
-      /** Format: double */
-      suggestedDepositAmount?: number | null;
-      /** @enum {string} */
-      riskLevel: "low" | "medium" | "high";
-      /** Format: double */
-      confidence: number;
-      followUpQuestion?: string | null;
     };
     SecurityAlert: {
       id?: string;

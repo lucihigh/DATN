@@ -1,7 +1,12 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import jsQR from "jsqr";
 
-import { useAuth } from "./context/AuthContext";
+import {
+  useAuth,
+  type AuthCompletionResult,
+  type LoginResult,
+  type SessionReplacementAlert,
+} from "./context/AuthContext";
 import { useToast } from "./context/ToastContext";
 import { useTheme } from "./context/ThemeContext";
 import "./index.css";
@@ -9,6 +14,9 @@ import "./index.css";
 const API_BASE =
   (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ||
   "http://localhost:4000";
+const SESSION_REPLACEMENT_ALERT_STORAGE_KEY =
+  "fpipay_session_replacement_alert";
+const NOTIFICATION_READ_STORAGE_PREFIX = "fpipay_notification_reads";
 
 const NAV_ITEMS: {
   id: string;
@@ -48,32 +56,7 @@ const dashboardQuickActions = [
   },
 ];
 
-const dashboardSecurityAlerts = [
-  {
-    title: "Login Verified",
-    location: "San Francisco, US",
-    detail:
-      "Device: MacBook Pro (Chrome 124). AI analyzed behavior patterns and confirmed identity matches your typical usage.",
-    time: "2 minutes ago",
-    tone: "safe",
-  },
-  {
-    title: "New Device Registered",
-    location: "London, UK",
-    detail:
-      "Device: iPhone 15 Pro. Device fingerprint added to encrypted vault. Bio-auth enabled successfully.",
-    time: "Today, 10:45 AM",
-    tone: "info",
-  },
-  {
-    title: "Anomalous Connection Blocked",
-    location: "Unrecognized IP",
-    detail:
-      "AI detection engine automatically blocked a login attempt from a known malicious proxy server. No data compromised.",
-    time: "Yesterday, 11:20 PM",
-    tone: "warn",
-  },
-];
+const dashboardSecurityAlerts: SecurityAlertItem[] = [];
 
 const accountsRecentTransactions = [
   {
@@ -114,6 +97,88 @@ type RecentTransaction = {
   description?: string;
   createdAt: string;
   direction: "credit" | "debit";
+};
+
+type TransactionReceipt = {
+  txId: string;
+  executedAt: string;
+  fromAccount: string;
+  toAccount: string;
+  amountUsd: string;
+  feeUsd: string;
+  note: string;
+  status: string;
+};
+
+type TransactionHistoryItem = {
+  id: string;
+  entity: string;
+  date: string;
+  status: string;
+  amount: string;
+  amountTone: "positive" | "negative";
+  receipt: TransactionReceipt;
+};
+
+type SecurityAlertTone = "safe" | "info" | "warn";
+
+type SecurityAlertItem = {
+  id: string;
+  title: string;
+  location: string;
+  detail: string;
+  time: string;
+  tone: SecurityAlertTone;
+};
+
+type SecurityRecentLoginItem = {
+  id: string;
+  location: string;
+  ipAddress?: string;
+  userAgent: string;
+  success: boolean;
+  anomaly: number;
+  createdAt: string;
+  trustedIp: boolean;
+};
+
+type SecurityTrustedDeviceItem = {
+  id: string;
+  ipAddress: string;
+  location: string;
+  userAgent: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  lastVerifiedAt: string;
+  current: boolean;
+};
+
+type SecurityOverviewAlert = {
+  id?: string;
+  title?: string;
+  location?: string;
+  detail?: string;
+  tone?: SecurityAlertTone;
+  occurredAt?: string;
+};
+
+type SecurityOverviewResponse = {
+  alerts: SecurityOverviewAlert[];
+  recentLogins: SecurityRecentLoginItem[];
+  trustedDevices: SecurityTrustedDeviceItem[];
+};
+
+type ActivityNotificationType = "transactions" | "security";
+
+type ActivityNotification = {
+  id: string;
+  type: ActivityNotificationType;
+  title: string;
+  message: string;
+  createdAt: string;
+  timeLabel: string;
+  amountText?: string;
+  amountTone?: "positive" | "negative";
 };
 
 type CopilotMessage = {
@@ -226,6 +291,7 @@ function DashboardView() {
   const transferQrStreamRef = useRef<MediaStream | null>(null);
   const transferQrScanTimerRef = useRef<number | null>(null);
   const copilotThreadRef = useRef<HTMLDivElement>(null);
+  const walletRefreshInFlightRef = useRef(false);
   const [wallet, setWallet] = useState<{
     id: string;
     balance: number;
@@ -253,7 +319,13 @@ function DashboardView() {
     riskLevel: string;
     nextAction: string;
     confidence: number;
-  } | null>(null);
+  }>({
+    recommendedAmount: 0,
+    reasoning: [],
+    riskLevel: "low",
+    nextAction: "",
+    confidence: 0,
+  });
   const [copilotOpen, setCopilotOpen] = useState(false);
   const [copilotBusy, setCopilotBusy] = useState(false);
   const [copilotInput, setCopilotInput] = useState("");
@@ -264,9 +336,14 @@ function DashboardView() {
         "I can help with budget, spending, savings targets, and market context. Ask me what you want to improve.",
     },
   ]);
-  const [copilotInsight, setCopilotInsight] = useState<CopilotInsight | null>(
-    null,
-  );
+  const [copilotInsight, setCopilotInsight] = useState<CopilotInsight>({
+    topic: "",
+    suggestedActions: [],
+    suggestedDepositAmount: null,
+    riskLevel: "low",
+    confidence: 0,
+    followUpQuestion: null,
+  });
   const [transferStep, setTransferStep] = useState<1 | 2 | 3 | 4>(1);
   const [transferMethod, setTransferMethod] = useState<"account" | "qr">(
     "account",
@@ -298,19 +375,25 @@ function DashboardView() {
     RecentTransaction[]
   >([]);
   const [transactionHistory, setTransactionHistory] = useState<
-    { entity: string; date: string; status: string; amount: string; amountTone: "positive" | "negative" }[]
+    TransactionHistoryItem[]
   >([]);
+  const [securityAlerts, setSecurityAlerts] = useState<SecurityAlertItem[]>(
+    dashboardSecurityAlerts,
+  );
+  const [securityRecentLogins, setSecurityRecentLogins] = useState<
+    SecurityRecentLoginItem[]
+  >([]);
+  const [securityTrustedDevices, setSecurityTrustedDevices] = useState<
+    SecurityTrustedDeviceItem[]
+  >([]);
+  const [securityAlertsBusy, setSecurityAlertsBusy] = useState(false);
+  const [securityAlertsError, setSecurityAlertsError] = useState("");
+  const [securityAlertsModalOpen, setSecurityAlertsModalOpen] = useState(false);
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
-  const [transferReceipt, setTransferReceipt] = useState<{
-    txId: string;
-    executedAt: string;
-    fromAccount: string;
-    toAccount: string;
-    amountUsd: string;
-    feeUsd: string;
-    note: string;
-    status: string;
-  } | null>(null);
+  const [transferReceipt, setTransferReceipt] =
+    useState<TransactionReceipt | null>(null);
+  const [selectedTransactionReceipt, setSelectedTransactionReceipt] =
+    useState<TransactionReceipt | null>(null);
 
   const cardProfile = {
     holder: "Alex Thompson",
@@ -366,66 +449,311 @@ function DashboardView() {
   const monthlyIncomeValue = Number(depositIncome || 0);
   const monthlyExpensesValue = Number(depositExpenses || 0);
 
-  const refreshWalletSnapshot = async () => {
-    if (!token) return;
-    const headers = { Authorization: `Bearer ${token}` };
-    const [walletResp, txResp] = await Promise.all([
-      fetch(`${API_BASE}/wallet/me`, { headers }),
-      fetch(`${API_BASE}/transactions`, { headers }),
-    ]);
-
-    if (walletResp.ok) {
-      const w = (await walletResp.json()) as {
-        id: string;
-        balance: number;
-        currency: string;
-        accountNumber?: string;
-        qrPayload?: string;
-        qrImageUrl?: string;
+  const buildTransactionReceipt = useCallback(
+    (tx: {
+      id: string;
+      amount: number;
+      type: string;
+      status?: string;
+      description?: string;
+      createdAt: string;
+      metadata?: {
+        entry?: "DEBIT" | "CREDIT";
+        fromAccount?: string;
+        toAccount?: string;
+        source?: string;
       };
-      setWallet(w);
+    }) => {
+      const currentAccount = wallet?.accountNumber || "Primary Checking";
+      const isCredit = tx.type === "DEPOSIT" || tx.metadata?.entry === "CREDIT";
+      const fallbackFromAccount = isCredit
+        ? tx.metadata?.source === "ADMIN_TOPUP"
+          ? "Admin funding"
+          : currentAccount
+        : currentAccount;
+      const fallbackToAccount = isCredit ? currentAccount : "Unknown account";
+
+      return {
+        txId: tx.id,
+        executedAt: new Date(tx.createdAt).toLocaleString("en-US", {
+          month: "short",
+          day: "2-digit",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: true,
+        }),
+        fromAccount: tx.metadata?.fromAccount || fallbackFromAccount,
+        toAccount: tx.metadata?.toAccount || fallbackToAccount,
+        amountUsd: Number(tx.amount || 0).toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        }),
+        feeUsd: "0.00",
+        note: tx.description || tx.type,
+        status: tx.status || "Completed",
+      };
+    },
+    [wallet?.accountNumber],
+  );
+
+  const formatSecurityAlertTime = useCallback((value: string) => {
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return "Just now";
+
+    const diffMinutes = Math.max(
+      0,
+      Math.round((Date.now() - parsed.getTime()) / 60000),
+    );
+    if (diffMinutes < 1) return "Just now";
+    if (diffMinutes < 60) {
+      return `${diffMinutes} minute${diffMinutes === 1 ? "" : "s"} ago`;
+    }
+    if (diffMinutes < 24 * 60) {
+      const diffHours = Math.round(diffMinutes / 60);
+      return `${diffHours} hour${diffHours === 1 ? "" : "s"} ago`;
     }
 
-    if (txResp.ok) {
-      const txs = (await txResp.json()) as Array<{
-        id: string;
-        amount: number;
-        type: string;
-        description?: string;
-        createdAt: string;
-        metadata?: { entry?: "DEBIT" | "CREDIT" };
-      }>;
-      setRecentTransactions(
-        txs.slice(0, 12).map((tx) => ({
-          amount: Number(tx.amount || 0),
-          type: tx.type,
-          description: tx.description,
-          createdAt: tx.createdAt,
-          direction:
-            tx.type === "DEPOSIT" || tx.metadata?.entry === "CREDIT"
-              ? "credit"
-              : "debit",
-        })),
-      );
-      setTransactionHistory(
-        txs.map((tx) => ({
-          entity: tx.description || tx.type,
-          date: new Date(tx.createdAt).toLocaleString("en-US"),
-          status: "Completed",
-          amount: `${tx.type === "DEPOSIT" || tx.metadata?.entry === "CREDIT" ? "+" : "-"}$${Math.abs(
-            Number(tx.amount || 0),
-          ).toLocaleString("en-US", {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2,
-          })}`,
-          amountTone:
-            tx.type === "DEPOSIT" || tx.metadata?.entry === "CREDIT"
-              ? "positive"
-              : "negative",
-        })),
-      );
+    return parsed.toLocaleString("en-US", {
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }, []);
+
+  const formatSecurityTimestamp = useCallback((value: string) => {
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return "Unknown";
+    return parsed.toLocaleString("en-US", {
+      month: "short",
+      day: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }, []);
+
+  const summarizeUserAgent = useCallback((value?: string) => {
+    if (!value?.trim()) return "Unknown device";
+
+    const userAgent = value.trim();
+    const browserMatchers: Array<[RegExp, string]> = [
+      [/Edg\/(\d+)/, "Edge"],
+      [/Chrome\/(\d+)/, "Chrome"],
+      [/Firefox\/(\d+)/, "Firefox"],
+      [/Version\/(\d+).+Safari\//, "Safari"],
+    ];
+    const osMatchers: Array<[RegExp, string]> = [
+      [/Windows NT 10\.0/, "Windows 10"],
+      [/Windows NT 11\.0/, "Windows 11"],
+      [/Windows NT 6\.3/, "Windows 8.1"],
+      [/Mac OS X ([\d_]+)/, "macOS"],
+      [/Android (\d+)/, "Android"],
+      [/(iPhone|iPad|iPod).*OS ([\d_]+)/, "iOS"],
+      [/Linux/, "Linux"],
+    ];
+
+    let browserLabel = "";
+    for (const [pattern, label] of browserMatchers) {
+      const match = userAgent.match(pattern);
+      if (match) {
+        browserLabel = `${label}${match[1] ? ` ${match[1]}` : ""}`;
+        break;
+      }
     }
-  };
+
+    let osLabel = "";
+    for (const [pattern, label] of osMatchers) {
+      if (pattern.test(userAgent)) {
+        osLabel = label;
+        break;
+      }
+    }
+
+    if (browserLabel && osLabel) return `${browserLabel} on ${osLabel}`;
+    if (browserLabel) return browserLabel;
+    if (osLabel) return osLabel;
+    return userAgent.length > 48 ? `${userAgent.slice(0, 48)}...` : userAgent;
+  }, []);
+
+  const refreshSecurityAlerts = useCallback(
+    async (options?: { silent?: boolean }) => {
+      if (!token) {
+        setSecurityAlerts(dashboardSecurityAlerts);
+        setSecurityRecentLogins([]);
+        setSecurityTrustedDevices([]);
+        setSecurityAlertsError("");
+        setSecurityAlertsBusy(false);
+        return;
+      }
+
+      if (!options?.silent) {
+        setSecurityAlertsBusy(true);
+      }
+      setSecurityAlertsError("");
+
+      try {
+        const resp = await fetch(`${API_BASE}/security/overview`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const data = (await resp.json().catch(() => null)) as
+          | SecurityOverviewResponse
+          | { error?: string }
+          | null;
+
+        if (
+          !resp.ok ||
+          !data ||
+          !("alerts" in data) ||
+          !Array.isArray(data.alerts) ||
+          !Array.isArray(data.recentLogins) ||
+          !Array.isArray(data.trustedDevices)
+        ) {
+          throw new Error(
+            (data &&
+              "error" in data &&
+              typeof data.error === "string" &&
+              data.error) ||
+              "Cannot load security alerts",
+          );
+        }
+
+        const overview = data;
+
+        setSecurityAlerts(
+          overview.alerts.length
+            ? overview.alerts.map((alert, index) => ({
+                id: alert.id || `alert-${index}`,
+                title: alert.title || "Security Activity",
+                location: alert.location || "Unknown location",
+                detail:
+                  alert.detail ||
+                  "Security activity was recorded for your account.",
+                tone: alert.tone || "info",
+                time: formatSecurityAlertTime(
+                  alert.occurredAt || new Date().toISOString(),
+                ),
+              }))
+            : [
+                {
+                  id: "no-alerts",
+                  title: "No Recent Alerts",
+                  location: "Current Account",
+                  detail:
+                    "No unusual sign-in activity was detected for this account in the current review window.",
+                  time: "Up to date",
+                  tone: "safe",
+                },
+              ],
+        );
+        setSecurityRecentLogins(overview.recentLogins);
+        setSecurityTrustedDevices(overview.trustedDevices);
+      } catch (err) {
+        setSecurityAlertsError(
+          err instanceof Error ? err.message : "Cannot load security alerts",
+        );
+      } finally {
+        setSecurityAlertsBusy(false);
+      }
+    },
+    [formatSecurityAlertTime, token],
+  );
+
+  const refreshWalletSnapshot = useCallback(
+    async (options?: { resetOnFailure?: boolean; force?: boolean }) => {
+      if (!token) {
+        if (options?.resetOnFailure) {
+          setWallet(null);
+          setRecentTransactions([]);
+          setTransactionHistory([]);
+        }
+        return;
+      }
+      if (walletRefreshInFlightRef.current && !options?.force) return;
+
+      walletRefreshInFlightRef.current = true;
+      const headers = { Authorization: `Bearer ${token}` };
+
+      try {
+        const [walletResp, txResp] = await Promise.all([
+          fetch(`${API_BASE}/wallet/me`, { headers }),
+          fetch(`${API_BASE}/transactions`, { headers }),
+        ]);
+
+        if (walletResp.ok) {
+          const w = (await walletResp.json()) as {
+            id: string;
+            balance: number;
+            currency: string;
+            accountNumber?: string;
+            qrPayload?: string;
+            qrImageUrl?: string;
+          };
+          setWallet(w);
+        }
+
+        if (txResp.ok) {
+          const txs = (await txResp.json()) as Array<{
+            id: string;
+            amount: number;
+            type: string;
+            status?: string;
+            description?: string;
+            createdAt: string;
+            metadata?: {
+              entry?: "DEBIT" | "CREDIT";
+              fromAccount?: string;
+              toAccount?: string;
+            };
+          }>;
+          setRecentTransactions(
+            txs.slice(0, 12).map((tx) => ({
+              amount: Number(tx.amount || 0),
+              type: tx.type,
+              description: tx.description,
+              createdAt: tx.createdAt,
+              direction:
+                tx.type === "DEPOSIT" || tx.metadata?.entry === "CREDIT"
+                  ? "credit"
+                  : "debit",
+            })),
+          );
+          setTransactionHistory(
+            txs.map((tx) => {
+              const isCredit =
+                tx.type === "DEPOSIT" || tx.metadata?.entry === "CREDIT";
+              const receipt = buildTransactionReceipt(tx);
+              return {
+                id: tx.id,
+                entity: tx.description || tx.type,
+                date: new Date(tx.createdAt).toLocaleString("en-US"),
+                status: (tx.status || "Completed").toUpperCase(),
+                amount: `${isCredit ? "+" : "-"}$${Math.abs(
+                  Number(tx.amount || 0),
+                ).toLocaleString("en-US", {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}`,
+                amountTone: isCredit ? "positive" : "negative",
+                receipt,
+              };
+            }),
+          );
+        }
+      } catch {
+        if (options?.resetOnFailure) {
+          setWallet(null);
+          setRecentTransactions([]);
+          setTransactionHistory([]);
+        }
+      } finally {
+        walletRefreshInFlightRef.current = false;
+      }
+    },
+    [buildTransactionReceipt, token],
+  );
 
   const executeDeposit = async (amount: number) => {
     if (!token) {
@@ -441,7 +769,9 @@ function DashboardView() {
       body: JSON.stringify({ amount }),
     });
     if (!resp.ok) {
-      const err = (await resp.json().catch(() => null)) as { error?: string } | null;
+      const err = (await resp.json().catch(() => null)) as {
+        error?: string;
+      } | null;
       toast(err?.error || "Deposit failed", "error");
       return false;
     }
@@ -475,16 +805,14 @@ function DashboardView() {
           monthlyExpenses: Number(depositExpenses || 0),
         }),
       });
-      const data = (await resp.json().catch(() => null)) as
-        | {
-            error?: string;
-            recommendedAmount?: number;
-            reasoning?: string[];
-            riskLevel?: string;
-            nextAction?: string;
-            confidence?: number;
-          }
-        | null;
+      const data = (await resp.json().catch(() => null)) as {
+        error?: string;
+        recommendedAmount?: number;
+        reasoning?: string[];
+        riskLevel?: string;
+        nextAction?: string;
+        confidence?: number;
+      } | null;
       if (!resp.ok || !data?.recommendedAmount) {
         toast(data?.error || "AI agent is unavailable", "error");
         return;
@@ -511,7 +839,14 @@ function DashboardView() {
           "I can help with budget, spending, savings targets, and market context. Ask me what you want to improve.",
       },
     ]);
-    setCopilotInsight(null);
+    setCopilotInsight({
+      topic: "",
+      suggestedActions: [],
+      suggestedDepositAmount: null,
+      riskLevel: "low",
+      confidence: 0,
+      followUpQuestion: null,
+    });
     setCopilotInput("");
   };
 
@@ -553,18 +888,16 @@ function DashboardView() {
           messages: nextMessages,
         }),
       });
-      const data = (await resp.json().catch(() => null)) as
-        | {
-            error?: string;
-            reply?: string;
-            topic?: string;
-            suggestedActions?: string[];
-            suggestedDepositAmount?: number | null;
-            riskLevel?: string;
-            confidence?: number;
-            followUpQuestion?: string | null;
-          }
-        | null;
+      const data = (await resp.json().catch(() => null)) as {
+        error?: string;
+        reply?: string;
+        topic?: string;
+        suggestedActions?: string[];
+        suggestedDepositAmount?: number | null;
+        riskLevel?: string;
+        confidence?: number;
+        followUpQuestion?: string | null;
+      } | null;
       if (!resp.ok || !data?.reply) {
         toast(data?.error || "AI copilot is unavailable", "error");
         setCopilotMessages(nextMessages);
@@ -610,7 +943,8 @@ function DashboardView() {
   }, [copilotMessages, copilotBusy, copilotOpen]);
 
   const extractAccountFromQrPayload = (payload: string) =>
-    payload.match(/ACC:(\d{8,19})/i)?.[1] || payload.replace(/\D/g, "").slice(0, 19);
+    payload.match(/ACC:(\d{8,19})/i)?.[1] ||
+    payload.replace(/\D/g, "").slice(0, 19);
 
   const decodeQrFromCanvasArea = (
     source: HTMLCanvasElement,
@@ -691,9 +1025,11 @@ function DashboardView() {
   ) => {
     const BarcodeDetectorCtor = (
       window as Window & {
-        BarcodeDetector?: new (opts?: {
-          formats?: string[];
-        }) => { detect: (source: ImageBitmapSource) => Promise<Array<{ rawValue?: string }>> };
+        BarcodeDetector?: new (opts?: { formats?: string[] }) => {
+          detect: (
+            source: ImageBitmapSource,
+          ) => Promise<Array<{ rawValue?: string }>>;
+        };
       }
     ).BarcodeDetector;
 
@@ -726,7 +1062,10 @@ function DashboardView() {
       },
       {
         video: {
-          facingMode: { ideal: preferredFacingMode === "environment" ? "user" : "environment" },
+          facingMode: {
+            ideal:
+              preferredFacingMode === "environment" ? "user" : "environment",
+          },
         },
       },
     ];
@@ -816,7 +1155,9 @@ function DashboardView() {
       const activeTrack = activeStream.getVideoTracks()[0] ?? null;
       const ImageCaptureCtor = (window as Window & { ImageCapture?: unknown })
         .ImageCapture as
-        | (new (track: MediaStreamTrack) => { grabFrame: () => Promise<ImageBitmap> })
+        | (new (track: MediaStreamTrack) => {
+            grabFrame: () => Promise<ImageBitmap>;
+          })
         | undefined;
       setTransferQrCameraOn(true);
       transferQrScanTimerRef.current = window.setInterval(async () => {
@@ -849,7 +1190,12 @@ function DashboardView() {
             }
           }
 
-          if (!raw && activeTrack && ImageCaptureCtor && activeTrack.readyState === "live") {
+          if (
+            !raw &&
+            activeTrack &&
+            ImageCaptureCtor &&
+            activeTrack.readyState === "live"
+          ) {
             const imageCapture = new ImageCaptureCtor(activeTrack);
             const bitmap = await imageCapture.grabFrame();
             try {
@@ -896,7 +1242,9 @@ function DashboardView() {
           ? String((err as { message?: unknown }).message || "")
           : "";
       if (name === "NotAllowedError") {
-        setTransferQrCameraError("Camera permission denied. Please allow camera access.");
+        setTransferQrCameraError(
+          "Camera permission denied. Please allow camera access.",
+        );
       } else if (name === "NotFoundError") {
         setTransferQrCameraError("No camera device found on this machine.");
       } else if (name === "NotReadableError") {
@@ -926,9 +1274,11 @@ function DashboardView() {
   const detectQrFromImageFile = async (file: File) => {
     const BarcodeDetectorCtor = (
       window as Window & {
-        BarcodeDetector?: new (opts?: {
-          formats?: string[];
-        }) => { detect: (source: ImageBitmapSource) => Promise<Array<{ rawValue?: string }>> };
+        BarcodeDetector?: new (opts?: { formats?: string[] }) => {
+          detect: (
+            source: ImageBitmapSource,
+          ) => Promise<Array<{ rawValue?: string }>>;
+        };
       }
     ).BarcodeDetector;
 
@@ -1005,9 +1355,14 @@ function DashboardView() {
             work.height,
           );
           const imageData = workCtx.getImageData(0, 0, work.width, work.height);
-          const decoded = jsQR(imageData.data, imageData.width, imageData.height, {
-            inversionAttempts: "attemptBoth",
-          });
+          const decoded = jsQR(
+            imageData.data,
+            imageData.width,
+            imageData.height,
+            {
+              inversionAttempts: "attemptBoth",
+            },
+          );
           return decoded?.data?.trim() || "";
         };
 
@@ -1079,77 +1434,32 @@ function DashboardView() {
   };
 
   useEffect(() => {
+    void refreshWalletSnapshot({ resetOnFailure: true, force: true });
+  }, [refreshWalletSnapshot]);
+
+  useEffect(() => {
+    void refreshSecurityAlerts({ silent: true });
+  }, [refreshSecurityAlerts]);
+
+  useEffect(() => {
     if (!token) return;
-    const headers = { Authorization: `Bearer ${token}` };
-    const load = async () => {
-      try {
-        const [walletResp, txResp] = await Promise.all([
-          fetch(`${API_BASE}/wallet/me`, { headers }),
-          fetch(`${API_BASE}/transactions`, { headers }),
-        ]);
-        if (walletResp.ok) {
-          const w = (await walletResp.json()) as {
-            id: string;
-            balance: number;
-            currency: string;
-            accountNumber?: string;
-            qrPayload?: string;
-            qrImageUrl?: string;
-          };
-          setWallet(w);
-        }
-        if (txResp.ok) {
-          const txs = (await txResp.json()) as Array<{
-            id: string;
-            amount: number;
-            type: string;
-            description?: string;
-            createdAt: string;
-            metadata?: {
-              entry?: "DEBIT" | "CREDIT";
-              fromAccount?: string;
-              toAccount?: string;
-            };
-          }>;
-          setRecentTransactions(
-            txs.slice(0, 12).map((tx) => ({
-              amount: Number(tx.amount || 0),
-              type: tx.type,
-              description: tx.description,
-              createdAt: tx.createdAt,
-              direction:
-                tx.type === "DEPOSIT" || tx.metadata?.entry === "CREDIT"
-                  ? "credit"
-                  : "debit",
-            })),
-          );
-          setTransactionHistory(
-            txs.map((tx) => {
-              const isCredit =
-                tx.type === "DEPOSIT" || tx.metadata?.entry === "CREDIT";
-              return {
-                entity: tx.description || tx.type,
-                date: new Date(tx.createdAt).toLocaleString("en-US"),
-                status: "Completed",
-                amount: `${isCredit ? "+" : "-"}$${Math.abs(
-                  Number(tx.amount || 0),
-                ).toLocaleString("en-US", {
-                  minimumFractionDigits: 2,
-                  maximumFractionDigits: 2,
-                })}`,
-                amountTone: isCredit ? "positive" : "negative",
-              };
-            }),
-          );
-        }
-      } catch {
-        setWallet(null);
-        setRecentTransactions([]);
-        setTransactionHistory([]);
-      }
+
+    const refreshIfVisible = () => {
+      if (document.visibilityState === "hidden") return;
+      void refreshWalletSnapshot();
+      void refreshSecurityAlerts({ silent: true });
     };
-    void load();
-  }, [token]);
+
+    const interval = window.setInterval(refreshIfVisible, 5000);
+    window.addEventListener("focus", refreshIfVisible);
+    document.addEventListener("visibilitychange", refreshIfVisible);
+
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshIfVisible);
+      document.removeEventListener("visibilitychange", refreshIfVisible);
+    };
+  }, [refreshSecurityAlerts, refreshWalletSnapshot, token]);
 
   const generateOtp = () => {
     const next = String(Math.floor(100000 + Math.random() * 900000));
@@ -1239,7 +1549,10 @@ function DashboardView() {
 
   useEffect(() => {
     if (transferOtpResendAt <= Date.now()) return;
-    const timer = window.setInterval(() => setTransferOtpClock(Date.now()), 1000);
+    const timer = window.setInterval(
+      () => setTransferOtpClock(Date.now()),
+      1000,
+    );
     return () => window.clearInterval(timer);
   }, [transferOtpResendAt]);
 
@@ -1261,15 +1574,13 @@ function DashboardView() {
         note: transferContent || defaultTransferContent,
       }),
     });
-    const data = (await resp.json().catch(() => null)) as
-      | {
-          error?: string;
-          challengeId?: string;
-          destination?: string;
-          expiresAt?: string;
-          retryAfterSeconds?: number;
-        }
-      | null;
+    const data = (await resp.json().catch(() => null)) as {
+      error?: string;
+      challengeId?: string;
+      destination?: string;
+      expiresAt?: string;
+      retryAfterSeconds?: number;
+    } | null;
     if (!resp.ok || !data?.challengeId) {
       toast(data?.error || "Failed to send OTP email", "error");
       return false;
@@ -1277,7 +1588,9 @@ function DashboardView() {
     setTransferOtpChallengeId(data.challengeId);
     setTransferOtpDestination(data.destination || "");
     setTransferOtpExpiresAt(data.expiresAt || "");
-    setTransferOtpResendAt(Date.now() + Number(data.retryAfterSeconds || 60) * 1000);
+    setTransferOtpResendAt(
+      Date.now() + Number(data.retryAfterSeconds || 60) * 1000,
+    );
     setTransferOtpInput("");
     setTransferOtpError("");
     toast(
@@ -1300,7 +1613,10 @@ function DashboardView() {
         return;
       }
     } else if (!transferAccount) {
-      toast("Please scan QR by camera or extract account from QR payload first.", "error");
+      toast(
+        "Please scan QR by camera or extract account from QR payload first.",
+        "error",
+      );
       return;
     }
 
@@ -1311,9 +1627,11 @@ function DashboardView() {
           headers: { Authorization: `Bearer ${token}` },
         },
       );
-      const data = (await resp.json().catch(() => null)) as
-        | { error?: string; holderName?: string; accountNumber?: string }
-        | null;
+      const data = (await resp.json().catch(() => null)) as {
+        error?: string;
+        holderName?: string;
+        accountNumber?: string;
+      } | null;
       if (!resp.ok || !data?.accountNumber) {
         toast(data?.error || "Recipient account not found", "error");
         return;
@@ -1390,23 +1708,22 @@ function DashboardView() {
       }),
     });
     if (!transferResp.ok) {
-      const err = (await transferResp.json().catch(() => null)) as
-        | { error?: string }
-        | null;
+      const err = (await transferResp.json().catch(() => null)) as {
+        error?: string;
+      } | null;
       setTransferOtpError(err?.error || "OTP verification failed");
       return;
     }
 
-    const transferPayload = (await transferResp.json().catch(() => null)) as
-      | {
-          reconciliationId?: string;
-          transaction?: {
-            id: string;
-            toAccount?: string;
-          };
-        }
-      | null;
-    const targetAccount = transferPayload?.transaction?.toAccount || transferAccount;
+    const transferPayload = (await transferResp.json().catch(() => null)) as {
+      reconciliationId?: string;
+      transaction?: {
+        id: string;
+        toAccount?: string;
+      };
+    } | null;
+    const targetAccount =
+      transferPayload?.transaction?.toAccount || transferAccount;
     setTransferReceipt({
       txId: transferPayload?.transaction?.id || txId,
       executedAt,
@@ -1424,15 +1741,30 @@ function DashboardView() {
       {
         entity: `Transfer to •••• ${targetAccount.slice(-4)}`,
         date: executedAt,
-        status: "Completed",
+        id: transferPayload?.transaction?.id || txId,
+        status: "COMPLETED",
         amount: `-$${amount.toLocaleString("en-US", {
           minimumFractionDigits: 2,
           maximumFractionDigits: 2,
         })}`,
         amountTone: "negative",
+        receipt: {
+          txId: transferPayload?.transaction?.id || txId,
+          executedAt,
+          fromAccount: wallet?.accountNumber || "Primary Checking",
+          toAccount: targetAccount,
+          amountUsd: amount.toLocaleString("en-US", {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          }),
+          feeUsd: "0.00",
+          note: transferContent || defaultTransferContent,
+          status: "Completed",
+        },
       },
       ...prev,
     ]);
+    await refreshWalletSnapshot({ force: true });
     setTransferStep(4);
     toast("Transfer completed successfully");
   };
@@ -1472,7 +1804,9 @@ function DashboardView() {
                   aria-label={
                     showWalletId ? "Hide account number" : "Show account number"
                   }
-                  title={showWalletId ? "Hide account number" : "Show account number"}
+                  title={
+                    showWalletId ? "Hide account number" : "Show account number"
+                  }
                 >
                   {showWalletId ? "🙈" : "👁"}
                 </button>
@@ -1491,34 +1825,27 @@ function DashboardView() {
         <aside className="dashboard-actions-card">
           <h3>Quick Actions</h3>
           <div className="dashboard-actions-list">
-            {dashboardQuickActions.map((action) => (
-              <button
-                type="button"
-                className="dashboard-action-item"
-                key={action.title}
-                onClick={async () => {
-                  if (action.id === "transfer") {
-                    openTransferModal();
-                  } else if (action.id === "copilot") {
-                    resetCopilotSession();
-                    setCopilotOpen(true);
-                  } else {
-                    setDepositAgentPlan(null);
-                    setDepositGoal("");
-                    setDepositIncome("");
-                    setDepositExpenses("");
-                    setDepositAgentOpen(true);
-                  }
-                }}
-              >
-                <span className="dashboard-action-icon">{action.icon}</span>
-                <span className="dashboard-action-text">
-                  <strong>{action.title}</strong>
-                  <small>{action.detail}</small>
-                </span>
-                <span className="dashboard-action-arrow">›</span>
-              </button>
-            ))}
+            {dashboardQuickActions
+              .filter((action) => action.id === "transfer")
+              .map((action) => (
+                <button
+                  type="button"
+                  className="dashboard-action-item"
+                  key={action.title}
+                  onClick={() => {
+                    if (action.id === "transfer") {
+                      openTransferModal();
+                    }
+                  }}
+                >
+                  <span className="dashboard-action-icon">{action.icon}</span>
+                  <span className="dashboard-action-text">
+                    <strong>{action.title}</strong>
+                    <small>{action.detail}</small>
+                  </span>
+                  <span className="dashboard-action-arrow">›</span>
+                </button>
+              ))}
           </div>
           <button type="button" className="dashboard-all-actions">
             View all actions
@@ -1529,37 +1856,62 @@ function DashboardView() {
       <section className="dashboard-block">
         <div className="dashboard-block-head">
           <h3>Security Alerts</h3>
-          <span className="dashboard-tag">AI MONITORED</span>
-          <button type="button" className="dashboard-link">
-            Full Audit Log
+          <span className="dashboard-tag">VERIFIED</span>
+          <button
+            type="button"
+            className="dashboard-link"
+            onClick={() => {
+              setSecurityAlertsModalOpen(true);
+              void refreshSecurityAlerts();
+            }}
+          >
+            {securityAlertsBusy ? "Loading..." : "View Sign-In Activity"}
           </button>
         </div>
         <div className="dashboard-alert-list">
-          {dashboardSecurityAlerts.map((alert) => (
-            <article
-              className={`dashboard-alert-item ${alert.tone}`}
-              key={alert.title}
-            >
-              <div className="dashboard-alert-icon">
-                {alert.tone === "safe"
-                  ? "✓"
-                  : alert.tone === "info"
-                    ? "i"
-                    : "!"}
-              </div>
-              <div className="dashboard-alert-content">
-                <div className="dashboard-alert-title-row">
-                  <strong>{alert.title}</strong>
-                  <span className="dashboard-alert-location">
-                    {alert.location}
-                  </span>
+          {(securityAlerts.length
+            ? securityAlerts
+            : [
+                {
+                  id: "no-alerts-preview",
+                  title: "No Recent Alerts",
+                  location: "Current Account",
+                  detail:
+                    "No unusual sign-in activity was detected for this account in the current review window.",
+                  time: "Up to date",
+                  tone: "safe" as const,
+                },
+              ]
+          )
+            .slice(0, 3)
+            .map((alert) => (
+              <article
+                className={`dashboard-alert-item ${alert.tone}`}
+                key={alert.id}
+              >
+                <div className="dashboard-alert-icon">
+                  {alert.tone === "safe"
+                    ? "✓"
+                    : alert.tone === "info"
+                      ? "i"
+                      : "!"}
                 </div>
-                <p>{alert.detail}</p>
-              </div>
-              <div className="dashboard-alert-time">{alert.time}</div>
-            </article>
-          ))}
+                <div className="dashboard-alert-content">
+                  <div className="dashboard-alert-title-row">
+                    <strong>{alert.title}</strong>
+                    <span className="dashboard-alert-location">
+                      {alert.location}
+                    </span>
+                  </div>
+                  <p>{alert.detail}</p>
+                </div>
+                <div className="dashboard-alert-time">{alert.time}</div>
+              </article>
+            ))}
         </div>
+        {securityAlertsError ? (
+          <div className="dashboard-inline-note">{securityAlertsError}</div>
+        ) : null}
       </section>
 
       <section className="dashboard-block">
@@ -1581,11 +1933,12 @@ function DashboardView() {
                 <th>Date</th>
                 <th>Status</th>
                 <th>Amount</th>
+                <th>Details</th>
               </tr>
             </thead>
             <tbody>
               {transactionHistory.slice(0, 3).map((tx) => (
-                <tr key={tx.entity + tx.date}>
+                <tr key={tx.id}>
                   <td>{tx.entity}</td>
                   <td>{tx.date}</td>
                   <td>
@@ -1600,12 +1953,231 @@ function DashboardView() {
                   >
                     {tx.amount}
                   </td>
+                  <td>
+                    <button
+                      type="button"
+                      className="tx-detail-btn"
+                      onClick={() => setSelectedTransactionReceipt(tx.receipt)}
+                    >
+                      Details
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       </section>
+
+      {securityAlertsModalOpen && (
+        <div
+          className="modal-overlay"
+          onClick={() => setSecurityAlertsModalOpen(false)}
+        >
+          <div
+            className="modal-card security-alerts-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="card-details-head">
+              <h3>Sign-In Activity</h3>
+              <button
+                type="button"
+                className="card-details-close"
+                onClick={() => setSecurityAlertsModalOpen(false)}
+              >
+                x
+              </button>
+            </div>
+            <div className="security-alerts-toolbar">
+              <span className="dashboard-tag">LIVE</span>
+              <button
+                type="button"
+                className="pill"
+                disabled={securityAlertsBusy}
+                onClick={() => void refreshSecurityAlerts()}
+              >
+                {securityAlertsBusy ? "Refreshing..." : "Refresh"}
+              </button>
+            </div>
+            {securityAlertsError ? (
+              <div className="dashboard-inline-note">{securityAlertsError}</div>
+            ) : null}
+            <div className="security-activity-grid">
+              <section className="security-activity-section">
+                <div className="security-activity-head">
+                  <h4>Recent Alerts</h4>
+                  <span className="dashboard-tag">{securityAlerts.length}</span>
+                </div>
+                <div className="dashboard-alert-list security-alert-list-modal">
+                  {(securityAlerts.length
+                    ? securityAlerts
+                    : [
+                        {
+                          id: "no-alerts-modal",
+                          title: "No Recent Alerts",
+                          location: "Current Account",
+                          detail:
+                            "No unusual sign-in activity was detected for this account in the current review window.",
+                          time: "Up to date",
+                          tone: "safe" as const,
+                        },
+                      ]
+                  ).map((alert) => (
+                    <article
+                      className={`dashboard-alert-item ${alert.tone}`}
+                      key={`modal-${alert.id}`}
+                    >
+                      <div className="dashboard-alert-icon">
+                        {alert.tone === "safe"
+                          ? "OK"
+                          : alert.tone === "info"
+                            ? "i"
+                            : "!"}
+                      </div>
+                      <div className="dashboard-alert-content">
+                        <div className="dashboard-alert-title-row">
+                          <strong>{alert.title}</strong>
+                          <span className="dashboard-alert-location">
+                            {alert.location}
+                          </span>
+                        </div>
+                        <p>{alert.detail}</p>
+                      </div>
+                      <div className="dashboard-alert-time">{alert.time}</div>
+                    </article>
+                  ))}
+                </div>
+              </section>
+
+              <section className="security-activity-section">
+                <div className="security-activity-head">
+                  <h4>Trusted Devices / Saved IPs</h4>
+                  <span className="dashboard-tag">
+                    {securityTrustedDevices.length}
+                  </span>
+                </div>
+                {securityTrustedDevices.length ? (
+                  <div className="security-record-list">
+                    {securityTrustedDevices.map((device) => (
+                      <article className="security-record-card" key={device.id}>
+                        <div className="security-record-head">
+                          <div className="security-record-summary">
+                            <strong title={device.userAgent}>
+                              {summarizeUserAgent(device.userAgent)}
+                            </strong>
+                            <p>{device.location}</p>
+                            <p
+                              className="security-record-agent"
+                              title={device.userAgent}
+                            >
+                              {device.userAgent}
+                            </p>
+                          </div>
+                          <span className="security-record-pill">
+                            {device.current ? "Current session" : "Trusted IP"}
+                          </span>
+                        </div>
+                        <dl className="security-record-meta">
+                          <div>
+                            <dt>Saved IP</dt>
+                            <dd>{device.ipAddress}</dd>
+                          </div>
+                          <div>
+                            <dt>Verified</dt>
+                            <dd>
+                              {formatSecurityTimestamp(device.lastVerifiedAt)}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt>First seen</dt>
+                            <dd>
+                              {formatSecurityTimestamp(device.firstSeenAt)}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt>Last used</dt>
+                            <dd>
+                              {formatSecurityTimestamp(device.lastSeenAt)}
+                            </dd>
+                          </div>
+                        </dl>
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="dashboard-inline-note">
+                    No trusted device or saved IP has been verified for this
+                    account yet.
+                  </div>
+                )}
+              </section>
+
+              <section className="security-activity-section">
+                <div className="security-activity-head">
+                  <h4>Recent Sign-Ins</h4>
+                  <span className="dashboard-tag">
+                    {securityRecentLogins.length}
+                  </span>
+                </div>
+                {securityRecentLogins.length ? (
+                  <div className="security-record-list">
+                    {securityRecentLogins.map((login) => (
+                      <article className="security-record-card" key={login.id}>
+                        <div className="security-record-head">
+                          <div className="security-record-summary">
+                            <strong title={login.userAgent}>
+                              {summarizeUserAgent(login.userAgent)}
+                            </strong>
+                            <p>{login.location}</p>
+                            <p
+                              className="security-record-agent"
+                              title={login.userAgent}
+                            >
+                              {login.userAgent}
+                            </p>
+                          </div>
+                          <span
+                            className={`security-record-pill ${login.success ? "success" : "warn"}`}
+                          >
+                            {login.success
+                              ? login.trustedIp
+                                ? "Trusted sign-in"
+                                : "Verified sign-in"
+                              : "Blocked"}
+                          </span>
+                        </div>
+                        <dl className="security-record-meta">
+                          <div>
+                            <dt>IP</dt>
+                            <dd>{login.ipAddress || "Unavailable"}</dd>
+                          </div>
+                          <div>
+                            <dt>Time</dt>
+                            <dd>{formatSecurityTimestamp(login.createdAt)}</dd>
+                          </div>
+                          <div>
+                            <dt>Risk</dt>
+                            <dd>{Math.round(login.anomaly * 100)}%</dd>
+                          </div>
+                          <div>
+                            <dt>Status</dt>
+                            <dd>{login.success ? "Successful" : "Blocked"}</dd>
+                          </div>
+                        </dl>
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="dashboard-inline-note">
+                    No recent sign-in activity is available for this account
+                    yet.
+                  </div>
+                )}
+              </section>
+            </div>
+          </div>
+        </div>
+      )}
 
       {historyModalOpen && (
         <div
@@ -1634,11 +2206,12 @@ function DashboardView() {
                     <th>Date</th>
                     <th>Status</th>
                     <th>Amount</th>
+                    <th>Details</th>
                   </tr>
                 </thead>
                 <tbody>
                   {transactionHistory.map((tx) => (
-                    <tr key={`modal-${tx.entity}-${tx.date}`}>
+                    <tr key={`modal-${tx.id}`}>
                       <td>{tx.entity}</td>
                       <td>{tx.date}</td>
                       <td>
@@ -1654,6 +2227,17 @@ function DashboardView() {
                         }
                       >
                         {tx.amount}
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className="tx-detail-btn"
+                          onClick={() =>
+                            setSelectedTransactionReceipt(tx.receipt)
+                          }
+                        >
+                          Details
+                        </button>
                       </td>
                     </tr>
                   ))}
@@ -1826,7 +2410,7 @@ function DashboardView() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="transfer-head">
-              <h3>Secure Bank Transfer</h3>
+              <h3>FPIPay Transfer</h3>
               <button
                 type="button"
                 className="card-details-close"
@@ -1954,14 +2538,19 @@ function DashboardView() {
                         Camera
                         <select
                           value={transferQrDeviceId}
-                          onChange={(e) => setTransferQrDeviceId(e.target.value)}
+                          onChange={(e) =>
+                            setTransferQrDeviceId(e.target.value)
+                          }
                           disabled={transferQrDevices.length === 0}
                         >
                           {transferQrDevices.length === 0 ? (
                             <option value="">No camera found</option>
                           ) : (
                             transferQrDevices.map((cam, idx) => (
-                              <option key={cam.deviceId || String(idx)} value={cam.deviceId}>
+                              <option
+                                key={cam.deviceId || String(idx)}
+                                value={cam.deviceId}
+                              >
                                 {cam.label || `Camera ${idx + 1}`}
                               </option>
                             ))
@@ -1987,12 +2576,17 @@ function DashboardView() {
                           playsInline
                           muted
                         />
-                        <div className="transfer-qr-target" aria-hidden="true" />
+                        <div
+                          className="transfer-qr-target"
+                          aria-hidden="true"
+                        />
                       </div>
                       <small className="muted">
                         {transferQrCameraOn
                           ? `Place the QR inside the square frame to auto-detect. Current camera: ${
-                              transferQrFacingMode === "environment" ? "Back" : "Front"
+                              transferQrFacingMode === "environment"
+                                ? "Back"
+                                : "Front"
                             }.`
                           : "Camera preview will appear here after you start scanning."}
                       </small>
@@ -2034,7 +2628,8 @@ function DashboardView() {
                       type="button"
                       className="pill"
                       onClick={() => {
-                        const extracted = extractAccountFromQrPayload(transferQrRaw);
+                        const extracted =
+                          extractAccountFromQrPayload(transferQrRaw);
                         if (!/^\d{8,19}$/.test(extracted)) {
                           toast("Invalid QR payload.", "error");
                           return;
@@ -2088,7 +2683,8 @@ function DashboardView() {
                   />
                   {isInsufficientBalance && (
                     <small className="transfer-input-error">
-                      Insufficient balance</small>
+                      Insufficient balance
+                    </small>
                   )}
                 </label>
                 <label className="form-group">
@@ -2141,13 +2737,12 @@ function DashboardView() {
                     <strong>{transferOtpDestination}</strong>
                     <small>
                       {transferOtpExpiresAt
-                        ? `Expires at ${new Date(transferOtpExpiresAt).toLocaleTimeString(
-                            "en-US",
-                            {
-                              hour: "2-digit",
-                              minute: "2-digit",
-                            },
-                          )}`
+                        ? `Expires at ${new Date(
+                            transferOtpExpiresAt,
+                          ).toLocaleTimeString("en-US", {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}`
                         : "Check your inbox for the 6-digit code."}
                     </small>
                   </div>
@@ -2197,42 +2792,7 @@ function DashboardView() {
                 <div className="transfer-success-icon">✓</div>
                 <h4>Transfer Successful</h4>
                 {transferReceipt && (
-                  <div className="transfer-receipt">
-                    <div className="transfer-receipt-row">
-                      <span>Transaction ID</span>
-                      <strong>{transferReceipt.txId}</strong>
-                    </div>
-                    <div className="transfer-receipt-row">
-                      <span>Execution Time</span>
-                      <strong>{transferReceipt.executedAt}</strong>
-                    </div>
-                    <div className="transfer-receipt-row">
-                      <span>From Account</span>
-                      <strong>{transferReceipt.fromAccount}</strong>
-                    </div>
-                    <div className="transfer-receipt-row">
-                      <span>To Account</span>
-                      <strong>{transferReceipt.toAccount}</strong>
-                    </div>
-                    <div className="transfer-receipt-row">
-                      <span>Amount</span>
-                      <strong>${transferReceipt.amountUsd}</strong>
-                    </div>
-                    <div className="transfer-receipt-row">
-                      <span>Transfer Fee</span>
-                      <strong>${transferReceipt.feeUsd}</strong>
-                    </div>
-                    <div className="transfer-receipt-row">
-                      <span>Content</span>
-                      <strong>{transferReceipt.note}</strong>
-                    </div>
-                    <div className="transfer-receipt-row">
-                      <span>Status</span>
-                      <strong className="transfer-receipt-status">
-                        {transferReceipt.status}
-                      </strong>
-                    </div>
-                  </div>
+                  <TransactionReceiptCard receipt={transferReceipt} />
                 )}
                 <div className="transfer-actions">
                   <button
@@ -2249,7 +2809,44 @@ function DashboardView() {
         </div>
       )}
 
-      {copilotOpen && (
+      {selectedTransactionReceipt && (
+        <div
+          className="modal-overlay"
+          onClick={() => setSelectedTransactionReceipt(null)}
+        >
+          <div
+            className="modal-card transfer-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="card-details-head">
+              <h3>Transaction Details</h3>
+              <button
+                type="button"
+                className="card-details-close"
+                onClick={() => setSelectedTransactionReceipt(null)}
+              >
+                x
+              </button>
+            </div>
+            <div className="transfer-body transfer-success">
+              <div className="transfer-success-icon">OK</div>
+              <h4>Transaction Detail</h4>
+              <TransactionReceiptCard receipt={selectedTransactionReceipt} />
+              <div className="transfer-actions">
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() => setSelectedTransactionReceipt(null)}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {false && copilotOpen && (
         <div
           className="modal-overlay"
           onClick={() => {
@@ -2263,10 +2860,13 @@ function DashboardView() {
           >
             <div className="ai-copilot-head">
               <div className="ai-copilot-head-copy">
-                <div className="ai-copilot-kicker">Live Financial Assistant</div>
+                <div className="ai-copilot-kicker">
+                  Live Financial Assistant
+                </div>
                 <h3>Ask Financial Copilot</h3>
                 <div className="ai-agent-copy">
-                  Ask about exchange rates, gold, stocks, Bitcoin, spending, savings targets, or transfer readiness.
+                  Ask about exchange rates, gold, stocks, Bitcoin, spending,
+                  savings targets, or transfer readiness.
                 </div>
                 <div className="ai-copilot-status">
                   Live quotes for FX, gold, crypto, and selected stocks
@@ -2278,125 +2878,135 @@ function DashboardView() {
                 onClick={() => setCopilotOpen(false)}
                 aria-label="Close AI Copilot"
               >
-                Ã¢Å“â€¢
+                x
               </button>
             </div>
 
             <div className="ai-copilot-body">
-            <div className="ai-copilot-thread-wrap">
-              <div className="ai-copilot-section-title">Conversation</div>
-              <div className="ai-copilot-thread" ref={copilotThreadRef}>
-                {copilotMessages.map((message, index) => (
-                  <div
-                    key={`${message.role}-${index}-${message.content.slice(0, 24)}`}
-                    className={`ai-copilot-bubble ai-copilot-bubble-${message.role}`}
-                  >
-                    <span>{message.role === "assistant" ? "Copilot" : "You"}</span>
-                    <p>{message.content}</p>
-                  </div>
-                ))}
-                {copilotBusy && (
-                  <div className="ai-copilot-bubble ai-copilot-bubble-assistant">
-                    <span>Copilot</span>
-                    <p>Checking your wallet context and live market data...</p>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {copilotInsight && (
-              <div className="ai-copilot-insight">
-                <div className="ai-copilot-insight-head">
-                  <div>
-                    <div className="ai-copilot-kicker">Latest Insight</div>
-                    <strong>{copilotInsight.topic}</strong>
-                  </div>
-                  <div className="ai-copilot-insight-metrics">
-                    <span>Risk {copilotInsight.riskLevel}</span>
-                    <span>{Math.round(copilotInsight.confidence * 100)}% confidence</span>
-                  </div>
-                  <span>
-                    Risk {copilotInsight.riskLevel} · {Math.round(copilotInsight.confidence * 100)}% confidence
-                  </span>
+              <div className="ai-copilot-thread-wrap">
+                <div className="ai-copilot-section-title">Conversation</div>
+                <div className="ai-copilot-thread" ref={copilotThreadRef}>
+                  {copilotMessages.map((message, index) => (
+                    <div
+                      key={`${message.role}-${index}-${message.content.slice(0, 24)}`}
+                      className={`ai-copilot-bubble ai-copilot-bubble-${message.role}`}
+                    >
+                      <span>
+                        {message.role === "assistant" ? "Copilot" : "You"}
+                      </span>
+                      <p>{message.content}</p>
+                    </div>
+                  ))}
+                  {copilotBusy && (
+                    <div className="ai-copilot-bubble ai-copilot-bubble-assistant">
+                      <span>Copilot</span>
+                      <p>
+                        Checking your wallet context and live market data...
+                      </p>
+                    </div>
+                  )}
                 </div>
-                {copilotInsight.suggestedDepositAmount ? (
-                  <div className="ai-copilot-deposit-tip">
-                    Suggested deposit: $
-                    {copilotInsight.suggestedDepositAmount.toLocaleString("en-US")}
+              </div>
+
+              {copilotInsight && (
+                <div className="ai-copilot-insight">
+                  <div className="ai-copilot-insight-head">
+                    <div>
+                      <div className="ai-copilot-kicker">Latest Insight</div>
+                      <strong>{copilotInsight!.topic}</strong>
+                    </div>
+                    <div className="ai-copilot-insight-metrics">
+                      <span>Risk {copilotInsight!.riskLevel}</span>
+                      <span>
+                        {Math.round(copilotInsight!.confidence * 100)}%
+                        confidence
+                      </span>
+                    </div>
+                    <span>
+                      Risk {copilotInsight.riskLevel} ·{" "}
+                      {Math.round(copilotInsight.confidence * 100)}% confidence
+                    </span>
                   </div>
-                ) : null}
-                <div className="ai-copilot-actions">
-                  {copilotInsight.suggestedActions.map((action) => (
-                    <p key={action}>{action}</p>
+                  {copilotInsight!.suggestedDepositAmount ? (
+                    <div className="ai-copilot-deposit-tip">
+                      Suggested deposit: $
+                      {copilotInsight!.suggestedDepositAmount!.toLocaleString(
+                        "en-US",
+                      )}
+                    </div>
+                  ) : null}
+                  <div className="ai-copilot-actions">
+                    {copilotInsight!.suggestedActions.map((action) => (
+                      <p key={action}>{action}</p>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="ai-copilot-prompt-block">
+                <div className="ai-copilot-section-title">Try Asking</div>
+                <div className="ai-copilot-prompts">
+                  {[
+                    "What is the USD/VND exchange rate today?",
+                    "What is the gold price today?",
+                    "How much is Bitcoin today?",
+                    "Review my cash flow this month",
+                  ].map((prompt) => (
+                    <button
+                      key={prompt}
+                      type="button"
+                      className="pill ai-copilot-prompt"
+                      disabled={copilotBusy}
+                      onClick={() => void sendCopilotMessage(prompt)}
+                    >
+                      {prompt}
+                    </button>
                   ))}
                 </div>
               </div>
-            )}
 
-            <div className="ai-copilot-prompt-block">
-              <div className="ai-copilot-section-title">Try Asking</div>
-              <div className="ai-copilot-prompts">
-                {[
-                  "What is the USD/VND exchange rate today?",
-                  "What is the gold price today?",
-                  "How much is Bitcoin today?",
-                  "Review my cash flow this month",
-                ].map((prompt) => (
+              <div className="ai-copilot-compose">
+                <div className="ai-copilot-section-title">Your Question</div>
+                <textarea
+                  value={copilotInput}
+                  onChange={(e) => setCopilotInput(e.target.value)}
+                  placeholder="Example: What is the USD/VND exchange rate today? Or: Should I build an emergency fund first?"
+                  rows={4}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      void sendCopilotMessage();
+                    }
+                  }}
+                />
+                <div className="ai-copilot-compose-hint">
+                  Press Enter to send. Use Shift+Enter for a new line.
+                </div>
+                <div className="ai-copilot-compose-actions">
                   <button
-                    key={prompt}
                     type="button"
-                    className="pill ai-copilot-prompt"
+                    className="pill ai-copilot-secondary"
                     disabled={copilotBusy}
-                    onClick={() => void sendCopilotMessage(prompt)}
+                    onClick={resetCopilotSession}
                   >
-                    {prompt}
+                    New Chat
                   </button>
-                ))}
+                  <button
+                    type="button"
+                    className="btn-primary ai-copilot-primary"
+                    disabled={copilotBusy || !copilotInput.trim()}
+                    onClick={() => void sendCopilotMessage()}
+                  >
+                    {copilotBusy ? "Thinking..." : "Ask Assistant"}
+                  </button>
+                </div>
               </div>
-            </div>
-
-            <div className="ai-copilot-compose">
-              <div className="ai-copilot-section-title">Your Question</div>
-              <textarea
-                value={copilotInput}
-                onChange={(e) => setCopilotInput(e.target.value)}
-                placeholder="Example: What is the USD/VND exchange rate today? Or: Should I build an emergency fund first?"
-                rows={4}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    void sendCopilotMessage();
-                  }
-                }}
-              />
-              <div className="ai-copilot-compose-hint">
-                Press Enter to send. Use Shift+Enter for a new line.
-              </div>
-              <div className="ai-copilot-compose-actions">
-                <button
-                  type="button"
-                  className="pill ai-copilot-secondary"
-                  disabled={copilotBusy}
-                  onClick={resetCopilotSession}
-                >
-                  New Chat
-                </button>
-                <button
-                  type="button"
-                  className="btn-primary ai-copilot-primary"
-                  disabled={copilotBusy || !copilotInput.trim()}
-                  onClick={() => void sendCopilotMessage()}
-                >
-                  {copilotBusy ? "Thinking..." : "Ask Assistant"}
-                </button>
-              </div>
-            </div>
             </div>
           </div>
         </div>
       )}
 
-      {depositAgentOpen && (
+      {false && depositAgentOpen && (
         <div
           className="modal-overlay"
           onClick={() => {
@@ -2415,11 +3025,12 @@ function DashboardView() {
                 className="card-details-close"
                 onClick={() => setDepositAgentOpen(false)}
               >
-                âœ•
+                x
               </button>
             </div>
             <div className="ai-agent-copy">
-              Describe why you want to top up this wallet and the agent will suggest a practical amount.
+              Describe why you want to top up this wallet and the agent will
+              suggest a practical amount.
             </div>
             <label className="form-group">
               <span>Funding goal</span>
@@ -2463,24 +3074,31 @@ function DashboardView() {
                   <div>
                     <span>Recommended top-up</span>
                     <strong>
-                      ${depositAgentPlan.recommendedAmount.toLocaleString("en-US")}
+                      $
+                      {depositAgentPlan!.recommendedAmount.toLocaleString(
+                        "en-US",
+                      )}
                     </strong>
                   </div>
                   <div>
                     <span>Confidence</span>
-                    <strong>{Math.round(depositAgentPlan.confidence * 100)}%</strong>
+                    <strong>
+                      {Math.round(depositAgentPlan!.confidence * 100)}%
+                    </strong>
                   </div>
                   <div>
                     <span>Risk</span>
-                    <strong>{depositAgentPlan.riskLevel}</strong>
+                    <strong>{depositAgentPlan!.riskLevel}</strong>
                   </div>
                 </div>
                 <div className="ai-agent-plan-body">
-                  {depositAgentPlan.reasoning.map((item) => (
+                  {depositAgentPlan!.reasoning.map((item) => (
                     <p key={item}>{item}</p>
                   ))}
                 </div>
-                <div className="ai-agent-next">{depositAgentPlan.nextAction}</div>
+                <div className="ai-agent-next">
+                  {depositAgentPlan!.nextAction}
+                </div>
               </div>
             )}
 
@@ -2500,7 +3118,9 @@ function DashboardView() {
                 onClick={() =>
                   void (async () => {
                     if (!depositAgentPlan) return;
-                    const ok = await executeDeposit(depositAgentPlan.recommendedAmount);
+                    const ok = await executeDeposit(
+                      depositAgentPlan.recommendedAmount,
+                    );
                     if (ok) {
                       setDepositAgentOpen(false);
                     }
@@ -2514,6 +3134,45 @@ function DashboardView() {
         </div>
       )}
     </section>
+  );
+}
+
+function TransactionReceiptCard({ receipt }: { receipt: TransactionReceipt }) {
+  return (
+    <div className="transfer-receipt">
+      <div className="transfer-receipt-row">
+        <span>Transaction ID</span>
+        <strong>{receipt.txId}</strong>
+      </div>
+      <div className="transfer-receipt-row">
+        <span>Execution Time</span>
+        <strong>{receipt.executedAt}</strong>
+      </div>
+      <div className="transfer-receipt-row">
+        <span>From Account</span>
+        <strong>{receipt.fromAccount}</strong>
+      </div>
+      <div className="transfer-receipt-row">
+        <span>To Account</span>
+        <strong>{receipt.toAccount}</strong>
+      </div>
+      <div className="transfer-receipt-row">
+        <span>Amount</span>
+        <strong>${receipt.amountUsd}</strong>
+      </div>
+      <div className="transfer-receipt-row">
+        <span>Transfer Fee</span>
+        <strong>${receipt.feeUsd}</strong>
+      </div>
+      <div className="transfer-receipt-row">
+        <span>Content</span>
+        <strong>{receipt.note}</strong>
+      </div>
+      <div className="transfer-receipt-row">
+        <span>Status</span>
+        <strong className="transfer-receipt-status">{receipt.status}</strong>
+      </div>
+    </div>
   );
 }
 
@@ -2897,7 +3556,7 @@ const recentTransfers = [
   },
 ];
 
-function CardCenterView() {
+function LegacyCardCenterView() {
   const { user } = useAuth();
   const { toast } = useToast();
   const [cardList, setCardList] = useState(initialCardList);
@@ -3247,6 +3906,715 @@ function CardCenterView() {
   );
 }
 
+type CardCenterCard = {
+  id: string;
+  type: "Mastercard" | "Visa" | "Payoneer" | "Skrill";
+  bank: string;
+  holder: string;
+  number: string;
+  last4: string;
+  expiryMonth: string;
+  expiryYear: string;
+  status: "ACTIVE" | "FROZEN";
+  isPrimary: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type CardCenterActivity = {
+  id: string;
+  title: string;
+  date: string;
+  amountLabel: string;
+  amountValue: number;
+  positive: boolean;
+};
+
+const CARD_CENTER_TYPES: CardCenterCard["type"][] = [
+  "Mastercard",
+  "Visa",
+  "Payoneer",
+  "Skrill",
+];
+
+function CardCenterView() {
+  const { user, token } = useAuth();
+  const { toast } = useToast();
+  const [cardList, setCardList] = useState<CardCenterCard[]>([]);
+  const [walletBalance, setWalletBalance] = useState(0);
+  const [walletCurrency, setWalletCurrency] = useState("USD");
+  const [recentCardActivity, setRecentCardActivity] = useState<
+    CardCenterActivity[]
+  >([]);
+  const [cardsBusy, setCardsBusy] = useState(false);
+  const [cardActionBusyId, setCardActionBusyId] = useState("");
+  const [addCardOpen, setAddCardOpen] = useState(false);
+  const [newCard, setNewCard] = useState({
+    type: "Mastercard" as CardCenterCard["type"],
+    bank: "",
+    number: "",
+    expiryMonth: "",
+    expiryYear: "",
+    holder: user?.name ?? "FPIPay User",
+  });
+  const [method, setMethod] = useState<CardCenterCard["type"]>("Mastercard");
+
+  const loadCardCenter = useCallback(async () => {
+    if (!token) {
+      setCardList([]);
+      setWalletBalance(0);
+      setRecentCardActivity([]);
+      return;
+    }
+
+    setCardsBusy(true);
+    try {
+      const headers = { Authorization: `Bearer ${token}` };
+      const [cardsResp, walletResp, txResp] = await Promise.all([
+        fetch(`${API_BASE}/cards`, { headers }),
+        fetch(`${API_BASE}/wallet/me`, { headers }),
+        fetch(`${API_BASE}/transactions`, { headers }),
+      ]);
+
+      const cardsData = (await cardsResp.json().catch(() => null)) as {
+        cards?: CardCenterCard[];
+        error?: string;
+      } | null;
+      const walletData = (await walletResp.json().catch(() => null)) as {
+        balance?: number;
+        currency?: string;
+        error?: string;
+      } | null;
+      const txData = (await txResp.json().catch(() => null)) as
+        | Array<{
+            id: string;
+            amount: number;
+            type: string;
+            description?: string;
+            createdAt: string;
+            metadata?: { entry?: "DEBIT" | "CREDIT" };
+          }>
+        | { error?: string }
+        | null;
+
+      if (!cardsResp.ok || !Array.isArray(cardsData?.cards)) {
+        throw new Error(cardsData?.error || "Cannot load cards");
+      }
+      if (!walletResp.ok) {
+        throw new Error(walletData?.error || "Cannot load wallet balance");
+      }
+      if (!txResp.ok || !Array.isArray(txData)) {
+        throw new Error(
+          txData && !Array.isArray(txData)
+            ? txData.error || "Cannot load activity"
+            : "Cannot load activity",
+        );
+      }
+
+      setCardList(cardsData.cards);
+      setWalletBalance(Number(walletData?.balance || 0));
+      setWalletCurrency(walletData?.currency || "USD");
+      setRecentCardActivity(
+        txData.slice(0, 6).map((tx) => {
+          const positive =
+            tx.type === "DEPOSIT" || tx.metadata?.entry === "CREDIT";
+          const amountValue = Math.abs(Number(tx.amount || 0));
+          return {
+            id: tx.id,
+            title: tx.description || tx.type,
+            date: new Date(tx.createdAt).toLocaleString("en-US", {
+              month: "short",
+              day: "2-digit",
+              year: "numeric",
+            }),
+            amountLabel: `${positive ? "+" : "-"}$${amountValue.toLocaleString(
+              "en-US",
+              {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              },
+            )}`,
+            amountValue,
+            positive,
+          };
+        }),
+      );
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Cannot load cards", "error");
+    } finally {
+      setCardsBusy(false);
+    }
+  }, [toast, token]);
+
+  useEffect(() => {
+    void loadCardCenter();
+  }, [loadCardCenter]);
+
+  useEffect(() => {
+    setNewCard((prev) => ({
+      ...prev,
+      holder: user?.name ?? prev.holder ?? "FPIPay User",
+    }));
+  }, [user?.name]);
+
+  const cardsByType = CARD_CENTER_TYPES.map((type) => ({
+    type,
+    cards: cardList.filter((card) => card.type === type),
+  }));
+  const selectedTypeCards =
+    cardsByType.find((entry) => entry.type === method)?.cards ?? [];
+  const balanceSeries = (
+    recentCardActivity.length
+      ? recentCardActivity.slice(0, 8).map((entry) => entry.amountValue)
+      : [0, 0, 0, 0, 0, 0, 0, 0]
+  ).map((value, _index, source) => {
+    const max = Math.max(...source, 1);
+    return Math.max(12, Math.round((value / max) * 100));
+  });
+  const selectedTypeShare = cardList.length
+    ? Math.round((selectedTypeCards.length / cardList.length) * 100)
+    : 0;
+  const donutSegments = cardsByType
+    .filter((entry) => entry.cards.length > 0)
+    .map((entry) => ({
+      label: `${entry.type} ${Math.round((entry.cards.length / Math.max(cardList.length, 1)) * 100)}%`,
+      color:
+        entry.type === "Mastercard"
+          ? "var(--accent)"
+          : entry.type === "Visa"
+            ? "#1a3a5c"
+            : entry.type === "Payoneer"
+              ? "var(--accent-2)"
+              : "#f59e0b",
+    }));
+
+  const submitNewCard = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token) {
+      toast("Session expired. Please login again.", "error");
+      return;
+    }
+    if (
+      !newCard.number.trim() ||
+      !newCard.bank.trim() ||
+      !newCard.expiryMonth.trim() ||
+      !newCard.expiryYear.trim()
+    ) {
+      toast("Please fill all card fields", "error");
+      return;
+    }
+
+    setCardsBusy(true);
+    try {
+      const resp = await fetch(`${API_BASE}/cards`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(newCard),
+      });
+      const data = (await resp.json().catch(() => null)) as {
+        cards?: CardCenterCard[];
+        error?: string;
+      } | null;
+      if (!resp.ok || !Array.isArray(data?.cards)) {
+        throw new Error(data?.error || "Failed to add card");
+      }
+
+      setCardList(data.cards);
+      setAddCardOpen(false);
+      setNewCard({
+        type: "Mastercard",
+        bank: "",
+        number: "",
+        expiryMonth: "",
+        expiryYear: "",
+        holder: user?.name ?? "FPIPay User",
+      });
+      toast("Card added successfully");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Failed to add card", "error");
+    } finally {
+      setCardsBusy(false);
+    }
+  };
+
+  const runCardAction = async (
+    cardId: string,
+    action: "set_primary" | "freeze" | "unfreeze" | "delete",
+  ) => {
+    if (!token) {
+      toast("Session expired. Please login again.", "error");
+      return;
+    }
+
+    setCardActionBusyId(cardId);
+    try {
+      const resp = await fetch(`${API_BASE}/cards/${cardId}`, {
+        method: action === "delete" ? "DELETE" : "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: action === "delete" ? undefined : JSON.stringify({ action }),
+      });
+
+      if (action === "delete") {
+        if (!resp.ok) {
+          const err = (await resp.json().catch(() => null)) as {
+            error?: string;
+          } | null;
+          throw new Error(err?.error || "Failed to delete card");
+        }
+        setCardList((prev) => prev.filter((card) => card.id !== cardId));
+      } else {
+        const data = (await resp.json().catch(() => null)) as {
+          cards?: CardCenterCard[];
+          error?: string;
+        } | null;
+        if (!resp.ok || !Array.isArray(data?.cards)) {
+          throw new Error(data?.error || "Failed to update card");
+        }
+        setCardList(data.cards);
+      }
+
+      toast(
+        action === "set_primary"
+          ? "Primary card updated"
+          : action === "freeze"
+            ? "Card frozen"
+            : action === "unfreeze"
+              ? "Card reactivated"
+              : "Card removed",
+      );
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Card action failed", "error");
+    } finally {
+      setCardActionBusyId("");
+    }
+  };
+
+  return (
+    <section className="grid grid-card-center">
+      <div className="card my-cards-card">
+        <div className="card-head">
+          <h3>My Cards</h3>
+          <button
+            type="button"
+            className="link-add"
+            onClick={() => setAddCardOpen(true)}
+          >
+            Add Card
+          </button>
+        </div>
+        <div className="my-cards-stack">
+          {cardList.length ? (
+            cardList.slice(0, 3).map((card) => (
+              <div key={card.id} className="card-visual mini">
+                <div className="card-chip" />
+                <div className="card-number">{card.number}</div>
+                <div className="card-name">{card.holder}</div>
+                <div className="card-valid">
+                  {card.expiryMonth}/{card.expiryYear.slice(-2)}
+                </div>
+                <div className="card-brand">
+                  {card.type} - {card.bank}
+                </div>
+                <div className="card-meta-row">
+                  {card.isPrimary ? (
+                    <span className="status-badge status-completed">
+                      Primary
+                    </span>
+                  ) : null}
+                  <span
+                    className={`status-badge ${card.status === "FROZEN" ? "status-canceled" : "status-pending"}`}
+                  >
+                    {card.status === "FROZEN" ? "Frozen" : "Active"}
+                  </span>
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="dashboard-inline-note">
+              No cards yet. Add your first card to manage it here.
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="card current-balance-card">
+        <h3>Current Balance</h3>
+        <div className="balance-value">
+          {walletCurrency === "USD" ? "$" : `${walletCurrency} `}
+          {walletBalance.toLocaleString("en-US", {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          })}
+        </div>
+        <div className="mini-bars">
+          {balanceSeries.map((height, index) => (
+            <div
+              key={index}
+              className="mini-bar"
+              style={{ height: `${height}%` }}
+            />
+          ))}
+        </div>
+        <div className="dashboard-inline-note">
+          Based on your latest wallet and transfer activity.
+        </div>
+      </div>
+
+      <div className="card payment-method-card">
+        <h3>Card Portfolio</h3>
+        <div className="method-tabs">
+          {CARD_CENTER_TYPES.map((type) => (
+            <button
+              key={type}
+              type="button"
+              className={`method-tab ${method === type ? "active" : ""}`}
+              onClick={() => setMethod(type)}
+            >
+              {type}
+            </button>
+          ))}
+        </div>
+        <div className="card-portfolio-stats">
+          <div className="card-portfolio-stat">
+            <span>Total Cards</span>
+            <strong>{selectedTypeCards.length}</strong>
+          </div>
+          <div className="card-portfolio-stat">
+            <span>Active</span>
+            <strong>
+              {
+                selectedTypeCards.filter((card) => card.status === "ACTIVE")
+                  .length
+              }
+            </strong>
+          </div>
+          <div className="card-portfolio-stat">
+            <span>Frozen</span>
+            <strong>
+              {
+                selectedTypeCards.filter((card) => card.status === "FROZEN")
+                  .length
+              }
+            </strong>
+          </div>
+        </div>
+        <div
+          className="chart-bars"
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(10px, 1fr))",
+            gap: 8,
+            alignItems: "end",
+            height: 160,
+          }}
+        >
+          {balanceSeries.map((value, index) => (
+            <div
+              key={index}
+              className="chart-bar"
+              style={{
+                width: "100%",
+                background: "#eef2ff",
+                borderRadius: 10,
+                height: 100,
+                position: "relative",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                className="chart-bar-fill"
+                style={{
+                  height: `${value}%`,
+                  width: "100%",
+                  position: "absolute",
+                  bottom: 0,
+                  left: 0,
+                  background:
+                    method === "Payoneer"
+                      ? "var(--accent)"
+                      : method === "Mastercard"
+                        ? "var(--accent-2)"
+                        : method === "Visa"
+                          ? "#1a3a5c"
+                          : "#f59e0b",
+                  borderRadius: 10,
+                }}
+              />
+            </div>
+          ))}
+        </div>
+        <div className="payment-summary">
+          <span>{method}</span>
+          <strong>Share of portfolio: {selectedTypeShare}%</strong>
+        </div>
+      </div>
+
+      <div className="card card-expenses-card">
+        <h3>Card Distribution</h3>
+        <DonutChart
+          percent={selectedTypeShare}
+          segments={
+            donutSegments.length
+              ? donutSegments
+              : [{ label: "No cards yet", color: "var(--accent)" }]
+          }
+        />
+      </div>
+
+      <div className="card card-list-card span-2">
+        <div className="card-head">
+          <h3>Card List</h3>
+          <button
+            type="button"
+            className="pill"
+            disabled={cardsBusy}
+            onClick={() => void loadCardCenter()}
+          >
+            {cardsBusy ? "Refreshing..." : "Refresh"}
+          </button>
+        </div>
+        <div className="transactions-table-wrap">
+          <table className="transactions-table">
+            <thead>
+              <tr>
+                <th>Card Type</th>
+                <th>Status</th>
+                <th>Bank</th>
+                <th>Card Number</th>
+                <th>Card Holder</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {cardList.length ? (
+                cardList.map((card) => (
+                  <tr key={card.id}>
+                    <td>{card.type}</td>
+                    <td>
+                      {card.isPrimary ? (
+                        <span className="status-badge status-completed">
+                          Primary
+                        </span>
+                      ) : (
+                        <span className="status-badge status-pending">
+                          Saved
+                        </span>
+                      )}
+                    </td>
+                    <td className="muted">{card.bank}</td>
+                    <td>{card.number}</td>
+                    <td>{card.holder}</td>
+                    <td>
+                      <div className="card-actions-inline">
+                        {!card.isPrimary ? (
+                          <button
+                            type="button"
+                            className="tx-detail-btn"
+                            disabled={cardActionBusyId === card.id}
+                            onClick={() =>
+                              void runCardAction(card.id, "set_primary")
+                            }
+                          >
+                            Primary
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="tx-detail-btn"
+                          disabled={cardActionBusyId === card.id}
+                          onClick={() =>
+                            void runCardAction(
+                              card.id,
+                              card.status === "ACTIVE" ? "freeze" : "unfreeze",
+                            )
+                          }
+                        >
+                          {card.status === "ACTIVE" ? "Freeze" : "Unfreeze"}
+                        </button>
+                        <button
+                          type="button"
+                          className="tx-detail-btn danger"
+                          disabled={cardActionBusyId === card.id}
+                          onClick={() => void runCardAction(card.id, "delete")}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={6} className="muted">
+                    No cards saved for this account yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {addCardOpen && (
+        <div className="modal-overlay" onClick={() => setAddCardOpen(false)}>
+          <div
+            className="modal-card card-center-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3>Add Card</h3>
+            <form onSubmit={submitNewCard}>
+              <div className="form-group">
+                <label>Card Type</label>
+                <select
+                  value={newCard.type}
+                  onChange={(e) =>
+                    setNewCard((prev) => ({
+                      ...prev,
+                      type: e.target.value as CardCenterCard["type"],
+                    }))
+                  }
+                >
+                  {CARD_CENTER_TYPES.map((type) => (
+                    <option key={type} value={type}>
+                      {type}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="form-group">
+                <label>Bank</label>
+                <input
+                  type="text"
+                  value={newCard.bank}
+                  onChange={(e) =>
+                    setNewCard((prev) => ({ ...prev, bank: e.target.value }))
+                  }
+                  placeholder="Bank name"
+                  required
+                />
+              </div>
+              <div className="form-group">
+                <label>Card Number</label>
+                <input
+                  type="text"
+                  value={newCard.number}
+                  onChange={(e) =>
+                    setNewCard((prev) => ({
+                      ...prev,
+                      number: e.target.value
+                        .replace(/[^\d\s]/g, "")
+                        .slice(0, 19),
+                    }))
+                  }
+                  placeholder="1234 5678 9012 3456"
+                  required
+                />
+              </div>
+              <div className="card-form-grid">
+                <div className="form-group">
+                  <label>Expiry Month</label>
+                  <input
+                    type="text"
+                    value={newCard.expiryMonth}
+                    onChange={(e) =>
+                      setNewCard((prev) => ({
+                        ...prev,
+                        expiryMonth: e.target.value
+                          .replace(/\D/g, "")
+                          .slice(0, 2),
+                      }))
+                    }
+                    placeholder="MM"
+                    required
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Expiry Year</label>
+                  <input
+                    type="text"
+                    value={newCard.expiryYear}
+                    onChange={(e) =>
+                      setNewCard((prev) => ({
+                        ...prev,
+                        expiryYear: e.target.value
+                          .replace(/\D/g, "")
+                          .slice(0, 4),
+                      }))
+                    }
+                    placeholder="YYYY"
+                    required
+                  />
+                </div>
+              </div>
+              <div className="form-group">
+                <label>Card Holder</label>
+                <input
+                  type="text"
+                  value={newCard.holder}
+                  onChange={(e) =>
+                    setNewCard((prev) => ({ ...prev, holder: e.target.value }))
+                  }
+                  required
+                />
+              </div>
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="pill"
+                  onClick={() => setAddCardOpen(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="btn-primary"
+                  disabled={cardsBusy}
+                >
+                  {cardsBusy ? "Saving..." : "Add Card"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      <div className="card recent-transfer-card">
+        <h3>Recent Activity</h3>
+        <div className="recent-transfer-list">
+          {recentCardActivity.length ? (
+            recentCardActivity.map((activity) => (
+              <div key={activity.id} className="recent-transfer-row">
+                <div className="recent-transfer-avatar">
+                  {activity.title.slice(0, 1).toUpperCase()}
+                </div>
+                <div className="recent-transfer-info">
+                  <span>{activity.title}</span>
+                  <span className="muted">{activity.date}</span>
+                </div>
+                <span
+                  className={`recent-transfer-amount ${activity.positive ? "positive" : "negative"}`}
+                >
+                  {activity.amountLabel}
+                </span>
+              </div>
+            ))
+          ) : (
+            <div className="dashboard-inline-note">
+              No recent account activity is available yet.
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function AccountsView() {
   return (
     <section className="grid grid-accounts">
@@ -3352,9 +4720,9 @@ function AccountsView() {
   );
 }
 
-const SETTING_PROFILE_KEY = "moneyfarm_profile";
-const PROFILE_AVATAR_KEY = "moneyfarm_profile_avatar";
-const SETTING_SECURITY_KEY = "moneyfarm_security";
+const SETTING_PROFILE_KEY = "fpipay_profile";
+const PROFILE_AVATAR_KEY = "fpipay_profile_avatar";
+const SETTING_SECURITY_KEY = "fpipay_security";
 type ProfileForm = {
   name: string;
   userName: string;
@@ -3684,11 +5052,7 @@ function SettingView() {
               <p className="muted">Dark mode is fixed for this project.</p>
               <div className="setting-row toggle-row">
                 <span>Enable dark mode</span>
-                <Toggle
-                  id="pref-theme"
-                  checked
-                  onChange={() => {}}
-                />
+                <Toggle id="pref-theme" checked onChange={() => {}} />
               </div>
             </div>
             <div className="setting-block">
@@ -3938,18 +5302,16 @@ function MyProfileView() {
         const resp = await fetch(`${API_BASE}/auth/me`, {
           headers: { Authorization: `Bearer ${token}` },
         });
-        const data = (await resp.json().catch(() => null)) as
-          | {
-              error?: string;
-              fullName?: string;
-              email?: string;
-              phone?: string;
-              address?: string;
-              dob?: string;
-              avatar?: string;
-              metadata?: Record<string, unknown>;
-            }
-          | null;
+        const data = (await resp.json().catch(() => null)) as {
+          error?: string;
+          fullName?: string;
+          email?: string;
+          phone?: string;
+          address?: string;
+          dob?: string;
+          avatar?: string;
+          metadata?: Record<string, unknown>;
+        } | null;
         if (!resp.ok) {
           if (isAuthExpired(resp.status, data?.error)) {
             toast("Session expired. Please sign in again.", "error");
@@ -3983,9 +5345,9 @@ function MyProfileView() {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!walletResp.ok) {
-          const walletErr = (await walletResp.json().catch(() => null)) as
-            | { error?: string }
-            | null;
+          const walletErr = (await walletResp.json().catch(() => null)) as {
+            error?: string;
+          } | null;
           if (isAuthExpired(walletResp.status, walletErr?.error)) {
             toast("Session expired. Please sign in again.", "error");
             logout();
@@ -3994,9 +5356,9 @@ function MyProfileView() {
           return;
         }
         if (walletResp.ok) {
-          const walletData = (await walletResp.json().catch(() => null)) as
-            | { accountNumber?: string }
-            | null;
+          const walletData = (await walletResp.json().catch(() => null)) as {
+            accountNumber?: string;
+          } | null;
           setAccountNumber(walletData?.accountNumber || "");
         }
       } catch {
@@ -4030,9 +5392,11 @@ function MyProfileView() {
           },
         }),
       });
-      const data = (await resp.json().catch(() => null)) as
-        | { error?: string; fullName?: string; email?: string }
-        | null;
+      const data = (await resp.json().catch(() => null)) as {
+        error?: string;
+        fullName?: string;
+        email?: string;
+      } | null;
       if (!resp.ok) {
         if (isAuthExpired(resp.status, data?.error)) {
           toast("Session expired. Please sign in again.", "error");
@@ -4097,7 +5461,11 @@ function MyProfileView() {
           onClick={openAvatarPicker}
           aria-label="Change profile image"
         >
-          <img src={avatarUrl} alt="Profile avatar" className="setting-avatar" />
+          <img
+            src={avatarUrl}
+            alt="Profile avatar"
+            className="setting-avatar"
+          />
           <span className="setting-avatar-edit">Edit</span>
           <input
             ref={fileInputRef}
@@ -4111,7 +5479,9 @@ function MyProfileView() {
           <h2>{profile.name || "User"}</h2>
           <p>{profile.email}</p>
           <div className="user-profile-meta">
-            <span className="user-profile-pill">Role: {user?.role ?? "USER"}</span>
+            <span className="user-profile-pill">
+              Role: {user?.role ?? "USER"}
+            </span>
             <span className="user-profile-pill">
               Account: {accountNumber || "Not available"}
             </span>
@@ -4125,7 +5495,9 @@ function MyProfileView() {
           <input
             type="text"
             value={profile.name}
-            onChange={(e) => setProfile((p) => ({ ...p, name: e.target.value }))}
+            onChange={(e) =>
+              setProfile((p) => ({ ...p, name: e.target.value }))
+            }
           />
         </div>
         <div className="form-group">
@@ -4133,7 +5505,9 @@ function MyProfileView() {
           <input
             type="text"
             value={profile.userName}
-            onChange={(e) => setProfile((p) => ({ ...p, userName: e.target.value }))}
+            onChange={(e) =>
+              setProfile((p) => ({ ...p, userName: e.target.value }))
+            }
           />
         </div>
         <div className="form-group">
@@ -4141,7 +5515,9 @@ function MyProfileView() {
           <input
             type="email"
             value={profile.email}
-            onChange={(e) => setProfile((p) => ({ ...p, email: e.target.value }))}
+            onChange={(e) =>
+              setProfile((p) => ({ ...p, email: e.target.value }))
+            }
           />
         </div>
         <div className="form-group">
@@ -4149,7 +5525,9 @@ function MyProfileView() {
           <input
             type="text"
             value={profile.phone}
-            onChange={(e) => setProfile((p) => ({ ...p, phone: e.target.value }))}
+            onChange={(e) =>
+              setProfile((p) => ({ ...p, phone: e.target.value }))
+            }
           />
         </div>
         <div className="form-group">
@@ -4172,7 +5550,9 @@ function MyProfileView() {
           <input
             type="text"
             value={profile.address}
-            onChange={(e) => setProfile((p) => ({ ...p, address: e.target.value }))}
+            onChange={(e) =>
+              setProfile((p) => ({ ...p, address: e.target.value }))
+            }
           />
         </div>
       </div>
@@ -4342,43 +5722,95 @@ function LicenseView() {
 
 function NotificationsView({
   notifications,
+  busy,
+  error,
+  onMarkRead,
+  onMarkAllRead,
 }: {
-  notifications: { type: string; message: string }[];
+  notifications: Array<ActivityNotification & { read: boolean }>;
+  busy: boolean;
+  error: string;
+  onMarkRead: (id: string) => void;
+  onMarkAllRead: () => void;
 }) {
-  const [filter, setFilter] = useState<
-    "all" | "transactions" | "security" | "offers"
-  >("all");
+  const [filter, setFilter] = useState<"all" | "transactions" | "security">(
+    "all",
+  );
 
   const filtered = notifications.filter(
     (n) => filter === "all" || n.type === filter,
   );
+  const unreadCount = notifications.filter((n) => !n.read).length;
 
   return (
     <section className="card notifications-card">
       <div className="card-head">
-        <h3>Notifications</h3>
-        <select
-          className="pill"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value as typeof filter)}
-        >
-          <option value="all">All</option>
-          <option value="transactions">Transactions</option>
-          <option value="security">Security</option>
-          <option value="offers">Offers</option>
-        </select>
+        <div>
+          <h3>Activity Notifications</h3>
+          <p className="muted">
+            Balance movements and security events for this account.
+          </p>
+        </div>
+        <div className="notifications-head-actions">
+          <select
+            className="pill"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value as typeof filter)}
+          >
+            <option value="all">All</option>
+            <option value="transactions">Balance</option>
+            <option value="security">Security</option>
+          </select>
+          <button
+            type="button"
+            className="pill tiny"
+            onClick={onMarkAllRead}
+            disabled={unreadCount === 0}
+          >
+            Mark all read
+          </button>
+        </div>
       </div>
       <div className="notifications-list">
-        {filtered.map((n, i) => (
-          <div key={i} className="notification-row">
-            <div className={`notif-pill notif-${n.type}`}>{n.type}</div>
-            <div>{n.message}</div>
-            <button type="button" className="pill tiny">
-              Mark read
+        {busy && notifications.length === 0 && (
+          <p className="muted">Loading activity...</p>
+        )}
+        {!busy && error && notifications.length === 0 && (
+          <p className="muted">{error}</p>
+        )}
+        {filtered.map((n) => (
+          <div
+            key={n.id}
+            className={`notification-row ${!n.read ? "unread" : ""}`}
+          >
+            <div className="notification-main">
+              <div className="notification-topline">
+                <div className={`notif-pill notif-${n.type}`}>
+                  {n.type === "transactions" ? "Balance" : "Security"}
+                </div>
+                <span className="notification-time">{n.timeLabel}</span>
+              </div>
+              <strong>{n.title}</strong>
+              <div className="notification-message">{n.message}</div>
+            </div>
+            <div
+              className={`notification-amount ${n.amountTone ? `notification-amount-${n.amountTone}` : ""}`}
+            >
+              {n.amountText || "--"}
+            </div>
+            <button
+              type="button"
+              className="pill tiny"
+              onClick={() => onMarkRead(n.id)}
+              disabled={n.read}
+            >
+              {n.read ? "Read" : "Mark read"}
             </button>
           </div>
         ))}
-        {filtered.length === 0 && <p className="muted">No notifications.</p>}
+        {!busy && filtered.length === 0 && (
+          <p className="muted">No notifications for this filter.</p>
+        )}
       </div>
     </section>
   );
@@ -4466,6 +5898,7 @@ const PAGE_TITLE: Record<string, string> = {
 function App() {
   const {
     user,
+    token,
     logout,
     requestLoginOtp,
     verifyLoginOtp,
@@ -4473,18 +5906,57 @@ function App() {
     verifyRegisterOtp,
     requestPasswordResetOtp,
     resetPasswordWithOtp,
+    respondToSessionAlert,
   } = useAuth();
   const { toast } = useToast();
   const [activeTab, setActiveTab] = useState("Dashboard");
   const [showNotifications, setShowNotifications] = useState(false);
   const [notificationFilter, setNotificationFilter] = useState<
-    "all" | "transactions" | "security" | "offers"
+    "all" | "transactions" | "security"
   >("all");
+  const [showAllNotificationsInDropdown, setShowAllNotificationsInDropdown] =
+    useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
   const supportMenuRef = useRef<HTMLDivElement>(null);
+  const notificationMenuRef = useRef<HTMLDivElement>(null);
   const [invoicesExpanded, setInvoicesExpanded] = useState(false);
   const [utilitiesExpanded, setUtilitiesExpanded] = useState(false);
+  const [activityNotifications, setActivityNotifications] = useState<
+    ActivityNotification[]
+  >([]);
+  const [notificationsBusy, setNotificationsBusy] = useState(false);
+  const [notificationsError, setNotificationsError] = useState("");
+  const [readNotificationIds, setReadNotificationIds] = useState<string[]>([]);
+  const [pendingSessionAlert, setPendingSessionAlert] =
+    useState<SessionReplacementAlert | null>(() => {
+      try {
+        const raw = sessionStorage.getItem(
+          SESSION_REPLACEMENT_ALERT_STORAGE_KEY,
+        );
+        if (!raw) return null;
+        const parsed = JSON.parse(raw) as Partial<SessionReplacementAlert>;
+        if (
+          !parsed ||
+          typeof parsed.token !== "string" ||
+          typeof parsed.email !== "string"
+        ) {
+          return null;
+        }
+        return {
+          token: parsed.token,
+          email: parsed.email,
+          issuedAt:
+            typeof parsed.issuedAt === "string" ? parsed.issuedAt : undefined,
+          ipAddress:
+            typeof parsed.ipAddress === "string" ? parsed.ipAddress : undefined,
+          userAgent:
+            typeof parsed.userAgent === "string" ? parsed.userAgent : undefined,
+        };
+      } catch {
+        return null;
+      }
+    });
 
   const isInvoicesActive =
     activeTab === "Invoice List" || activeTab === "Create Invoices";
@@ -4492,27 +5964,89 @@ function App() {
   const utilitiesExpandedShow = utilitiesExpanded;
 
   useEffect(() => {
-    const close = (e: MouseEvent) => {
-      const target = e.target as Node;
+    const close = (event: MouseEvent | TouchEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (
+        notificationMenuRef.current &&
+        !notificationMenuRef.current.contains(target)
+      ) {
+        setShowNotifications(false);
+        setShowAllNotificationsInDropdown(false);
+      }
       if (userMenuRef.current && !userMenuRef.current.contains(target))
         setUserMenuOpen(false);
       if (supportMenuRef.current && !supportMenuRef.current.contains(target)) {
         setUtilitiesExpanded(false);
       }
     };
-    document.addEventListener("click", close);
-    return () => document.removeEventListener("click", close);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setShowNotifications(false);
+        setShowAllNotificationsInDropdown(false);
+        setUserMenuOpen(false);
+        setUtilitiesExpanded(false);
+      }
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("touchstart", close, { passive: true });
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("touchstart", close);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
   }, []);
 
   useEffect(() => {
     if (user) {
       setActiveTab("Dashboard");
+      setPendingSessionAlert(null);
     }
   }, [user?.id]);
 
   useEffect(() => {
-    const onSessionExpired = () => {
-      toast("Your login session has expired. Please sign in again.", "error");
+    if (!showNotifications) {
+      setShowAllNotificationsInDropdown(false);
+    }
+  }, [showNotifications]);
+
+  useEffect(() => {
+    setShowAllNotificationsInDropdown(false);
+  }, [notificationFilter]);
+
+  useEffect(() => {
+    try {
+      if (pendingSessionAlert) {
+        sessionStorage.setItem(
+          SESSION_REPLACEMENT_ALERT_STORAGE_KEY,
+          JSON.stringify(pendingSessionAlert),
+        );
+      } else {
+        sessionStorage.removeItem(SESSION_REPLACEMENT_ALERT_STORAGE_KEY);
+      }
+    } catch {
+      // ignore storage permission errors
+    }
+  }, [pendingSessionAlert]);
+
+  useEffect(() => {
+    const onSessionExpired = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          reason?: "expired" | "replaced";
+          sessionAlert?: SessionReplacementAlert;
+        }>
+      ).detail;
+      if (detail?.reason === "replaced" && detail.sessionAlert) {
+        setPendingSessionAlert(detail.sessionAlert);
+      }
+      toast(
+        detail?.reason === "replaced"
+          ? "This account was signed in on another device. This device has been signed out."
+          : "Your login session has expired. Please sign in again.",
+        "error",
+      );
     };
     window.addEventListener("auth:session-expired", onSessionExpired);
     return () => {
@@ -4520,9 +6054,256 @@ function App() {
     };
   }, [toast]);
 
+  const formatNotificationTime = useCallback((value: string) => {
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return "Just now";
+    const diffMs = Date.now() - parsed.getTime();
+    const diffMinutes = Math.max(0, Math.round(diffMs / 60000));
+
+    if (diffMinutes < 1) return "Just now";
+    if (diffMinutes < 60) return `${diffMinutes}m ago`;
+    if (diffMinutes < 24 * 60) {
+      const diffHours = Math.round(diffMinutes / 60);
+      return `${diffHours}h ago`;
+    }
+
+    return parsed.toLocaleString("en-US", {
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }, []);
+
+  const formatCurrencyAmount = useCallback((amount: number) => {
+    return `$${Math.abs(amount).toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
+  }, []);
+
+  const notificationReadStorageKey = user?.id
+    ? `${NOTIFICATION_READ_STORAGE_PREFIX}_${user.id}`
+    : "";
+
+  useEffect(() => {
+    if (!notificationReadStorageKey) {
+      setReadNotificationIds([]);
+      return;
+    }
+    try {
+      const raw = localStorage.getItem(notificationReadStorageKey);
+      if (!raw) {
+        setReadNotificationIds([]);
+        return;
+      }
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        setReadNotificationIds(
+          parsed.filter((value): value is string => typeof value === "string"),
+        );
+        return;
+      }
+    } catch {
+      // ignore storage permission errors
+    }
+    setReadNotificationIds([]);
+  }, [notificationReadStorageKey]);
+
+  useEffect(() => {
+    if (!notificationReadStorageKey) return;
+    try {
+      localStorage.setItem(
+        notificationReadStorageKey,
+        JSON.stringify(readNotificationIds),
+      );
+    } catch {
+      // ignore storage permission errors
+    }
+  }, [notificationReadStorageKey, readNotificationIds]);
+
+  const loadNotifications = useCallback(
+    async (options?: { silent?: boolean }) => {
+      if (!token || !user) {
+        setActivityNotifications([]);
+        setNotificationsError("");
+        setNotificationsBusy(false);
+        return;
+      }
+
+      if (!options?.silent) {
+        setNotificationsBusy(true);
+      }
+
+      const headers = { Authorization: `Bearer ${token}` };
+      let nextNotifications: ActivityNotification[] = [];
+      let hasSuccess = false;
+
+      try {
+        const [txResp, securityResp] = await Promise.all([
+          fetch(`${API_BASE}/transactions`, { headers }),
+          fetch(`${API_BASE}/security/overview`, { headers }),
+        ]);
+
+        if (txResp.ok) {
+          const txs = (await txResp.json()) as Array<{
+            id: string;
+            amount: number;
+            type: string;
+            status?: string;
+            description?: string;
+            createdAt: string;
+            metadata?: {
+              entry?: "DEBIT" | "CREDIT";
+              fromAccount?: string;
+              toAccount?: string;
+              source?: string;
+            };
+          }>;
+
+          hasSuccess = true;
+          nextNotifications = nextNotifications.concat(
+            txs
+              .filter(
+                (tx) =>
+                  (tx.status || "COMPLETED").toUpperCase() === "COMPLETED",
+              )
+              .slice(0, 20)
+              .map((tx) => {
+                const isCredit =
+                  tx.type === "DEPOSIT" || tx.metadata?.entry === "CREDIT";
+                const signedAmount = `${isCredit ? "+" : "-"}${formatCurrencyAmount(
+                  Number(tx.amount || 0),
+                )}`;
+                const title =
+                  tx.type === "DEPOSIT"
+                    ? "Deposit received"
+                    : isCredit
+                      ? "Incoming transfer"
+                      : "Outgoing transfer";
+                const detail = tx.description?.trim();
+                const message = detail
+                  ? `${isCredit ? "Your balance increased" : "Your balance decreased"} by ${signedAmount}. ${detail}.`
+                  : `${isCredit ? "Your balance increased" : "Your balance decreased"} by ${signedAmount}.`;
+
+                return {
+                  id: `tx:${tx.id}`,
+                  type: "transactions" as const,
+                  title,
+                  message,
+                  createdAt: tx.createdAt,
+                  timeLabel: formatNotificationTime(tx.createdAt),
+                  amountText: signedAmount,
+                  amountTone: isCredit ? "positive" : "negative",
+                };
+              }),
+          );
+        }
+
+        if (securityResp.ok) {
+          const overview =
+            (await securityResp.json()) as SecurityOverviewResponse;
+          hasSuccess = true;
+          nextNotifications = nextNotifications.concat(
+            overview.alerts.slice(0, 10).map((alert, index) => ({
+              id: `security:${alert.id || index}`,
+              type: "security" as const,
+              title: alert.title || "Security activity detected",
+              message:
+                `${alert.detail || "Security activity was recorded on this account."}` +
+                `${alert.location ? ` (${alert.location})` : ""}`,
+              createdAt: alert.occurredAt || new Date().toISOString(),
+              timeLabel: formatNotificationTime(
+                alert.occurredAt || new Date().toISOString(),
+              ),
+            })),
+          );
+        }
+
+        nextNotifications.sort(
+          (left, right) =>
+            new Date(right.createdAt).getTime() -
+            new Date(left.createdAt).getTime(),
+        );
+
+        setActivityNotifications(nextNotifications);
+        setNotificationsError(
+          hasSuccess ? "" : "Cannot load account notifications right now.",
+        );
+      } catch {
+        setNotificationsError("Cannot load account notifications right now.");
+        if (!hasSuccess) {
+          setActivityNotifications([]);
+        }
+      } finally {
+        setNotificationsBusy(false);
+      }
+    },
+    [formatCurrencyAmount, formatNotificationTime, token, user],
+  );
+
+  useEffect(() => {
+    if (!token || !user) {
+      setActivityNotifications([]);
+      setNotificationsError("");
+      setNotificationsBusy(false);
+      return;
+    }
+
+    void loadNotifications();
+
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void loadNotifications({ silent: true });
+      }
+    }, 15000);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void loadNotifications({ silent: true });
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [loadNotifications, token, user]);
+
+  const markNotificationRead = useCallback((id: string) => {
+    setReadNotificationIds((current) =>
+      current.includes(id) ? current : [...current, id],
+    );
+  }, []);
+
+  const markAllNotificationsRead = useCallback(() => {
+    setReadNotificationIds((current) => {
+      const merged = new Set(current);
+      for (const notification of activityNotifications) {
+        merged.add(notification.id);
+      }
+      return Array.from(merged);
+    });
+  }, [activityNotifications]);
+
+  const notifications = activityNotifications.map((notification) => ({
+    ...notification,
+    read: readNotificationIds.includes(notification.id),
+  }));
+  const unreadNotificationCount = notifications.filter((n) => !n.read).length;
+  const dropdownNotifications = notifications.filter(
+    (notification) =>
+      notificationFilter === "all" || notification.type === notificationFilter,
+  );
+  const latestDropdownNotifications = dropdownNotifications.slice(0, 3);
+  const visibleDropdownNotifications = showAllNotificationsInDropdown
+    ? dropdownNotifications
+    : latestDropdownNotifications;
+
   const displayUser = user ?? {
     name: "Guest User",
-    email: "guest@moneyfarm.app",
+    email: "guest@fpipay.app",
     avatar: "https://i.pravatar.cc/80?img=13",
   };
 
@@ -4536,6 +6317,9 @@ function App() {
         onVerifyRegisterOtp={verifyRegisterOtp}
         onRequestPasswordResetOtp={requestPasswordResetOtp}
         onResetPasswordWithOtp={resetPasswordWithOtp}
+        onRespondToSessionAlert={respondToSessionAlert}
+        pendingSessionAlert={pendingSessionAlert}
+        onClearSessionAlert={() => setPendingSessionAlert(null)}
       />
     );
   }
@@ -4551,17 +6335,10 @@ function App() {
     if (item.id === "Support") setUtilitiesExpanded(!utilitiesExpandedShow);
   };
 
-  const notifications = [
-    { type: "security", message: "New login from Chrome on MacOS" },
-    { type: "transactions", message: "Invoice INV-42015 paid" },
-    { type: "security", message: "Security: 2FA enabled" },
-    { type: "offers", message: "Cashback 5% this weekend" },
-  ];
-
   return (
     <div className="shell">
       <aside className="sidebar">
-        <div className="logo">E-Wallet Banking</div>
+        <div className="logo">FPIPay</div>
         <nav>
           {NAV_ITEMS.map((item) => {
             if (item.children) {
@@ -4633,7 +6410,7 @@ function App() {
           })}
         </nav>
         <div className="top-actions top-actions-inline">
-          <div className="bell-wrap">
+          <div className="bell-wrap" ref={notificationMenuRef}>
             <button
               type="button"
               className="bell"
@@ -4641,10 +6418,19 @@ function App() {
               aria-haspopup="true"
               aria-expanded={showNotifications}
             >
-              🔔<span className="badge">{notifications.length}</span>
+              🔔
+              {unreadNotificationCount > 0 && (
+                <span className="badge">{unreadNotificationCount}</span>
+              )}
             </button>
             {showNotifications && (
               <div className="notif-dropdown">
+                <div className="notif-dropdown-head">
+                  <strong>Account activity</strong>
+                  <span className="muted">
+                    {unreadNotificationCount} unread
+                  </span>
+                </div>
                 <div className="notif-filter">
                   <select
                     value={notificationFilter}
@@ -4655,32 +6441,79 @@ function App() {
                     }
                   >
                     <option value="all">All</option>
-                    <option value="transactions">Transactions</option>
+                    <option value="transactions">Balance</option>
                     <option value="security">Security</option>
-                    <option value="offers">Offers</option>
                   </select>
                 </div>
-                {notifications
-                  .filter(
-                    (n) =>
-                      notificationFilter === "all" ||
-                      n.type === notificationFilter,
-                  )
-                  .map((n, i) => (
-                    <div key={i} className="notif-row">
-                      <strong style={{ textTransform: "capitalize" }}>
-                        {n.type}
-                      </strong>
-                      <div>{n.message}</div>
-                    </div>
+                {notificationsBusy && notifications.length === 0 && (
+                  <div className="notif-empty">Loading activity...</div>
+                )}
+                {!notificationsBusy &&
+                  visibleDropdownNotifications.map((notification) => (
+                    <button
+                      key={notification.id}
+                      type="button"
+                      className={`notif-row ${!notification.read ? "unread" : ""}`}
+                      onClick={() => {
+                        markNotificationRead(notification.id);
+                        setActiveTab("Notifications");
+                        setShowNotifications(false);
+                      }}
+                    >
+                      <div className="notif-row-head">
+                        <span
+                          className={`notif-pill notif-${notification.type}`}
+                        >
+                          {notification.type === "transactions"
+                            ? "Balance"
+                            : "Security"}
+                        </span>
+                        <span className="notif-time">
+                          {notification.timeLabel}
+                        </span>
+                      </div>
+                      <strong>{notification.title}</strong>
+                      <div>{notification.message}</div>
+                      {notification.amountText && (
+                        <span
+                          className={`notif-amount notif-amount-${notification.amountTone || "positive"}`}
+                        >
+                          {notification.amountText}
+                        </span>
+                      )}
+                    </button>
                   ))}
-                <button
-                  type="button"
-                  className="pill"
-                  onClick={() => setShowNotifications(false)}
-                >
-                  Mark read & close
-                </button>
+                {!notificationsBusy &&
+                  visibleDropdownNotifications.length === 0 && (
+                    <div className="notif-empty">
+                      {notificationsError || "No account activity yet."}
+                    </div>
+                  )}
+                <div className="notif-actions">
+                  <button
+                    type="button"
+                    className="pill"
+                    onClick={() => {
+                      markAllNotificationsRead();
+                      setShowNotifications(false);
+                    }}
+                    disabled={unreadNotificationCount === 0}
+                  >
+                    Mark all read
+                  </button>
+                  <button
+                    type="button"
+                    className="pill"
+                    onClick={() =>
+                      setShowAllNotificationsInDropdown((current) => !current)
+                    }
+                    disabled={dropdownNotifications.length <= 3}
+                  >
+                    {showAllNotificationsInDropdown
+                      ? "Show less"
+                      : `View all (${dropdownNotifications.length})`}
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -4751,7 +6584,13 @@ function App() {
         {activeTab === "Setting" && <SettingView />}
         {activeTab === "Knowledge base" && <KnowledgeBaseView />}
         {activeTab === "Notifications" && (
-          <NotificationsView notifications={notifications} />
+          <NotificationsView
+            notifications={notifications}
+            busy={notificationsBusy}
+            error={notificationsError}
+            onMarkRead={markNotificationRead}
+            onMarkAllRead={markAllNotificationsRead}
+          />
         )}
         {activeTab === "KYC Verification" && <KycView />}
         {![
@@ -4774,7 +6613,7 @@ function App() {
           </section>
         )}
 
-        <footer className="foot">© E-Wallet Banking by My Team</footer>
+        <footer className="foot">© FPIPay by My Team</footer>
       </main>
     </div>
   );
@@ -4784,16 +6623,11 @@ export default App;
 
 // -------- Auth Shell (shown when user is null) ----------
 type AuthShellProps = {
-  onRequestLoginOtp: (
-    email: string,
-    password: string,
-  ) => Promise<{
-    challengeId: string;
-    destination: string;
-    expiresAt: string;
-    retryAfterSeconds: number;
-  }>;
-  onVerifyLoginOtp: (challengeId: string, otp: string) => Promise<void>;
+  onRequestLoginOtp: (email: string, password: string) => Promise<LoginResult>;
+  onVerifyLoginOtp: (
+    challengeId: string,
+    otp: string,
+  ) => Promise<AuthCompletionResult>;
   onRequestRegisterOtp: (payload: {
     fullName: string;
     userName: string;
@@ -4808,7 +6642,10 @@ type AuthShellProps = {
     expiresAt: string;
     retryAfterSeconds: number;
   }>;
-  onVerifyRegisterOtp: (challengeId: string, otp: string) => Promise<void>;
+  onVerifyRegisterOtp: (
+    challengeId: string,
+    otp: string,
+  ) => Promise<AuthCompletionResult>;
   onRequestPasswordResetOtp: (email: string) => Promise<{
     challengeId: string;
     destination: string;
@@ -4821,6 +6658,20 @@ type AuthShellProps = {
     otp: string;
     newPassword: string;
   }) => Promise<void>;
+  onRespondToSessionAlert: (
+    alertToken: string,
+    action: "confirm" | "secure_account",
+  ) => Promise<{
+    status: "acknowledged" | "secured";
+    message: string;
+    email?: string;
+    destination?: string;
+    challengeId?: string;
+    expiresAt?: string;
+    retryAfterSeconds?: number;
+  }>;
+  pendingSessionAlert: SessionReplacementAlert | null;
+  onClearSessionAlert: () => void;
 };
 
 function AuthShell({
@@ -4830,15 +6681,25 @@ function AuthShell({
   onVerifyRegisterOtp,
   onRequestPasswordResetOtp,
   onResetPasswordWithOtp,
+  onRespondToSessionAlert,
+  pendingSessionAlert,
+  onClearSessionAlert,
 }: AuthShellProps) {
   useTheme();
 
   const { toast } = useToast();
   const [mode, setMode] = useState<
-    "signin" | "signinOtp" | "signup" | "signupOtp" | "forgot" | "forgotOtp" | null
+    | "signin"
+    | "signinOtp"
+    | "signup"
+    | "signupOtp"
+    | "forgot"
+    | "forgotOtp"
+    | null
   >(null);
   const [showPassword, setShowPassword] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
+  const [sessionAlertBusy, setSessionAlertBusy] = useState(false);
   const [authClock, setAuthClock] = useState(Date.now());
 
   const [signinForm, setSigninForm] = useState({ email: "", password: "" });
@@ -4897,6 +6758,16 @@ function AuthShell({
     Math.ceil((forgotResendAt - authClock) / 1000),
   );
 
+  const sessionAlertIssuedAt = pendingSessionAlert?.issuedAt
+    ? new Date(pendingSessionAlert.issuedAt).toLocaleString("en-US", {
+        month: "short",
+        day: "2-digit",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : "Just now";
+
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!signinForm.email || !signinForm.password) {
@@ -4905,14 +6776,34 @@ function AuthShell({
     }
     setAuthBusy(true);
     try {
-      const data = await onRequestLoginOtp(signinForm.email, signinForm.password);
+      const data = await onRequestLoginOtp(
+        signinForm.email,
+        signinForm.password,
+      );
+      if (data.status === "authenticated") {
+        setLoginOtpChallengeId("");
+        setLoginOtpDestination("");
+        setLoginOtpExpiresAt("");
+        setLoginOtpResendAt(0);
+        setLoginOtpInput("");
+        setMode(null);
+        toast("Signed in successfully");
+        if (data.notice) {
+          toast(data.notice, "info");
+        }
+        return;
+      }
+
       setLoginOtpChallengeId(data.challengeId);
       setLoginOtpDestination(data.destination);
       setLoginOtpExpiresAt(data.expiresAt);
       setLoginOtpResendAt(Date.now() + data.retryAfterSeconds * 1000);
       setLoginOtpInput("");
       setMode("signinOtp");
-      toast("A verification code has been sent to your email.");
+      toast(
+        data.notice || "A verification code has been sent to your email.",
+        "info",
+      );
     } catch (err) {
       toast(err instanceof Error ? err.message : "Sign in failed", "error");
     } finally {
@@ -4986,8 +6877,14 @@ function AuthShell({
     }
     setAuthBusy(true);
     try {
-      await onVerifyRegisterOtp(signupOtpChallengeId, signupOtpInput);
+      const result = await onVerifyRegisterOtp(
+        signupOtpChallengeId,
+        signupOtpInput,
+      );
       toast("Account created successfully");
+      if (result.notice) {
+        toast(result.notice, "info");
+      }
     } catch (err) {
       toast(
         err instanceof Error ? err.message : "OTP verification failed",
@@ -5036,8 +6933,11 @@ function AuthShell({
     }
     setAuthBusy(true);
     try {
-      await onVerifyLoginOtp(loginOtpChallengeId, loginOtpInput);
+      const result = await onVerifyLoginOtp(loginOtpChallengeId, loginOtpInput);
       toast("Signed in successfully");
+      if (result.notice) {
+        toast(result.notice, "info");
+      }
     } catch (err) {
       toast(
         err instanceof Error ? err.message : "OTP verification failed",
@@ -5052,14 +6952,33 @@ function AuthShell({
     if (loginOtpCooldownSeconds > 0) return;
     setAuthBusy(true);
     try {
-      const data = await onRequestLoginOtp(signinForm.email, signinForm.password);
+      const data = await onRequestLoginOtp(
+        signinForm.email,
+        signinForm.password,
+      );
+      if (data.status === "authenticated") {
+        setLoginOtpChallengeId("");
+        setLoginOtpDestination("");
+        setLoginOtpExpiresAt("");
+        setLoginOtpResendAt(0);
+        setLoginOtpInput("");
+        setMode(null);
+        toast("Signed in successfully");
+        if (data.notice) {
+          toast(data.notice, "info");
+        }
+        return;
+      }
       setLoginOtpChallengeId(data.challengeId);
       setLoginOtpDestination(data.destination);
       setLoginOtpExpiresAt(data.expiresAt);
       setLoginOtpResendAt(Date.now() + data.retryAfterSeconds * 1000);
-      toast("A new verification code has been sent.");
+      toast(data.notice || "A new verification code has been sent.", "info");
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Failed to resend OTP", "error");
+      toast(
+        err instanceof Error ? err.message : "Failed to resend OTP",
+        "error",
+      );
     } finally {
       setAuthBusy(false);
     }
@@ -5084,7 +7003,10 @@ function AuthShell({
       setSignupOtpResendAt(Date.now() + data.retryAfterSeconds * 1000);
       toast("A new verification code has been sent.");
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Failed to resend OTP", "error");
+      toast(
+        err instanceof Error ? err.message : "Failed to resend OTP",
+        "error",
+      );
     } finally {
       setAuthBusy(false);
     }
@@ -5141,9 +7063,63 @@ function AuthShell({
       setForgotResendAt(Date.now() + data.retryAfterSeconds * 1000);
       toast("A new reset code has been sent.");
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Failed to resend OTP", "error");
+      toast(
+        err instanceof Error ? err.message : "Failed to resend OTP",
+        "error",
+      );
     } finally {
       setAuthBusy(false);
+    }
+  };
+
+  const handleConfirmSessionAlert = async () => {
+    if (!pendingSessionAlert) return;
+    setSessionAlertBusy(true);
+    try {
+      const result = await onRespondToSessionAlert(
+        pendingSessionAlert.token,
+        "confirm",
+      );
+      onClearSessionAlert();
+      toast(result.message || "Security notice dismissed.");
+    } catch (err) {
+      toast(
+        err instanceof Error
+          ? err.message
+          : "Failed to confirm sign-in activity",
+        "error",
+      );
+    } finally {
+      setSessionAlertBusy(false);
+    }
+  };
+
+  const handleSecureCompromisedSession = async () => {
+    if (!pendingSessionAlert) return;
+    setSessionAlertBusy(true);
+    try {
+      const result = await onRespondToSessionAlert(
+        pendingSessionAlert.token,
+        "secure_account",
+      );
+      onClearSessionAlert();
+      setForgotEmail(result.email || pendingSessionAlert.email);
+      setForgotChallengeId(result.challengeId || "");
+      setForgotDestination(result.destination || pendingSessionAlert.email);
+      setForgotExpiresAt(result.expiresAt || "");
+      setForgotResendAt(Date.now() + (result.retryAfterSeconds || 60) * 1000);
+      setForgotOtpInput("");
+      setForgotNewPassword("");
+      setForgotConfirmPassword("");
+      setMode(result.challengeId ? "forgotOtp" : "forgot");
+      toast(result.message, "info");
+    } catch (err) {
+      toast(
+        err instanceof Error ? err.message : "Failed to secure account",
+        "error",
+      );
+    } finally {
+      setSessionAlertBusy(false);
     }
   };
 
@@ -5152,13 +7128,12 @@ function AuthShell({
       <div className="hero-copy">
         <div className="hero-pill">Secure · Fast · Smart</div>
         <h1>
-          Secure E-Wallet — <span className="hero-accent">Fast</span>,{" "}
+          FPIPay — <span className="hero-accent">Fast</span>,{" "}
           <span className="hero-accent-2">Safe</span>, Easy to Use
         </h1>
         <p className="hero-lead">
           Experience multi-layer security and seamless transactions. Protect
-          your digital assets with E-Wallet Banking and stay in control
-          everywhere.
+          your digital assets with FPIPay and stay in control everywhere.
         </p>
 
         <div className="hero-features">
@@ -5251,7 +7226,7 @@ function AuthShell({
             <form className="auth-form-modern" onSubmit={handleSignIn}>
               <h2>Sign In</h2>
               <p className="muted">
-                Welcome back! Enter your credentials to access E-Wallet Banking.
+                Welcome back! Enter your credentials to access FPIPay.
               </p>
               <label className="auth-label">
                 Email Address
@@ -5335,7 +7310,8 @@ function AuthShell({
             <form className="auth-form-modern" onSubmit={handleVerifyLoginOtp}>
               <h2>Verify Sign In</h2>
               <p className="muted">
-                Enter the 6-digit code sent to <strong>{loginOtpDestination}</strong>.
+                Enter the 6-digit code sent to{" "}
+                <strong>{loginOtpDestination}</strong>.
               </p>
               <label className="auth-label">
                 Verification Code
@@ -5344,17 +7320,21 @@ function AuthShell({
                   maxLength={6}
                   value={loginOtpInput}
                   onChange={(e) =>
-                    setLoginOtpInput(e.target.value.replace(/\D/g, "").slice(0, 6))
+                    setLoginOtpInput(
+                      e.target.value.replace(/\D/g, "").slice(0, 6),
+                    )
                   }
                   placeholder="Enter 6-digit OTP"
                   required
                 />
                 <span className="muted" style={{ fontSize: 12 }}>
                   {loginOtpExpiresAt
-                    ? `Code expires at ${new Date(loginOtpExpiresAt).toLocaleTimeString(
-                        "en-US",
-                        { hour: "2-digit", minute: "2-digit" },
-                      )}`
+                    ? `Code expires at ${new Date(
+                        loginOtpExpiresAt,
+                      ).toLocaleTimeString("en-US", {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}`
                     : "Check your inbox for the latest code."}
                 </span>
               </label>
@@ -5394,8 +7374,7 @@ function AuthShell({
             <form className="auth-form-modern" onSubmit={handleSignUp}>
               <h2>Sign Up</h2>
               <p className="muted">
-                Create your E-Wallet Banking account to start managing finances
-                smartly.
+                Create your FPIPay account to start managing finances smartly.
               </p>
               <div className="grid-two">
                 <label className="auth-label">
@@ -5549,10 +7528,15 @@ function AuthShell({
         )}
         {mode === "signupOtp" && (
           <div className="auth-form-shell">
-            <form className="auth-form-modern" onSubmit={handleVerifyRegisterOtp}>
+            <form
+              className="auth-form-modern"
+              onSubmit={handleVerifyRegisterOtp}
+            >
               <h2>Verify Email</h2>
               <p className="muted">
-                Enter the 6-digit code sent to <strong>{signupOtpDestination}</strong> to activate your account.
+                Enter the 6-digit code sent to{" "}
+                <strong>{signupOtpDestination}</strong> to activate your
+                account.
               </p>
               <label className="auth-label">
                 Verification Code
@@ -5561,17 +7545,21 @@ function AuthShell({
                   maxLength={6}
                   value={signupOtpInput}
                   onChange={(e) =>
-                    setSignupOtpInput(e.target.value.replace(/\D/g, "").slice(0, 6))
+                    setSignupOtpInput(
+                      e.target.value.replace(/\D/g, "").slice(0, 6),
+                    )
                   }
                   placeholder="Enter 6-digit OTP"
                   required
                 />
                 <span className="muted" style={{ fontSize: 12 }}>
                   {signupOtpExpiresAt
-                    ? `Code expires at ${new Date(signupOtpExpiresAt).toLocaleTimeString(
-                        "en-US",
-                        { hour: "2-digit", minute: "2-digit" },
-                      )}`
+                    ? `Code expires at ${new Date(
+                        signupOtpExpiresAt,
+                      ).toLocaleTimeString("en-US", {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}`
                     : "Check your inbox for the latest code."}
                 </span>
               </label>
@@ -5649,7 +7637,8 @@ function AuthShell({
             <form className="auth-form-modern" onSubmit={handleResetPassword}>
               <h2>Reset Password</h2>
               <p className="muted">
-                Enter the 6-digit code sent to <strong>{forgotDestination}</strong> and set a new password.
+                Enter the 6-digit code sent to{" "}
+                <strong>{forgotDestination}</strong> and set a new password.
               </p>
               <label className="auth-label">
                 Reset Code
@@ -5658,17 +7647,21 @@ function AuthShell({
                   maxLength={6}
                   value={forgotOtpInput}
                   onChange={(e) =>
-                    setForgotOtpInput(e.target.value.replace(/\D/g, "").slice(0, 6))
+                    setForgotOtpInput(
+                      e.target.value.replace(/\D/g, "").slice(0, 6),
+                    )
                   }
                   placeholder="Enter 6-digit OTP"
                   required
                 />
                 <span className="muted" style={{ fontSize: 12 }}>
                   {forgotExpiresAt
-                    ? `Code expires at ${new Date(forgotExpiresAt).toLocaleTimeString(
-                        "en-US",
-                        { hour: "2-digit", minute: "2-digit" },
-                      )}`
+                    ? `Code expires at ${new Date(
+                        forgotExpiresAt,
+                      ).toLocaleTimeString("en-US", {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}`
                     : "Check your inbox for the latest code."}
                 </span>
               </label>
@@ -5724,9 +7717,47 @@ function AuthShell({
           </div>
         )}
       </div>
+      {pendingSessionAlert && (
+        <div className="session-alert-overlay">
+          <div className="session-alert-banner">
+            <div className="session-alert-copy">
+              <span className="session-alert-kicker">Security Review</span>
+              <h3>Your previous device was signed out</h3>
+              <p>
+                A newer sign-in was detected for this account. Review it before
+                continuing.
+              </p>
+              <div className="session-alert-meta">
+                <span>Time: {sessionAlertIssuedAt}</span>
+                <span>
+                  Device: {pendingSessionAlert.userAgent || "Unknown device"}
+                </span>
+                <span>
+                  IP: {pendingSessionAlert.ipAddress || "Unavailable"}
+                </span>
+              </div>
+            </div>
+            <div className="session-alert-actions">
+              <button
+                type="button"
+                className="pill"
+                disabled={sessionAlertBusy}
+                onClick={() => void handleConfirmSessionAlert()}
+              >
+                {sessionAlertBusy ? "Processing..." : "Yes, it was me"}
+              </button>
+              <button
+                type="button"
+                className="btn-primary auth-submit"
+                disabled={sessionAlertBusy}
+                onClick={() => void handleSecureCompromisedSession()}
+              >
+                {sessionAlertBusy ? "Securing..." : "No, secure account"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
-
-
-

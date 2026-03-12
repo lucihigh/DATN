@@ -4,6 +4,8 @@ import dotenv from "dotenv";
 import { MongoClient, ObjectId } from "mongodb";
 import { PrismaClient } from "@prisma/client";
 
+import { buildEncryptedTransactionCreateData } from "../services/transactionSecurity";
+
 type Role = "USER" | "ADMIN";
 type UserStatus = "ACTIVE" | "DISABLED" | "PENDING";
 type TransactionStatus = "PENDING" | "COMPLETED" | "FAILED" | "REVERSED";
@@ -151,7 +153,9 @@ async function migrateTransactions(
     const type = ["DEPOSIT", "WITHDRAW", "TRANSFER"].includes(String(doc.type))
       ? String(doc.type)
       : "TRANSFER";
-    const status = ["PENDING", "COMPLETED", "FAILED", "REVERSED"].includes(String(doc.status))
+    const status = ["PENDING", "COMPLETED", "FAILED", "REVERSED"].includes(
+      String(doc.status),
+    )
       ? String(doc.status)
       : "COMPLETED";
     const walletIdRaw = toOptionalId(doc.walletId);
@@ -162,47 +166,59 @@ async function migrateTransactions(
     await prisma.transaction.upsert({
       where: { id },
       update: {
-        walletId:
-          walletIdRaw && validWalletIds.has(walletIdRaw) ? walletIdRaw : null,
-        counterpartyWalletId:
-          counterpartyWalletIdRaw && validWalletIds.has(counterpartyWalletIdRaw)
-            ? counterpartyWalletIdRaw
-            : null,
-        fromUserId:
-          fromUserIdRaw && validUserIds.has(fromUserIdRaw)
-            ? fromUserIdRaw
-            : null,
-        toUserId:
-          toUserIdRaw && validUserIds.has(toUserIdRaw) ? toUserIdRaw : null,
-        amount: toNumber(doc.amount, 0),
-        type: type as TransactionType,
-        status: status as TransactionStatus,
-        description: typeof doc.description === "string" ? doc.description : null,
+        ...buildEncryptedTransactionCreateData(id, {
+          walletId:
+            walletIdRaw && validWalletIds.has(walletIdRaw) ? walletIdRaw : null,
+          sensitive: {
+            amount: toNumber(doc.amount, 0),
+            type: type as TransactionType,
+            status: status as TransactionStatus,
+            description:
+              typeof doc.description === "string" ? doc.description : null,
+            counterpartyWalletId:
+              counterpartyWalletIdRaw &&
+              validWalletIds.has(counterpartyWalletIdRaw)
+                ? counterpartyWalletIdRaw
+                : null,
+            fromUserId:
+              fromUserIdRaw && validUserIds.has(fromUserIdRaw)
+                ? fromUserIdRaw
+                : null,
+            toUserId:
+              toUserIdRaw && validUserIds.has(toUserIdRaw) ? toUserIdRaw : null,
+            metadata: safeJson(doc.metadata ?? {}),
+          },
+        }),
         createdAt: toDate(doc.createdAt),
         updatedAt: toDate(doc.updatedAt),
-        metadata: safeJson(doc.metadata ?? {}),
       },
       create: {
         id,
-        walletId:
-          walletIdRaw && validWalletIds.has(walletIdRaw) ? walletIdRaw : null,
-        counterpartyWalletId:
-          counterpartyWalletIdRaw && validWalletIds.has(counterpartyWalletIdRaw)
-            ? counterpartyWalletIdRaw
-            : null,
-        fromUserId:
-          fromUserIdRaw && validUserIds.has(fromUserIdRaw)
-            ? fromUserIdRaw
-            : null,
-        toUserId:
-          toUserIdRaw && validUserIds.has(toUserIdRaw) ? toUserIdRaw : null,
-        amount: toNumber(doc.amount, 0),
-        type: type as TransactionType,
-        status: status as TransactionStatus,
-        description: typeof doc.description === "string" ? doc.description : null,
+        ...buildEncryptedTransactionCreateData(id, {
+          walletId:
+            walletIdRaw && validWalletIds.has(walletIdRaw) ? walletIdRaw : null,
+          sensitive: {
+            amount: toNumber(doc.amount, 0),
+            type: type as TransactionType,
+            status: status as TransactionStatus,
+            description:
+              typeof doc.description === "string" ? doc.description : null,
+            counterpartyWalletId:
+              counterpartyWalletIdRaw &&
+              validWalletIds.has(counterpartyWalletIdRaw)
+                ? counterpartyWalletIdRaw
+                : null,
+            fromUserId:
+              fromUserIdRaw && validUserIds.has(fromUserIdRaw)
+                ? fromUserIdRaw
+                : null,
+            toUserId:
+              toUserIdRaw && validUserIds.has(toUserIdRaw) ? toUserIdRaw : null,
+            metadata: safeJson(doc.metadata ?? {}),
+          },
+        }),
         createdAt: toDate(doc.createdAt),
         updatedAt: toDate(doc.updatedAt),
-        metadata: safeJson(doc.metadata ?? {}),
       },
     });
   }
@@ -222,7 +238,8 @@ async function migrateLoginEvents(db: Awaited<ReturnType<MongoClient["db"]>>) {
       where: { id },
       update: {
         userId: userIdRaw && validUserIds.has(userIdRaw) ? userIdRaw : null,
-        email: typeof doc.email === "string" ? doc.email.trim().toLowerCase() : null,
+        email:
+          typeof doc.email === "string" ? doc.email.trim().toLowerCase() : null,
         ipAddress: typeof doc.ipAddress === "string" ? doc.ipAddress : null,
         userAgent: typeof doc.userAgent === "string" ? doc.userAgent : null,
         success: Boolean(doc.success),
@@ -234,7 +251,8 @@ async function migrateLoginEvents(db: Awaited<ReturnType<MongoClient["db"]>>) {
       create: {
         id,
         userId: userIdRaw && validUserIds.has(userIdRaw) ? userIdRaw : null,
-        email: typeof doc.email === "string" ? doc.email.trim().toLowerCase() : null,
+        email:
+          typeof doc.email === "string" ? doc.email.trim().toLowerCase() : null,
         ipAddress: typeof doc.ipAddress === "string" ? doc.ipAddress : null,
         userAgent: typeof doc.userAgent === "string" ? doc.userAgent : null,
         success: Boolean(doc.success),
@@ -283,7 +301,9 @@ async function migrateAuditLogs(db: Awaited<ReturnType<MongoClient["db"]>>) {
   return docs.length;
 }
 
-async function migrateSecurityPolicies(db: Awaited<ReturnType<MongoClient["db"]>>) {
+async function migrateSecurityPolicies(
+  db: Awaited<ReturnType<MongoClient["db"]>>,
+) {
   const docs = await db.collection("securityPolicies").find({}).toArray();
   for (const doc of docs) {
     const id = toId(doc._id);
@@ -348,6 +368,3 @@ main()
     await mongo.close();
     await prisma.$disconnect();
   });
-
-
-

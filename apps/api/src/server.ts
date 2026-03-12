@@ -3,7 +3,7 @@ import path from "path";
 
 import cors from "cors";
 import dotenv from "dotenv";
-import express, { type ErrorRequestHandler } from "express";
+import express, { type ErrorRequestHandler, type Request } from "express";
 import fetch from "node-fetch";
 import helmet from "helmet";
 import morgan from "morgan";
@@ -24,7 +24,7 @@ import { applySecurityHeaders } from "./middleware/secureHeaders";
 import { lockoutGuard } from "./middleware/lockout";
 import { loginRateLimiter } from "./middleware/rateLimit";
 import { requireAuth, requireRole } from "./middleware/auth";
-import { signAuthToken } from "./security/jwt";
+import { signAuthToken, verifySessionAlertToken } from "./security/jwt";
 import { hashPassword, verifyPassword } from "./security/password";
 import {
   getSecurityPolicy,
@@ -32,11 +32,38 @@ import {
 } from "./services/securityPolicy";
 import { logAuditEvent } from "./services/audit";
 import {
+  sendBalanceChangeEmail,
   sendLoginOtpEmail,
   sendPasswordResetOtpEmail,
   sendRegisterOtpEmail,
   sendTransferOtpEmail,
 } from "./services/email";
+import {
+  activateAuthSession,
+  buildRecentIpNotice,
+  clearActiveAuthSession,
+  getAuthSecurityState,
+  getLatestDifferentTrustedIp,
+  isTrustedIp,
+  normalizeIpAddress,
+  recordSuccessfulLoginIp,
+  resolveRequestIpAddress,
+  setAuthSecurityState,
+  type TrustedIpEntry,
+} from "./services/trustedIp";
+import {
+  buildEncryptedTransactionCreateData,
+  decryptStoredTransaction,
+  generateEncryptedTransactionId,
+} from "./services/transactionSecurity";
+import {
+  createStoredCard,
+  getStoredCards,
+  normalizePrimaryCard,
+  setStoredCards,
+  type CardType,
+  type StoredCard,
+} from "./services/cards";
 import {
   consumeOtpChallenge,
   createEmailOtpChallenge,
@@ -46,9 +73,13 @@ import {
 
 // Support running from both repo root and apps/api folders.
 dotenv.config({ path: path.resolve(process.cwd(), ".env"), override: true });
-dotenv.config({ path: path.resolve(process.cwd(), "../../.env"), override: true });
+dotenv.config({
+  path: path.resolve(process.cwd(), "../../.env"),
+  override: true,
+});
 
 const app = express();
+app.set("trust proxy", true);
 app.use(cors());
 app.use(helmet());
 app.use(morgan("dev"));
@@ -75,6 +106,8 @@ const RESET_PASSWORD_OTP_TTL_MINUTES = Number(
 const OTP_MAX_ATTEMPTS = Number(process.env.OTP_MAX_ATTEMPTS || "5");
 
 const normalizeEmail = (email: string) => email.trim().toLowerCase();
+
+const getRequestIp = (req: Request) => resolveRequestIpAddress(req);
 
 const toAnomalyScore = (value: unknown) =>
   typeof value === "number" && Number.isFinite(value) ? value : 0;
@@ -120,6 +153,96 @@ const sanitizeUser = (user: UserEntity | null) => {
   const { passwordHash, ...rest } = user;
   void passwordHash;
   return rest;
+};
+
+const buildAuthPayload = (
+  userDoc: UserEntity,
+  sessionId: string,
+  extra?: { notice?: string; status?: "authenticated" },
+) => {
+  const user: components["schemas"]["User"] = {
+    id: userDoc.id,
+    email: userDoc.email,
+    role: userDoc.role,
+  };
+
+  return {
+    status: extra?.status ?? "authenticated",
+    token: signAuthToken({
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+      sid: sessionId,
+    }),
+    user,
+    notice: extra?.notice,
+  };
+};
+
+const getRecipientName = (input: {
+  fullName?: string | null;
+  email: string;
+}) => {
+  const fullName =
+    typeof input.fullName === "string" ? input.fullName.trim() : "";
+  if (fullName) return fullName;
+  return input.email.split("@")[0] || "User";
+};
+
+const notifyBalanceChange = (input: {
+  to: string;
+  recipientName: string;
+  direction: "credit" | "debit";
+  amount: number;
+  balance: number;
+  currency: string;
+  transactionType: "DEPOSIT" | "TRANSFER";
+  description: string;
+  occurredAt: string;
+  counterpartyLabel?: string;
+}) => {
+  void sendBalanceChangeEmail(input).catch((err) => {
+    console.error("Failed to send balance change email", err);
+  });
+};
+
+const persistAuthSecurityState = async (
+  userRepository: ReturnType<typeof createUserRepository>,
+  userDoc: UserEntity,
+  nextState: ReturnType<typeof getAuthSecurityState>,
+) => {
+  await userRepository.updateMetadata(
+    userDoc.id,
+    setAuthSecurityState(userDoc.metadata, nextState),
+  );
+};
+
+const issueExclusiveUserSession = async (input: {
+  userRepository: ReturnType<typeof createUserRepository>;
+  userDoc: UserEntity;
+  authState: ReturnType<typeof getAuthSecurityState>;
+  ipAddress?: string;
+  userAgent?: string;
+}) => {
+  const nextSessionId = crypto.randomUUID();
+  const previousSession = input.authState.activeSession;
+  const nextAuthState = activateAuthSession(input.authState, {
+    sessionId: nextSessionId,
+    ipAddress: input.ipAddress,
+    userAgent: input.userAgent,
+  });
+
+  await persistAuthSecurityState(
+    input.userRepository,
+    input.userDoc,
+    nextAuthState,
+  );
+
+  return {
+    sessionId: nextSessionId,
+    replacedSession: previousSession,
+    authState: nextAuthState,
+  };
 };
 
 const countRecentFailedAttempts = async (email: string, minutes: number) => {
@@ -171,6 +294,114 @@ const buildAlertFromLoginEvent = (
   };
 };
 
+const SECURITY_OVERVIEW_WINDOW_DAYS = 30;
+const SECURITY_VERIFICATION_MATCH_WINDOW_MS = 10 * 60 * 1000;
+
+const buildSecurityLocationLabel = (input: {
+  location?: string;
+  ipAddress?: string;
+}) => {
+  const location =
+    typeof input.location === "string" ? input.location.trim() : "";
+  if (location) return location;
+  const ipAddress = normalizeIpAddress(input.ipAddress);
+  return ipAddress ? `IP ${ipAddress}` : "Unknown location";
+};
+
+const buildUserSecurityAlert = (
+  event: LoginEventEntity,
+  anomalyThreshold: number,
+  trustedIp?: TrustedIpEntry,
+) => {
+  const reasons = buildAlertFromLoginEvent(event, anomalyThreshold).reasons;
+  const location = buildSecurityLocationLabel(event);
+  const userAgent = event.userAgent ?? "Unknown device";
+  const riskScore = Math.round((event.anomaly ?? 0) * 100);
+  const verifiedAt = trustedIp
+    ? Date.parse(trustedIp.lastVerifiedAt)
+    : Number.NaN;
+  const isVerificationEvent =
+    trustedIp &&
+    Number.isFinite(verifiedAt) &&
+    Math.abs(event.createdAt.getTime() - verifiedAt) <=
+      SECURITY_VERIFICATION_MATCH_WINDOW_MS;
+
+  if (!event.success) {
+    return {
+      id: event.id,
+      title: "Blocked Sign-In Attempt",
+      location,
+      detail: [
+        `Device: ${userAgent}.`,
+        reasons.length ? `Reasons: ${reasons.join(", ")}.` : "",
+        riskScore > 0 ? `Risk score: ${riskScore}%.` : "",
+      ]
+        .filter(Boolean)
+        .join(" "),
+      tone: "warn" as const,
+      occurredAt: event.createdAt.toISOString(),
+    };
+  }
+
+  if (isVerificationEvent && trustedIp) {
+    return {
+      id: event.id,
+      title: "New Device Verified",
+      location,
+      detail: `Device: ${userAgent}. IP ${trustedIp.ipAddress} was verified and saved for future sign-ins.`,
+      tone: "info" as const,
+      occurredAt: event.createdAt.toISOString(),
+    };
+  }
+
+  if (trustedIp) {
+    return {
+      id: event.id,
+      title: "Session Verified",
+      location,
+      detail: `Device: ${userAgent}. Sign-in matched the saved IP ${trustedIp.ipAddress}.`,
+      tone: "safe" as const,
+      occurredAt: event.createdAt.toISOString(),
+    };
+  }
+
+  return {
+    id: event.id,
+    title:
+      (event.anomaly ?? 0) >= anomalyThreshold
+        ? "Risk Review Required"
+        : "Sign-In Recorded",
+    location,
+    detail: [
+      `Device: ${userAgent}.`,
+      riskScore > 0 ? `Risk score: ${riskScore}%.` : "",
+      "This sign-in is not saved as a trusted device yet.",
+    ]
+      .filter(Boolean)
+      .join(" "),
+    tone:
+      (event.anomaly ?? 0) >= anomalyThreshold
+        ? ("warn" as const)
+        : ("info" as const),
+    occurredAt: event.createdAt.toISOString(),
+  };
+};
+
+const serializeCard = (card: StoredCard) => ({
+  id: card.id,
+  type: card.type,
+  bank: card.bank,
+  holder: card.holder,
+  number: card.maskedNumber,
+  last4: card.last4,
+  expiryMonth: card.expiryMonth,
+  expiryYear: card.expiryYear,
+  status: card.status,
+  isPrimary: card.isPrimary,
+  createdAt: card.createdAt,
+  updatedAt: card.updatedAt,
+});
+
 const toPositiveAmount = (value: unknown) => {
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return null;
@@ -184,9 +415,11 @@ type ResolvedTransferContext = {
   senderWallet: Wallet;
   senderAccountNumber: string;
   receiverAccountNumber: string;
-  receiverWalletByAccount:
-    | { id: string; userId: string | null; metadata: unknown }
-    | null;
+  receiverWalletByAccount: {
+    id: string;
+    userId: string | null;
+    metadata: unknown;
+  } | null;
 };
 
 const resolveTransferContext = async (input: {
@@ -214,12 +447,16 @@ const resolveTransferContext = async (input: {
       ? (senderWallet.metadata as Record<string, unknown>)
       : {};
   const senderAccountNumber =
-    typeof senderMeta.accountNumber === "string" ? senderMeta.accountNumber : "";
+    typeof senderMeta.accountNumber === "string"
+      ? senderMeta.accountNumber
+      : "";
 
   let resolvedReceiverUserId = toUserId;
-  let receiverWalletByAccount:
-    | { id: string; userId: string | null; metadata: unknown }
-    | null = null;
+  let receiverWalletByAccount: {
+    id: string;
+    userId: string | null;
+    metadata: unknown;
+  } | null = null;
 
   if (toAccount) {
     receiverWalletByAccount = await findWalletByAccountNumber(toAccount);
@@ -284,9 +521,11 @@ const executeTransfer = async (input: {
   note: string;
   senderAccountNumber: string;
   receiverAccountNumber: string;
-  receiverWalletByAccount:
-    | { id: string; userId: string | null; metadata: unknown }
-    | null;
+  receiverWalletByAccount: {
+    id: string;
+    userId: string | null;
+    metadata: unknown;
+  } | null;
 }) => {
   return prisma.$transaction(async (tx) => {
     const senderWallet = await tx.wallet.findFirst({
@@ -299,7 +538,9 @@ const executeTransfer = async (input: {
 
     const receiverWallet =
       (input.receiverWalletByAccount
-        ? await tx.wallet.findFirst({ where: { id: input.receiverWalletByAccount.id } })
+        ? await tx.wallet.findFirst({
+            where: { id: input.receiverWalletByAccount.id },
+          })
         : null) ??
       (await tx.wallet.findFirst({
         where: { userId: input.resolvedReceiverUserId },
@@ -328,43 +569,57 @@ const executeTransfer = async (input: {
       data: { balance: { increment: input.amount } },
     });
 
-    const debitTx = await tx.transaction.create({
-      data: {
-        id: crypto.randomUUID(),
-        walletId: senderWallet.id,
-        counterpartyWalletId: receiverWallet.id,
-        amount: input.amount,
-        type: "TRANSFER",
-        status: "COMPLETED",
-        description: input.note || `Transfer to ${input.receiverAccountNumber}`,
-        fromUserId: input.senderUserId,
-        toUserId: input.resolvedReceiverUserId,
-        metadata: {
-          entry: "DEBIT",
-          reconciliationId,
-          fromAccount: input.senderAccountNumber,
-          toAccount: input.receiverAccountNumber,
-        } as never,
-      },
-    });
+    const debitTxId = generateEncryptedTransactionId();
+    const debitTx = decryptStoredTransaction(
+      await tx.transaction.create({
+        data: {
+          id: debitTxId,
+          ...buildEncryptedTransactionCreateData(debitTxId, {
+            walletId: senderWallet.id,
+            sensitive: {
+              amount: input.amount,
+              type: "TRANSFER",
+              status: "COMPLETED",
+              description:
+                input.note || `Transfer to ${input.receiverAccountNumber}`,
+              counterpartyWalletId: receiverWallet.id,
+              fromUserId: input.senderUserId,
+              toUserId: input.resolvedReceiverUserId,
+              metadata: {
+                entry: "DEBIT",
+                reconciliationId,
+                fromAccount: input.senderAccountNumber,
+                toAccount: input.receiverAccountNumber,
+              },
+            },
+          }),
+        },
+      }),
+    );
 
+    const creditTxId = generateEncryptedTransactionId();
     await tx.transaction.create({
       data: {
-        id: crypto.randomUUID(),
-        walletId: receiverWallet.id,
-        counterpartyWalletId: senderWallet.id,
-        amount: input.amount,
-        type: "TRANSFER",
-        status: "COMPLETED",
-        description: input.note || `Receive from ${input.senderAccountNumber}`,
-        fromUserId: input.senderUserId,
-        toUserId: input.resolvedReceiverUserId,
-        metadata: {
-          entry: "CREDIT",
-          reconciliationId,
-          fromAccount: input.senderAccountNumber,
-          toAccount: input.receiverAccountNumber,
-        } as never,
+        id: creditTxId,
+        ...buildEncryptedTransactionCreateData(creditTxId, {
+          walletId: receiverWallet.id,
+          sensitive: {
+            amount: input.amount,
+            type: "TRANSFER",
+            status: "COMPLETED",
+            description:
+              input.note || `Receive from ${input.senderAccountNumber}`,
+            counterpartyWalletId: senderWallet.id,
+            fromUserId: input.senderUserId,
+            toUserId: input.resolvedReceiverUserId,
+            metadata: {
+              entry: "CREDIT",
+              reconciliationId,
+              fromAccount: input.senderAccountNumber,
+              toAccount: input.receiverAccountNumber,
+            },
+          },
+        }),
       },
     });
 
@@ -372,6 +627,9 @@ const executeTransfer = async (input: {
       transaction: debitTx,
       reconciliationId,
       receiverAccountNumber: input.receiverAccountNumber,
+      senderBalance: Number(senderWallet.balance) - input.amount,
+      receiverBalance: Number(receiverWallet.balance) + input.amount,
+      currency: senderWallet.currency,
     };
   });
 };
@@ -419,7 +677,8 @@ const attachWalletIdentity = async (wallet: Wallet): Promise<Wallet> => {
     return wallet;
   }
 
-  const accountNumber = existingAccountNumber || buildAccountNumber(wallet.userId);
+  const accountNumber =
+    existingAccountNumber || buildAccountNumber(wallet.userId);
   const qrPayload = existingQrPayload || buildWalletQrPayload(accountNumber);
   const qrImageUrl = existingQrImageUrl || buildWalletQrImageUrl(qrPayload);
 
@@ -493,189 +752,12 @@ app.get("/health", async (_req, res) => {
   }
 });
 
-app.post("/ai/deposit-agent", requireAuth, async (req, res) => {
-  const userId = req.user?.sub;
-  if (!userId) return res.status(401).json({ error: "Unauthorized" });
-
-  const body = req.body as {
-    goal?: unknown;
-    currentBalance?: unknown;
-    currency?: unknown;
-    monthlyIncome?: unknown;
-    monthlyExpenses?: unknown;
-  };
-
-  const goal = typeof body.goal === "string" ? body.goal.trim() : "";
-  if (!goal) {
-    return res.status(400).json({ error: "Goal is required" });
-  }
-
-  try {
-    const currentBalance =
-      typeof body.currentBalance === "number"
-        ? body.currentBalance
-        : Number(body.currentBalance || 0);
-    const monthlyIncome =
-      typeof body.monthlyIncome === "number"
-        ? body.monthlyIncome
-        : Number(body.monthlyIncome || 0);
-    const monthlyExpenses =
-      typeof body.monthlyExpenses === "number"
-        ? body.monthlyExpenses
-        : Number(body.monthlyExpenses || 0);
-
-    const resp = await fetch(`${AI_URL}/ai/deposit-agent`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        userId,
-        goal,
-        currentBalance: Number.isFinite(currentBalance) ? currentBalance : 0,
-        currency:
-          typeof body.currency === "string" && body.currency.trim()
-            ? body.currency.trim().toUpperCase()
-            : "USD",
-        monthlyIncome: Number.isFinite(monthlyIncome) ? monthlyIncome : 0,
-        monthlyExpenses: Number.isFinite(monthlyExpenses) ? monthlyExpenses : 0,
-      }),
-    });
-
-    const data = (await resp.json().catch(() => null)) as
-      | (DepositAgentResponse & { error?: string })
-      | null;
-    if (!resp.ok || !data) {
-      return res
-        .status(502)
-        .json({ error: data?.error || "AI deposit agent is unavailable" });
-    }
-
-    return res.json(data);
-  } catch (err) {
-    console.error("Failed to call AI deposit agent", err);
-    return res.status(502).json({ error: "AI deposit agent is unavailable" });
-  }
+app.post("/ai/deposit-agent", requireAuth, async (_req, res) => {
+  return res.status(404).json({ error: "Feature removed" });
 });
 
-app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
-  const userId = req.user?.sub;
-  if (!userId) return res.status(401).json({ error: "Unauthorized" });
-
-  const body = req.body as {
-    currency?: unknown;
-    currentBalance?: unknown;
-    monthlyIncome?: unknown;
-    monthlyExpenses?: unknown;
-    recentTransactions?: unknown;
-    messages?: unknown;
-  };
-
-  const messages = Array.isArray(body.messages)
-    ? body.messages
-        .map((message): CopilotMessagePayload | null => {
-          if (!message || typeof message !== "object") return null;
-          const candidate = message as Record<string, unknown>;
-          const role = candidate.role;
-          const content = candidate.content;
-          if (
-            (role !== "user" && role !== "assistant" && role !== "system") ||
-            typeof content !== "string"
-          ) {
-            return null;
-          }
-          const trimmed = content.trim();
-          if (!trimmed) return null;
-          return { role, content: trimmed.slice(0, 4000) };
-        })
-        .filter((message): message is CopilotMessagePayload => Boolean(message))
-    : [];
-
-  if (messages.length === 0) {
-    return res.status(400).json({ error: "At least one message is required" });
-  }
-
-  const recentTransactions = Array.isArray(body.recentTransactions)
-    ? body.recentTransactions
-        .map((tx): CopilotTransactionPayload | null => {
-          if (!tx || typeof tx !== "object") return null;
-          const candidate = tx as Record<string, unknown>;
-          const amount =
-            typeof candidate.amount === "number"
-              ? candidate.amount
-              : Number(candidate.amount);
-          const type =
-            typeof candidate.type === "string" ? candidate.type.trim() : "";
-          const createdAt =
-            typeof candidate.createdAt === "string"
-              ? candidate.createdAt.trim()
-              : "";
-          const description =
-            typeof candidate.description === "string"
-              ? candidate.description.trim().slice(0, 240)
-              : undefined;
-          const direction =
-            candidate.direction === "credit" ? "credit" : "debit";
-          if (!Number.isFinite(amount) || !type || !createdAt) {
-            return null;
-          }
-          return {
-            amount,
-            type: type.slice(0, 80),
-            description,
-            createdAt,
-            direction,
-          };
-        })
-        .filter(
-          (tx): tx is CopilotTransactionPayload => Boolean(tx),
-        )
-        .slice(0, 20)
-    : [];
-
-  try {
-    const currentBalance =
-      typeof body.currentBalance === "number"
-        ? body.currentBalance
-        : Number(body.currentBalance || 0);
-    const monthlyIncome =
-      typeof body.monthlyIncome === "number"
-        ? body.monthlyIncome
-        : Number(body.monthlyIncome || 0);
-    const monthlyExpenses =
-      typeof body.monthlyExpenses === "number"
-        ? body.monthlyExpenses
-        : Number(body.monthlyExpenses || 0);
-
-    const resp = await fetch(`${AI_URL}/ai/copilot-chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        userId,
-        currency:
-          typeof body.currency === "string" && body.currency.trim()
-            ? body.currency.trim().toUpperCase()
-            : "USD",
-        currentBalance: Number.isFinite(currentBalance) ? currentBalance : 0,
-        monthlyIncome: Number.isFinite(monthlyIncome) ? monthlyIncome : 0,
-        monthlyExpenses: Number.isFinite(monthlyExpenses) ? monthlyExpenses : 0,
-        recentTransactions,
-        messages: messages.slice(-12),
-      }),
-    });
-
-    const data = (await resp.json().catch(() => null)) as
-      | (CopilotResponsePayload & { error?: string })
-      | null;
-    if (!resp.ok || !data?.reply) {
-      return res
-        .status(502)
-        .json({ error: data?.error || "AI copilot is unavailable" });
-    }
-
-    return res.json(data);
-  } catch (err) {
-    console.error("Failed to call AI copilot", err);
-    return res.status(502).json({ error: "AI copilot is unavailable" });
-  }
+app.post("/ai/copilot-chat", requireAuth, async (_req, res) => {
+  return res.status(404).json({ error: "Feature removed" });
 });
 
 app.post("/auth/register", async (req, res) => {
@@ -737,7 +819,7 @@ app.post("/auth/register", async (req, res) => {
       actor: email,
       action: "REGISTER_OTP_SENT",
       userId: pendingUser.id,
-      ipAddress: req.ip,
+      ipAddress: getRequestIp(req),
     });
 
     return res.status(201).json({
@@ -759,7 +841,9 @@ app.post("/auth/register", async (req, res) => {
       return res.status(429).json({
         error: "OTP recently sent. Please wait before requesting another code.",
         retryAfterSeconds:
-          "retryAfterSeconds" in err ? (err as { retryAfterSeconds: number }).retryAfterSeconds : 60,
+          "retryAfterSeconds" in err
+            ? (err as { retryAfterSeconds: number }).retryAfterSeconds
+            : 60,
       });
     }
     console.error("Failed to register user", err);
@@ -783,7 +867,11 @@ app.post("/auth/register/verify", async (req, res) => {
     const challenge = await prisma.otpChallenge.findUnique({
       where: { id: challengeId },
     });
-    if (!challenge || challenge.purpose !== "REGISTER" || challenge.channel !== "EMAIL") {
+    if (
+      !challenge ||
+      challenge.purpose !== "REGISTER" ||
+      challenge.channel !== "EMAIL"
+    ) {
       return res.status(404).json({ error: "OTP challenge not found" });
     }
 
@@ -799,28 +887,56 @@ app.post("/auth/register/verify", async (req, res) => {
     if (!userDoc) return res.status(404).json({ error: "User not found" });
 
     await userRepository.setStatus(userDoc.id, "ACTIVE");
+    await userRepository.touchLastLogin(userDoc.id);
+    const currentIp = getRequestIp(req);
+    const currentUserAgent =
+      typeof req.headers["user-agent"] === "string"
+        ? req.headers["user-agent"]
+        : undefined;
+    const nextAuthState = recordSuccessfulLoginIp(
+      getAuthSecurityState(userDoc.metadata),
+      currentIp,
+      { trustIp: true },
+    );
+    const sessionResult = await issueExclusiveUserSession({
+      userRepository,
+      userDoc,
+      authState: nextAuthState,
+      ipAddress: currentIp,
+      userAgent: currentUserAgent,
+    });
     await consumeOtpChallenge(challengeId);
     await getOrCreateWalletByUserId(userDoc.id);
-
-    const user: components["schemas"]["User"] = {
-      id: userDoc.id,
-      email: userDoc.email,
-      role: userDoc.role,
-    };
-
-    const token = signAuthToken({
-      sub: user.id,
-      email: user.email,
-      role: user.role,
-    });
     await logAuditEvent({
-      actor: user.email,
+      actor: userDoc.email,
       action: "REGISTER",
-      userId: user.id,
-      ipAddress: req.ip,
+      userId: userDoc.id,
+      ipAddress: getRequestIp(req),
     });
 
-    return res.json({ token, user });
+    if (sessionResult.replacedSession) {
+      await logAuditEvent({
+        actor: userDoc.email,
+        action: "SESSION_REPLACED",
+        userId: userDoc.id,
+        details: {
+          previousSessionId: sessionResult.replacedSession.sessionId,
+          previousIp: sessionResult.replacedSession.ipAddress,
+          previousUserAgent: sessionResult.replacedSession.userAgent,
+          newIp: currentIp,
+          newUserAgent: currentUserAgent,
+        },
+        ipAddress: currentIp,
+      });
+    }
+
+    return res.json(
+      buildAuthPayload(userDoc, sessionResult.sessionId, {
+        notice: currentIp
+          ? `IP ${currentIp} is trusted for future sign-ins.`
+          : undefined,
+      }),
+    );
   } catch (err) {
     if (err instanceof Error && err.message === "OTP_CHALLENGE_NOT_FOUND") {
       return res.status(404).json({ error: "OTP challenge not found" });
@@ -861,7 +977,7 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
 
   try {
     const loginEventPayload = {
-      ipAddress: req.ip,
+      ipAddress: getRequestIp(req),
       userAgent,
       timestamp: new Date().toISOString(),
     };
@@ -885,7 +1001,7 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
       await loginEventRepository.createLoginEvent({
         userId: userDoc.id,
         email,
-        ipAddress: req.ip,
+        ipAddress: getRequestIp(req),
         userAgent,
         success: false,
         anomaly: score,
@@ -896,7 +1012,7 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
         userId: userDoc.id,
         action: "LOGIN_BLOCKED",
         details: "account disabled",
-        ipAddress: req.ip,
+        ipAddress: getRequestIp(req),
       });
       return res
         .status(423)
@@ -913,13 +1029,13 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
           userDoc.id,
           email,
           "Too many failed attempts",
-          req.ip,
+          getRequestIp(req),
         );
       }
       await loginEventRepository.createLoginEvent({
         userId: userDoc?.id,
         email,
-        ipAddress: req.ip,
+        ipAddress: getRequestIp(req),
         userAgent,
         success: false,
         anomaly: score,
@@ -937,7 +1053,7 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
     await loginEventRepository.createLoginEvent({
       userId: userDoc?.id,
       email,
-      ipAddress: req.ip,
+      ipAddress: getRequestIp(req),
       userAgent,
       success: isPasswordValid,
       anomaly: score,
@@ -950,7 +1066,7 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
         userId: userDoc?.id,
         action: "AI_ALERT",
         details: { score, reasons: aiResult?.reasons ?? [] },
-        ipAddress: req.ip,
+        ipAddress: getRequestIp(req),
       });
     }
 
@@ -959,7 +1075,7 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
         actor: email,
         action: "LOGIN_FAILED",
         details: `anomaly=${score}`,
-        ipAddress: req.ip,
+        ipAddress: getRequestIp(req),
       });
 
       const failedAttempts = failedBefore + 1;
@@ -968,7 +1084,7 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
           userDoc.id,
           email,
           "Exceeded failed attempts",
-          req.ip,
+          getRequestIp(req),
         );
         return res.status(423).json({
           error: "Account locked after repeated failed attempts",
@@ -987,12 +1103,79 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
         userId: userDoc.id,
         action: "LOGIN_BLOCKED",
         details: `status=${userDoc.status}`,
-        ipAddress: req.ip,
+        ipAddress: getRequestIp(req),
       });
       return res
         .status(423)
         .json({ error: "Account is not active", anomaly: aiResult });
     }
+
+    const currentIp = getRequestIp(req);
+    const currentUserAgent =
+      typeof req.headers["user-agent"] === "string"
+        ? req.headers["user-agent"]
+        : undefined;
+    const authSecurityState = getAuthSecurityState(userDoc.metadata);
+    if (isTrustedIp(authSecurityState, currentIp)) {
+      const notice = buildRecentIpNotice(
+        authSecurityState,
+        currentIp,
+        APP_TIMEZONE,
+      );
+      const nextAuthState = recordSuccessfulLoginIp(
+        authSecurityState,
+        currentIp,
+      );
+
+      await userRepository.touchLastLogin(userDoc.id);
+      const sessionResult = await issueExclusiveUserSession({
+        userRepository,
+        userDoc,
+        authState: nextAuthState,
+        ipAddress: currentIp,
+        userAgent: currentUserAgent,
+      });
+
+      await logAuditEvent({
+        actor: email,
+        action: "LOGIN_TRUSTED_IP",
+        userId: userDoc.id,
+        details: {
+          anomaly: score,
+          trustedIp: currentIp,
+        },
+        ipAddress: getRequestIp(req),
+      });
+
+      if (sessionResult.replacedSession) {
+        await logAuditEvent({
+          actor: email,
+          action: "SESSION_REPLACED",
+          userId: userDoc.id,
+          details: {
+            previousSessionId: sessionResult.replacedSession.sessionId,
+            previousIp: sessionResult.replacedSession.ipAddress,
+            previousUserAgent: sessionResult.replacedSession.userAgent,
+            newIp: currentIp,
+            newUserAgent: currentUserAgent,
+          },
+          ipAddress: currentIp,
+        });
+      }
+
+      return res.json({
+        ...buildAuthPayload(userDoc, sessionResult.sessionId, { notice }),
+        anomaly: aiResult,
+      });
+    }
+
+    const previousTrustedIp = getLatestDifferentTrustedIp(
+      authSecurityState,
+      currentIp,
+    );
+    const otpNotice = previousTrustedIp
+      ? `New IP detected. Verification code sent. Most recent trusted IP: ${previousTrustedIp.ipAddress}.`
+      : "New IP detected. Verification code sent to your email.";
 
     const otpChallenge = await createEmailOtpChallenge({
       userId: userDoc.id,
@@ -1003,6 +1186,8 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
       metadata: {
         anomalyScore: score,
         aiReasons: Array.isArray(aiResult?.reasons) ? aiResult.reasons : [],
+        currentIp,
+        previousTrustedIp: previousTrustedIp?.ipAddress,
       },
     });
     await sendLoginOtpEmail({
@@ -1019,8 +1204,10 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
       details: {
         anomaly: score,
         challengeId: otpChallenge.challengeId,
+        currentIp,
+        previousTrustedIp: previousTrustedIp?.ipAddress,
       },
-      ipAddress: req.ip,
+      ipAddress: getRequestIp(req),
     });
 
     return res.json({
@@ -1029,6 +1216,7 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
       destination: maskEmail(userDoc.email),
       expiresAt: otpChallenge.expiresAt.toISOString(),
       retryAfterSeconds: otpChallenge.retryAfterSeconds,
+      notice: otpNotice,
       anomaly: aiResult,
     });
   } catch (err) {
@@ -1036,7 +1224,9 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
       return res.status(429).json({
         error: "OTP recently sent. Please wait before requesting another code.",
         retryAfterSeconds:
-          "retryAfterSeconds" in err ? (err as { retryAfterSeconds: number }).retryAfterSeconds : 60,
+          "retryAfterSeconds" in err
+            ? (err as { retryAfterSeconds: number }).retryAfterSeconds
+            : 60,
       });
     }
     console.error("Failed to login user", err);
@@ -1060,7 +1250,11 @@ app.post("/auth/login/verify", async (req, res) => {
     const challenge = await prisma.otpChallenge.findUnique({
       where: { id: challengeId },
     });
-    if (!challenge || challenge.purpose !== "LOGIN" || challenge.channel !== "EMAIL") {
+    if (
+      !challenge ||
+      challenge.purpose !== "LOGIN" ||
+      challenge.channel !== "EMAIL"
+    ) {
       return res.status(404).json({ error: "OTP challenge not found" });
     }
 
@@ -1087,27 +1281,69 @@ app.post("/auth/login/verify", async (req, res) => {
         : {};
     const anomalyScore =
       typeof metadata.anomalyScore === "number" ? metadata.anomalyScore : 0;
-
-    const user: components["schemas"]["User"] = {
-      id: userDoc.id,
-      email: userDoc.email,
-      role: userDoc.role,
-    };
-
-    const token = signAuthToken({
-      sub: user.id,
-      email: user.email,
-      role: user.role,
+    const verifiedIp = normalizeIpAddress(
+      typeof metadata.currentIp === "string"
+        ? metadata.currentIp
+        : getRequestIp(req),
+    );
+    const previousTrustedIp = normalizeIpAddress(
+      typeof metadata.previousTrustedIp === "string"
+        ? metadata.previousTrustedIp
+        : undefined,
+    );
+    const nextAuthState = recordSuccessfulLoginIp(
+      getAuthSecurityState(userDoc.metadata),
+      verifiedIp,
+      { trustIp: true },
+    );
+    const currentUserAgent =
+      typeof req.headers["user-agent"] === "string"
+        ? req.headers["user-agent"]
+        : undefined;
+    const sessionResult = await issueExclusiveUserSession({
+      userRepository,
+      userDoc,
+      authState: nextAuthState,
+      ipAddress: verifiedIp,
+      userAgent: currentUserAgent,
     });
+
+    const notice = verifiedIp
+      ? previousTrustedIp && previousTrustedIp !== verifiedIp
+        ? `IP ${verifiedIp} is now trusted. Previous trusted IP: ${previousTrustedIp}.`
+        : `IP ${verifiedIp} is now trusted for future sign-ins.`
+      : undefined;
+
     await logAuditEvent({
-      actor: user.email,
+      actor: userDoc.email,
       action: "LOGIN",
-      userId: user.id,
-      details: `anomaly=${anomalyScore}`,
-      ipAddress: req.ip,
+      userId: userDoc.id,
+      details: {
+        anomaly: anomalyScore,
+        trustedIp: verifiedIp,
+      },
+      ipAddress: getRequestIp(req),
     });
 
-    return res.json({ token, user });
+    if (sessionResult.replacedSession) {
+      await logAuditEvent({
+        actor: userDoc.email,
+        action: "SESSION_REPLACED",
+        userId: userDoc.id,
+        details: {
+          previousSessionId: sessionResult.replacedSession.sessionId,
+          previousIp: sessionResult.replacedSession.ipAddress,
+          previousUserAgent: sessionResult.replacedSession.userAgent,
+          newIp: verifiedIp,
+          newUserAgent: currentUserAgent,
+        },
+        ipAddress: verifiedIp,
+      });
+    }
+
+    return res.json(
+      buildAuthPayload(userDoc, sessionResult.sessionId, { notice }),
+    );
   } catch (err) {
     if (err instanceof Error && err.message === "OTP_CHALLENGE_NOT_FOUND") {
       return res.status(404).json({ error: "OTP challenge not found" });
@@ -1165,7 +1401,7 @@ app.post("/auth/password/otp/send", async (req, res) => {
       actor: userDoc.email,
       action: "RESET_PASSWORD_OTP_SENT",
       userId: userDoc.id,
-      ipAddress: req.ip,
+      ipAddress: getRequestIp(req),
     });
 
     return res.json({
@@ -1180,7 +1416,9 @@ app.post("/auth/password/otp/send", async (req, res) => {
       return res.status(429).json({
         error: "OTP recently sent. Please wait before requesting another code.",
         retryAfterSeconds:
-          "retryAfterSeconds" in err ? (err as { retryAfterSeconds: number }).retryAfterSeconds : 60,
+          "retryAfterSeconds" in err
+            ? (err as { retryAfterSeconds: number }).retryAfterSeconds
+            : 60,
       });
     }
     console.error("Failed to send password reset OTP", err);
@@ -1195,14 +1433,20 @@ app.post("/auth/password/reset", async (req, res) => {
     otp?: unknown;
     newPassword?: unknown;
   };
-  const email = typeof body.email === "string" ? normalizeEmail(body.email) : "";
+  const email =
+    typeof body.email === "string" ? normalizeEmail(body.email) : "";
   const challengeId =
     typeof body.challengeId === "string" ? body.challengeId.trim() : "";
   const otp = typeof body.otp === "string" ? body.otp.replace(/\D/g, "") : "";
   const newPassword =
     typeof body.newPassword === "string" ? body.newPassword.trim() : "";
 
-  if (!email || !challengeId || !/^\d{6}$/.test(otp) || newPassword.length < 8) {
+  if (
+    !email ||
+    !challengeId ||
+    !/^\d{6}$/.test(otp) ||
+    newPassword.length < 8
+  ) {
     return res.status(400).json({ error: "Invalid password reset payload" });
   }
 
@@ -1226,7 +1470,7 @@ app.post("/auth/password/reset", async (req, res) => {
       actor: userDoc.email,
       userId: userDoc.id,
       action: "RESET_PASSWORD",
-      ipAddress: req.ip,
+      ipAddress: getRequestIp(req),
     });
 
     return res.status(204).send();
@@ -1255,6 +1499,126 @@ app.post("/auth/logout", (_req, res) => {
   res.status(204).send();
 });
 
+app.post("/auth/session-alert/respond", async (req, res) => {
+  const body = req.body as {
+    alertToken?: unknown;
+    action?: unknown;
+  };
+  const alertToken =
+    typeof body.alertToken === "string" ? body.alertToken.trim() : "";
+  const action =
+    body.action === "confirm" || body.action === "secure_account"
+      ? body.action
+      : "";
+
+  if (!alertToken || !action) {
+    return res.status(400).json({ error: "Invalid session alert payload" });
+  }
+
+  try {
+    const payload = verifySessionAlertToken(alertToken);
+    const userRepository = createUserRepository();
+    const userDoc = await userRepository.findValidatedById(payload.sub);
+    if (!userDoc) return res.status(404).json({ error: "User not found" });
+
+    const authSecurityState = getAuthSecurityState(userDoc.metadata);
+    const activeSession = authSecurityState.activeSession;
+    const sessionStillActive = activeSession?.sessionId === payload.activeSid;
+
+    if (action === "confirm") {
+      await logAuditEvent({
+        actor: userDoc.email,
+        action: "SESSION_REPLACEMENT_CONFIRMED",
+        userId: userDoc.id,
+        details: {
+          revokedSessionId: payload.revokedSid,
+          activeSessionId: payload.activeSid,
+          activeIp: payload.activeSessionIp,
+          activeUserAgent: payload.activeSessionUserAgent,
+        },
+      });
+
+      return res.json({
+        status: "acknowledged",
+        message: "Security notice dismissed.",
+        active: sessionStillActive,
+      });
+    }
+
+    if (sessionStillActive) {
+      const nextAuthState = clearActiveAuthSession(authSecurityState);
+      await persistAuthSecurityState(userRepository, userDoc, nextAuthState);
+    }
+
+    let challengeId: string | undefined;
+    let expiresAt: string | undefined;
+    let retryAfterSeconds = 0;
+
+    try {
+      const otpChallenge = await createEmailOtpChallenge({
+        userId: userDoc.id,
+        purpose: "RESET_PASSWORD",
+        destination: userDoc.email,
+        ttlMinutes: RESET_PASSWORD_OTP_TTL_MINUTES,
+        maxAttempts: OTP_MAX_ATTEMPTS,
+      });
+
+      await sendPasswordResetOtpEmail({
+        to: userDoc.email,
+        recipientName:
+          userDoc.fullName || userDoc.email.split("@")[0] || "User",
+        otpCode: otpChallenge.otpCode,
+        expiresInMinutes: RESET_PASSWORD_OTP_TTL_MINUTES,
+      });
+
+      challengeId = otpChallenge.challengeId;
+      expiresAt = otpChallenge.expiresAt.toISOString();
+      retryAfterSeconds = otpChallenge.retryAfterSeconds;
+    } catch (err) {
+      if (err instanceof Error && err.message === "OTP_COOLDOWN_ACTIVE") {
+        retryAfterSeconds =
+          "retryAfterSeconds" in err
+            ? (err as { retryAfterSeconds: number }).retryAfterSeconds
+            : 60;
+      } else {
+        throw err;
+      }
+    }
+
+    await logAuditEvent({
+      actor: userDoc.email,
+      action: "ACCOUNT_SECURED_AFTER_SESSION_REPLACEMENT",
+      userId: userDoc.id,
+      details: {
+        revokedSessionId: payload.activeSid,
+        reportedBySessionId: payload.revokedSid,
+        activeIp: payload.activeSessionIp,
+        activeUserAgent: payload.activeSessionUserAgent,
+      },
+      ipAddress: payload.activeSessionIp,
+    });
+
+    return res.json({
+      status: "secured",
+      message:
+        "The newer device has been signed out. Complete the password reset to secure your account.",
+      email: userDoc.email,
+      destination: maskEmail(userDoc.email),
+      challengeId,
+      expiresAt,
+      retryAfterSeconds,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("jwt")) {
+      return res
+        .status(400)
+        .json({ error: "Session alert is invalid or expired" });
+    }
+    console.error("Failed to respond to session alert", err);
+    return res.status(500).json({ error: "Internal error" });
+  }
+});
+
 app.post("/auth/change-password", requireAuth, async (req, res) => {
   const { currentPassword, newPassword } = req.body as {
     currentPassword?: string;
@@ -1278,7 +1642,7 @@ app.post("/auth/change-password", requireAuth, async (req, res) => {
     actor: req.user?.email,
     userId: userDoc.id,
     action: "CHANGE_PASSWORD",
-    ipAddress: req.ip,
+    ipAddress: getRequestIp(req),
   });
 
   return res.status(204).send();
@@ -1306,8 +1670,7 @@ app.get("/auth/me", requireAuth, async (req, res) => {
       phone: typeof userDoc.phone === "string" ? userDoc.phone : "",
       address: typeof userDoc.address === "string" ? userDoc.address : "",
       dob: typeof userDoc.dob === "string" ? userDoc.dob : "",
-      avatar:
-        typeof metadata.avatar === "string" ? metadata.avatar : undefined,
+      avatar: typeof metadata.avatar === "string" ? metadata.avatar : undefined,
       metadata,
     });
   } catch (err) {
@@ -1363,7 +1726,7 @@ app.patch("/auth/me", requireAuth, async (req, res) => {
       userId,
       action: "PROFILE_UPDATED",
       details: { fullName: Boolean(fullName), phone: Boolean(phone) },
-      ipAddress: req.ip,
+      ipAddress: getRequestIp(req),
     });
 
     return res.json({
@@ -1377,8 +1740,7 @@ app.patch("/auth/me", requireAuth, async (req, res) => {
       avatar:
         updated.metadata &&
         typeof updated.metadata === "object" &&
-        typeof (updated.metadata as Record<string, unknown>).avatar ===
-          "string"
+        typeof (updated.metadata as Record<string, unknown>).avatar === "string"
           ? ((updated.metadata as Record<string, unknown>).avatar as string)
           : undefined,
       metadata:
@@ -1388,6 +1750,238 @@ app.patch("/auth/me", requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error("Failed to update profile", err);
+    return res.status(500).json({ error: "Internal error" });
+  }
+});
+
+app.get("/cards", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  try {
+    const userRepository = createUserRepository();
+    const userDoc = await userRepository.findValidatedById(userId);
+    if (!userDoc) return res.status(404).json({ error: "User not found" });
+
+    return res.json({
+      cards: getStoredCards(userDoc.metadata).map(serializeCard),
+    });
+  } catch (err) {
+    console.error("Failed to list cards", err);
+    return res.status(500).json({ error: "Internal error" });
+  }
+});
+
+app.post("/cards", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const body = req.body as {
+    type?: unknown;
+    bank?: unknown;
+    number?: unknown;
+    holder?: unknown;
+    expiryMonth?: unknown;
+    expiryYear?: unknown;
+  };
+  const type =
+    body.type === "Mastercard" ||
+    body.type === "Visa" ||
+    body.type === "Payoneer" ||
+    body.type === "Skrill"
+      ? (body.type as CardType)
+      : undefined;
+  const bank = typeof body.bank === "string" ? body.bank.trim() : "";
+  const holder = typeof body.holder === "string" ? body.holder.trim() : "";
+  const number =
+    typeof body.number === "string" ? body.number.replace(/\D/g, "") : "";
+  const expiryMonth =
+    typeof body.expiryMonth === "string" ? body.expiryMonth.trim() : "";
+  const expiryYear =
+    typeof body.expiryYear === "string" ? body.expiryYear.trim() : "";
+
+  if (
+    !type ||
+    !bank ||
+    !holder ||
+    !/^\d{12,19}$/.test(number) ||
+    !/^(0[1-9]|1[0-2])$/.test(expiryMonth) ||
+    !/^\d{2,4}$/.test(expiryYear)
+  ) {
+    return res.status(400).json({ error: "Invalid card payload" });
+  }
+
+  try {
+    const userRepository = createUserRepository();
+    const userDoc = await userRepository.findValidatedById(userId);
+    if (!userDoc) return res.status(404).json({ error: "User not found" });
+
+    const cards = getStoredCards(userDoc.metadata);
+    if (cards.length >= 8) {
+      return res.status(400).json({ error: "Card limit reached" });
+    }
+
+    const nextCards = normalizePrimaryCard([
+      createStoredCard({
+        id: crypto.randomUUID(),
+        type,
+        bank,
+        holder,
+        rawCardNumber: number,
+        expiryMonth,
+        expiryYear: expiryYear.length === 2 ? `20${expiryYear}` : expiryYear,
+        isPrimary: cards.length === 0,
+      }),
+      ...cards.map((card) => ({
+        ...card,
+        isPrimary: cards.length === 0 ? false : card.isPrimary,
+      })),
+    ]);
+
+    await userRepository.updateMetadata(
+      userId,
+      setStoredCards(userDoc.metadata, nextCards),
+    );
+
+    await logAuditEvent({
+      actor: req.user?.email,
+      userId,
+      action: "CARD_ADDED",
+      details: {
+        type,
+        bank,
+        last4: number.slice(-4),
+      },
+      ipAddress: getRequestIp(req),
+    });
+
+    return res.status(201).json({
+      cards: nextCards.map(serializeCard),
+    });
+  } catch (err) {
+    console.error("Failed to add card", err);
+    return res.status(500).json({ error: "Internal error" });
+  }
+});
+
+app.patch("/cards/:id", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const action =
+    req.body?.action === "set_primary" ||
+    req.body?.action === "freeze" ||
+    req.body?.action === "unfreeze"
+      ? (req.body.action as "set_primary" | "freeze" | "unfreeze")
+      : null;
+  if (!action) {
+    return res.status(400).json({ error: "Invalid card action" });
+  }
+
+  try {
+    const userRepository = createUserRepository();
+    const userDoc = await userRepository.findValidatedById(userId);
+    if (!userDoc) return res.status(404).json({ error: "User not found" });
+
+    const cards = getStoredCards(userDoc.metadata);
+    const target = cards.find((card) => card.id === req.params.id);
+    if (!target) return res.status(404).json({ error: "Card not found" });
+
+    const nextCards = normalizePrimaryCard(
+      cards.map((card) => {
+        if (card.id !== req.params.id) {
+          return action === "set_primary"
+            ? { ...card, isPrimary: false }
+            : card;
+        }
+
+        return {
+          ...card,
+          isPrimary: action === "set_primary" ? true : card.isPrimary,
+          status:
+            action === "freeze"
+              ? "FROZEN"
+              : action === "unfreeze"
+                ? "ACTIVE"
+                : card.status,
+          updatedAt: new Date().toISOString(),
+        };
+      }),
+    );
+
+    await userRepository.updateMetadata(
+      userId,
+      setStoredCards(userDoc.metadata, nextCards),
+    );
+
+    await logAuditEvent({
+      actor: req.user?.email,
+      userId,
+      action:
+        action === "set_primary"
+          ? "CARD_PRIMARY_UPDATED"
+          : action === "freeze"
+            ? "CARD_FROZEN"
+            : "CARD_UNFROZEN",
+      details: {
+        cardId: target.id,
+        type: target.type,
+        last4: target.last4,
+      },
+      ipAddress: getRequestIp(req),
+    });
+
+    return res.json({
+      cards: nextCards.map(serializeCard),
+    });
+  } catch (err) {
+    console.error("Failed to update card", err);
+    return res.status(500).json({ error: "Internal error" });
+  }
+});
+
+app.delete("/cards/:id", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  try {
+    const userRepository = createUserRepository();
+    const userDoc = await userRepository.findValidatedById(userId);
+    if (!userDoc) return res.status(404).json({ error: "User not found" });
+
+    const cards = getStoredCards(userDoc.metadata);
+    const target = cards.find((card) => card.id === req.params.id);
+    if (!target) return res.status(404).json({ error: "Card not found" });
+
+    const nextCards = normalizePrimaryCard(
+      cards
+        .filter((card) => card.id !== req.params.id)
+        .map((card) => ({
+          ...card,
+          updatedAt: card.updatedAt,
+        })),
+    );
+
+    await userRepository.updateMetadata(
+      userId,
+      setStoredCards(userDoc.metadata, nextCards),
+    );
+
+    await logAuditEvent({
+      actor: req.user?.email,
+      userId,
+      action: "CARD_REMOVED",
+      details: {
+        cardId: target.id,
+        type: target.type,
+        last4: target.last4,
+      },
+      ipAddress: getRequestIp(req),
+    });
+
+    return res.status(204).send();
+  } catch (err) {
+    console.error("Failed to delete card", err);
     return res.status(500).json({ error: "Internal error" });
   }
 });
@@ -1413,7 +2007,8 @@ app.get("/wallet/me", requireAuth, async (req, res) => {
         typeof metadata.accountNumber === "string"
           ? metadata.accountNumber
           : "",
-      qrPayload: typeof metadata.qrPayload === "string" ? metadata.qrPayload : "",
+      qrPayload:
+        typeof metadata.qrPayload === "string" ? metadata.qrPayload : "",
       qrImageUrl:
         typeof metadata.qrImageUrl === "string" ? metadata.qrImageUrl : "",
     });
@@ -1479,6 +2074,10 @@ app.post("/wallet/deposit", requireAuth, async (req, res) => {
   if (!amount) return res.status(400).json({ error: "Invalid amount" });
 
   try {
+    const userRepository = createUserRepository();
+    const userDoc = await userRepository.findValidatedById(userId);
+    if (!userDoc) return res.status(404).json({ error: "User not found" });
+
     const updatedWallet = await prisma.$transaction(async (tx) => {
       const wallet = await tx.wallet.findFirst({ where: { userId } });
       const nextWallet =
@@ -1498,20 +2097,37 @@ app.post("/wallet/deposit", requireAuth, async (req, res) => {
         data: { balance: { increment: amount } },
       });
 
+      const transactionId = generateEncryptedTransactionId();
       await tx.transaction.create({
         data: {
-          id: crypto.randomUUID(),
-          walletId: updated.id,
-          amount,
-          type: "DEPOSIT",
-          status: "COMPLETED",
-          description: "Wallet deposit",
-          fromUserId: userId,
-          toUserId: userId,
+          id: transactionId,
+          ...buildEncryptedTransactionCreateData(transactionId, {
+            walletId: updated.id,
+            sensitive: {
+              amount,
+              type: "DEPOSIT",
+              status: "COMPLETED",
+              description: "Wallet deposit",
+              fromUserId: userId,
+              toUserId: userId,
+            },
+          }),
         },
       });
 
       return updated;
+    });
+
+    notifyBalanceChange({
+      to: userDoc.email,
+      recipientName: getRecipientName(userDoc),
+      direction: "credit",
+      amount,
+      balance: Number(updatedWallet.balance),
+      currency: updatedWallet.currency,
+      transactionType: "DEPOSIT",
+      description: "Wallet deposit",
+      occurredAt: new Date().toISOString(),
     });
 
     return res.json({
@@ -1582,7 +2198,7 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
         amount: context.amount,
         toAccount: context.receiverAccountNumber,
       },
-      ipAddress: req.ip,
+      ipAddress: getRequestIp(req),
     });
 
     return res.json({
@@ -1597,7 +2213,9 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       return res.status(429).json({
         error: "OTP recently sent. Please wait before requesting another code.",
         retryAfterSeconds:
-          "retryAfterSeconds" in err ? (err as { retryAfterSeconds: number }).retryAfterSeconds : 60,
+          "retryAfterSeconds" in err
+            ? (err as { retryAfterSeconds: number }).retryAfterSeconds
+            : 60,
       });
     }
     if (err instanceof Error) {
@@ -1641,6 +2259,10 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
   }
 
   try {
+    const userRepository = createUserRepository();
+    const senderUser = await userRepository.findValidatedById(senderUserId);
+    if (!senderUser) return res.status(404).json({ error: "User not found" });
+
     const { challenge, metadata } = await verifyEmailOtpChallenge({
       userId: senderUserId,
       purpose: "TRANSFER",
@@ -1655,7 +2277,9 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
       typeof metadata.toUserId === "string" ? metadata.toUserId : "";
     const note = typeof metadata.note === "string" ? metadata.note : "";
     if (!amount || (!toAccount && !toUserId)) {
-      return res.status(400).json({ error: "Stored OTP transfer payload is invalid" });
+      return res
+        .status(400)
+        .json({ error: "Stored OTP transfer payload is invalid" });
     }
 
     const context = await resolveTransferContext({
@@ -1665,6 +2289,11 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
       amount,
       note,
     });
+    const receiverUser = await userRepository.findValidatedById(
+      context.resolvedReceiverUserId,
+    );
+    if (!receiverUser)
+      return res.status(404).json({ error: "Recipient not found" });
 
     const transferResult = await executeTransfer({
       senderUserId,
@@ -1686,7 +2315,35 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
         challengeId: challenge.id,
         transactionId: transferResult.transaction.id,
       },
-      ipAddress: req.ip,
+      ipAddress: getRequestIp(req),
+    });
+
+    notifyBalanceChange({
+      to: senderUser.email,
+      recipientName: getRecipientName(senderUser),
+      direction: "debit",
+      amount: context.amount,
+      balance: transferResult.senderBalance,
+      currency: transferResult.currency,
+      transactionType: "TRANSFER",
+      description:
+        transferResult.transaction.description ??
+        `Transfer to ${transferResult.receiverAccountNumber}`,
+      occurredAt: transferResult.transaction.createdAt.toISOString(),
+      counterpartyLabel: getRecipientName(receiverUser),
+    });
+    notifyBalanceChange({
+      to: receiverUser.email,
+      recipientName: getRecipientName(receiverUser),
+      direction: "credit",
+      amount: context.amount,
+      balance: transferResult.receiverBalance,
+      currency: transferResult.currency,
+      transactionType: "TRANSFER",
+      description:
+        context.note || `Receive from ${context.senderAccountNumber}`,
+      occurredAt: transferResult.transaction.createdAt.toISOString(),
+      counterpartyLabel: getRecipientName(senderUser),
     });
 
     return res.json({
@@ -1694,7 +2351,7 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
       reconciliationId: transferResult.reconciliationId,
       transaction: {
         id: transferResult.transaction.id,
-        amount: Number(transferResult.transaction.amount),
+        amount: transferResult.transaction.amount,
         type: transferResult.transaction.type,
         description: transferResult.transaction.description ?? undefined,
         createdAt: transferResult.transaction.createdAt.toISOString(),
@@ -1762,6 +2419,10 @@ app.post("/transfer", requireAuth, async (req, res) => {
   if (!amount) return res.status(400).json({ error: "Invalid amount" });
 
   try {
+    const userRepository = createUserRepository();
+    const senderUser = await userRepository.findValidatedById(senderUserId);
+    if (!senderUser) return res.status(404).json({ error: "User not found" });
+
     const senderWallet = await getOrCreateWalletByUserId(senderUserId);
     const senderMeta =
       senderWallet.metadata && typeof senderWallet.metadata === "object"
@@ -1773,9 +2434,11 @@ app.post("/transfer", requireAuth, async (req, res) => {
         : "";
 
     let resolvedReceiverUserId = toUserId;
-    let receiverWalletByAccount:
-      | { id: string; userId: string | null; metadata: unknown }
-      | null = null;
+    let receiverWalletByAccount: {
+      id: string;
+      userId: string | null;
+      metadata: unknown;
+    } | null = null;
 
     if (toAccount) {
       receiverWalletByAccount = await findWalletByAccountNumber(toAccount);
@@ -1796,98 +2459,44 @@ app.post("/transfer", requireAuth, async (req, res) => {
     const receiver = await prisma.user.findUnique({
       where: { id: resolvedReceiverUserId },
     });
-    if (!receiver) return res.status(404).json({ error: "Recipient not found" });
+    if (!receiver)
+      return res.status(404).json({ error: "Recipient not found" });
+    const transferResult = await executeTransfer({
+      senderUserId,
+      resolvedReceiverUserId,
+      amount,
+      note,
+      senderAccountNumber,
+      receiverAccountNumber:
+        toAccount || buildAccountNumber(resolvedReceiverUserId),
+      receiverWalletByAccount,
+    });
 
-    const transferResult = await prisma.$transaction(async (tx) => {
-      const senderWallet = await tx.wallet.findFirst({
-        where: { userId: senderUserId },
-      });
-      if (!senderWallet) throw new Error("SENDER_WALLET_NOT_FOUND");
-      if (Number(senderWallet.balance) < amount)
-        throw new Error("INSUFFICIENT_BALANCE");
-
-      const receiverWallet =
-        (receiverWalletByAccount
-          ? await tx.wallet.findFirst({ where: { id: receiverWalletByAccount.id } })
-          : null) ??
-        (await tx.wallet.findFirst({ where: { userId: resolvedReceiverUserId } })) ??
-        (await tx.wallet.create({
-          data: {
-            id: crypto.randomUUID(),
-            userId: resolvedReceiverUserId,
-            balance: 0,
-            currency: senderWallet.currency,
-            status: "ACTIVE",
-            metadata: {
-              accountNumber: buildAccountNumber(resolvedReceiverUserId),
-            } as never,
-          },
-        }));
-
-      const receiverMeta =
-        receiverWallet.metadata && typeof receiverWallet.metadata === "object"
-          ? (receiverWallet.metadata as Record<string, unknown>)
-          : {};
-      const receiverAccountNumber =
-        typeof receiverMeta.accountNumber === "string"
-          ? receiverMeta.accountNumber
-          : buildAccountNumber(resolvedReceiverUserId);
-      const reconciliationId = crypto.randomUUID();
-
-      await tx.wallet.update({
-        where: { id: senderWallet.id },
-        data: { balance: { decrement: amount } },
-      });
-      await tx.wallet.update({
-        where: { id: receiverWallet.id },
-        data: { balance: { increment: amount } },
-      });
-
-      const debitTx = await tx.transaction.create({
-        data: {
-          id: crypto.randomUUID(),
-          walletId: senderWallet.id,
-          counterpartyWalletId: receiverWallet.id,
-          amount,
-          type: "TRANSFER",
-          status: "COMPLETED",
-          description: note || `Transfer to ${receiverAccountNumber}`,
-          fromUserId: senderUserId,
-          toUserId: resolvedReceiverUserId,
-          metadata: {
-            entry: "DEBIT",
-            reconciliationId,
-            fromAccount: senderAccountNumber,
-            toAccount: receiverAccountNumber,
-          } as never,
-        },
-      });
-
-      await tx.transaction.create({
-        data: {
-          id: crypto.randomUUID(),
-          walletId: receiverWallet.id,
-          counterpartyWalletId: senderWallet.id,
-          amount,
-          type: "TRANSFER",
-          status: "COMPLETED",
-          description: note || `Receive from ${senderAccountNumber}`,
-          fromUserId: senderUserId,
-          toUserId: resolvedReceiverUserId,
-          metadata: {
-            entry: "CREDIT",
-            reconciliationId,
-            fromAccount: senderAccountNumber,
-            toAccount: receiverAccountNumber,
-          } as never,
-        },
-      });
-
-      return {
-        transaction: debitTx,
-        reconciliationId,
-        receiverAccountNumber,
-      };
+    notifyBalanceChange({
+      to: senderUser.email,
+      recipientName: getRecipientName(senderUser),
+      direction: "debit",
+      amount,
+      balance: transferResult.senderBalance,
+      currency: transferResult.currency,
+      transactionType: "TRANSFER",
+      description:
+        transferResult.transaction.description ??
+        `Transfer to ${transferResult.receiverAccountNumber}`,
+      occurredAt: transferResult.transaction.createdAt.toISOString(),
+      counterpartyLabel: getRecipientName(receiver),
+    });
+    notifyBalanceChange({
+      to: receiver.email,
+      recipientName: getRecipientName(receiver),
+      direction: "credit",
+      amount,
+      balance: transferResult.receiverBalance,
+      currency: transferResult.currency,
+      transactionType: "TRANSFER",
+      description: note || `Receive from ${senderAccountNumber}`,
+      occurredAt: transferResult.transaction.createdAt.toISOString(),
+      counterpartyLabel: getRecipientName(senderUser),
     });
 
     return res.json({
@@ -1895,7 +2504,7 @@ app.post("/transfer", requireAuth, async (req, res) => {
       reconciliationId: transferResult.reconciliationId,
       transaction: {
         id: transferResult.transaction.id,
-        amount: Number(transferResult.transaction.amount),
+        amount: transferResult.transaction.amount,
         type: transferResult.transaction.type,
         description: transferResult.transaction.description ?? undefined,
         createdAt: transferResult.transaction.createdAt.toISOString(),
@@ -1936,17 +2545,18 @@ app.get("/transactions", requireAuth, async (req, res) => {
     });
 
     return res.json(
-      txns.map((txn) => ({
-        id: txn.id,
-        amount: Number(txn.amount),
-        type: txn.type,
-        description: txn.description ?? undefined,
-        createdAt: txn.createdAt.toISOString(),
-        metadata:
-          txn.metadata && typeof txn.metadata === "object"
-            ? (txn.metadata as Record<string, unknown>)
-            : undefined,
-      })),
+      txns.map((txn) => {
+        const decrypted = decryptStoredTransaction(txn);
+        return {
+          id: decrypted.id,
+          amount: decrypted.amount,
+          type: decrypted.type,
+          status: decrypted.status,
+          description: decrypted.description ?? undefined,
+          createdAt: decrypted.createdAt.toISOString(),
+          metadata: decrypted.metadata,
+        };
+      }),
     );
   } catch (err) {
     console.error("Failed to list transactions", err);
@@ -1956,6 +2566,87 @@ app.get("/transactions", requireAuth, async (req, res) => {
 
 app.post("/security/login-events", (_req, res) => {
   res.json({ score: 0.1, reasons: ["stub"], received: _req.body });
+});
+
+app.get("/security/overview", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  try {
+    const [policy, userDoc] = await Promise.all([
+      getSecurityPolicy(),
+      createUserRepository().findValidatedById(userId),
+    ]);
+
+    if (!userDoc) return res.status(404).json({ error: "User not found" });
+
+    const authSecurityState = getAuthSecurityState(userDoc.metadata);
+    const repo = createLoginEventRepository();
+    const since = new Date(
+      Date.now() - SECURITY_OVERVIEW_WINDOW_DAYS * 24 * 60 * 60 * 1000,
+    );
+    const events = await repo.findByUserSince(userId, since, 50);
+    const trustedByIp = new Map(
+      authSecurityState.trustedIps.map((entry) => [entry.ipAddress, entry]),
+    );
+
+    const alerts = events.slice(0, 12).map((event) => {
+      const normalizedIp = normalizeIpAddress(event.ipAddress);
+      return buildUserSecurityAlert(
+        event,
+        policy.anomalyAlertThreshold,
+        normalizedIp ? trustedByIp.get(normalizedIp) : undefined,
+      );
+    });
+
+    const recentLogins = events.slice(0, 20).map((event) => {
+      const normalizedIp = normalizeIpAddress(event.ipAddress);
+      const trustedIp = normalizedIp
+        ? trustedByIp.get(normalizedIp)
+        : undefined;
+      return {
+        id: event.id,
+        location: buildSecurityLocationLabel(event),
+        ipAddress: normalizedIp ?? undefined,
+        userAgent: event.userAgent ?? "Unknown device",
+        success: Boolean(event.success),
+        anomaly: event.anomaly ?? 0,
+        createdAt: event.createdAt.toISOString(),
+        trustedIp: Boolean(trustedIp),
+      };
+    });
+
+    const trustedDevices = authSecurityState.trustedIps.map((entry, index) => {
+      const matchingEvent = events.find(
+        (event) =>
+          Boolean(event.success) &&
+          normalizeIpAddress(event.ipAddress) === entry.ipAddress,
+      );
+
+      return {
+        id: `trusted-device-${index + 1}`,
+        ipAddress: entry.ipAddress,
+        location: buildSecurityLocationLabel({
+          location: matchingEvent?.location,
+          ipAddress: entry.ipAddress,
+        }),
+        userAgent: matchingEvent?.userAgent ?? "Saved trusted device",
+        firstSeenAt: entry.firstSeenAt,
+        lastSeenAt: entry.lastSeenAt,
+        lastVerifiedAt: entry.lastVerifiedAt,
+        current: entry.ipAddress === authSecurityState.lastLoginIp,
+      };
+    });
+
+    return res.json({
+      alerts,
+      recentLogins,
+      trustedDevices,
+    });
+  } catch (err) {
+    console.error("Failed to load security overview", err);
+    return res.status(500).json({ error: "Internal error" });
+  }
 });
 
 app.get("/security/alerts", async (_req, res) => {
@@ -2003,7 +2694,10 @@ app.patch(
 
     try {
       const userRepository = createUserRepository();
-      await userRepository.setStatus(req.params.id, statusNormalized as UserStatus);
+      await userRepository.setStatus(
+        req.params.id,
+        statusNormalized as UserStatus,
+      );
       const updated = await userRepository.findValidatedById(req.params.id);
       const sanitized = sanitizeUser(updated);
 
@@ -2015,7 +2709,7 @@ app.patch(
             ? "ACCOUNT_LOCKED"
             : "ACCOUNT_UNLOCKED",
         details: reason ?? "manual update",
-        ipAddress: req.ip,
+        ipAddress: getRequestIp(req),
       });
 
       return res.json({ user: sanitized });
@@ -2039,7 +2733,7 @@ app.post(
     try {
       const targetUser = await prisma.user.findUnique({
         where: { id: targetUserId },
-        select: { id: true, email: true, status: true },
+        select: { id: true, email: true, fullName: true, status: true },
       });
       if (!targetUser) return res.status(404).json({ error: "User not found" });
       if (targetUser.status !== "ACTIVE") {
@@ -2053,22 +2747,29 @@ app.post(
           data: { balance: { increment: amount } },
         });
 
-        const transaction = await tx.transaction.create({
-          data: {
-            id: crypto.randomUUID(),
-            walletId: nextWallet.id,
-            amount,
-            type: "DEPOSIT",
-            status: "COMPLETED",
-            description: `Admin top-up for ${targetUser.email}`,
-            fromUserId: adminUserId,
-            toUserId: targetUser.id,
-            metadata: {
-              entry: "CREDIT",
-              source: "ADMIN_TOPUP",
-            } as never,
-          },
-        });
+        const transactionId = generateEncryptedTransactionId();
+        const transaction = decryptStoredTransaction(
+          await tx.transaction.create({
+            data: {
+              id: transactionId,
+              ...buildEncryptedTransactionCreateData(transactionId, {
+                walletId: nextWallet.id,
+                sensitive: {
+                  amount,
+                  type: "DEPOSIT",
+                  status: "COMPLETED",
+                  description: `Admin top-up for ${targetUser.email}`,
+                  fromUserId: adminUserId,
+                  toUserId: targetUser.id,
+                  metadata: {
+                    entry: "CREDIT",
+                    source: "ADMIN_TOPUP",
+                  },
+                },
+              }),
+            },
+          }),
+        );
 
         return { nextWallet, transaction };
       });
@@ -2081,7 +2782,20 @@ app.post(
           amount,
           currency: updated.nextWallet.currency,
         },
-        ipAddress: req.ip,
+        ipAddress: getRequestIp(req),
+      });
+
+      notifyBalanceChange({
+        to: targetUser.email,
+        recipientName: getRecipientName(targetUser),
+        direction: "credit",
+        amount,
+        balance: Number(updated.nextWallet.balance),
+        currency: updated.nextWallet.currency,
+        transactionType: "DEPOSIT",
+        description: updated.transaction.description ?? "Admin top-up",
+        occurredAt: updated.transaction.createdAt.toISOString(),
+        counterpartyLabel: "FPIPay Admin",
       });
 
       return res.json({
@@ -2092,7 +2806,7 @@ app.post(
         },
         transaction: {
           id: updated.transaction.id,
-          amount: Number(updated.transaction.amount),
+          amount: updated.transaction.amount,
           type: updated.transaction.type,
           status: updated.transaction.status,
           description: updated.transaction.description ?? "",
@@ -2146,16 +2860,19 @@ app.get(
       orderBy: { createdAt: "desc" },
       take: limit,
     });
-    const normalized = txns.map((txn) => ({
-      id: txn.id,
-      amount: Number(txn.amount),
-      type: txn.type,
-      status: txn.status,
-      description: txn.description ?? "",
-      createdAt: txn.createdAt,
-      fromUserId: txn.fromUserId ?? undefined,
-      toUserId: txn.toUserId ?? undefined,
-    }));
+    const normalized = txns.map((txn) => {
+      const decrypted = decryptStoredTransaction(txn);
+      return {
+        id: decrypted.id,
+        amount: decrypted.amount,
+        type: decrypted.type,
+        status: decrypted.status,
+        description: decrypted.description ?? "",
+        createdAt: decrypted.createdAt,
+        fromUserId: decrypted.fromUserId ?? undefined,
+        toUserId: decrypted.toUserId ?? undefined,
+      };
+    });
     res.json(normalized);
   },
 );
@@ -2268,7 +2985,12 @@ app.post(
       await repo.createLoginEvent(evt);
     }
     if (userId) {
-      await lockUserAccount(userId, email, "Demo brute force lock", req.ip);
+      await lockUserAccount(
+        userId,
+        email,
+        "Demo brute force lock",
+        getRequestIp(req),
+      );
     }
     res.json({ inserted: entries.length, email });
   },
@@ -2403,6 +3125,3 @@ const start = async () => {
 };
 
 start();
-
-
-
