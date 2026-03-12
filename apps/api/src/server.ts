@@ -104,6 +104,7 @@ const RESET_PASSWORD_OTP_TTL_MINUTES = Number(
   process.env.RESET_PASSWORD_OTP_TTL_MINUTES || "10",
 );
 const OTP_MAX_ATTEMPTS = Number(process.env.OTP_MAX_ATTEMPTS || "5");
+const RECAPTCHA_SECRET_KEY = process.env.RECAPTCHA_SECRET_KEY || "";
 
 const normalizeEmail = (email: string) => email.trim().toLowerCase();
 
@@ -177,6 +178,37 @@ const buildAuthPayload = (
     user,
     notice: extra?.notice,
   };
+};
+
+const verifyRecaptchaToken = async (token: string, remoteIp?: string) => {
+  if (!RECAPTCHA_SECRET_KEY) {
+    throw new Error("RECAPTCHA_NOT_CONFIGURED");
+  }
+
+  const body = new URLSearchParams({
+    secret: RECAPTCHA_SECRET_KEY,
+    response: token,
+  });
+  if (remoteIp) {
+    body.set("remoteip", remoteIp);
+  }
+
+  const response = await fetch(
+    "https://www.google.com/recaptcha/api/siteverify",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: body.toString(),
+    },
+  );
+  const data = (await response.json().catch(() => null)) as {
+    success?: boolean;
+    ["error-codes"]?: string[];
+  } | null;
+
+  return Boolean(data?.success);
 };
 
 const getRecipientName = (input: {
@@ -762,15 +794,30 @@ app.post("/ai/copilot-chat", requireAuth, async (_req, res) => {
 
 app.post("/auth/register", async (req, res) => {
   type RegisterReq = components["schemas"]["RegisterRequest"];
+  const recaptchaToken =
+    typeof req.body?.recaptchaToken === "string"
+      ? req.body.recaptchaToken.trim()
+      : "";
   const parsed = registerSchema.safeParse(req.body as RegisterReq);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
+  }
+  if (!recaptchaToken) {
+    return res.status(400).json({ error: "Missing reCAPTCHA token" });
   }
 
   const userRepository = createUserRepository();
   const email = normalizeEmail(parsed.data.email);
 
   try {
+    const recaptchaVerified = await verifyRecaptchaToken(
+      recaptchaToken,
+      getRequestIp(req),
+    );
+    if (!recaptchaVerified) {
+      return res.status(403).json({ error: "reCAPTCHA verification failed" });
+    }
+
     const existingUser = await userRepository.findByEmail(email);
     if (existingUser && existingUser.status !== "PENDING") {
       return res.status(409).json({ error: "Email already registered" });
@@ -845,6 +892,9 @@ app.post("/auth/register", async (req, res) => {
             ? (err as { retryAfterSeconds: number }).retryAfterSeconds
             : 60,
       });
+    }
+    if (err instanceof Error && err.message === "RECAPTCHA_NOT_CONFIGURED") {
+      return res.status(500).json({ error: "reCAPTCHA is not configured" });
     }
     console.error("Failed to register user", err);
     return res.status(500).json({ error: "Internal error" });
@@ -960,9 +1010,16 @@ app.post("/auth/register/verify", async (req, res) => {
 
 app.post("/auth/login", loginRateLimiter, async (req, res) => {
   type LoginReq = components["schemas"]["LoginRequest"];
+  const recaptchaToken =
+    typeof req.body?.recaptchaToken === "string"
+      ? req.body.recaptchaToken.trim()
+      : "";
   const parsed = loginSchema.safeParse(req.body as LoginReq);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
+  }
+  if (!recaptchaToken) {
+    return res.status(400).json({ error: "Missing reCAPTCHA token" });
   }
 
   const userRepository = createUserRepository();
@@ -976,6 +1033,14 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
       : "unknown";
 
   try {
+    const recaptchaVerified = await verifyRecaptchaToken(
+      recaptchaToken,
+      getRequestIp(req),
+    );
+    if (!recaptchaVerified) {
+      return res.status(403).json({ error: "reCAPTCHA verification failed" });
+    }
+
     const loginEventPayload = {
       ipAddress: getRequestIp(req),
       userAgent,
@@ -1229,6 +1294,9 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
             : 60,
       });
     }
+    if (err instanceof Error && err.message === "RECAPTCHA_NOT_CONFIGURED") {
+      return res.status(500).json({ error: "reCAPTCHA is not configured" });
+    }
     console.error("Failed to login user", err);
     return res.status(500).json({ error: "Internal error" });
   }
@@ -1368,11 +1436,26 @@ app.post("/auth/login/verify", async (req, res) => {
 app.post("/auth/password/otp/send", async (req, res) => {
   const email =
     typeof req.body?.email === "string" ? normalizeEmail(req.body.email) : "";
+  const recaptchaToken =
+    typeof req.body?.recaptchaToken === "string"
+      ? req.body.recaptchaToken.trim()
+      : "";
   if (!email) {
     return res.status(400).json({ error: "Email is required" });
   }
+  if (!recaptchaToken) {
+    return res.status(400).json({ error: "Missing reCAPTCHA token" });
+  }
 
   try {
+    const recaptchaVerified = await verifyRecaptchaToken(
+      recaptchaToken,
+      getRequestIp(req),
+    );
+    if (!recaptchaVerified) {
+      return res.status(403).json({ error: "reCAPTCHA verification failed" });
+    }
+
     const userRepository = createUserRepository();
     const userDoc = await userRepository.findByEmail(email);
     if (!userDoc) {
@@ -1420,6 +1503,9 @@ app.post("/auth/password/otp/send", async (req, res) => {
             ? (err as { retryAfterSeconds: number }).retryAfterSeconds
             : 60,
       });
+    }
+    if (err instanceof Error && err.message === "RECAPTCHA_NOT_CONFIGURED") {
+      return res.status(500).json({ error: "reCAPTCHA is not configured" });
     }
     console.error("Failed to send password reset OTP", err);
     return res.status(500).json({ error: "Failed to send password reset OTP" });
@@ -3114,8 +3200,18 @@ const initializeDatabase = async () => {
 const start = async () => {
   try {
     registerShutdownHooks();
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
       console.log(`API listening on http://localhost:${PORT}`);
+    });
+    server.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EADDRINUSE") {
+        console.error(
+          `Port ${PORT} is already in use. Stop the existing process or restart the VS Code api:dev task.`,
+        );
+        process.exit(1);
+      }
+      console.error("Failed to start API server", err);
+      process.exit(1);
     });
     void initializeDatabase();
   } catch (err) {
