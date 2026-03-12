@@ -15,29 +15,70 @@ export type User = {
   role: "USER" | "ADMIN";
 };
 
-const USER_STORAGE_KEY = "moneyfarm_user";
-const TOKEN_STORAGE_KEY = "moneyfarm_token";
-const TOKEN_EXPIRES_AT_STORAGE_KEY = "moneyfarm_token_expires_at";
+export type LoginOtpRequiredResult = {
+  status: "otp_required";
+  challengeId: string;
+  destination: string;
+  expiresAt: string;
+  retryAfterSeconds: number;
+  notice?: string;
+};
+
+export type LoginAuthenticatedResult = {
+  status: "authenticated";
+  notice?: string;
+};
+
+export type LoginResult = LoginOtpRequiredResult | LoginAuthenticatedResult;
+
+export type AuthCompletionResult = {
+  notice?: string;
+};
+
+export type SessionReplacementAlert = {
+  token: string;
+  email: string;
+  issuedAt?: string;
+  ipAddress?: string;
+  userAgent?: string;
+};
+
+export type SessionAlertResponse =
+  | {
+      status: "acknowledged";
+      message: string;
+      active: boolean;
+    }
+  | {
+      status: "secured";
+      message: string;
+      email: string;
+      destination: string;
+      challengeId?: string;
+      expiresAt?: string;
+      retryAfterSeconds: number;
+    };
+
+const USER_STORAGE_KEY = "fpipay_user";
+const TOKEN_STORAGE_KEY = "fpipay_token";
+const TOKEN_EXPIRES_AT_STORAGE_KEY = "fpipay_token_expires_at";
 const DEFAULT_AVATAR = "https://i.pravatar.cc/80?img=12";
 const API_BASE =
   (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ||
   "http://localhost:4000";
-const SESSION_TIMEOUT_MS = 5 * 60 * 1000;
 const SESSION_EXPIRED_EVENT = "auth:session-expired";
+const SESSION_VERIFY_INTERVAL_MS = 10000;
+
+type SessionExpiredReason = "expired" | "replaced";
 
 const AuthContext = createContext<{
   user: User | null;
   token: string | null;
-  requestLoginOtp: (
-    email: string,
-    password: string,
-  ) => Promise<{
-    challengeId: string;
-    destination: string;
-    expiresAt: string;
-    retryAfterSeconds: number;
-  }>;
-  verifyLoginOtp: (challengeId: string, otp: string) => Promise<void>;
+  requestLoginOtp: (email: string, password: string) => Promise<LoginResult>;
+  verifyLoginOtp: (
+    challengeId: string,
+    otp: string,
+  ) => Promise<AuthCompletionResult>;
   requestRegisterOtp: (payload: {
     fullName: string;
     userName: string;
@@ -52,7 +93,10 @@ const AuthContext = createContext<{
     expiresAt: string;
     retryAfterSeconds: number;
   }>;
-  verifyRegisterOtp: (challengeId: string, otp: string) => Promise<void>;
+  verifyRegisterOtp: (
+    challengeId: string,
+    otp: string,
+  ) => Promise<AuthCompletionResult>;
   requestPasswordResetOtp: (email: string) => Promise<{
     challengeId: string;
     destination: string;
@@ -65,6 +109,10 @@ const AuthContext = createContext<{
     otp: string;
     newPassword: string;
   }) => Promise<void>;
+  respondToSessionAlert: (
+    alertToken: string,
+    action: "confirm" | "secure_account",
+  ) => Promise<SessionAlertResponse>;
   updateUser: (patch: Partial<User>) => void;
   logout: () => void;
 } | null>(null);
@@ -116,13 +164,61 @@ const extractApiErrorMessage = (data: unknown, fallback: string) => {
   return fallback;
 };
 
+const decodeJwtExpiresAt = (token: string) => {
+  try {
+    const [, payload] = token.split(".");
+    if (!payload) return null;
+    const normalized = payload
+      .replace(/-/g, "+")
+      .replace(/_/g, "/")
+      .padEnd(Math.ceil(payload.length / 4) * 4, "=");
+    const parsed = JSON.parse(atob(normalized)) as { exp?: unknown };
+    return typeof parsed.exp === "number" ? parsed.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+};
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const expireSession = useCallback(() => {
-    setUser(null);
-    setToken(null);
-    setTokenExpiresAt(null);
-    window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT));
-  }, []);
+  const expireSession = useCallback(
+    (
+      reason: SessionExpiredReason = "expired",
+      sessionAlert?: SessionReplacementAlert,
+    ) => {
+      setUser(null);
+      setToken(null);
+      setTokenExpiresAt(null);
+      window.dispatchEvent(
+        new CustomEvent(SESSION_EXPIRED_EVENT, {
+          detail: { reason, sessionAlert },
+        }),
+      );
+    },
+    [],
+  );
+
+  const getSessionExpiredReason = useCallback(
+    (status: number, data: { error?: string; code?: string } | null) => {
+      const message = (data?.error || "").toLowerCase();
+      if (
+        data?.code === "SESSION_REPLACED" ||
+        message.includes("session revoked") ||
+        message.includes("newer sign-in")
+      ) {
+        return "replaced" as const;
+      }
+      if (
+        status === 401 ||
+        message.includes("invalid") ||
+        message.includes("expired") ||
+        message.includes("token")
+      ) {
+        return "expired" as const;
+      }
+      return null;
+    },
+    [],
+  );
 
   const [user, setUser] = useState<User | null>(() => {
     try {
@@ -151,9 +247,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [tokenExpiresAt, setTokenExpiresAt] = useState<number | null>(() => {
     try {
       const raw = sessionStorage.getItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
-      if (!raw) return null;
-      const parsed = Number(raw);
-      return Number.isFinite(parsed) ? parsed : null;
+      if (raw) {
+        const parsed = Number(raw);
+        if (Number.isFinite(parsed)) return parsed;
+      }
+      const storedToken = sessionStorage.getItem(TOKEN_STORAGE_KEY);
+      return storedToken ? decodeJwtExpiresAt(storedToken) : null;
     } catch {
       return null;
     }
@@ -207,10 +306,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!token) return;
     const now = Date.now();
-    const expiry = tokenExpiresAt ?? now + SESSION_TIMEOUT_MS;
-    if (!tokenExpiresAt) {
+    const expiry = tokenExpiresAt ?? decodeJwtExpiresAt(token);
+    if (expiry && expiry !== tokenExpiresAt) {
       setTokenExpiresAt(expiry);
     }
+    if (!expiry) return;
     if (expiry <= now) {
       expireSession();
       return;
@@ -233,19 +333,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!resp.ok) {
-          const data = (await resp.json().catch(() => null)) as
-            | { error?: string }
-            | null;
-          const msg = (data?.error || "").toLowerCase();
-          if (
-            resp.status === 401 ||
-            msg.includes("invalid") ||
-            msg.includes("expired") ||
-            msg.includes("token")
-          ) {
-            if (!cancelled) {
-              expireSession();
-            }
+          const data = (await resp.json().catch(() => null)) as {
+            error?: string;
+            code?: string;
+            sessionAlert?: SessionReplacementAlert;
+          } | null;
+          const reason = getSessionExpiredReason(resp.status, data);
+          if (!cancelled && reason) {
+            expireSession(reason, data?.sessionAlert);
           }
         }
       } catch {
@@ -254,15 +349,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
 
     void verifyToken();
+    const interval = window.setInterval(() => {
+      void verifyToken();
+    }, SESSION_VERIFY_INTERVAL_MS);
     return () => {
       cancelled = true;
+      window.clearInterval(interval);
     };
-  }, [expireSession, token]);
+  }, [expireSession, getSessionExpiredReason, token]);
 
   const completeLogin = useCallback(
-    (data: { token: string; user: { id: string; email: string; role: "USER" | "ADMIN" } }) => {
+    (data: {
+      token: string;
+      user: { id: string; email: string; role: "USER" | "ADMIN" };
+    }) => {
       setToken(data.token);
-      setTokenExpiresAt(Date.now() + SESSION_TIMEOUT_MS);
+      setTokenExpiresAt(decodeJwtExpiresAt(data.token));
       setUser((prev) => ({
         id: data.user.id,
         role: data.user.role,
@@ -277,38 +379,62 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [],
   );
 
-  const requestLoginOtp = useCallback(async (email: string, password: string) => {
-    try {
-      const resp = await fetch(`${API_BASE}/auth/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
-      });
-      const data = (await resp.json().catch(() => null)) as {
-        error?: unknown;
-        challengeId?: string;
-        destination?: string;
-        expiresAt?: string;
-        retryAfterSeconds?: number;
-      } | null;
+  const requestLoginOtp = useCallback(
+    async (email: string, password: string): Promise<LoginResult> => {
+      try {
+        const resp = await fetch(`${API_BASE}/auth/login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password }),
+        });
+        const data = (await resp.json().catch(() => null)) as {
+          error?: unknown;
+          status?: string;
+          challengeId?: string;
+          destination?: string;
+          expiresAt?: string;
+          retryAfterSeconds?: number;
+          notice?: string;
+          token?: string;
+          user?: { id: string; email: string; role: "USER" | "ADMIN" };
+        } | null;
 
-      if (!resp.ok || !data?.challengeId || !data.destination || !data.expiresAt) {
-        throw new Error(extractApiErrorMessage(data, "Login failed"));
+        if (!resp.ok) {
+          throw new Error(extractApiErrorMessage(data, "Login failed"));
+        }
+
+        if (data?.token && data.user) {
+          completeLogin({
+            token: data.token,
+            user: data.user,
+          });
+          return {
+            status: "authenticated",
+            notice: data.notice,
+          };
+        }
+
+        if (!data?.challengeId || !data.destination || !data.expiresAt) {
+          throw new Error("Login response is missing OTP challenge data");
+        }
+
+        return {
+          status: "otp_required",
+          challengeId: data.challengeId,
+          destination: data.destination,
+          expiresAt: data.expiresAt,
+          retryAfterSeconds: Number(data.retryAfterSeconds || 60),
+          notice: data.notice,
+        };
+      } catch (err) {
+        throw new Error(parseApiError(err));
       }
-
-      return {
-        challengeId: data.challengeId,
-        destination: data.destination,
-        expiresAt: data.expiresAt,
-        retryAfterSeconds: Number(data.retryAfterSeconds || 60),
-      };
-    } catch (err) {
-      throw new Error(parseApiError(err));
-    }
-  }, []);
+    },
+    [completeLogin],
+  );
 
   const verifyLoginOtp = useCallback(
-    async (challengeId: string, otp: string) => {
+    async (challengeId: string, otp: string): Promise<AuthCompletionResult> => {
       try {
         const resp = await fetch(`${API_BASE}/auth/login/verify`, {
           method: "POST",
@@ -317,18 +443,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         });
         const data = (await resp.json().catch(() => null)) as {
           error?: unknown;
+          notice?: string;
           token?: string;
           user?: { id: string; email: string; role: "USER" | "ADMIN" };
         } | null;
 
         if (!resp.ok || !data?.token || !data.user) {
-          throw new Error(extractApiErrorMessage(data, "OTP verification failed"));
+          throw new Error(
+            extractApiErrorMessage(data, "OTP verification failed"),
+          );
         }
 
         completeLogin({
           token: data.token,
           user: data.user,
         });
+        return { notice: data.notice };
       } catch (err) {
         throw new Error(parseApiError(err));
       }
@@ -351,8 +481,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         retryAfterSeconds?: number;
       } | null;
 
-      if (!resp.ok || !data?.challengeId || !data.destination || !data.expiresAt) {
-        throw new Error(extractApiErrorMessage(data, "Failed to send reset OTP"));
+      if (
+        !resp.ok ||
+        !data?.challengeId ||
+        !data.destination ||
+        !data.expiresAt
+      ) {
+        throw new Error(
+          extractApiErrorMessage(data, "Failed to send reset OTP"),
+        );
       }
 
       return {
@@ -383,8 +520,46 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           const data = (await resp.json().catch(() => null)) as {
             error?: unknown;
           } | null;
-          throw new Error(extractApiErrorMessage(data, "Failed to reset password"));
+          throw new Error(
+            extractApiErrorMessage(data, "Failed to reset password"),
+          );
         }
+      } catch (err) {
+        throw new Error(parseApiError(err));
+      }
+    },
+    [],
+  );
+
+  const respondToSessionAlert = useCallback(
+    async (
+      alertToken: string,
+      action: "confirm" | "secure_account",
+    ): Promise<SessionAlertResponse> => {
+      try {
+        const resp = await fetch(`${API_BASE}/auth/session-alert/respond`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ alertToken, action }),
+        });
+        const data = (await resp.json().catch(() => null)) as
+          | (SessionAlertResponse & { error?: unknown })
+          | { error?: unknown }
+          | null;
+
+        if (
+          !resp.ok ||
+          !data ||
+          typeof data !== "object" ||
+          !("status" in data) ||
+          typeof data.status !== "string"
+        ) {
+          throw new Error(
+            extractApiErrorMessage(data, "Failed to process session alert"),
+          );
+        }
+
+        return data;
       } catch (err) {
         throw new Error(parseApiError(err));
       }
@@ -425,7 +600,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           retryAfterSeconds?: number;
         } | null;
 
-        if (!resp.ok || !data?.challengeId || !data.destination || !data.expiresAt) {
+        if (
+          !resp.ok ||
+          !data?.challengeId ||
+          !data.destination ||
+          !data.expiresAt
+        ) {
           throw new Error(extractApiErrorMessage(data, "Sign up failed"));
         }
 
@@ -443,7 +623,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const verifyRegisterOtp = useCallback(
-    async (challengeId: string, otp: string) => {
+    async (challengeId: string, otp: string): Promise<AuthCompletionResult> => {
       try {
         const resp = await fetch(`${API_BASE}/auth/register/verify`, {
           method: "POST",
@@ -452,18 +632,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         });
         const data = (await resp.json().catch(() => null)) as {
           error?: unknown;
+          notice?: string;
           token?: string;
           user?: { id: string; email: string; role: "USER" | "ADMIN" };
         } | null;
 
         if (!resp.ok || !data?.token || !data.user) {
-          throw new Error(extractApiErrorMessage(data, "OTP verification failed"));
+          throw new Error(
+            extractApiErrorMessage(data, "OTP verification failed"),
+          );
         }
 
         completeLogin({
           token: data.token,
           user: data.user,
         });
+        return { notice: data.notice };
       } catch (err) {
         throw new Error(parseApiError(err));
       }
@@ -492,6 +676,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         verifyRegisterOtp,
         requestPasswordResetOtp,
         resetPasswordWithOtp,
+        respondToSessionAlert,
         updateUser,
         logout,
       }}

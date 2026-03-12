@@ -128,9 +128,12 @@ export class UserRepository {
         role: input.role ?? "USER",
         status: input.status ?? "ACTIVE",
         fullName: input.fullName,
-        phone: encrypted.phone === undefined ? undefined : asJson(encrypted.phone),
+        phone:
+          encrypted.phone === undefined ? undefined : asJson(encrypted.phone),
         address:
-          encrypted.address === undefined ? undefined : asJson(encrypted.address),
+          encrypted.address === undefined
+            ? undefined
+            : asJson(encrypted.address),
         dob: encrypted.dob === undefined ? undefined : asJson(encrypted.dob),
         metadata: input.metadata ? asJson(input.metadata) : undefined,
       },
@@ -186,11 +189,24 @@ export class UserRepository {
       where: { id },
       data: {
         fullName: input.fullName,
-        phone: encrypted.phone === undefined ? undefined : asJson(encrypted.phone),
+        phone:
+          encrypted.phone === undefined ? undefined : asJson(encrypted.phone),
         address:
-          encrypted.address === undefined ? undefined : asJson(encrypted.address),
+          encrypted.address === undefined
+            ? undefined
+            : asJson(encrypted.address),
         dob: encrypted.dob === undefined ? undefined : asJson(encrypted.dob),
         metadata: asJson(mergedMetadata),
+      },
+    });
+    return toEntity(updated);
+  }
+
+  async updateMetadata(id: string, metadata: Record<string, unknown>) {
+    const updated = await prisma.user.update({
+      where: { id },
+      data: {
+        metadata: asJson(metadata),
       },
     });
     return toEntity(updated);
@@ -206,4 +222,3 @@ export class UserRepository {
 }
 
 export const createUserRepository = () => new UserRepository();
-

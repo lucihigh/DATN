@@ -114,7 +114,7 @@ const loadActiveKey = () => {
 };
 
 const getPayloadData = (value: EncryptedString) =>
-  value.data || value.ciphertext;
+  value.data ?? value.ciphertext;
 
 export const isEncryptedString = (value: unknown): value is EncryptedString => {
   if (!value || typeof value !== "object") return false;
@@ -171,7 +171,7 @@ export const decryptField = (
   options?: EncryptDecryptOptions,
 ): string => {
   const encryptedValue = getPayloadData(payload);
-  if (!encryptedValue) {
+  if (encryptedValue === undefined || encryptedValue === null) {
     throw new Error("Encrypted payload is missing `data`/`ciphertext`.");
   }
   if (payload.algorithm && payload.algorithm !== ALGORITHM) {

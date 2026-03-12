@@ -93,7 +93,18 @@ export class LoginEventRepository {
     });
     return events.map(toEntity);
   }
+
+  async findByUserSince(userId: string, since: Date, limit = 100) {
+    const events = await prisma.loginEvent.findMany({
+      where: {
+        userId,
+        createdAt: { gte: since },
+      },
+      orderBy: { createdAt: "desc" },
+      take: limit,
+    });
+    return events.map(toEntity);
+  }
 }
 
 export const createLoginEventRepository = () => new LoginEventRepository();
-

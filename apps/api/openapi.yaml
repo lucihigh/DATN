@@ -1,6 +1,6 @@
 openapi: 3.0.3
 info:
-  title: Secure E-Wallet API
+  title: FPIPay API
   version: 0.1.0
 paths:
   /health:
