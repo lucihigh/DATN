@@ -31,10 +31,22 @@ import {
   getDefaultSecurityPolicy,
 } from "./services/securityPolicy";
 import { logAuditEvent } from "./services/audit";
+import {
+  sendLoginOtpEmail,
+  sendPasswordResetOtpEmail,
+  sendRegisterOtpEmail,
+  sendTransferOtpEmail,
+} from "./services/email";
+import {
+  consumeOtpChallenge,
+  createEmailOtpChallenge,
+  maskEmail,
+  verifyEmailOtpChallenge,
+} from "./services/otp";
 
 // Support running from both repo root and apps/api folders.
-dotenv.config({ path: path.resolve(process.cwd(), ".env") });
-dotenv.config({ path: path.resolve(process.cwd(), "../../.env") });
+dotenv.config({ path: path.resolve(process.cwd(), ".env"), override: true });
+dotenv.config({ path: path.resolve(process.cwd(), "../../.env"), override: true });
 
 const app = express();
 app.use(cors());
@@ -49,6 +61,18 @@ const AI_URL = process.env.AI_SERVICE_URL || "http://localhost:8000";
 const APP_TIMEZONE = process.env.APP_TIMEZONE || "Asia/Ho_Chi_Minh";
 const ADMIN_EMAIL = "ledanhdat56@gmail.com";
 const ADMIN_PASSWORD = "Ledanhdat2005@";
+const TRANSFER_OTP_TTL_MINUTES = Number(
+  process.env.TRANSFER_OTP_TTL_MINUTES || "5",
+);
+const TRANSFER_OTP_MAX_ATTEMPTS = Number(
+  process.env.TRANSFER_OTP_MAX_ATTEMPTS || "5",
+);
+const LOGIN_OTP_TTL_MINUTES = Number(process.env.LOGIN_OTP_TTL_MINUTES || "5");
+const REGISTER_OTP_TTL_MINUTES = LOGIN_OTP_TTL_MINUTES;
+const RESET_PASSWORD_OTP_TTL_MINUTES = Number(
+  process.env.RESET_PASSWORD_OTP_TTL_MINUTES || "10",
+);
+const OTP_MAX_ATTEMPTS = Number(process.env.OTP_MAX_ATTEMPTS || "5");
 
 const normalizeEmail = (email: string) => email.trim().toLowerCase();
 
@@ -57,6 +81,37 @@ const toAnomalyScore = (value: unknown) =>
 
 type AnomalyResponse = Partial<components["schemas"]["AnomalyScore"]> &
   Record<string, unknown>;
+
+type DepositAgentResponse = {
+  recommendedAmount: number;
+  reasoning: string[];
+  riskLevel: string;
+  nextAction: string;
+  confidence: number;
+};
+
+type CopilotMessagePayload = {
+  role: "user" | "assistant" | "system";
+  content: string;
+};
+
+type CopilotTransactionPayload = {
+  amount: number;
+  type: string;
+  description?: string;
+  createdAt: string;
+  direction: "credit" | "debit";
+};
+
+type CopilotResponsePayload = {
+  reply: string;
+  topic: string;
+  suggestedActions: string[];
+  suggestedDepositAmount?: number | null;
+  riskLevel: string;
+  confidence: number;
+  followUpQuestion?: string | null;
+};
 
 const DEFAULT_SECURITY_POLICY = getDefaultSecurityPolicy();
 
@@ -120,6 +175,205 @@ const toPositiveAmount = (value: unknown) => {
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return null;
   return parsed;
+};
+
+type ResolvedTransferContext = {
+  amount: number;
+  note: string;
+  resolvedReceiverUserId: string;
+  senderWallet: Wallet;
+  senderAccountNumber: string;
+  receiverAccountNumber: string;
+  receiverWalletByAccount:
+    | { id: string; userId: string | null; metadata: unknown }
+    | null;
+};
+
+const resolveTransferContext = async (input: {
+  senderUserId: string;
+  toUserId?: string;
+  toAccount?: string;
+  amount: number;
+  note?: string;
+}) => {
+  const toUserId =
+    typeof input.toUserId === "string" ? input.toUserId.trim() : "";
+  const toAccount =
+    typeof input.toAccount === "string"
+      ? input.toAccount.replace(/\D/g, "").slice(0, 19)
+      : "";
+  const note = typeof input.note === "string" ? input.note.trim() : "";
+
+  if (!toUserId && !toAccount) {
+    throw new Error("MISSING_RECIPIENT_ACCOUNT");
+  }
+
+  const senderWallet = await getOrCreateWalletByUserId(input.senderUserId);
+  const senderMeta =
+    senderWallet.metadata && typeof senderWallet.metadata === "object"
+      ? (senderWallet.metadata as Record<string, unknown>)
+      : {};
+  const senderAccountNumber =
+    typeof senderMeta.accountNumber === "string" ? senderMeta.accountNumber : "";
+
+  let resolvedReceiverUserId = toUserId;
+  let receiverWalletByAccount:
+    | { id: string; userId: string | null; metadata: unknown }
+    | null = null;
+
+  if (toAccount) {
+    receiverWalletByAccount = await findWalletByAccountNumber(toAccount);
+    if (!receiverWalletByAccount?.userId) {
+      throw new Error("RECIPIENT_ACCOUNT_NOT_FOUND");
+    }
+    resolvedReceiverUserId = receiverWalletByAccount.userId;
+  }
+
+  if (resolvedReceiverUserId === input.senderUserId) {
+    throw new Error("CANNOT_TRANSFER_TO_SELF");
+  }
+
+  if (!resolvedReceiverUserId) {
+    throw new Error("RECIPIENT_NOT_FOUND");
+  }
+
+  const receiver = await prisma.user.findUnique({
+    where: { id: resolvedReceiverUserId },
+  });
+  if (!receiver) {
+    throw new Error("RECIPIENT_NOT_FOUND");
+  }
+  if (receiver.status !== "ACTIVE") {
+    throw new Error("RECIPIENT_LOCKED");
+  }
+
+  const receiverWallet =
+    receiverWalletByAccount ??
+    (await prisma.wallet.findFirst({
+      where: { userId: resolvedReceiverUserId },
+      select: { id: true, userId: true, metadata: true },
+    }));
+  const receiverMeta =
+    receiverWallet?.metadata && typeof receiverWallet.metadata === "object"
+      ? (receiverWallet.metadata as Record<string, unknown>)
+      : {};
+  const receiverAccountNumber =
+    typeof receiverMeta.accountNumber === "string"
+      ? receiverMeta.accountNumber
+      : buildAccountNumber(resolvedReceiverUserId);
+
+  if (Number(senderWallet.balance) < input.amount) {
+    throw new Error("INSUFFICIENT_BALANCE");
+  }
+
+  return {
+    amount: input.amount,
+    note,
+    resolvedReceiverUserId,
+    senderWallet,
+    senderAccountNumber,
+    receiverAccountNumber,
+    receiverWalletByAccount,
+  } satisfies ResolvedTransferContext;
+};
+
+const executeTransfer = async (input: {
+  senderUserId: string;
+  resolvedReceiverUserId: string;
+  amount: number;
+  note: string;
+  senderAccountNumber: string;
+  receiverAccountNumber: string;
+  receiverWalletByAccount:
+    | { id: string; userId: string | null; metadata: unknown }
+    | null;
+}) => {
+  return prisma.$transaction(async (tx) => {
+    const senderWallet = await tx.wallet.findFirst({
+      where: { userId: input.senderUserId },
+    });
+    if (!senderWallet) throw new Error("SENDER_WALLET_NOT_FOUND");
+    if (Number(senderWallet.balance) < input.amount) {
+      throw new Error("INSUFFICIENT_BALANCE");
+    }
+
+    const receiverWallet =
+      (input.receiverWalletByAccount
+        ? await tx.wallet.findFirst({ where: { id: input.receiverWalletByAccount.id } })
+        : null) ??
+      (await tx.wallet.findFirst({
+        where: { userId: input.resolvedReceiverUserId },
+      })) ??
+      (await tx.wallet.create({
+        data: {
+          id: crypto.randomUUID(),
+          userId: input.resolvedReceiverUserId,
+          balance: 0,
+          currency: senderWallet.currency,
+          status: "ACTIVE",
+          metadata: {
+            accountNumber: input.receiverAccountNumber,
+          } as never,
+        },
+      }));
+
+    const reconciliationId = crypto.randomUUID();
+
+    await tx.wallet.update({
+      where: { id: senderWallet.id },
+      data: { balance: { decrement: input.amount } },
+    });
+    await tx.wallet.update({
+      where: { id: receiverWallet.id },
+      data: { balance: { increment: input.amount } },
+    });
+
+    const debitTx = await tx.transaction.create({
+      data: {
+        id: crypto.randomUUID(),
+        walletId: senderWallet.id,
+        counterpartyWalletId: receiverWallet.id,
+        amount: input.amount,
+        type: "TRANSFER",
+        status: "COMPLETED",
+        description: input.note || `Transfer to ${input.receiverAccountNumber}`,
+        fromUserId: input.senderUserId,
+        toUserId: input.resolvedReceiverUserId,
+        metadata: {
+          entry: "DEBIT",
+          reconciliationId,
+          fromAccount: input.senderAccountNumber,
+          toAccount: input.receiverAccountNumber,
+        } as never,
+      },
+    });
+
+    await tx.transaction.create({
+      data: {
+        id: crypto.randomUUID(),
+        walletId: receiverWallet.id,
+        counterpartyWalletId: senderWallet.id,
+        amount: input.amount,
+        type: "TRANSFER",
+        status: "COMPLETED",
+        description: input.note || `Receive from ${input.senderAccountNumber}`,
+        fromUserId: input.senderUserId,
+        toUserId: input.resolvedReceiverUserId,
+        metadata: {
+          entry: "CREDIT",
+          reconciliationId,
+          fromAccount: input.senderAccountNumber,
+          toAccount: input.receiverAccountNumber,
+        } as never,
+      },
+    });
+
+    return {
+      transaction: debitTx,
+      reconciliationId,
+      receiverAccountNumber: input.receiverAccountNumber,
+    };
+  });
 };
 
 const buildAccountNumber = (userId: string) => {
@@ -239,6 +493,191 @@ app.get("/health", async (_req, res) => {
   }
 });
 
+app.post("/ai/deposit-agent", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const body = req.body as {
+    goal?: unknown;
+    currentBalance?: unknown;
+    currency?: unknown;
+    monthlyIncome?: unknown;
+    monthlyExpenses?: unknown;
+  };
+
+  const goal = typeof body.goal === "string" ? body.goal.trim() : "";
+  if (!goal) {
+    return res.status(400).json({ error: "Goal is required" });
+  }
+
+  try {
+    const currentBalance =
+      typeof body.currentBalance === "number"
+        ? body.currentBalance
+        : Number(body.currentBalance || 0);
+    const monthlyIncome =
+      typeof body.monthlyIncome === "number"
+        ? body.monthlyIncome
+        : Number(body.monthlyIncome || 0);
+    const monthlyExpenses =
+      typeof body.monthlyExpenses === "number"
+        ? body.monthlyExpenses
+        : Number(body.monthlyExpenses || 0);
+
+    const resp = await fetch(`${AI_URL}/ai/deposit-agent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId,
+        goal,
+        currentBalance: Number.isFinite(currentBalance) ? currentBalance : 0,
+        currency:
+          typeof body.currency === "string" && body.currency.trim()
+            ? body.currency.trim().toUpperCase()
+            : "USD",
+        monthlyIncome: Number.isFinite(monthlyIncome) ? monthlyIncome : 0,
+        monthlyExpenses: Number.isFinite(monthlyExpenses) ? monthlyExpenses : 0,
+      }),
+    });
+
+    const data = (await resp.json().catch(() => null)) as
+      | (DepositAgentResponse & { error?: string })
+      | null;
+    if (!resp.ok || !data) {
+      return res
+        .status(502)
+        .json({ error: data?.error || "AI deposit agent is unavailable" });
+    }
+
+    return res.json(data);
+  } catch (err) {
+    console.error("Failed to call AI deposit agent", err);
+    return res.status(502).json({ error: "AI deposit agent is unavailable" });
+  }
+});
+
+app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const body = req.body as {
+    currency?: unknown;
+    currentBalance?: unknown;
+    monthlyIncome?: unknown;
+    monthlyExpenses?: unknown;
+    recentTransactions?: unknown;
+    messages?: unknown;
+  };
+
+  const messages = Array.isArray(body.messages)
+    ? body.messages
+        .map((message): CopilotMessagePayload | null => {
+          if (!message || typeof message !== "object") return null;
+          const candidate = message as Record<string, unknown>;
+          const role = candidate.role;
+          const content = candidate.content;
+          if (
+            (role !== "user" && role !== "assistant" && role !== "system") ||
+            typeof content !== "string"
+          ) {
+            return null;
+          }
+          const trimmed = content.trim();
+          if (!trimmed) return null;
+          return { role, content: trimmed.slice(0, 4000) };
+        })
+        .filter((message): message is CopilotMessagePayload => Boolean(message))
+    : [];
+
+  if (messages.length === 0) {
+    return res.status(400).json({ error: "At least one message is required" });
+  }
+
+  const recentTransactions = Array.isArray(body.recentTransactions)
+    ? body.recentTransactions
+        .map((tx): CopilotTransactionPayload | null => {
+          if (!tx || typeof tx !== "object") return null;
+          const candidate = tx as Record<string, unknown>;
+          const amount =
+            typeof candidate.amount === "number"
+              ? candidate.amount
+              : Number(candidate.amount);
+          const type =
+            typeof candidate.type === "string" ? candidate.type.trim() : "";
+          const createdAt =
+            typeof candidate.createdAt === "string"
+              ? candidate.createdAt.trim()
+              : "";
+          const description =
+            typeof candidate.description === "string"
+              ? candidate.description.trim().slice(0, 240)
+              : undefined;
+          const direction =
+            candidate.direction === "credit" ? "credit" : "debit";
+          if (!Number.isFinite(amount) || !type || !createdAt) {
+            return null;
+          }
+          return {
+            amount,
+            type: type.slice(0, 80),
+            description,
+            createdAt,
+            direction,
+          };
+        })
+        .filter(
+          (tx): tx is CopilotTransactionPayload => Boolean(tx),
+        )
+        .slice(0, 20)
+    : [];
+
+  try {
+    const currentBalance =
+      typeof body.currentBalance === "number"
+        ? body.currentBalance
+        : Number(body.currentBalance || 0);
+    const monthlyIncome =
+      typeof body.monthlyIncome === "number"
+        ? body.monthlyIncome
+        : Number(body.monthlyIncome || 0);
+    const monthlyExpenses =
+      typeof body.monthlyExpenses === "number"
+        ? body.monthlyExpenses
+        : Number(body.monthlyExpenses || 0);
+
+    const resp = await fetch(`${AI_URL}/ai/copilot-chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId,
+        currency:
+          typeof body.currency === "string" && body.currency.trim()
+            ? body.currency.trim().toUpperCase()
+            : "USD",
+        currentBalance: Number.isFinite(currentBalance) ? currentBalance : 0,
+        monthlyIncome: Number.isFinite(monthlyIncome) ? monthlyIncome : 0,
+        monthlyExpenses: Number.isFinite(monthlyExpenses) ? monthlyExpenses : 0,
+        recentTransactions,
+        messages: messages.slice(-12),
+      }),
+    });
+
+    const data = (await resp.json().catch(() => null)) as
+      | (CopilotResponsePayload & { error?: string })
+      | null;
+    if (!resp.ok || !data?.reply) {
+      return res
+        .status(502)
+        .json({ error: data?.error || "AI copilot is unavailable" });
+    }
+
+    return res.json(data);
+  } catch (err) {
+    console.error("Failed to call AI copilot", err);
+    return res.status(502).json({ error: "AI copilot is unavailable" });
+  }
+});
+
 app.post("/auth/register", async (req, res) => {
   type RegisterReq = components["schemas"]["RegisterRequest"];
   const parsed = registerSchema.safeParse(req.body as RegisterReq);
@@ -250,16 +689,13 @@ app.post("/auth/register", async (req, res) => {
   const email = normalizeEmail(parsed.data.email);
 
   try {
-    const exists = await userRepository.existsByEmail(email);
-    if (exists) {
+    const existingUser = await userRepository.findByEmail(email);
+    if (existingUser && existingUser.status !== "PENDING") {
       return res.status(409).json({ error: "Email already registered" });
     }
 
     const passwordHash = await hashPassword(parsed.data.password);
-    const created = await userRepository.createUser({
-      email,
-      passwordHash,
-      role: "USER",
+    const profilePayload = {
       fullName: parsed.data.fullName?.trim(),
       phone: parsed.data.phone?.trim(),
       address: parsed.data.address?.trim(),
@@ -267,28 +703,50 @@ app.post("/auth/register", async (req, res) => {
       metadata: parsed.data.userName
         ? { userName: parsed.data.userName.trim() }
         : undefined,
-    });
-    await getOrCreateWalletByUserId(created.id);
-
-    const user: components["schemas"]["User"] = {
-      id: created.id,
-      email,
-      role: "USER",
     };
+    const pendingUser = existingUser
+      ? await (async () => {
+          await userRepository.updatePassword(existingUser.id, passwordHash);
+          await userRepository.setStatus(existingUser.id, "PENDING");
+          return userRepository.updateProfile(existingUser.id, profilePayload);
+        })()
+      : await userRepository.createUser({
+          email,
+          passwordHash,
+          role: "USER",
+          status: "PENDING",
+          ...profilePayload,
+        });
 
-    const token = signAuthToken({
-      sub: user.id,
-      email: user.email,
-      role: user.role,
+    const otpChallenge = await createEmailOtpChallenge({
+      userId: pendingUser.id,
+      purpose: "REGISTER",
+      destination: email,
+      ttlMinutes: REGISTER_OTP_TTL_MINUTES,
+      maxAttempts: OTP_MAX_ATTEMPTS,
     });
+
+    await sendRegisterOtpEmail({
+      to: email,
+      recipientName: pendingUser.fullName || email.split("@")[0] || "User",
+      otpCode: otpChallenge.otpCode,
+      expiresInMinutes: REGISTER_OTP_TTL_MINUTES,
+    });
+
     await logAuditEvent({
       actor: email,
-      action: "REGISTER",
-      userId: user.id,
+      action: "REGISTER_OTP_SENT",
+      userId: pendingUser.id,
       ipAddress: req.ip,
     });
 
-    return res.status(201).json({ token, user });
+    return res.status(201).json({
+      status: "otp_required",
+      challengeId: otpChallenge.challengeId,
+      destination: email,
+      expiresAt: otpChallenge.expiresAt.toISOString(),
+      retryAfterSeconds: otpChallenge.retryAfterSeconds,
+    });
   } catch (err) {
     const errorCode =
       typeof err === "object" && err !== null && "code" in err
@@ -297,7 +755,89 @@ app.post("/auth/register", async (req, res) => {
     if (errorCode === "P2002") {
       return res.status(409).json({ error: "Email already registered" });
     }
+    if (err instanceof Error && err.message === "OTP_COOLDOWN_ACTIVE") {
+      return res.status(429).json({
+        error: "OTP recently sent. Please wait before requesting another code.",
+        retryAfterSeconds:
+          "retryAfterSeconds" in err ? (err as { retryAfterSeconds: number }).retryAfterSeconds : 60,
+      });
+    }
     console.error("Failed to register user", err);
+    return res.status(500).json({ error: "Internal error" });
+  }
+});
+
+app.post("/auth/register/verify", async (req, res) => {
+  const body = req.body as {
+    challengeId?: unknown;
+    otp?: unknown;
+  };
+  const challengeId =
+    typeof body.challengeId === "string" ? body.challengeId.trim() : "";
+  const otp = typeof body.otp === "string" ? body.otp.replace(/\D/g, "") : "";
+  if (!challengeId || !/^\d{6}$/.test(otp)) {
+    return res.status(400).json({ error: "Invalid registration OTP payload" });
+  }
+
+  try {
+    const challenge = await prisma.otpChallenge.findUnique({
+      where: { id: challengeId },
+    });
+    if (!challenge || challenge.purpose !== "REGISTER" || challenge.channel !== "EMAIL") {
+      return res.status(404).json({ error: "OTP challenge not found" });
+    }
+
+    await verifyEmailOtpChallenge({
+      userId: challenge.userId,
+      purpose: "REGISTER",
+      challengeId,
+      otp,
+    });
+
+    const userRepository = createUserRepository();
+    const userDoc = await userRepository.findValidatedById(challenge.userId);
+    if (!userDoc) return res.status(404).json({ error: "User not found" });
+
+    await userRepository.setStatus(userDoc.id, "ACTIVE");
+    await consumeOtpChallenge(challengeId);
+    await getOrCreateWalletByUserId(userDoc.id);
+
+    const user: components["schemas"]["User"] = {
+      id: userDoc.id,
+      email: userDoc.email,
+      role: userDoc.role,
+    };
+
+    const token = signAuthToken({
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+    });
+    await logAuditEvent({
+      actor: user.email,
+      action: "REGISTER",
+      userId: user.id,
+      ipAddress: req.ip,
+    });
+
+    return res.json({ token, user });
+  } catch (err) {
+    if (err instanceof Error && err.message === "OTP_CHALLENGE_NOT_FOUND") {
+      return res.status(404).json({ error: "OTP challenge not found" });
+    }
+    if (err instanceof Error && err.message === "OTP_CHALLENGE_ALREADY_USED") {
+      return res.status(400).json({ error: "OTP challenge already used" });
+    }
+    if (err instanceof Error && err.message === "OTP_EXPIRED") {
+      return res.status(400).json({ error: "OTP has expired" });
+    }
+    if (err instanceof Error && err.message === "OTP_TOO_MANY_ATTEMPTS") {
+      return res.status(429).json({ error: "Too many invalid OTP attempts" });
+    }
+    if (err instanceof Error && err.message === "OTP_INCORRECT") {
+      return res.status(400).json({ error: "Incorrect OTP" });
+    }
+    console.error("Failed to verify register OTP", err);
     return res.status(500).json({ error: "Internal error" });
   }
 });
@@ -454,11 +994,103 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
         .json({ error: "Account is not active", anomaly: aiResult });
     }
 
+    const otpChallenge = await createEmailOtpChallenge({
+      userId: userDoc.id,
+      purpose: "LOGIN",
+      destination: userDoc.email,
+      ttlMinutes: LOGIN_OTP_TTL_MINUTES,
+      maxAttempts: OTP_MAX_ATTEMPTS,
+      metadata: {
+        anomalyScore: score,
+        aiReasons: Array.isArray(aiResult?.reasons) ? aiResult.reasons : [],
+      },
+    });
+    await sendLoginOtpEmail({
+      to: userDoc.email,
+      recipientName: userDoc.fullName || userDoc.email.split("@")[0] || "User",
+      otpCode: otpChallenge.otpCode,
+      expiresInMinutes: LOGIN_OTP_TTL_MINUTES,
+    });
+
+    await logAuditEvent({
+      actor: email,
+      action: "LOGIN_OTP_SENT",
+      userId: userDoc.id,
+      details: {
+        anomaly: score,
+        challengeId: otpChallenge.challengeId,
+      },
+      ipAddress: req.ip,
+    });
+
+    return res.json({
+      status: "otp_required",
+      challengeId: otpChallenge.challengeId,
+      destination: maskEmail(userDoc.email),
+      expiresAt: otpChallenge.expiresAt.toISOString(),
+      retryAfterSeconds: otpChallenge.retryAfterSeconds,
+      anomaly: aiResult,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === "OTP_COOLDOWN_ACTIVE") {
+      return res.status(429).json({
+        error: "OTP recently sent. Please wait before requesting another code.",
+        retryAfterSeconds:
+          "retryAfterSeconds" in err ? (err as { retryAfterSeconds: number }).retryAfterSeconds : 60,
+      });
+    }
+    console.error("Failed to login user", err);
+    return res.status(500).json({ error: "Internal error" });
+  }
+});
+
+app.post("/auth/login/verify", async (req, res) => {
+  const body = req.body as {
+    challengeId?: unknown;
+    otp?: unknown;
+  };
+  const challengeId =
+    typeof body.challengeId === "string" ? body.challengeId.trim() : "";
+  const otp = typeof body.otp === "string" ? body.otp.replace(/\D/g, "") : "";
+  if (!challengeId || !/^\d{6}$/.test(otp)) {
+    return res.status(400).json({ error: "Invalid login OTP payload" });
+  }
+
+  try {
+    const challenge = await prisma.otpChallenge.findUnique({
+      where: { id: challengeId },
+    });
+    if (!challenge || challenge.purpose !== "LOGIN" || challenge.channel !== "EMAIL") {
+      return res.status(404).json({ error: "OTP challenge not found" });
+    }
+
+    await verifyEmailOtpChallenge({
+      userId: challenge.userId,
+      purpose: "LOGIN",
+      challengeId,
+      otp,
+    });
+
+    const userRepository = createUserRepository();
+    const userDoc = await userRepository.findValidatedById(challenge.userId);
+    if (!userDoc) return res.status(404).json({ error: "User not found" });
+    if (userDoc.status !== "ACTIVE") {
+      return res.status(423).json({ error: "Account is not active" });
+    }
+
+    await consumeOtpChallenge(challengeId);
     await userRepository.touchLastLogin(userDoc.id);
+
+    const metadata =
+      challenge.metadata && typeof challenge.metadata === "object"
+        ? (challenge.metadata as Record<string, unknown>)
+        : {};
+    const anomalyScore =
+      typeof metadata.anomalyScore === "number" ? metadata.anomalyScore : 0;
 
     const user: components["schemas"]["User"] = {
       id: userDoc.id,
-      email,
+      email: userDoc.email,
       role: userDoc.role,
     };
 
@@ -468,17 +1100,154 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
       role: user.role,
     });
     await logAuditEvent({
-      actor: email,
+      actor: user.email,
       action: "LOGIN",
       userId: user.id,
-      details: `anomaly=${score}`,
+      details: `anomaly=${anomalyScore}`,
       ipAddress: req.ip,
     });
 
-    return res.json({ token, user, anomaly: aiResult });
+    return res.json({ token, user });
   } catch (err) {
+    if (err instanceof Error && err.message === "OTP_CHALLENGE_NOT_FOUND") {
+      return res.status(404).json({ error: "OTP challenge not found" });
+    }
+    if (err instanceof Error && err.message === "OTP_CHALLENGE_ALREADY_USED") {
+      return res.status(400).json({ error: "OTP challenge already used" });
+    }
+    if (err instanceof Error && err.message === "OTP_EXPIRED") {
+      return res.status(400).json({ error: "OTP has expired" });
+    }
+    if (err instanceof Error && err.message === "OTP_TOO_MANY_ATTEMPTS") {
+      return res.status(429).json({ error: "Too many invalid OTP attempts" });
+    }
+    if (err instanceof Error && err.message === "OTP_INCORRECT") {
+      return res.status(400).json({ error: "Incorrect OTP" });
+    }
     console.error("Failed to login user", err);
     return res.status(500).json({ error: "Internal error" });
+  }
+});
+
+app.post("/auth/password/otp/send", async (req, res) => {
+  const email =
+    typeof req.body?.email === "string" ? normalizeEmail(req.body.email) : "";
+  if (!email) {
+    return res.status(400).json({ error: "Email is required" });
+  }
+
+  try {
+    const userRepository = createUserRepository();
+    const userDoc = await userRepository.findByEmail(email);
+    if (!userDoc) {
+      return res.status(404).json({ error: "Email not found" });
+    }
+    if (userDoc.status !== "ACTIVE") {
+      return res.status(423).json({ error: "Account is not active" });
+    }
+
+    const otpChallenge = await createEmailOtpChallenge({
+      userId: userDoc.id,
+      purpose: "RESET_PASSWORD",
+      destination: userDoc.email,
+      ttlMinutes: RESET_PASSWORD_OTP_TTL_MINUTES,
+      maxAttempts: OTP_MAX_ATTEMPTS,
+    });
+
+    await sendPasswordResetOtpEmail({
+      to: userDoc.email,
+      recipientName: userDoc.fullName || userDoc.email.split("@")[0] || "User",
+      otpCode: otpChallenge.otpCode,
+      expiresInMinutes: RESET_PASSWORD_OTP_TTL_MINUTES,
+    });
+
+    await logAuditEvent({
+      actor: userDoc.email,
+      action: "RESET_PASSWORD_OTP_SENT",
+      userId: userDoc.id,
+      ipAddress: req.ip,
+    });
+
+    return res.json({
+      status: "ok",
+      challengeId: otpChallenge.challengeId,
+      destination: maskEmail(userDoc.email),
+      expiresAt: otpChallenge.expiresAt.toISOString(),
+      retryAfterSeconds: otpChallenge.retryAfterSeconds,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === "OTP_COOLDOWN_ACTIVE") {
+      return res.status(429).json({
+        error: "OTP recently sent. Please wait before requesting another code.",
+        retryAfterSeconds:
+          "retryAfterSeconds" in err ? (err as { retryAfterSeconds: number }).retryAfterSeconds : 60,
+      });
+    }
+    console.error("Failed to send password reset OTP", err);
+    return res.status(500).json({ error: "Failed to send password reset OTP" });
+  }
+});
+
+app.post("/auth/password/reset", async (req, res) => {
+  const body = req.body as {
+    email?: unknown;
+    challengeId?: unknown;
+    otp?: unknown;
+    newPassword?: unknown;
+  };
+  const email = typeof body.email === "string" ? normalizeEmail(body.email) : "";
+  const challengeId =
+    typeof body.challengeId === "string" ? body.challengeId.trim() : "";
+  const otp = typeof body.otp === "string" ? body.otp.replace(/\D/g, "") : "";
+  const newPassword =
+    typeof body.newPassword === "string" ? body.newPassword.trim() : "";
+
+  if (!email || !challengeId || !/^\d{6}$/.test(otp) || newPassword.length < 8) {
+    return res.status(400).json({ error: "Invalid password reset payload" });
+  }
+
+  try {
+    const userRepository = createUserRepository();
+    const userDoc = await userRepository.findByEmail(email);
+    if (!userDoc) return res.status(404).json({ error: "Email not found" });
+
+    await verifyEmailOtpChallenge({
+      userId: userDoc.id,
+      purpose: "RESET_PASSWORD",
+      challengeId,
+      otp,
+    });
+
+    const passwordHash = await hashPassword(newPassword);
+    await userRepository.updatePassword(userDoc.id, passwordHash);
+    await consumeOtpChallenge(challengeId);
+
+    await logAuditEvent({
+      actor: userDoc.email,
+      userId: userDoc.id,
+      action: "RESET_PASSWORD",
+      ipAddress: req.ip,
+    });
+
+    return res.status(204).send();
+  } catch (err) {
+    if (err instanceof Error && err.message === "OTP_CHALLENGE_NOT_FOUND") {
+      return res.status(404).json({ error: "OTP challenge not found" });
+    }
+    if (err instanceof Error && err.message === "OTP_CHALLENGE_ALREADY_USED") {
+      return res.status(400).json({ error: "OTP challenge already used" });
+    }
+    if (err instanceof Error && err.message === "OTP_EXPIRED") {
+      return res.status(400).json({ error: "OTP has expired" });
+    }
+    if (err instanceof Error && err.message === "OTP_TOO_MANY_ATTEMPTS") {
+      return res.status(429).json({ error: "Too many invalid OTP attempts" });
+    }
+    if (err instanceof Error && err.message === "OTP_INCORRECT") {
+      return res.status(400).json({ error: "Incorrect OTP" });
+    }
+    console.error("Failed to reset password", err);
+    return res.status(500).json({ error: "Failed to reset password" });
   }
 });
 
@@ -753,6 +1522,218 @@ app.post("/wallet/deposit", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("Failed to deposit", err);
     return res.status(500).json({ error: "Internal error" });
+  }
+});
+
+app.post("/transfer/otp/send", requireAuth, async (req, res) => {
+  const senderUserId = req.user?.sub;
+  if (!senderUserId) return res.status(401).json({ error: "Unauthorized" });
+
+  const body = req.body as {
+    toUserId?: string;
+    toAccount?: string;
+    amount?: unknown;
+    note?: string;
+  };
+  const amount = toPositiveAmount(body.amount);
+  if (!amount) return res.status(400).json({ error: "Invalid amount" });
+
+  try {
+    const context = await resolveTransferContext({
+      senderUserId,
+      toUserId: body.toUserId,
+      toAccount: body.toAccount,
+      amount,
+      note: body.note,
+    });
+    const userRepository = createUserRepository();
+    const user = await userRepository.findValidatedById(senderUserId);
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const otpChallenge = await createEmailOtpChallenge({
+      userId: senderUserId,
+      purpose: "TRANSFER",
+      destination: user.email,
+      ttlMinutes: TRANSFER_OTP_TTL_MINUTES,
+      maxAttempts: TRANSFER_OTP_MAX_ATTEMPTS,
+      metadata: {
+        toUserId: context.resolvedReceiverUserId,
+        toAccount: context.receiverAccountNumber,
+        amount: context.amount,
+        note: context.note,
+      },
+    });
+
+    await sendTransferOtpEmail({
+      to: user.email,
+      recipientName: user.fullName || user.email.split("@")[0] || "User",
+      otpCode: otpChallenge.otpCode,
+      expiresInMinutes: TRANSFER_OTP_TTL_MINUTES,
+      amount: context.amount,
+      toAccount: context.receiverAccountNumber,
+    });
+
+    await logAuditEvent({
+      actor: req.user?.email,
+      userId: senderUserId,
+      action: "TRANSFER_OTP_SENT",
+      details: {
+        challengeId: otpChallenge.challengeId,
+        amount: context.amount,
+        toAccount: context.receiverAccountNumber,
+      },
+      ipAddress: req.ip,
+    });
+
+    return res.json({
+      status: "ok",
+      challengeId: otpChallenge.challengeId,
+      expiresAt: otpChallenge.expiresAt.toISOString(),
+      destination: maskEmail(user.email),
+      retryAfterSeconds: otpChallenge.retryAfterSeconds,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === "OTP_COOLDOWN_ACTIVE") {
+      return res.status(429).json({
+        error: "OTP recently sent. Please wait before requesting another code.",
+        retryAfterSeconds:
+          "retryAfterSeconds" in err ? (err as { retryAfterSeconds: number }).retryAfterSeconds : 60,
+      });
+    }
+    if (err instanceof Error) {
+      if (err.message === "MISSING_RECIPIENT_ACCOUNT") {
+        return res.status(400).json({ error: "Missing recipient account" });
+      }
+      if (err.message === "RECIPIENT_ACCOUNT_NOT_FOUND") {
+        return res.status(404).json({ error: "Recipient account not found" });
+      }
+      if (err.message === "RECIPIENT_NOT_FOUND") {
+        return res.status(404).json({ error: "Recipient not found" });
+      }
+      if (err.message === "CANNOT_TRANSFER_TO_SELF") {
+        return res.status(400).json({ error: "Cannot transfer to self" });
+      }
+      if (err.message === "RECIPIENT_LOCKED") {
+        return res.status(423).json({ error: "Recipient account is locked" });
+      }
+      if (err.message === "INSUFFICIENT_BALANCE") {
+        return res.status(400).json({ error: "Insufficient balance" });
+      }
+    }
+    console.error("Failed to send transfer OTP", err);
+    return res.status(500).json({ error: "Failed to send transfer OTP" });
+  }
+});
+
+app.post("/transfer/confirm", requireAuth, async (req, res) => {
+  const senderUserId = req.user?.sub;
+  if (!senderUserId) return res.status(401).json({ error: "Unauthorized" });
+
+  const body = req.body as {
+    challengeId?: unknown;
+    otp?: unknown;
+  };
+  const challengeId =
+    typeof body.challengeId === "string" ? body.challengeId.trim() : "";
+  const otp = typeof body.otp === "string" ? body.otp.replace(/\D/g, "") : "";
+  if (!challengeId || !/^\d{6}$/.test(otp)) {
+    return res.status(400).json({ error: "Invalid OTP confirmation payload" });
+  }
+
+  try {
+    const { challenge, metadata } = await verifyEmailOtpChallenge({
+      userId: senderUserId,
+      purpose: "TRANSFER",
+      challengeId,
+      otp,
+    });
+
+    const amount = toPositiveAmount(metadata.amount);
+    const toAccount =
+      typeof metadata.toAccount === "string" ? metadata.toAccount : "";
+    const toUserId =
+      typeof metadata.toUserId === "string" ? metadata.toUserId : "";
+    const note = typeof metadata.note === "string" ? metadata.note : "";
+    if (!amount || (!toAccount && !toUserId)) {
+      return res.status(400).json({ error: "Stored OTP transfer payload is invalid" });
+    }
+
+    const context = await resolveTransferContext({
+      senderUserId,
+      toUserId,
+      toAccount,
+      amount,
+      note,
+    });
+
+    const transferResult = await executeTransfer({
+      senderUserId,
+      resolvedReceiverUserId: context.resolvedReceiverUserId,
+      amount: context.amount,
+      note: context.note,
+      senderAccountNumber: context.senderAccountNumber,
+      receiverAccountNumber: context.receiverAccountNumber,
+      receiverWalletByAccount: context.receiverWalletByAccount,
+    });
+
+    await consumeOtpChallenge(challenge.id);
+
+    await logAuditEvent({
+      actor: req.user?.email,
+      userId: senderUserId,
+      action: "TRANSFER_OTP_VERIFIED",
+      details: {
+        challengeId: challenge.id,
+        transactionId: transferResult.transaction.id,
+      },
+      ipAddress: req.ip,
+    });
+
+    return res.json({
+      status: "ok",
+      reconciliationId: transferResult.reconciliationId,
+      transaction: {
+        id: transferResult.transaction.id,
+        amount: Number(transferResult.transaction.amount),
+        type: transferResult.transaction.type,
+        description: transferResult.transaction.description ?? undefined,
+        createdAt: transferResult.transaction.createdAt.toISOString(),
+        toAccount: transferResult.receiverAccountNumber,
+      },
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === "OTP_CHALLENGE_NOT_FOUND") {
+      return res.status(404).json({ error: "OTP challenge not found" });
+    }
+    if (err instanceof Error && err.message === "OTP_CHALLENGE_ALREADY_USED") {
+      return res.status(400).json({ error: "OTP challenge already used" });
+    }
+    if (err instanceof Error && err.message === "OTP_EXPIRED") {
+      return res.status(400).json({ error: "OTP has expired" });
+    }
+    if (err instanceof Error && err.message === "OTP_TOO_MANY_ATTEMPTS") {
+      return res.status(429).json({ error: "Too many invalid OTP attempts" });
+    }
+    if (err instanceof Error && err.message === "OTP_INCORRECT") {
+      return res.status(400).json({ error: "Incorrect OTP" });
+    }
+    if (err instanceof Error && err.message === "SENDER_WALLET_NOT_FOUND") {
+      return res.status(400).json({ error: "Sender wallet not found" });
+    }
+    if (err instanceof Error && err.message === "INSUFFICIENT_BALANCE") {
+      return res.status(400).json({ error: "Insufficient balance" });
+    }
+    if (err instanceof Error && err.message === "RECIPIENT_ACCOUNT_NOT_FOUND") {
+      return res.status(404).json({ error: "Recipient account not found" });
+    }
+    if (err instanceof Error && err.message === "RECIPIENT_NOT_FOUND") {
+      return res.status(404).json({ error: "Recipient not found" });
+    }
+    if (err instanceof Error && err.message === "RECIPIENT_LOCKED") {
+      return res.status(423).json({ error: "Recipient account is locked" });
+    }
+    console.error("Failed to confirm transfer with OTP", err);
+    return res.status(500).json({ error: "Failed to confirm transfer" });
   }
 });
 
