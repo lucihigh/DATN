@@ -11,6 +11,7 @@
     "format": "prettier --check \"src/**/*.ts\"",
     "test": "echo 'tests pending'",
     "db:migrate-mongo": "tsx src/scripts/migrateMongoToPostgres.ts",
+    "db:encrypt-transactions": "tsx src/scripts/encryptTransactions.ts",
     "prisma:migrate": "prisma migrate dev --schema ../../prisma/schema.prisma --name init",
     "prisma:generate": "prisma generate --schema ../../prisma/schema.prisma"
   },

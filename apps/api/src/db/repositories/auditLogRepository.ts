@@ -36,7 +36,8 @@ const toEntity = (log: {
   userId: log.userId ?? undefined,
   actor: log.actor,
   action: log.action,
-  details: (log.details as string | Record<string, unknown> | null) ?? undefined,
+  details:
+    (log.details as string | Record<string, unknown> | null) ?? undefined,
   ipAddress: log.ipAddress ?? undefined,
   createdAt: log.createdAt,
   metadata: (log.metadata as Record<string, unknown> | null) ?? undefined,
@@ -67,4 +68,3 @@ export class AuditLogRepository {
 }
 
 export const createAuditLogRepository = () => new AuditLogRepository();
-

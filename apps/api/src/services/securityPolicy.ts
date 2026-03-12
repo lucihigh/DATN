@@ -28,4 +28,3 @@ export const getSecurityPolicy = async (): Promise<SecurityPolicy> => {
 };
 
 export const getDefaultSecurityPolicy = () => ({ ...DEFAULT_SECURITY_POLICY });
-

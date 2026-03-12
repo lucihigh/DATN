@@ -11,9 +11,7 @@ const getEmailConfig = () => {
     smtpUser: process.env.SMTP_USER || "",
     smtpPass: process.env.SMTP_PASS || "",
     smtpFrom:
-      process.env.SMTP_FROM ||
-      process.env.SMTP_USER ||
-      "no-reply@secure-wallet.local",
+      process.env.SMTP_FROM || process.env.SMTP_USER || "no-reply@fpipay.local",
     smtpSecure:
       String(process.env.SMTP_SECURE || "").toLowerCase() === "true" ||
       smtpPort === 465,
@@ -53,7 +51,7 @@ const renderOtpEmailHtml = (input: {
     <div style="display:none;opacity:0;visibility:hidden;overflow:hidden;height:0;width:0">${input.preheader}</div>
     <div style="max-width:620px;margin:0 auto;background:#0c1730;border:1px solid #1d3a66;border-radius:24px;overflow:hidden;box-shadow:0 18px 48px rgba(0,0,0,0.35)">
       <div style="padding:28px 32px;background:radial-gradient(circle at top right,#1f8ef1 0%,#10264d 40%,#09162e 100%)">
-        <div style="display:inline-block;padding:8px 12px;border-radius:999px;background:rgba(14,165,233,0.18);color:#7dd3fc;font-size:12px;font-weight:700;letter-spacing:1px;text-transform:uppercase">Secure Wallet</div>
+        <div style="display:inline-block;padding:8px 12px;border-radius:999px;background:rgba(14,165,233,0.18);color:#7dd3fc;font-size:12px;font-weight:700;letter-spacing:1px;text-transform:uppercase">FPIPay</div>
         <h1 style="margin:16px 0 10px;color:#f8fafc;font-size:30px;line-height:1.2">${input.title}</h1>
         <p style="margin:0;color:#bfd4ff;font-size:15px;line-height:1.65">${input.subtitle}</p>
       </div>
@@ -73,12 +71,18 @@ const renderOtpEmailHtml = (input: {
         </div>
         <p style="margin:0 0 12px;font-size:14px;color:#bfd4ff;line-height:1.65">${input.securityNote}</p>
         <p style="margin:0;font-size:12px;color:#6b86b3;line-height:1.6">
-          For your security, never share this code with anyone. Secure Wallet staff will never ask for your OTP.
+          For your security, never share this code with anyone. FPIPay staff will never ask for your OTP.
         </p>
       </div>
     </div>
   </div>
 `;
+
+const formatMoney = (currency: string, amount: number) =>
+  `${currency} ${amount.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
 
 const sendEmail = async (input: {
   to: string;
@@ -130,15 +134,15 @@ export const sendTransferOtpEmail = async (input: {
 }) =>
   sendEmail({
     to: input.to,
-    subject: "Secure Wallet transfer verification code",
-    text: `Your Secure Wallet transfer OTP is ${input.otpCode}. It expires in ${input.expiresInMinutes} minutes. Transfer amount: $${input.amount.toFixed(
+    subject: "FPIPay transfer verification code",
+    text: `Your FPIPay transfer OTP is ${input.otpCode}. It expires in ${input.expiresInMinutes} minutes. Transfer amount: $${input.amount.toFixed(
       2,
     )}. Recipient account: ${input.toAccount}.`,
     html: renderOtpEmailHtml({
       preheader: "Verify your transfer with this one-time password.",
       title: "Transfer verification code",
       subtitle:
-        "We received a request to approve an internal transfer from your Secure Wallet account.",
+        "We received a request to approve an internal transfer from your FPIPay account.",
       recipientName: input.recipientName,
       otpCode: input.otpCode,
       expiresInMinutes: input.expiresInMinutes,
@@ -165,8 +169,8 @@ export const sendLoginOtpEmail = async (input: {
 }) =>
   sendEmail({
     to: input.to,
-    subject: "Secure Wallet sign-in verification code",
-    text: `Your Secure Wallet sign-in OTP is ${input.otpCode}. It expires in ${input.expiresInMinutes} minutes.`,
+    subject: "FPIPay sign-in verification code",
+    text: `Your FPIPay sign-in OTP is ${input.otpCode}. It expires in ${input.expiresInMinutes} minutes.`,
     html: renderOtpEmailHtml({
       preheader: "Verify your sign-in with this one-time password.",
       title: "Sign-in verification code",
@@ -213,13 +217,13 @@ export const sendPasswordResetOtpEmail = async (input: {
 }) =>
   sendEmail({
     to: input.to,
-    subject: "Secure Wallet password reset code",
-    text: `Your Secure Wallet password reset OTP is ${input.otpCode}. It expires in ${input.expiresInMinutes} minutes.`,
+    subject: "FPIPay password reset code",
+    text: `Your FPIPay password reset OTP is ${input.otpCode}. It expires in ${input.expiresInMinutes} minutes.`,
     html: renderOtpEmailHtml({
-      preheader: "Use this one-time password to reset your Secure Wallet password.",
+      preheader: "Use this one-time password to reset your FPIPay password.",
       title: "Password reset code",
       subtitle:
-        "We received a request to reset the password for your Secure Wallet account.",
+        "We received a request to reset the password for your FPIPay account.",
       recipientName: input.recipientName,
       otpCode: input.otpCode,
       expiresInMinutes: input.expiresInMinutes,
@@ -230,3 +234,93 @@ export const sendPasswordResetOtpEmail = async (input: {
     }),
     debug: { otpCode: input.otpCode },
   });
+
+export const sendBalanceChangeEmail = async (input: {
+  to: string;
+  recipientName: string;
+  direction: "credit" | "debit";
+  amount: number;
+  balance: number;
+  currency: string;
+  transactionType: "DEPOSIT" | "TRANSFER";
+  description: string;
+  occurredAt: string;
+  counterpartyLabel?: string;
+}) => {
+  const amountLabel = formatMoney(input.currency, input.amount);
+  const balanceLabel = formatMoney(input.currency, input.balance);
+  const isCredit = input.direction === "credit";
+  const subject = isCredit
+    ? `FPIPay alert: +${amountLabel} credited`
+    : `FPIPay alert: -${amountLabel} debited`;
+  const movementLabel = isCredit ? "credited to" : "debited from";
+  const counterpartyLine = input.counterpartyLabel
+    ? `Counterparty: ${input.counterpartyLabel}.`
+    : "";
+  const transactionTypeLabel =
+    input.transactionType === "DEPOSIT" ? "Deposit" : "Transfer";
+
+  return sendEmail({
+    to: input.to,
+    subject,
+    text:
+      `Hello ${input.recipientName},\n\n` +
+      `${amountLabel} has been ${movementLabel} your FPIPay account.\n` +
+      `Available balance: ${balanceLabel}.\n` +
+      `Transaction type: ${transactionTypeLabel}.\n` +
+      `Description: ${input.description}.\n` +
+      `${counterpartyLine ? `${counterpartyLine}\n` : ""}` +
+      `Time: ${input.occurredAt}.\n\n` +
+      `If you do not recognize this activity, secure your account immediately.`,
+    html: `
+      <div style="margin:0;padding:32px 16px;background:#071120;font-family:Segoe UI,Arial,sans-serif;color:#dbeafe">
+        <div style="max-width:620px;margin:0 auto;background:#0c1730;border:1px solid #1d3a66;border-radius:24px;overflow:hidden;box-shadow:0 18px 48px rgba(0,0,0,0.35)">
+          <div style="padding:28px 32px;background:radial-gradient(circle at top right,#1f8ef1 0%,#10264d 40%,#09162e 100%)">
+            <div style="display:inline-block;padding:8px 12px;border-radius:999px;background:rgba(14,165,233,0.18);color:#7dd3fc;font-size:12px;font-weight:700;letter-spacing:1px;text-transform:uppercase">FPIPay</div>
+            <h1 style="margin:16px 0 10px;color:#f8fafc;font-size:30px;line-height:1.2">Balance change alert</h1>
+            <p style="margin:0;color:#bfd4ff;font-size:15px;line-height:1.65">
+              A ${transactionTypeLabel.toLowerCase()} has ${isCredit ? "increased" : "reduced"} your available balance.
+            </p>
+          </div>
+          <div style="padding:32px">
+            <p style="margin:0 0 14px;font-size:15px;color:#bfd4ff">Hello ${input.recipientName},</p>
+            <div style="margin:0 0 20px;padding:22px;border-radius:18px;background:${isCredit ? "linear-gradient(90deg,#22d3ee,#22c55e)" : "linear-gradient(90deg,#fb7185,#f59e0b)"};text-align:center">
+              <div style="font-size:12px;font-weight:700;letter-spacing:1.6px;color:#0f172a;text-transform:uppercase">Balance movement</div>
+              <div style="margin-top:10px;font-size:34px;font-weight:800;color:#04101f">${isCredit ? "+" : "-"}${amountLabel}</div>
+            </div>
+            <div style="display:grid;gap:12px">
+              <div style="padding:18px;border-radius:16px;background:#0a1327;border:1px solid #1d345a">
+                <div style="font-size:12px;font-weight:700;letter-spacing:1px;color:#7dd3fc;text-transform:uppercase;margin-bottom:8px">Available balance</div>
+                <div style="font-size:24px;font-weight:800;color:#f8fafc">${balanceLabel}</div>
+              </div>
+              <div style="padding:18px;border-radius:16px;background:#0a1327;border:1px solid #1d345a">
+                <div style="font-size:12px;font-weight:700;letter-spacing:1px;color:#7dd3fc;text-transform:uppercase;margin-bottom:8px">Transaction details</div>
+                <div style="font-size:14px;color:#dbeafe;line-height:1.8">
+                  <div>Type: ${transactionTypeLabel}</div>
+                  <div>Description: ${input.description}</div>
+                  ${
+                    input.counterpartyLabel
+                      ? `<div>Counterparty: ${input.counterpartyLabel}</div>`
+                      : ""
+                  }
+                  <div>Time: ${input.occurredAt}</div>
+                </div>
+              </div>
+            </div>
+            <p style="margin:18px 0 0;font-size:13px;color:#93a9d2;line-height:1.7">
+              If you do not recognize this activity, sign in immediately, change your password, and review recent sign-in activity.
+            </p>
+          </div>
+        </div>
+      </div>
+    `,
+    debug: {
+      direction: input.direction,
+      amount: input.amount,
+      balance: input.balance,
+      currency: input.currency,
+      transactionType: input.transactionType,
+      occurredAt: input.occurredAt,
+    },
+  });
+};

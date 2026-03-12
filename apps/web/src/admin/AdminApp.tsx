@@ -922,12 +922,14 @@ function AdminApp() {
 
     const mapUser = (u: AdminUserApi): AdminUser => ({
       id: u.id,
-      name: u.fullName?.trim() || (u.email.split("@")[0] || "User"),
+      name: u.fullName?.trim() || u.email.split("@")[0] || "User",
       email: u.email,
       role: u.role === "ADMIN" ? "Admin" : "User",
       title: u.role === "ADMIN" ? "System Admin" : "Customer",
       phone: u.phone || "-",
-      birthday: u.createdAt ? new Date(u.createdAt).toISOString().slice(0, 10) : "",
+      birthday: u.createdAt
+        ? new Date(u.createdAt).toISOString().slice(0, 10)
+        : "",
       address: u.address || "-",
       avatar: `https://i.pravatar.cc/80?u=${encodeURIComponent(u.email)}`,
       status: u.status === "ACTIVE" ? "Active" : "Locked",
@@ -942,8 +944,12 @@ function AdminApp() {
           fetch(`${API_BASE}/admin/audit-logs`, { headers }),
         ]);
 
-        const usersData = (await usersResp.json().catch(() => [])) as AdminUserApi[];
-        const txData = (await txResp.json().catch(() => [])) as AdminTransactionApi[];
+        const usersData = (await usersResp
+          .json()
+          .catch(() => [])) as AdminUserApi[];
+        const txData = (await txResp
+          .json()
+          .catch(() => [])) as AdminTransactionApi[];
         const auditData = (await auditResp.json().catch(() => [])) as Array<{
           id: string;
           actor?: string;
@@ -1108,10 +1114,7 @@ function AdminApp() {
         return false;
       if (auditStatus !== "all" && log.statusClass !== auditStatus)
         return false;
-      if (
-        accountQuery &&
-        !log.admin.toLowerCase().includes(accountQuery)
-      )
+      if (accountQuery && !log.admin.toLowerCase().includes(accountQuery))
         return false;
       return true;
     });
@@ -1269,9 +1272,7 @@ function AdminApp() {
     const prevMonthAudit = auditLogs.filter((log) => {
       const d = parseDateLoose(log.ts);
       return (
-        d &&
-        d.getFullYear() === now.getFullYear() &&
-        d.getMonth() === prevMonth
+        d && d.getFullYear() === now.getFullYear() && d.getMonth() === prevMonth
       );
     });
     const thisMonthLogin = thisMonthAudit.filter(
@@ -1330,9 +1331,21 @@ function AdminApp() {
         value: activeUsers.toLocaleString("en-US"),
         delta: `${totalUsers > 0 ? ((activeUsers / totalUsers) * 100).toFixed(1) : "0.0"}%`,
         items: [
-          { label: "Total users", value: totalUsers.toLocaleString("en-US"), color: "#5b21b6" },
-          { label: "Admin", value: adminUsers.toLocaleString("en-US"), color: "#2563eb" },
-          { label: "Customer", value: userUsers.toLocaleString("en-US"), color: "#f59e0b" },
+          {
+            label: "Total users",
+            value: totalUsers.toLocaleString("en-US"),
+            color: "#5b21b6",
+          },
+          {
+            label: "Admin",
+            value: adminUsers.toLocaleString("en-US"),
+            color: "#2563eb",
+          },
+          {
+            label: "Customer",
+            value: userUsers.toLocaleString("en-US"),
+            color: "#f59e0b",
+          },
         ],
       },
       {
@@ -1340,9 +1353,21 @@ function AdminApp() {
         value: `${successRate.toFixed(1)}%`,
         delta: `${totalTx.toLocaleString("en-US")} tx`,
         items: [
-          { label: "Completed", value: successCount.toLocaleString("en-US"), color: "#5b21b6" },
-          { label: "Pending", value: pendingCount.toLocaleString("en-US"), color: "#6366f1" },
-          { label: "Failed", value: failedCount.toLocaleString("en-US"), color: "#f59e0b" },
+          {
+            label: "Completed",
+            value: successCount.toLocaleString("en-US"),
+            color: "#5b21b6",
+          },
+          {
+            label: "Pending",
+            value: pendingCount.toLocaleString("en-US"),
+            color: "#6366f1",
+          },
+          {
+            label: "Failed",
+            value: failedCount.toLocaleString("en-US"),
+            color: "#f59e0b",
+          },
         ],
       },
       {
@@ -1350,9 +1375,23 @@ function AdminApp() {
         value: `${profileCompletionRate.toFixed(1)}%`,
         delta: `${lockedUsers.toLocaleString("en-US")} locked`,
         items: [
-          { label: "Completed profile", value: profileCompleted.toLocaleString("en-US"), color: "#5b21b6" },
-          { label: "Incomplete", value: Math.max(totalUsers - profileCompleted, 0).toLocaleString("en-US"), color: "#6366f1" },
-          { label: "Locked", value: lockedUsers.toLocaleString("en-US"), color: "#f59e0b" },
+          {
+            label: "Completed profile",
+            value: profileCompleted.toLocaleString("en-US"),
+            color: "#5b21b6",
+          },
+          {
+            label: "Incomplete",
+            value: Math.max(totalUsers - profileCompleted, 0).toLocaleString(
+              "en-US",
+            ),
+            color: "#6366f1",
+          },
+          {
+            label: "Locked",
+            value: lockedUsers.toLocaleString("en-US"),
+            color: "#f59e0b",
+          },
         ],
       },
       {
@@ -1365,26 +1404,35 @@ function AdminApp() {
         items: [
           {
             label: "Transfer",
-            value: `$${(txTypeMap.get("Transfer")?.amount ?? 0).toLocaleString("en-US", {
-              minimumFractionDigits: 2,
-              maximumFractionDigits: 2,
-            })}`,
+            value: `$${(txTypeMap.get("Transfer")?.amount ?? 0).toLocaleString(
+              "en-US",
+              {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              },
+            )}`,
             color: "#5b21b6",
           },
           {
             label: "Payment",
-            value: `$${(txTypeMap.get("Payment")?.amount ?? 0).toLocaleString("en-US", {
-              minimumFractionDigits: 2,
-              maximumFractionDigits: 2,
-            })}`,
+            value: `$${(txTypeMap.get("Payment")?.amount ?? 0).toLocaleString(
+              "en-US",
+              {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              },
+            )}`,
             color: "#6366f1",
           },
           {
             label: "Refund",
-            value: `$${(txTypeMap.get("Refund")?.amount ?? 0).toLocaleString("en-US", {
-              minimumFractionDigits: 2,
-              maximumFractionDigits: 2,
-            })}`,
+            value: `$${(txTypeMap.get("Refund")?.amount ?? 0).toLocaleString(
+              "en-US",
+              {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              },
+            )}`,
             color: "#f59e0b",
           },
         ],
@@ -1444,7 +1492,7 @@ function AdminApp() {
       <style>{styles}</style>
 
       <aside className="mf-sidebar">
-        <div className="mf-logo">E-Wallet Admin</div>
+        <div className="mf-logo">FPIPay Admin</div>
         <ul className="mf-menu">
           <li>
             <button
@@ -1505,7 +1553,9 @@ function AdminApp() {
         </ul>
       </aside>
 
-      <div className={`mf-main ana-page ${active === "profile" ? "no-scroll" : ""}`}>
+      <div
+        className={`mf-main ana-page ${active === "profile" ? "no-scroll" : ""}`}
+      >
         {active === "dashboard" && (
           <>
             <header className="ana-header">
@@ -2025,7 +2075,9 @@ function AdminApp() {
                               if (value === null) return;
                               const amount = Number(value);
                               if (!Number.isFinite(amount) || amount <= 0) {
-                                window.alert("Amount must be a positive number.");
+                                window.alert(
+                                  "Amount must be a positive number.",
+                                );
                                 return;
                               }
 
@@ -2042,14 +2094,14 @@ function AdminApp() {
                               );
                               const payload = (await resp
                                 .json()
-                                .catch(() => null)) as
-                                | {
-                                    error?: string;
-                                    transaction?: AdminTransactionApi;
-                                  }
-                                | null;
+                                .catch(() => null)) as {
+                                error?: string;
+                                transaction?: AdminTransactionApi;
+                              } | null;
                               if (!resp.ok || !payload?.transaction) {
-                                window.alert(payload?.error || "Top up failed.");
+                                window.alert(
+                                  payload?.error || "Top up failed.",
+                                );
                                 return;
                               }
 
@@ -2123,7 +2175,11 @@ function AdminApp() {
                   {filteredUsers.length
                     ? (currentUserPage - 1) * userPageSize + 1
                     : 0}{" "}
-                  to {Math.min(currentUserPage * userPageSize, filteredUsers.length)}{" "}
+                  to{" "}
+                  {Math.min(
+                    currentUserPage * userPageSize,
+                    filteredUsers.length,
+                  )}{" "}
                   of {filteredUsers.length} users
                 </span>
                 <div className="pager">
@@ -2323,9 +2379,7 @@ function AdminApp() {
                             </div>
                           </td>
                           <td>
-                            <span className="audit-type">
-                              {log.category}
-                            </span>
+                            <span className="audit-type">{log.category}</span>
                           </td>
                           <td>
                             <div className="audit-admin">
@@ -2433,4 +2487,3 @@ function AdminApp() {
 }
 
 export default AdminApp;
-
