@@ -23,12 +23,22 @@ const API_BASE =
   (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ||
   "http://localhost:4000";
 const SESSION_TIMEOUT_MS = 5 * 60 * 1000;
+const SESSION_EXPIRED_EVENT = "auth:session-expired";
 
 const AuthContext = createContext<{
   user: User | null;
   token: string | null;
-  login: (email: string, password: string) => Promise<void>;
-  signUp: (payload: {
+  requestLoginOtp: (
+    email: string,
+    password: string,
+  ) => Promise<{
+    challengeId: string;
+    destination: string;
+    expiresAt: string;
+    retryAfterSeconds: number;
+  }>;
+  verifyLoginOtp: (challengeId: string, otp: string) => Promise<void>;
+  requestRegisterOtp: (payload: {
     fullName: string;
     userName: string;
     email: string;
@@ -36,6 +46,24 @@ const AuthContext = createContext<{
     address: string;
     dob: string;
     password: string;
+  }) => Promise<{
+    challengeId: string;
+    destination: string;
+    expiresAt: string;
+    retryAfterSeconds: number;
+  }>;
+  verifyRegisterOtp: (challengeId: string, otp: string) => Promise<void>;
+  requestPasswordResetOtp: (email: string) => Promise<{
+    challengeId: string;
+    destination: string;
+    expiresAt: string;
+    retryAfterSeconds: number;
+  }>;
+  resetPasswordWithOtp: (payload: {
+    email: string;
+    challengeId: string;
+    otp: string;
+    newPassword: string;
   }) => Promise<void>;
   updateUser: (patch: Partial<User>) => void;
   logout: () => void;
@@ -89,6 +117,13 @@ const extractApiErrorMessage = (data: unknown, fallback: string) => {
 };
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const expireSession = useCallback(() => {
+    setUser(null);
+    setToken(null);
+    setTokenExpiresAt(null);
+    window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT));
+  }, []);
+
   const [user, setUser] = useState<User | null>(() => {
     try {
       const s = sessionStorage.getItem(USER_STORAGE_KEY);
@@ -177,20 +212,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setTokenExpiresAt(expiry);
     }
     if (expiry <= now) {
-      setToken(null);
-      setUser(null);
-      setTokenExpiresAt(null);
+      expireSession();
       return;
     }
 
     const timeout = window.setTimeout(() => {
-      setToken(null);
-      setUser(null);
-      setTokenExpiresAt(null);
+      expireSession();
     }, expiry - now);
 
     return () => window.clearTimeout(timeout);
-  }, [token, tokenExpiresAt]);
+  }, [expireSession, token, tokenExpiresAt]);
 
   useEffect(() => {
     if (!token) return;
@@ -213,8 +244,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             msg.includes("token")
           ) {
             if (!cancelled) {
-              setToken(null);
-              setUser(null);
+              expireSession();
             }
           }
         }
@@ -227,9 +257,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, [expireSession, token]);
 
-  const login = useCallback(async (email: string, password: string) => {
+  const completeLogin = useCallback(
+    (data: { token: string; user: { id: string; email: string; role: "USER" | "ADMIN" } }) => {
+      setToken(data.token);
+      setTokenExpiresAt(Date.now() + SESSION_TIMEOUT_MS);
+      setUser((prev) => ({
+        id: data.user.id,
+        role: data.user.role,
+        email: data.user.email,
+        name:
+          prev && prev.email.toLowerCase() === data.user.email.toLowerCase()
+            ? prev.name
+            : toDisplayName(data.user.email),
+        avatar: prev?.avatar || DEFAULT_AVATAR,
+      }));
+    },
+    [],
+  );
+
+  const requestLoginOtp = useCallback(async (email: string, password: string) => {
     try {
       const resp = await fetch(`${API_BASE}/auth/login`, {
         method: "POST",
@@ -238,32 +286,113 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
       const data = (await resp.json().catch(() => null)) as {
         error?: unknown;
-        token?: string;
-        user?: { id: string; email: string; role: "USER" | "ADMIN" };
+        challengeId?: string;
+        destination?: string;
+        expiresAt?: string;
+        retryAfterSeconds?: number;
       } | null;
 
-      if (!resp.ok || !data?.token || !data.user) {
+      if (!resp.ok || !data?.challengeId || !data.destination || !data.expiresAt) {
         throw new Error(extractApiErrorMessage(data, "Login failed"));
       }
 
-      setToken(data.token);
-      setTokenExpiresAt(Date.now() + SESSION_TIMEOUT_MS);
-      setUser((prev) => ({
-        id: data.user!.id,
-        role: data.user!.role,
-        email: data.user!.email,
-        name:
-          prev && prev.email.toLowerCase() === data.user!.email.toLowerCase()
-            ? prev.name
-            : toDisplayName(data.user!.email),
-        avatar: prev?.avatar || DEFAULT_AVATAR,
-      }));
+      return {
+        challengeId: data.challengeId,
+        destination: data.destination,
+        expiresAt: data.expiresAt,
+        retryAfterSeconds: Number(data.retryAfterSeconds || 60),
+      };
     } catch (err) {
       throw new Error(parseApiError(err));
     }
   }, []);
 
-  const signUp = useCallback(
+  const verifyLoginOtp = useCallback(
+    async (challengeId: string, otp: string) => {
+      try {
+        const resp = await fetch(`${API_BASE}/auth/login/verify`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ challengeId, otp }),
+        });
+        const data = (await resp.json().catch(() => null)) as {
+          error?: unknown;
+          token?: string;
+          user?: { id: string; email: string; role: "USER" | "ADMIN" };
+        } | null;
+
+        if (!resp.ok || !data?.token || !data.user) {
+          throw new Error(extractApiErrorMessage(data, "OTP verification failed"));
+        }
+
+        completeLogin({
+          token: data.token,
+          user: data.user,
+        });
+      } catch (err) {
+        throw new Error(parseApiError(err));
+      }
+    },
+    [completeLogin],
+  );
+
+  const requestPasswordResetOtp = useCallback(async (email: string) => {
+    try {
+      const resp = await fetch(`${API_BASE}/auth/password/otp/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      const data = (await resp.json().catch(() => null)) as {
+        error?: unknown;
+        challengeId?: string;
+        destination?: string;
+        expiresAt?: string;
+        retryAfterSeconds?: number;
+      } | null;
+
+      if (!resp.ok || !data?.challengeId || !data.destination || !data.expiresAt) {
+        throw new Error(extractApiErrorMessage(data, "Failed to send reset OTP"));
+      }
+
+      return {
+        challengeId: data.challengeId,
+        destination: data.destination,
+        expiresAt: data.expiresAt,
+        retryAfterSeconds: Number(data.retryAfterSeconds || 60),
+      };
+    } catch (err) {
+      throw new Error(parseApiError(err));
+    }
+  }, []);
+
+  const resetPasswordWithOtp = useCallback(
+    async (payload: {
+      email: string;
+      challengeId: string;
+      otp: string;
+      newPassword: string;
+    }) => {
+      try {
+        const resp = await fetch(`${API_BASE}/auth/password/reset`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!resp.ok) {
+          const data = (await resp.json().catch(() => null)) as {
+            error?: unknown;
+          } | null;
+          throw new Error(extractApiErrorMessage(data, "Failed to reset password"));
+        }
+      } catch (err) {
+        throw new Error(parseApiError(err));
+      }
+    },
+    [],
+  );
+
+  const requestRegisterOtp = useCallback(
     async (payload: {
       fullName: string;
       userName: string;
@@ -290,28 +419,56 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         });
         const data = (await resp.json().catch(() => null)) as {
           error?: unknown;
-          token?: string;
-          user?: { id: string; email: string; role: "USER" | "ADMIN" };
+          challengeId?: string;
+          destination?: string;
+          expiresAt?: string;
+          retryAfterSeconds?: number;
         } | null;
 
-        if (!resp.ok || !data?.token || !data.user) {
+        if (!resp.ok || !data?.challengeId || !data.destination || !data.expiresAt) {
           throw new Error(extractApiErrorMessage(data, "Sign up failed"));
         }
 
-        setToken(data.token);
-        setTokenExpiresAt(Date.now() + SESSION_TIMEOUT_MS);
-        setUser({
-          id: data.user.id,
-          role: data.user.role,
-          email: data.user.email,
-          name: payload.fullName.trim() || toDisplayName(data.user.email),
-          avatar: DEFAULT_AVATAR,
-        });
+        return {
+          challengeId: data.challengeId,
+          destination: data.destination,
+          expiresAt: data.expiresAt,
+          retryAfterSeconds: Number(data.retryAfterSeconds || 60),
+        };
       } catch (err) {
         throw new Error(parseApiError(err));
       }
     },
     [],
+  );
+
+  const verifyRegisterOtp = useCallback(
+    async (challengeId: string, otp: string) => {
+      try {
+        const resp = await fetch(`${API_BASE}/auth/register/verify`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ challengeId, otp }),
+        });
+        const data = (await resp.json().catch(() => null)) as {
+          error?: unknown;
+          token?: string;
+          user?: { id: string; email: string; role: "USER" | "ADMIN" };
+        } | null;
+
+        if (!resp.ok || !data?.token || !data.user) {
+          throw new Error(extractApiErrorMessage(data, "OTP verification failed"));
+        }
+
+        completeLogin({
+          token: data.token,
+          user: data.user,
+        });
+      } catch (err) {
+        throw new Error(parseApiError(err));
+      }
+    },
+    [completeLogin],
   );
 
   const updateUser = useCallback((patch: Partial<User>) => {
@@ -326,7 +483,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   return (
     <AuthContext.Provider
-      value={{ user, token, login, signUp, updateUser, logout }}
+      value={{
+        user,
+        token,
+        requestLoginOtp,
+        verifyLoginOtp,
+        requestRegisterOtp,
+        verifyRegisterOtp,
+        requestPasswordResetOtp,
+        resetPasswordWithOtp,
+        updateUser,
+        logout,
+      }}
     >
       {children}
     </AuthContext.Provider>
