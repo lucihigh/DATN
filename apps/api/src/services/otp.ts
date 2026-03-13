@@ -25,6 +25,13 @@ export const maskEmail = (email: string) => {
   return `${head}${"*".repeat(Math.max(2, local.length - 4))}${tail}@${domain}`;
 };
 
+export const maskPhone = (phone: string) => {
+  const digits = phone.replace(/\D/g, "");
+  if (digits.length < 4) return phone;
+  const tail = digits.slice(-4);
+  return `***-***-${tail}`;
+};
+
 export const getOtpCooldownRemainingSeconds = async (input: {
   userId: string;
   purpose: string;
@@ -93,6 +100,22 @@ export const createEmailOtpChallenge = async (input: {
     retryAfterSeconds: OTP_RESEND_COOLDOWN_SECONDS,
   };
 };
+
+export const createSmsOtpChallenge = async (input: {
+  userId: string;
+  purpose: string;
+  destination: string;
+  ttlMinutes: number;
+  maxAttempts: number;
+  metadata?: Record<string, unknown>;
+}) =>
+  createEmailOtpChallenge({
+    ...input,
+    metadata: {
+      ...(input.metadata ?? {}),
+      deliveryChannel: "SMS",
+    },
+  });
 
 export const verifyEmailOtpChallenge = async (input: {
   userId: string;

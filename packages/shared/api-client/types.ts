@@ -279,6 +279,7 @@ export interface components {
       expiresAt?: string;
       retryAfterSeconds?: number;
       notice?: string;
+      anomaly?: components["schemas"]["AnomalyScore"];
     };
     DepositRequest: {
       /** Format: double */
@@ -303,7 +304,17 @@ export interface components {
     AnomalyScore: {
       /** Format: double */
       score?: number;
+      /** @enum {string} */
+      riskLevel?: "low" | "medium" | "high";
       reasons?: string[];
+      monitoringOnly?: boolean;
+      action?: string;
+      requireOtp?: boolean;
+      otpChannel?: string | null;
+      otpReason?: string | null;
+      modelSource?: string | null;
+      modelVersion?: string | null;
+      requestKey?: string | null;
     };
     SecurityAlert: {
       id?: string;

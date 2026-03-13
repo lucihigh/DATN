@@ -187,6 +187,44 @@ export const sendLoginOtpEmail = async (input: {
     debug: { otpCode: input.otpCode },
   });
 
+export const sendLoginRiskAlertEmail = async (input: {
+  to: string;
+  recipientName: string;
+  ipAddress?: string;
+  userAgent?: string;
+  reason?: string;
+}) =>
+  sendEmail({
+    to: input.to,
+    subject: "FPIPay sign-in alert",
+    text:
+      `We noticed a sign-in from a new or unusual device.\n` +
+      `${input.ipAddress ? `IP: ${input.ipAddress}\n` : ""}` +
+      `${input.userAgent ? `Device: ${input.userAgent}\n` : ""}` +
+      `${input.reason ? `Reason: ${input.reason}\n` : ""}` +
+      "If this was you, no action is required. Large transfers may be temporarily limited for this session.",
+    html: renderOtpEmailHtml({
+      preheader: "We noticed a new or unusual sign-in to your FPIPay account.",
+      title: "New device sign-in alert",
+      subtitle:
+        "Your account was accessed from a device or network that needs additional monitoring.",
+      recipientName: input.recipientName,
+      otpCode: "ALERT",
+      expiresInMinutes: 15,
+      summaryLabel: "Security review",
+      summaryValue: input.reason || "New or unusual device detected",
+      securityNote:
+        `${input.ipAddress ? `IP: ${input.ipAddress}. ` : ""}` +
+        `${input.userAgent ? `Device: ${input.userAgent}. ` : ""}` +
+        "Large transfers may be temporarily limited for this session while we continue monitoring.",
+    }).replace(">ALERT<", '>NOTICE<'),
+    debug: {
+      ipAddress: input.ipAddress,
+      userAgent: input.userAgent,
+      reason: input.reason,
+    },
+  });
+
 export const sendRegisterOtpEmail = async (input: {
   to: string;
   recipientName: string;
