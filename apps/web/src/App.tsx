@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import ReCAPTCHA from "react-google-recaptcha";
 import jsQR from "jsqr";
 
 import {
@@ -14,6 +15,9 @@ import "./index.css";
 const API_BASE =
   (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ||
   "http://localhost:4000";
+const RECAPTCHA_SITE_KEY = import.meta.env.VITE_RECAPTCHA_SITE_KEY as
+  | string
+  | undefined;
 const SESSION_REPLACEMENT_ALERT_STORAGE_KEY =
   "fpipay_session_replacement_alert";
 const NOTIFICATION_READ_STORAGE_PREFIX = "fpipay_notification_reads";
@@ -6623,7 +6627,11 @@ export default App;
 
 // -------- Auth Shell (shown when user is null) ----------
 type AuthShellProps = {
-  onRequestLoginOtp: (email: string, password: string) => Promise<LoginResult>;
+  onRequestLoginOtp: (
+    email: string,
+    password: string,
+    recaptchaToken: string,
+  ) => Promise<LoginResult>;
   onVerifyLoginOtp: (
     challengeId: string,
     otp: string,
@@ -6636,6 +6644,7 @@ type AuthShellProps = {
     address: string;
     dob: string;
     password: string;
+    recaptchaToken: string;
   }) => Promise<{
     challengeId: string;
     destination: string;
@@ -6646,7 +6655,10 @@ type AuthShellProps = {
     challengeId: string,
     otp: string,
   ) => Promise<AuthCompletionResult>;
-  onRequestPasswordResetOtp: (email: string) => Promise<{
+  onRequestPasswordResetOtp: (
+    email: string,
+    recaptchaToken: string,
+  ) => Promise<{
     challengeId: string;
     destination: string;
     expiresAt: string;
@@ -6714,12 +6726,15 @@ function AuthShell({
     confirm: "",
     agree: false,
   });
+  const [signinRecaptchaToken, setSigninRecaptchaToken] = useState("");
+  const [signupRecaptchaToken, setSignupRecaptchaToken] = useState("");
   const [signupOtpInput, setSignupOtpInput] = useState("");
   const [signupOtpChallengeId, setSignupOtpChallengeId] = useState("");
   const [signupOtpDestination, setSignupOtpDestination] = useState("");
   const [signupOtpExpiresAt, setSignupOtpExpiresAt] = useState("");
   const [signupOtpResendAt, setSignupOtpResendAt] = useState(0);
   const [forgotEmail, setForgotEmail] = useState("");
+  const [forgotRecaptchaToken, setForgotRecaptchaToken] = useState("");
   const [loginOtpInput, setLoginOtpInput] = useState("");
   const [loginOtpChallengeId, setLoginOtpChallengeId] = useState("");
   const [loginOtpDestination, setLoginOtpDestination] = useState("");
@@ -6732,6 +6747,9 @@ function AuthShell({
   const [forgotResendAt, setForgotResendAt] = useState(0);
   const [forgotNewPassword, setForgotNewPassword] = useState("");
   const [forgotConfirmPassword, setForgotConfirmPassword] = useState("");
+  const signinRecaptchaRef = useRef<ReCAPTCHA>(null);
+  const signupRecaptchaRef = useRef<ReCAPTCHA>(null);
+  const forgotRecaptchaRef = useRef<ReCAPTCHA>(null);
 
   useEffect(() => {
     if (
@@ -6774,11 +6792,20 @@ function AuthShell({
       toast("Please enter email and password", "error");
       return;
     }
+    if (!RECAPTCHA_SITE_KEY) {
+      toast("reCAPTCHA site key is missing", "error");
+      return;
+    }
+    if (!signinRecaptchaToken) {
+      toast("Please complete reCAPTCHA", "error");
+      return;
+    }
     setAuthBusy(true);
     try {
       const data = await onRequestLoginOtp(
         signinForm.email,
         signinForm.password,
+        signinRecaptchaToken,
       );
       if (data.status === "authenticated") {
         setLoginOtpChallengeId("");
@@ -6799,12 +6826,16 @@ function AuthShell({
       setLoginOtpExpiresAt(data.expiresAt);
       setLoginOtpResendAt(Date.now() + data.retryAfterSeconds * 1000);
       setLoginOtpInput("");
+      setSigninRecaptchaToken("");
+      signinRecaptchaRef.current?.reset();
       setMode("signinOtp");
       toast(
         data.notice || "A verification code has been sent to your email.",
         "info",
       );
     } catch (err) {
+      setSigninRecaptchaToken("");
+      signinRecaptchaRef.current?.reset();
       toast(err instanceof Error ? err.message : "Sign in failed", "error");
     } finally {
       setAuthBusy(false);
@@ -6844,6 +6875,14 @@ function AuthShell({
       toast("Please agree to terms & privacy", "error");
       return;
     }
+    if (!RECAPTCHA_SITE_KEY) {
+      toast("reCAPTCHA site key is missing", "error");
+      return;
+    }
+    if (!signupRecaptchaToken) {
+      toast("Please complete reCAPTCHA", "error");
+      return;
+    }
     setAuthBusy(true);
     try {
       const data = await onRequestRegisterOtp({
@@ -6854,6 +6893,7 @@ function AuthShell({
         address,
         dob,
         password,
+        recaptchaToken: signupRecaptchaToken,
       });
       setSignupOtpChallengeId(data.challengeId);
       setSignupOtpDestination(data.destination);
@@ -6861,8 +6901,12 @@ function AuthShell({
       setSignupOtpResendAt(Date.now() + data.retryAfterSeconds * 1000);
       setSignupOtpInput("");
       setMode("signupOtp");
+      setSignupRecaptchaToken("");
+      signupRecaptchaRef.current?.reset();
       toast("A verification code has been sent to your email.");
     } catch (err) {
+      setSignupRecaptchaToken("");
+      signupRecaptchaRef.current?.reset();
       toast(err instanceof Error ? err.message : "Sign up failed", "error");
     } finally {
       setAuthBusy(false);
@@ -6902,9 +6946,20 @@ function AuthShell({
         toast("Please enter your email", "error");
         return;
       }
+      if (!RECAPTCHA_SITE_KEY) {
+        toast("reCAPTCHA site key is missing", "error");
+        return;
+      }
+      if (!forgotRecaptchaToken) {
+        toast("Please complete reCAPTCHA", "error");
+        return;
+      }
       setAuthBusy(true);
       try {
-        const data = await onRequestPasswordResetOtp(forgotEmail);
+        const data = await onRequestPasswordResetOtp(
+          forgotEmail,
+          forgotRecaptchaToken,
+        );
         setForgotChallengeId(data.challengeId);
         setForgotDestination(data.destination);
         setForgotExpiresAt(data.expiresAt);
@@ -6912,9 +6967,13 @@ function AuthShell({
         setForgotOtpInput("");
         setForgotNewPassword("");
         setForgotConfirmPassword("");
+        setForgotRecaptchaToken("");
+        forgotRecaptchaRef.current?.reset();
         setMode("forgotOtp");
         toast("Password reset code sent to your email.");
       } catch (err) {
+        setForgotRecaptchaToken("");
+        forgotRecaptchaRef.current?.reset();
         toast(
           err instanceof Error ? err.message : "Failed to send reset code",
           "error",
@@ -6950,11 +7009,20 @@ function AuthShell({
 
   const resendLoginOtp = async () => {
     if (loginOtpCooldownSeconds > 0) return;
+    if (!RECAPTCHA_SITE_KEY) {
+      toast("reCAPTCHA site key is missing", "error");
+      return;
+    }
+    if (!signinRecaptchaToken) {
+      toast("Please complete reCAPTCHA before resending OTP", "error");
+      return;
+    }
     setAuthBusy(true);
     try {
       const data = await onRequestLoginOtp(
         signinForm.email,
         signinForm.password,
+        signinRecaptchaToken,
       );
       if (data.status === "authenticated") {
         setLoginOtpChallengeId("");
@@ -6973,8 +7041,12 @@ function AuthShell({
       setLoginOtpDestination(data.destination);
       setLoginOtpExpiresAt(data.expiresAt);
       setLoginOtpResendAt(Date.now() + data.retryAfterSeconds * 1000);
+      setSigninRecaptchaToken("");
+      signinRecaptchaRef.current?.reset();
       toast(data.notice || "A new verification code has been sent.", "info");
     } catch (err) {
+      setSigninRecaptchaToken("");
+      signinRecaptchaRef.current?.reset();
       toast(
         err instanceof Error ? err.message : "Failed to resend OTP",
         "error",
@@ -6986,6 +7058,14 @@ function AuthShell({
 
   const resendRegisterOtp = async () => {
     if (signupOtpCooldownSeconds > 0) return;
+    if (!RECAPTCHA_SITE_KEY) {
+      toast("reCAPTCHA site key is missing", "error");
+      return;
+    }
+    if (!signupRecaptchaToken) {
+      toast("Please complete reCAPTCHA before resending OTP", "error");
+      return;
+    }
     setAuthBusy(true);
     try {
       const data = await onRequestRegisterOtp({
@@ -6996,13 +7076,18 @@ function AuthShell({
         address: signupForm.address,
         dob: signupForm.dob,
         password: signupForm.password,
+        recaptchaToken: signupRecaptchaToken,
       });
       setSignupOtpChallengeId(data.challengeId);
       setSignupOtpDestination(data.destination);
       setSignupOtpExpiresAt(data.expiresAt);
       setSignupOtpResendAt(Date.now() + data.retryAfterSeconds * 1000);
+      setSignupRecaptchaToken("");
+      signupRecaptchaRef.current?.reset();
       toast("A new verification code has been sent.");
     } catch (err) {
+      setSignupRecaptchaToken("");
+      signupRecaptchaRef.current?.reset();
       toast(
         err instanceof Error ? err.message : "Failed to resend OTP",
         "error",
@@ -7054,15 +7139,30 @@ function AuthShell({
 
   const resendForgotOtp = async () => {
     if (forgotOtpCooldownSeconds > 0) return;
+    if (!RECAPTCHA_SITE_KEY) {
+      toast("reCAPTCHA site key is missing", "error");
+      return;
+    }
+    if (!forgotRecaptchaToken) {
+      toast("Please complete reCAPTCHA before resending OTP", "error");
+      return;
+    }
     setAuthBusy(true);
     try {
-      const data = await onRequestPasswordResetOtp(forgotEmail);
+      const data = await onRequestPasswordResetOtp(
+        forgotEmail,
+        forgotRecaptchaToken,
+      );
       setForgotChallengeId(data.challengeId);
       setForgotDestination(data.destination);
       setForgotExpiresAt(data.expiresAt);
       setForgotResendAt(Date.now() + data.retryAfterSeconds * 1000);
+      setForgotRecaptchaToken("");
+      forgotRecaptchaRef.current?.reset();
       toast("A new reset code has been sent.");
     } catch (err) {
+      setForgotRecaptchaToken("");
+      forgotRecaptchaRef.current?.reset();
       toast(
         err instanceof Error ? err.message : "Failed to resend OTP",
         "error",
@@ -7277,10 +7377,24 @@ function AuthShell({
                   Forgot password
                 </a>
               </div>
+              {RECAPTCHA_SITE_KEY ? (
+                <div className="auth-recaptcha">
+                  <ReCAPTCHA
+                    ref={signinRecaptchaRef}
+                    sitekey={RECAPTCHA_SITE_KEY}
+                    onChange={(token) => setSigninRecaptchaToken(token || "")}
+                    theme="dark"
+                  />
+                </div>
+              ) : (
+                <p className="muted auth-recaptcha-missing">
+                  reCAPTCHA is not configured for this environment.
+                </p>
+              )}
               <button
                 type="submit"
                 className="btn-primary auth-submit"
-                disabled={authBusy}
+                disabled={authBusy || !RECAPTCHA_SITE_KEY}
               >
                 {authBusy ? "Signing in..." : "Sign In"}
               </button>
@@ -7338,6 +7452,16 @@ function AuthShell({
                     : "Check your inbox for the latest code."}
                 </span>
               </label>
+              {RECAPTCHA_SITE_KEY ? (
+                <div className="auth-recaptcha">
+                  <ReCAPTCHA
+                    ref={signinRecaptchaRef}
+                    sitekey={RECAPTCHA_SITE_KEY}
+                    onChange={(token) => setSigninRecaptchaToken(token || "")}
+                    theme="dark"
+                  />
+                </div>
+              ) : null}
               <div className="auth-otp-actions">
                 <button
                   type="button"
@@ -7498,10 +7622,24 @@ function AuthShell({
                 />{" "}
                 I agree to terms & privacy.
               </label>
+              {RECAPTCHA_SITE_KEY ? (
+                <div className="auth-recaptcha">
+                  <ReCAPTCHA
+                    ref={signupRecaptchaRef}
+                    sitekey={RECAPTCHA_SITE_KEY}
+                    onChange={(token) => setSignupRecaptchaToken(token || "")}
+                    theme="dark"
+                  />
+                </div>
+              ) : (
+                <p className="muted auth-recaptcha-missing">
+                  reCAPTCHA is not configured for this environment.
+                </p>
+              )}
               <button
                 type="submit"
                 className="btn-primary auth-submit"
-                disabled={authBusy}
+                disabled={authBusy || !RECAPTCHA_SITE_KEY}
               >
                 {authBusy ? "Creating..." : "Create Account"}
               </button>
@@ -7612,10 +7750,24 @@ function AuthShell({
                   required
                 />
               </label>
+              {RECAPTCHA_SITE_KEY ? (
+                <div className="auth-recaptcha">
+                  <ReCAPTCHA
+                    ref={forgotRecaptchaRef}
+                    sitekey={RECAPTCHA_SITE_KEY}
+                    onChange={(token) => setForgotRecaptchaToken(token || "")}
+                    theme="dark"
+                  />
+                </div>
+              ) : (
+                <p className="muted auth-recaptcha-missing">
+                  reCAPTCHA is not configured for this environment.
+                </p>
+              )}
               <button
                 type="submit"
                 className="btn-primary auth-submit"
-                disabled={authBusy}
+                disabled={authBusy || !RECAPTCHA_SITE_KEY}
               >
                 {authBusy ? "Sending..." : "Send Reset Code"}
               </button>
@@ -7665,6 +7817,16 @@ function AuthShell({
                     : "Check your inbox for the latest code."}
                 </span>
               </label>
+              {RECAPTCHA_SITE_KEY ? (
+                <div className="auth-recaptcha">
+                  <ReCAPTCHA
+                    ref={forgotRecaptchaRef}
+                    sitekey={RECAPTCHA_SITE_KEY}
+                    onChange={(token) => setForgotRecaptchaToken(token || "")}
+                    theme="dark"
+                  />
+                </div>
+              ) : null}
               <label className="auth-label">
                 New Password
                 <input

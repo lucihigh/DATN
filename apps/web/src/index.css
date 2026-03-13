@@ -2029,6 +2029,9 @@ body.theme-light .auth-form-shell {
 .auth-options { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .auth-checkbox { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; }
 .auth-checkbox input { accent-color: var(--accent); }
+.auth-recaptcha { display: flex; justify-content: center; margin-top: 4px; }
+.auth-recaptcha > div { transform-origin: center top; }
+.auth-recaptcha-missing { margin: 0; text-align: center; }
 .auth-terms { margin: 0; }
 .auth-link { color: var(--accent-2); text-decoration: none; font-size: 14px; }
 .auth-link:hover { text-decoration: underline; }
