@@ -74,7 +74,11 @@ type SessionExpiredReason = "expired" | "replaced";
 const AuthContext = createContext<{
   user: User | null;
   token: string | null;
-  requestLoginOtp: (email: string, password: string) => Promise<LoginResult>;
+  requestLoginOtp: (
+    email: string,
+    password: string,
+    recaptchaToken: string,
+  ) => Promise<LoginResult>;
   verifyLoginOtp: (
     challengeId: string,
     otp: string,
@@ -87,6 +91,7 @@ const AuthContext = createContext<{
     address: string;
     dob: string;
     password: string;
+    recaptchaToken: string;
   }) => Promise<{
     challengeId: string;
     destination: string;
@@ -97,7 +102,10 @@ const AuthContext = createContext<{
     challengeId: string,
     otp: string,
   ) => Promise<AuthCompletionResult>;
-  requestPasswordResetOtp: (email: string) => Promise<{
+  requestPasswordResetOtp: (
+    email: string,
+    recaptchaToken: string,
+  ) => Promise<{
     challengeId: string;
     destination: string;
     expiresAt: string;
@@ -380,12 +388,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const requestLoginOtp = useCallback(
-    async (email: string, password: string): Promise<LoginResult> => {
+    async (
+      email: string,
+      password: string,
+      recaptchaToken: string,
+    ): Promise<LoginResult> => {
       try {
         const resp = await fetch(`${API_BASE}/auth/login`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, password }),
+          body: JSON.stringify({ email, password, recaptchaToken }),
         });
         const data = (await resp.json().catch(() => null)) as {
           error?: unknown;
@@ -466,42 +478,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [completeLogin],
   );
 
-  const requestPasswordResetOtp = useCallback(async (email: string) => {
-    try {
-      const resp = await fetch(`${API_BASE}/auth/password/otp/send`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email }),
-      });
-      const data = (await resp.json().catch(() => null)) as {
-        error?: unknown;
-        challengeId?: string;
-        destination?: string;
-        expiresAt?: string;
-        retryAfterSeconds?: number;
-      } | null;
+  const requestPasswordResetOtp = useCallback(
+    async (email: string, recaptchaToken: string) => {
+      try {
+        const resp = await fetch(`${API_BASE}/auth/password/otp/send`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, recaptchaToken }),
+        });
+        const data = (await resp.json().catch(() => null)) as {
+          error?: unknown;
+          challengeId?: string;
+          destination?: string;
+          expiresAt?: string;
+          retryAfterSeconds?: number;
+        } | null;
 
-      if (
-        !resp.ok ||
-        !data?.challengeId ||
-        !data.destination ||
-        !data.expiresAt
-      ) {
-        throw new Error(
-          extractApiErrorMessage(data, "Failed to send reset OTP"),
-        );
+        if (
+          !resp.ok ||
+          !data?.challengeId ||
+          !data.destination ||
+          !data.expiresAt
+        ) {
+          throw new Error(
+            extractApiErrorMessage(data, "Failed to send reset OTP"),
+          );
+        }
+
+        return {
+          challengeId: data.challengeId,
+          destination: data.destination,
+          expiresAt: data.expiresAt,
+          retryAfterSeconds: Number(data.retryAfterSeconds || 60),
+        };
+      } catch (err) {
+        throw new Error(parseApiError(err));
       }
-
-      return {
-        challengeId: data.challengeId,
-        destination: data.destination,
-        expiresAt: data.expiresAt,
-        retryAfterSeconds: Number(data.retryAfterSeconds || 60),
-      };
-    } catch (err) {
-      throw new Error(parseApiError(err));
-    }
-  }, []);
+    },
+    [],
+  );
 
   const resetPasswordWithOtp = useCallback(
     async (payload: {
@@ -576,6 +591,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       address: string;
       dob: string;
       password: string;
+      recaptchaToken: string;
     }) => {
       try {
         const resp = await fetch(`${API_BASE}/auth/register`, {
@@ -590,6 +606,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             phone: payload.phone.trim() || undefined,
             address: payload.address.trim() || undefined,
             dob: payload.dob.trim() || undefined,
+            recaptchaToken: payload.recaptchaToken,
           }),
         });
         const data = (await resp.json().catch(() => null)) as {
