@@ -16,6 +16,13 @@ declare global {
     // eslint-disable-next-line @typescript-eslint/no-empty-interface
     interface Request {
       user?: AuthUser;
+      sessionSecurity?: {
+        riskLevel: "low" | "medium" | "high";
+        reviewReason?: string;
+        verificationMethod?: "password" | "email_otp" | "sms_otp";
+        restrictLargeTransfers?: boolean;
+        maxTransferAmount?: number;
+      };
     }
   }
 }
@@ -75,6 +82,7 @@ export const requireAuth = async (
       role: payload.role,
       sid: payload.sid,
     };
+    req.sessionSecurity = authSecurityState.activeSession?.security;
     return next();
   } catch (err) {
     return res.status(401).json({ error: "Invalid or expired token" });

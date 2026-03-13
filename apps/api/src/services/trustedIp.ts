@@ -10,6 +10,13 @@ export type ActiveAuthSession = {
   issuedAt: string;
   ipAddress?: string;
   userAgent?: string;
+  security?: {
+    riskLevel: "low" | "medium" | "high";
+    reviewReason?: string;
+    verificationMethod?: "password" | "email_otp" | "sms_otp";
+    restrictLargeTransfers?: boolean;
+    maxTransferAmount?: number;
+  };
 };
 
 export type AuthSecurityState = {
@@ -174,6 +181,11 @@ const toActiveAuthSession = (value: unknown): ActiveAuthSession | null => {
   const raw = asObject(value);
   const sessionId = asTrimmedString(raw.sessionId);
   const issuedAt = asIsoString(raw.issuedAt);
+  const securityRaw = asObject(raw.security);
+  const riskLevel =
+    securityRaw.riskLevel === "high" || securityRaw.riskLevel === "medium"
+      ? securityRaw.riskLevel
+      : "low";
   if (!sessionId || !issuedAt) return null;
   return {
     sessionId,
@@ -182,6 +194,22 @@ const toActiveAuthSession = (value: unknown): ActiveAuthSession | null => {
       typeof raw.ipAddress === "string" ? raw.ipAddress : undefined,
     ),
     userAgent: asTrimmedString(raw.userAgent),
+    security: {
+      riskLevel,
+      reviewReason: asTrimmedString(securityRaw.reviewReason),
+      verificationMethod:
+        securityRaw.verificationMethod === "sms_otp"
+          ? "sms_otp"
+          : securityRaw.verificationMethod === "email_otp"
+            ? "email_otp"
+            : "password",
+      restrictLargeTransfers: Boolean(securityRaw.restrictLargeTransfers),
+      maxTransferAmount:
+        typeof securityRaw.maxTransferAmount === "number" &&
+        Number.isFinite(securityRaw.maxTransferAmount)
+          ? securityRaw.maxTransferAmount
+          : undefined,
+    },
   };
 };
 
@@ -281,6 +309,7 @@ export const activateAuthSession = (
     ipAddress?: string | null;
     userAgent?: string | null;
     occurredAt?: Date;
+    security?: ActiveAuthSession["security"];
   },
 ): AuthSecurityState => {
   const sessionId = input.sessionId.trim();
@@ -294,6 +323,7 @@ export const activateAuthSession = (
       issuedAt: occurredAt.toISOString(),
       ipAddress: normalizeIpAddress(input.ipAddress),
       userAgent: asTrimmedString(input.userAgent),
+      security: input.security,
     },
   };
 };

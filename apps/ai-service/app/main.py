@@ -1,1484 +1,1744 @@
 import json
 import os
-import re
-import unicodedata
+import ipaddress
+import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from math import ceil
-from typing import Any, Literal
-from urllib.error import URLError
-from urllib.parse import urlencode
-from urllib.request import urlopen
+from pathlib import Path
+from typing import Any
 
-from fastapi import FastAPI
-from pydantic import BaseModel, Field
+import joblib
+import numpy as np
+from bson import ObjectId
+from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse
+from pymongo import MongoClient
+from pymongo.errors import DuplicateKeyError, PyMongoError
+from pyod.models.iforest import IForest
 
 try:
-    from openai import OpenAI
-except ImportError:
-    OpenAI = None
+    import jwt
+    from jwt import InvalidTokenError
+except Exception:  # pragma: no cover - optional dependency at import time
+    jwt = None
 
-app = FastAPI(title="AI Market Copilot")
-openai_client = (
-    OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    if OpenAI and os.getenv("OPENAI_API_KEY")
-    else None
+    class InvalidTokenError(Exception):
+        pass
+from app.login_model import (
+    FEATURE_NAMES,
+    LoginEvent,
+    TrainRequest,
+    adjust_risk_level as login_adjust_risk_level,
+    build_features as build_login_features,
+    build_reasons as build_login_reasons,
+    normalize_login_event as normalize_login_event_payload,
+    resolve_request_key as resolve_login_request_key,
+)
+from app.transaction_model import (
+    TX_FEATURE_NAMES,
+    TrainTransactionRequest,
+    TransactionEvent,
+    adjust_tx_risk_level as transaction_adjust_risk_level,
+    build_tx_features as build_transaction_features,
+    build_tx_reasons as build_transaction_reasons,
+    normalize_transaction_event as normalize_transaction_event_payload,
+    resolve_tx_request_key as resolve_transaction_request_key,
+)
+from app.test_ui import TEST_UI_HTML
+
+app = FastAPI(title="AI Anomaly Scorer")
+
+DEFAULT_CONTAMINATION = 0.02
+LOGIN_EVENTS_COLLECTION = "LOGIN_EVENTS"
+AI_LOGIN_SCORES_COLLECTION = "AI_LOGIN_SCORES"
+TRANSACTION_EVENTS_COLLECTION = "TRANSACTION_EVENTS"
+AI_TRANSACTION_SCORES_COLLECTION = "AI_TRANSACTION_SCORES"
+AUDIT_LOGS_COLLECTION = "AUDIT_LOGS"
+AI_ACTION = "NOTIFY_ADMIN_ONLY"
+AI_TX_ACTION = "REVIEW_TRANSACTION_ONLY"
+METRICS_KEYS = (
+    "score_requests_total",
+    "score_success_total",
+    "score_errors_total",
+    "tx_score_requests_total",
+    "tx_score_success_total",
+    "tx_score_errors_total",
+    "mongo_write_success_total",
+    "mongo_write_error_total",
+    "admin_alerts_sent_total",
+    "admin_alerts_error_total",
+    "risk_low_total",
+    "risk_medium_total",
+    "risk_high_total",
+    "score_latency_ms_total",
+    "tx_risk_low_total",
+    "tx_risk_medium_total",
+    "tx_risk_high_total",
+    "tx_score_latency_ms_total",
 )
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
-FX_API_URL = os.getenv("FX_API_URL", "https://open.er-api.com/v6/latest")
-CRYPTO_API_URL = os.getenv(
-    "CRYPTO_API_URL", "https://api.coingecko.com/api/v3/simple/price"
-)
-GOLD_API_URL = os.getenv("GOLD_API_URL", "https://api.gold-api.com/price/XAU")
-SILVER_API_URL = os.getenv("SILVER_API_URL", "https://api.gold-api.com/price/XAG")
-STOCK_API_URL = os.getenv("STOCK_API_URL", "https://stooq.com/q/l/")
 
-VIETNAMESE_ACCENTS = (
-    "ăâđêôơưáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệ"
-    "óòỏõọốồổỗộớờởỡợúùủũụứừửữựíìỉĩịýỳỷỹỵ"
-)
-PRICE_KEYWORDS = {
-    "price",
-    "quote",
-    "gia",
-    "bao nhieu",
-    "hom nay",
-    "today",
-    "spot",
-    "current",
-    "now",
-}
-COMPARE_KEYWORDS = {"compare", "comparison", "vs", "versus", "so sanh"}
-OUTLOOK_KEYWORDS = {
-    "outlook",
-    "forecast",
-    "trend",
-    "xu huong",
-    "nhan dinh",
-    "view",
-    "khan nang",
-}
-STRATEGY_KEYWORDS = {
-    "should i buy",
-    "should i sell",
-    "co nen mua",
-    "co nen ban",
-    "entry",
-    "allocation",
-    "phan bo",
-    "chien luoc",
-    "strategy",
-    "dca",
-    "all in",
-}
-EXPLAIN_KEYWORDS = {
-    "what is",
-    "explain",
-    "tai sao",
-    "vi sao",
-    "la gi",
-    "how does",
-    "anh huong",
-    "impact",
-}
-OVERVIEW_KEYWORDS = {
-    "thi truong",
-    "market today",
-    "market overview",
-    "tong quan",
-    "toan canh",
-    "money market",
-}
-DEPOSIT_KEYWORDS = {
-    "deposit",
-    "top up",
-    "top-up",
-    "save",
-    "saving",
-    "emergency",
-    "fund",
-    "nap",
-    "tiet kiem",
-    "du phong",
-}
-CASH_FLOW_KEYWORDS = {
-    "cash flow",
-    "expense",
-    "spending",
-    "budget",
-    "chi tieu",
-    "dong tien",
-    "ngan sach",
-}
-MARKET_SYSTEM_PROMPT = """
-You are FPIPay Market Copilot.
-
-Scope:
-- Answer questions about forex/currencies, stocks, ETFs, indices, gold, silver, crypto, and market risk.
-- Use the supplied marketContext and exchangeRateQuote as the source of truth for live prices.
-- If live data is missing for a current-market claim, say that clearly instead of guessing.
-- For market outlook questions, discuss drivers, risk, and scenarios. Do not promise returns.
-- Be concise, practical, and grounded.
-
-Language:
-- Reply in Vietnamese when the user's latest message is Vietnamese.
-- Reply in English when the user's latest message is English.
-
-Output:
-- Return strict JSON only.
-- Schema keys: reply, topic, suggestedActions, suggestedDepositAmount, riskLevel, confidence, followUpQuestion.
-- suggestedDepositAmount must be null unless the user is explicitly asking for savings/deposit planning.
-- riskLevel must be one of low, medium, high.
-- confidence must be between 0 and 1.
-""".strip()
-
-CURRENCY_ALIASES = {
-    "usd": "USD",
-    "dollar": "USD",
-    "dollars": "USD",
-    "us dollar": "USD",
-    "do la": "USD",
-    "do": "USD",
-    "my": "USD",
-    "eur": "EUR",
-    "euro": "EUR",
-    "vnd": "VND",
-    "dong": "VND",
-    "viet nam dong": "VND",
-    "jpy": "JPY",
-    "yen": "JPY",
-    "gbp": "GBP",
-    "pound": "GBP",
-    "aud": "AUD",
-    "cad": "CAD",
-    "sgd": "SGD",
-    "cny": "CNY",
-    "yuan": "CNY",
-    "hkd": "HKD",
-    "krw": "KRW",
-    "won": "KRW",
-    "thb": "THB",
-    "baht": "THB",
-    "chf": "CHF",
-    "nzd": "NZD",
-    "inr": "INR",
-    "aed": "AED",
-    "sek": "SEK",
-    "nok": "NOK",
-    "dkk": "DKK",
-    "pln": "PLN",
-}
-SUPPORTED_CURRENCY_CODES = set(CURRENCY_ALIASES.values())
-CRYPTO_ALIASES = {
-    "bitcoin": ("bitcoin", "BTC"),
-    "btc": ("bitcoin", "BTC"),
-    "ethereum": ("ethereum", "ETH"),
-    "eth": ("ethereum", "ETH"),
-    "solana": ("solana", "SOL"),
-    "sol": ("solana", "SOL"),
-    "binance coin": ("binancecoin", "BNB"),
-    "bnb": ("binancecoin", "BNB"),
-    "xrp": ("ripple", "XRP"),
-    "ripple": ("ripple", "XRP"),
-    "doge": ("dogecoin", "DOGE"),
-    "dogecoin": ("dogecoin", "DOGE"),
-    "ada": ("cardano", "ADA"),
-    "cardano": ("cardano", "ADA"),
-}
-METAL_ALIASES = {
-    "gold": ("gold", "XAU", "Gold"),
-    "xau": ("gold", "XAU", "Gold"),
-    "vang": ("gold", "XAU", "Gold"),
-    "silver": ("silver", "XAG", "Silver"),
-    "xag": ("silver", "XAG", "Silver"),
-    "bac": ("silver", "XAG", "Silver"),
-}
-STOOQ_REFERENCE_ALIASES = {
-    "aapl": ("stock", "aapl.us", "Apple"),
-    "apple": ("stock", "aapl.us", "Apple"),
-    "msft": ("stock", "msft.us", "Microsoft"),
-    "microsoft": ("stock", "msft.us", "Microsoft"),
-    "nvda": ("stock", "nvda.us", "NVIDIA"),
-    "nvidia": ("stock", "nvda.us", "NVIDIA"),
-    "tsla": ("stock", "tsla.us", "Tesla"),
-    "tesla": ("stock", "tsla.us", "Tesla"),
-    "amzn": ("stock", "amzn.us", "Amazon"),
-    "amazon": ("stock", "amzn.us", "Amazon"),
-    "googl": ("stock", "googl.us", "Alphabet"),
-    "goog": ("stock", "goog.us", "Alphabet"),
-    "google": ("stock", "googl.us", "Alphabet"),
-    "alphabet": ("stock", "googl.us", "Alphabet"),
-    "meta": ("stock", "meta.us", "Meta"),
-    "facebook": ("stock", "meta.us", "Meta"),
-    "amd": ("stock", "amd.us", "AMD"),
-    "spy": ("etf", "spy.us", "SPDR S&P 500 ETF"),
-    "qqq": ("etf", "qqq.us", "Invesco QQQ"),
-    "dia": ("etf", "dia.us", "SPDR Dow Jones ETF"),
-    "gld": ("etf", "gld.us", "SPDR Gold Shares"),
-    "slv": ("etf", "slv.us", "iShares Silver Trust"),
-    "sp500": ("index", "^spx", "S&P 500"),
-    "s&p 500": ("index", "^spx", "S&P 500"),
-    "spx": ("index", "^spx", "S&P 500"),
-    "nasdaq": ("index", "^ndq", "Nasdaq 100"),
-    "nasdaq 100": ("index", "^ndq", "Nasdaq 100"),
-    "ndx": ("index", "^ndq", "Nasdaq 100"),
-    "dow": ("index", "^dji", "Dow Jones Industrial Average"),
-    "dow jones": ("index", "^dji", "Dow Jones Industrial Average"),
-    "djia": ("index", "^dji", "Dow Jones Industrial Average"),
-    "dxy": ("index", "dx.f", "US Dollar Index"),
-    "usd index": ("index", "dx.f", "US Dollar Index"),
-    "dollar index": ("index", "dx.f", "US Dollar Index"),
-    "oil": ("commodity", "cl.f", "WTI Crude Oil"),
-    "crude": ("commodity", "cl.f", "WTI Crude Oil"),
-    "wti": ("commodity", "cl.f", "WTI Crude Oil"),
-}
-COMMON_TICKER_STOPWORDS = {
-    "THE",
-    "AND",
-    "FOR",
-    "YOU",
-    "FED",
-    "ETF",
-    "USD",
-    "EUR",
-    "VND",
-    "JPY",
-    "GBP",
-    "AUD",
-    "CAD",
-    "SGD",
-    "CNY",
-    "THB",
-    "XAU",
-    "XAG",
-    "BTC",
-    "ETH",
-    "SOL",
-    "BNB",
-    "XRP",
-    "ADA",
-}
+def _now_dt() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-class LoginEvent(BaseModel):
-    userId: str | None = None
-    ipAddress: str
-    userAgent: str | None = None
-    timestamp: str | None = None
+def _now_iso() -> str:
+    return _now_dt().isoformat()
 
 
-class DepositAgentRequest(BaseModel):
-    userId: str | None = None
-    goal: str
-    currency: str = "USD"
-    currentBalance: float = 0
-    monthlyIncome: float | None = None
-    monthlyExpenses: float | None = None
+def _metric_inc(key: str, amount: float = 1.0) -> None:
+    if key not in app.state.metrics:
+        app.state.metrics[key] = 0.0
+    app.state.metrics[key] += amount
 
 
-class DepositAgentResponse(BaseModel):
-    recommendedAmount: float
-    reasoning: list[str]
-    riskLevel: Literal["low", "medium", "high"]
-    nextAction: str
-    confidence: float
+def _auth_enabled() -> bool:
+    return not bool(str(os.getenv("AI_DISABLE_AUTH", "0")).strip().lower() in {"1", "true", "yes"})
 
 
-class CopilotMessage(BaseModel):
-    role: str
-    content: str
+def _auth_mode() -> str:
+    mode = str(os.getenv("AI_AUTH_MODE", "api_key")).strip().lower()
+    if mode in {"api_key", "jwt", "both"}:
+        return mode
+    return "api_key"
 
 
-class CopilotTransaction(BaseModel):
-    amount: float
-    type: str
-    description: str | None = None
-    createdAt: str
-    direction: str = "debit"
+def _verify_api_key(x_ai_api_key: str | None) -> bool:
+    expected = os.getenv("AI_API_KEY", "local-dev-key")
+    return bool(x_ai_api_key and x_ai_api_key == expected)
 
 
-class CopilotRequest(BaseModel):
-    userId: str | None = None
-    currency: str = "USD"
-    currentBalance: float = 0
-    monthlyIncome: float | None = None
-    monthlyExpenses: float | None = None
-    recentTransactions: list[CopilotTransaction] = Field(default_factory=list)
-    messages: list[CopilotMessage]
+def _verify_jwt(authorization: str | None) -> bool:
+    if not authorization:
+        return False
+    parts = str(authorization).strip().split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
+        return False
+
+    if jwt is None:
+        raise HTTPException(status_code=500, detail="JWT library is not available. Install PyJWT.")
+
+    secret = str(os.getenv("AI_JWT_SECRET", "")).strip()
+    if not secret:
+        raise HTTPException(status_code=500, detail="JWT auth is enabled but AI_JWT_SECRET is missing.")
+    algorithm = str(os.getenv("AI_JWT_ALGORITHM", "HS256")).strip() or "HS256"
+    audience = str(os.getenv("AI_JWT_AUDIENCE", "")).strip() or None
+    issuer = str(os.getenv("AI_JWT_ISSUER", "")).strip() or None
+
+    try:
+        jwt.decode(
+            parts[1].strip(),
+            secret,
+            algorithms=[algorithm],
+            audience=audience,
+            issuer=issuer,
+            options={"verify_aud": audience is not None},
+        )
+        return True
+    except InvalidTokenError:
+        return False
 
 
-class CopilotResponse(BaseModel):
-    reply: str
-    topic: str
-    suggestedActions: list[str]
-    suggestedDepositAmount: float | None = None
-    riskLevel: str
-    confidence: float
-    followUpQuestion: str | None = None
+def _require_api_key(
+    x_ai_api_key: str | None = Header(default=None, alias="X-AI-API-KEY"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> None:
+    if not _auth_enabled():
+        return
+
+    mode = _auth_mode()
+    if mode == "api_key":
+        if _verify_api_key(x_ai_api_key):
+            return
+        raise HTTPException(status_code=401, detail="Unauthorized: invalid API key")
+
+    if mode == "jwt":
+        if _verify_jwt(authorization):
+            return
+        raise HTTPException(status_code=401, detail="Unauthorized: invalid JWT")
+
+    if _verify_api_key(x_ai_api_key) or _verify_jwt(authorization):
+        return
+    raise HTTPException(status_code=401, detail="Unauthorized: invalid API key or JWT")
 
 
-class CopilotResult(BaseModel):
-    reply: str
-    topic: str
-    suggestedActions: list[str]
-    suggestedDepositAmount: float | None = None
-    riskLevel: str
-    confidence: float
-    followUpQuestion: str | None = None
+def _normalize_device(device: str) -> str:
+    return (device or "").strip().lower()
 
 
-class ExchangeRateQuote(BaseModel):
-    base: str
-    quote: str
-    amount: float
-    convertedAmount: float
-    rate: float
-    date: str
-    source: str
+def _normalize_login_event(event: LoginEvent) -> LoginEvent:
+    return normalize_login_event_payload(event)
 
 
-class MarketQuote(BaseModel):
-    assetType: str
-    symbol: str
-    name: str
-    price: float
-    currency: str
-    convertedPrice: float | None = None
-    convertedCurrency: str | None = None
-    updatedAt: str
-    source: str
-    note: str
-    openPrice: float | None = None
-    highPrice: float | None = None
-    lowPrice: float | None = None
-    sessionChangePct: float | None = None
+def _normalize_transaction_event(event: TransactionEvent) -> TransactionEvent:
+    return normalize_transaction_event_payload(event)
 
 
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _resolve_request_key(event: LoginEvent, header_key: str | None) -> str:
+    return resolve_login_request_key(event, header_key)
 
 
-def fold_text(text: str) -> str:
-    lowered = (text or "").lower().strip()
-    normalized = "".join(
-        char
-        for char in unicodedata.normalize("NFKD", lowered)
-        if not unicodedata.combining(char)
-    )
-    normalized = normalized.replace("đ", "d")
-    return re.sub(r"\s+", " ", normalized)
+def _resolve_tx_request_key(event: TransactionEvent, header_key: str | None) -> str:
+    return resolve_transaction_request_key(event, header_key)
 
 
-def contains_term(text: str, term: str) -> bool:
-    pattern = r"(?<![a-z0-9])" + re.escape(term) + r"(?![a-z0-9])"
-    return re.search(pattern, text) is not None
+def _build_features(event: LoginEvent) -> np.ndarray:
+    return build_login_features(event)
 
 
-def parse_float(value: str | None) -> float | None:
-    if value is None:
-        return None
-    cleaned = value.strip()
-    if not cleaned or cleaned == "N/D":
+def _build_tx_features(event: TransactionEvent) -> np.ndarray:
+    return build_transaction_features(event)
+
+
+def _state_ready() -> bool:
+    return getattr(app.state, "model", None) is not None
+
+
+def _tx_state_ready() -> bool:
+    return getattr(app.state, "tx_model", None) is not None
+
+
+def _mongo_ready() -> bool:
+    return getattr(app.state, "mongo_db", None) is not None
+
+
+def _score_to_level(score: float, thresholds: dict[str, float]) -> str:
+    if score <= thresholds["p90"]:
+        return "LOW"
+    if score <= thresholds["p97"]:
+        return "MEDIUM"
+    return "HIGH"
+
+
+def _scaled_score(score: float, score_min: float, score_max: float) -> float:
+    if score_max <= score_min:
+        return 0.0
+    scaled = (score - score_min) / (score_max - score_min)
+    return float(max(0.0, min(1.0, scaled)))
+
+
+def _fit_iforest(feature_matrix: np.ndarray) -> tuple[IForest, dict[str, float], np.ndarray, np.ndarray]:
+    model = IForest(contamination=DEFAULT_CONTAMINATION, random_state=42)
+    model.fit(feature_matrix)
+
+    scores = model.decision_scores_
+    if len(scores) >= 20:
+        p90 = float(np.percentile(scores, 90))
+        p97 = float(np.percentile(scores, 97))
+    else:
+        p90 = float(scores.mean() + scores.std())
+        p97 = float(scores.mean() + 2 * scores.std())
+
+    thresholds = {
+        "p90": p90,
+        "p97": p97,
+        "score_min": float(scores.min()),
+        "score_max": float(scores.max()),
+    }
+    feature_mean = feature_matrix.mean(axis=0)
+    feature_std = feature_matrix.std(axis=0)
+    return model, thresholds, feature_mean, feature_std
+
+
+def _set_model_state(
+    *,
+    model: Any,
+    thresholds: dict[str, float],
+    feature_mean: np.ndarray,
+    feature_std: np.ndarray,
+    countries: set[str],
+    devices: set[str],
+    trained_at: str,
+    train_size: int,
+    source: str,
+    model_version: str | None = None,
+    model_path: str | None = None,
+    metadata_path: str | None = None,
+) -> None:
+    safe_std = np.asarray(feature_std, dtype=float).copy()
+    safe_std[safe_std == 0] = 1.0
+    app.state.model = model
+    app.state.thresholds = thresholds
+    app.state.feature_mean = np.asarray(feature_mean, dtype=float)
+    app.state.feature_std = safe_std
+    app.state.countries = countries
+    app.state.devices = devices
+    app.state.trained_at = trained_at
+    app.state.train_size = train_size
+    app.state.model_source = source
+    app.state.model_version = model_version or str(trained_at)
+    app.state.model_path = model_path
+    app.state.metadata_path = metadata_path
+    app.state.feature_names = FEATURE_NAMES
+
+
+def _set_tx_model_state(
+    *,
+    model: Any,
+    thresholds: dict[str, float],
+    feature_mean: np.ndarray,
+    feature_std: np.ndarray,
+    countries: set[str],
+    payment_methods: set[str],
+    merchant_categories: set[str],
+    trained_at: str,
+    train_size: int,
+    source: str,
+    model_version: str | None = None,
+    model_path: str | None = None,
+    metadata_path: str | None = None,
+) -> None:
+    safe_std = np.asarray(feature_std, dtype=float).copy()
+    safe_std[safe_std == 0] = 1.0
+    app.state.tx_model = model
+    app.state.tx_thresholds = thresholds
+    app.state.tx_feature_mean = np.asarray(feature_mean, dtype=float)
+    app.state.tx_feature_std = safe_std
+    app.state.tx_countries = countries
+    app.state.tx_payment_methods = payment_methods
+    app.state.tx_merchant_categories = merchant_categories
+    app.state.tx_trained_at = trained_at
+    app.state.tx_train_size = train_size
+    app.state.tx_model_source = source
+    app.state.tx_model_version = model_version or str(trained_at)
+    app.state.tx_model_path = model_path
+    app.state.tx_metadata_path = metadata_path
+    app.state.tx_feature_names = TX_FEATURE_NAMES
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
         return None
     try:
-        return float(cleaned)
-    except ValueError:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
         return None
 
 
-def detect_language(text: str) -> Literal["vi", "en"]:
-    lowered = (text or "").lower()
-    folded = fold_text(text)
-    if any(char in lowered for char in VIETNAMESE_ACCENTS):
-        return "vi"
-    vi_markers = [
-        "ti gia",
-        "bao nhieu",
-        "hom nay",
-        "thi truong",
-        "co phieu",
-        "vang",
-        "bac",
-        "dong tien",
-        "co nen",
-        "giup toi",
-    ]
-    if any(contains_term(folded, marker) for marker in vi_markers):
-        return "vi"
-    return "en"
+def _as_utc(dt: datetime | None) -> datetime | None:
+    if not isinstance(dt, datetime):
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
-def normalize_currency_mentions(text: str) -> str:
-    normalized = fold_text(text)
-    replacements = {
-        "do la my": "usd",
-        "us dollar": "usd",
-        "do la": "usd",
-        "usd/vnd": "usd vnd",
-        "usdvnd": "usd vnd",
-        "eur/usd": "eur usd",
-        "eurusd": "eur usd",
-        "dong viet nam": "vnd",
-        "viet nam dong": "vnd",
+def _safe_object_id(value: str | None) -> ObjectId | None:
+    if not value:
+        return None
+    try:
+        return ObjectId(str(value))
+    except Exception:
+        return None
+
+
+def _is_private_or_loopback_ip(ip: str) -> bool:
+    try:
+        parsed = ipaddress.ip_address(ip)
+        return parsed.is_private or parsed.is_loopback
+    except Exception:
+        return False
+
+
+def _get_history_signals(event: LoginEvent) -> dict[str, Any]:
+    event_ts = _as_utc(event.timestamp) or event.timestamp
+    signals: dict[str, Any] = {
+        "available": False,
+        "history_count": 0,
+        "has_success_history": False,
+        "is_new_ip": False,
+        "is_new_country": False,
+        "is_new_device": False,
+        "recent_attempts_10m": 0,
+        "recent_attempts_1h": 0,
+        "recent_failed_10m_db": 0,
+        "last_country": None,
+        "last_region": None,
+        "last_city": None,
+        "last_ip": None,
+        "last_timestamp": None,
+        "last_success_ip": None,
+        "last_success_device": None,
+        "last_success_timestamp": None,
+        "different_ip_from_last_success": False,
+        "different_device_from_last_success": False,
+        "require_otp_sms": False,
+        "otp_reason": None,
+        "country_changed_recently": False,
+        "off_hour_for_user": False,
+        "private_ip": _is_private_or_loopback_ip(event.ip),
     }
-    for source, target in replacements.items():
-        normalized = normalized.replace(source, target)
-    return normalized
+
+    if not _mongo_ready():
+        return signals
+
+    mongo_db = app.state.mongo_db
+    user_oid = _safe_object_id(event.user_id)
+    query: dict[str, Any] = {}
+    if user_oid is not None:
+        query["$or"] = [{"userId": user_oid}, {"userIdRaw": event.user_id}]
+    else:
+        query["userIdRaw"] = event.user_id
+
+    query["createdAt"] = {"$lt": event_ts}
+
+    projection = {
+        "ipAddress": 1,
+        "country": 1,
+        "region": 1,
+        "city": 1,
+        "device": 1,
+        "userAgent": 1,
+        "success": 1,
+        "createdAt": 1,
+        "failed10m": 1,
+    }
+
+    try:
+        history_docs = list(
+            mongo_db[LOGIN_EVENTS_COLLECTION]
+            .find(query, projection=projection)
+            .sort("createdAt", -1)
+            .limit(300)
+        )
+    except PyMongoError:
+        return signals
+
+    if not history_docs:
+        return signals
+
+    signals["available"] = True
+    signals["history_count"] = len(history_docs)
+
+    seen_ips = {str(doc.get("ipAddress") or "").strip() for doc in history_docs if doc.get("ipAddress")}
+    seen_countries = {
+        str(doc.get("country") or doc.get("location") or "").strip().lower()
+        for doc in history_docs
+        if (doc.get("country") or doc.get("location"))
+    }
+    seen_devices = {
+        _normalize_device(str(doc.get("device") or doc.get("userAgent") or ""))
+        for doc in history_docs
+        if (doc.get("device") or doc.get("userAgent"))
+    }
+
+    signals["is_new_ip"] = event.ip not in seen_ips if seen_ips else False
+    signals["is_new_country"] = event.country.strip().lower() not in seen_countries if seen_countries else False
+    signals["is_new_device"] = _normalize_device(event.device) not in seen_devices if seen_devices else False
+
+    latest = history_docs[0]
+    signals["last_country"] = latest.get("country") or latest.get("location")
+    signals["last_region"] = latest.get("region")
+    signals["last_city"] = latest.get("city")
+    signals["last_ip"] = latest.get("ipAddress")
+    signals["last_timestamp"] = latest.get("createdAt")
+
+    successful_docs = [doc for doc in history_docs if doc.get("success") is True]
+    if successful_docs:
+        last_success = successful_docs[0]
+        last_success_ip = str(last_success.get("ipAddress") or "").strip() or None
+        last_success_device = _normalize_device(str(last_success.get("device") or last_success.get("userAgent") or ""))
+
+        signals["has_success_history"] = True
+        signals["last_success_ip"] = last_success_ip
+        signals["last_success_device"] = last_success_device or None
+        signals["last_success_timestamp"] = last_success.get("createdAt")
+        signals["different_ip_from_last_success"] = bool(last_success_ip and last_success_ip != event.ip)
+        signals["different_device_from_last_success"] = bool(
+            last_success_device and last_success_device != _normalize_device(event.device)
+        )
+
+        if signals["different_ip_from_last_success"] and signals["different_device_from_last_success"]:
+            signals["require_otp_sms"] = True
+            signals["otp_reason"] = "Existing successful login detected from another device and IP"
+
+    recent_10m_cutoff = event_ts.timestamp() - 600
+    recent_1h_cutoff = event_ts.timestamp() - 3600
+    hour_buckets: dict[int, int] = {}
+
+    for doc in history_docs:
+        created_at = doc.get("createdAt")
+        created_at = _as_utc(created_at)
+        if not isinstance(created_at, datetime):
+            continue
+        ts = created_at.timestamp()
+        if ts >= recent_10m_cutoff:
+            signals["recent_attempts_10m"] += 1
+            if doc.get("success") is False:
+                signals["recent_failed_10m_db"] += 1
+        if ts >= recent_1h_cutoff:
+            signals["recent_attempts_1h"] += 1
+        hour_buckets[created_at.hour] = hour_buckets.get(created_at.hour, 0) + 1
+
+    current_hour_count = hour_buckets.get(event_ts.hour, 0)
+    if len(history_docs) >= 20 and current_hour_count <= 1:
+        signals["off_hour_for_user"] = True
+
+    latest_time = _as_utc(latest.get("createdAt"))
+    latest_country = str(latest.get("country") or latest.get("location") or "").strip().lower()
+    if isinstance(latest_time, datetime) and latest_country:
+        delta_minutes = (event_ts - latest_time).total_seconds() / 60.0
+        signals["country_changed_recently"] = (
+            delta_minutes <= 180
+            and latest_country != event.country.strip().lower()
+        )
+
+    return signals
 
 
-def extract_amount(text: str) -> float:
-    for raw in re.findall(r"\d[\d,]*(?:\.\d+)?", text or ""):
-        cleaned = raw.replace(",", "")
+def _adjust_risk_level(base_risk: str, event: LoginEvent, history_signals: dict[str, Any]) -> str:
+    return login_adjust_risk_level(base_risk, event, history_signals)
+
+
+def _adjust_tx_risk_level(base_risk: str, event: TransactionEvent) -> str:
+    return transaction_adjust_risk_level(base_risk, event)
+
+
+def _build_reasons(event: LoginEvent, features: np.ndarray, history_signals: dict[str, Any] | None = None) -> list[str]:
+    return build_login_reasons(
+        event=event,
+        features=features,
+        feature_mean=app.state.feature_mean,
+        feature_std=app.state.feature_std,
+        countries=app.state.countries,
+        devices=app.state.devices,
+        history_signals=history_signals,
+    )
+
+
+def _build_tx_reasons(event: TransactionEvent, features: np.ndarray) -> list[str]:
+    return build_transaction_reasons(
+        event=event,
+        features=features,
+        feature_mean=app.state.tx_feature_mean,
+        feature_std=app.state.tx_feature_std,
+        countries=app.state.tx_countries,
+        payment_methods=app.state.tx_payment_methods,
+        merchant_categories=app.state.tx_merchant_categories,
+    )
+
+
+def _resolve_artifact_paths() -> tuple[Path, Path]:
+    base_dir = Path(__file__).resolve().parents[1]
+    env_model = os.getenv("AI_MODEL_PATH")
+    env_meta = os.getenv("AI_METADATA_PATH")
+    if env_model and env_meta:
+        return Path(env_model), Path(env_meta)
+
+    active_file = Path(os.getenv("AI_ACTIVE_MODEL_FILE", str(base_dir / "models" / "active_model.json")))
+    if active_file.exists():
         try:
-            value = float(cleaned)
-        except ValueError:
-            continue
-        if value > 0:
-            return value
-    return 1.0
+            active_cfg = json.loads(active_file.read_text(encoding="utf-8"))
+            return Path(active_cfg["model_path"]), Path(active_cfg["metadata_path"])
+        except Exception:
+            pass
+
+    model_path = Path(base_dir / "models" / "iforest_rba.joblib")
+    metadata_path = Path(base_dir / "models" / "iforest_rba_metadata.json")
+    return model_path, metadata_path
 
 
-def extract_currency_codes(text: str) -> list[str]:
-    normalized = normalize_currency_mentions(text)
-    found: list[str] = []
+def _resolve_tx_artifact_paths() -> tuple[Path, Path]:
+    base_dir = Path(__file__).resolve().parents[1]
+    env_model = os.getenv("AI_TX_MODEL_PATH")
+    env_meta = os.getenv("AI_TX_METADATA_PATH")
+    if env_model and env_meta:
+        return Path(env_model), Path(env_meta)
 
-    for alias, code in sorted(
-        CURRENCY_ALIASES.items(), key=lambda item: len(item[0]), reverse=True
-    ):
-        if contains_term(normalized, alias) and code not in found:
-            found.append(code)
+    active_file = Path(os.getenv("AI_TX_ACTIVE_MODEL_FILE", str(base_dir / "models" / "active_tx_model.json")))
+    if active_file.exists():
+        try:
+            active_cfg = json.loads(active_file.read_text(encoding="utf-8"))
+            return Path(active_cfg["model_path"]), Path(active_cfg["metadata_path"])
+        except Exception:
+            pass
 
-    words = re.findall(r"[a-z]{3}", normalized)
-    for word in words:
-        upper = word.upper()
-        if upper in SUPPORTED_CURRENCY_CODES and upper not in found:
-            found.append(upper)
-    return found
-
-
-def looks_like_exchange_rate_question(text: str) -> bool:
-    normalized = normalize_currency_mentions(text)
-    codes = extract_currency_codes(text)
-    keywords = [
-        "exchange rate",
-        "fx",
-        "forex",
-        "rate today",
-        "today",
-        "ti gia",
-        "ty gia",
-        "hom nay",
-        "bao nhieu",
-        "quy doi",
-        "convert",
-        "pair",
-    ]
-    has_fx_keyword = any(keyword in normalized for keyword in keywords)
-    explicit_pair = "/" in normalized or len(codes) >= 2
-    single_currency_lookup = len(codes) == 1 and any(
-        keyword in normalized
-        for keyword in ["ty gia", "ti gia", "bao nhieu", "quy doi", "convert", "today", "hom nay"]
-    )
-    return has_fx_keyword and (explicit_pair or single_currency_lookup)
+    model_path = Path(base_dir / "models" / "iforest_tx.joblib")
+    metadata_path = Path(base_dir / "models" / "iforest_tx_metadata.json")
+    return model_path, metadata_path
 
 
-def fetch_json(url: str) -> dict[str, Any] | list[Any] | None:
+def _resolve_model_version(
+    *, metadata: dict[str, Any] | None = None, model_path: Path | None = None, trained_at: str | None = None
+) -> str:
+    env_version = os.getenv("AI_MODEL_VERSION")
+    if env_version:
+        return env_version
+    if metadata and metadata.get("model_version"):
+        return str(metadata["model_version"])
+    if model_path is not None:
+        return model_path.stem
+    if trained_at:
+        return trained_at
+    return "unknown"
+
+
+def _try_load_persisted_model() -> None:
+    model_path, metadata_path = _resolve_artifact_paths()
+    if not model_path.exists() or not metadata_path.exists():
+        app.state.load_error = None
+        return
+
     try:
-        with urlopen(url, timeout=8) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except (URLError, TimeoutError, ValueError):
-        return None
-
-
-def fetch_exchange_rate(base: str, quote: str, amount: float) -> ExchangeRateQuote | None:
-    payload = fetch_json(f"{FX_API_URL}/{base}")
-    rates = payload.get("rates") if isinstance(payload, dict) else None
-    if not isinstance(rates, dict):
-        return None
-
-    raw_rate = rates.get(quote)
-    if not isinstance(raw_rate, (int, float)):
-        return None
-
-    converted_amount = round(amount * float(raw_rate), 4)
-    raw_updated_at = payload.get("time_last_update_utc") if isinstance(payload, dict) else None
-    as_of = str(raw_updated_at) if raw_updated_at else datetime.now(timezone.utc).date().isoformat()
-
-    return ExchangeRateQuote(
-        base=base,
-        quote=quote,
-        amount=float(amount),
-        convertedAmount=converted_amount,
-        rate=float(raw_rate),
-        date=as_of,
-        source="ExchangeRate-API",
-    )
-
-
-def convert_quote_currency(amount: float, from_currency: str, to_currency: str) -> float | None:
-    if from_currency == to_currency:
-        return amount
-    fx_quote = fetch_exchange_rate(from_currency, to_currency, amount)
-    return fx_quote.convertedAmount if fx_quote else None
-
-
-def maybe_get_exchange_rate_quote(
-    latest_user_message: str, payload: CopilotRequest
-) -> ExchangeRateQuote | None:
-    if not latest_user_message or not looks_like_exchange_rate_question(latest_user_message):
-        return None
-
-    codes = extract_currency_codes(latest_user_message)
-    if not codes:
-        return None
-
-    base = codes[0]
-    quote = codes[1] if len(codes) > 1 else ("VND" if base == "USD" else payload.currency.upper())
-    if base == quote:
-        quote = "VND" if base != "VND" else "USD"
-
-    amount = extract_amount(latest_user_message)
-    return fetch_exchange_rate(base, quote, amount)
-
-
-def format_number(value: float, digits: int = 4) -> str:
-    if abs(value) >= 1000:
-        template = "{:,.2f}"
-    elif abs(value) >= 1:
-        template = "{:,.4f}"
-    else:
-        template = "{:,.6f}"
-    if digits == 0:
-        template = "{:,.0f}"
-    return template.format(value).rstrip("0").rstrip(".")
-
-
-def build_exchange_rate_reply(
-    quote: ExchangeRateQuote, language: Literal["vi", "en"]
-) -> CopilotResponse:
-    amount_text = (
-        f"{quote.amount:.2f}".rstrip("0").rstrip(".")
-        if quote.amount % 1
-        else f"{int(quote.amount)}"
-    )
-    converted_text = (
-        f"{quote.convertedAmount:,.4f}".rstrip("0").rstrip(".")
-        if quote.quote not in {"VND", "JPY", "KRW"}
-        else f"{quote.convertedAmount:,.0f}"
-    )
-    rate_text = f"{quote.rate:,.6f}".rstrip("0").rstrip(".")
-
-    if language == "vi":
-        reply = (
-            f"Tỷ giá mới nhất tại thời điểm {quote.date}: 1 {quote.base} = {rate_text} {quote.quote}. "
-            f"Vì vậy {amount_text} {quote.base} tương đương khoảng {converted_text} {quote.quote}."
-        )
-        suggested_actions = [
-            f"Nguồn dữ liệu: {quote.source}.",
-            "Đây là tỷ giá tham chiếu, có thể khác tỷ giá giao dịch thực tế tại ngân hàng hoặc ứng dụng.",
-            f"Bạn có thể hỏi thêm cặp như {quote.base}/VND, EUR/USD hoặc JPY/VND.",
-        ]
-        follow_up = f"Bạn có muốn tôi so sánh thêm cặp {quote.base}/{quote.quote} với cặp khác không?"
-    else:
-        reply = (
-            f"Latest available rate on {quote.date}: 1 {quote.base} = {rate_text} {quote.quote}. "
-            f"So {amount_text} {quote.base} is about {converted_text} {quote.quote}."
-        )
-        suggested_actions = [
-            f"Source: {quote.source}.",
-            "These are reference rates and may differ from your bank or card network.",
-            "Ask for another pair like EUR/USD, USD/VND, or JPY/VND.",
-        ]
-        follow_up = f"Do you want me to compare {quote.base}/{quote.quote} with another pair?"
-
-    return CopilotResponse(
-        reply=reply,
-        topic="exchange-rate",
-        suggestedActions=suggested_actions,
-        suggestedDepositAmount=None,
-        riskLevel="low",
-        confidence=0.97,
-        followUpQuestion=follow_up,
-    )
-
-
-def extract_quote_currency(text: str, payload: CopilotRequest, default: str = "USD") -> str:
-    codes = extract_currency_codes(text)
-    for code in reversed(codes):
-        if code in SUPPORTED_CURRENCY_CODES:
-            return code
-    return payload.currency.upper() if payload.currency else default
-
-
-def asset_reference(
-    asset_type: str, provider: str, symbol: str, name: str, asset_id: str | None = None
-) -> dict[str, str]:
-    return {
-        "assetType": asset_type,
-        "provider": provider,
-        "symbol": symbol,
-        "name": name,
-        "id": asset_id or symbol,
-    }
-
-
-def extract_market_references(text: str) -> list[dict[str, str]]:
-    folded = fold_text(text)
-    references: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-
-    for alias, (asset_type, symbol, name) in sorted(
-        METAL_ALIASES.items(), key=lambda item: len(item[0]), reverse=True
-    ):
-        if contains_term(folded, alias):
-            key = (asset_type, symbol)
-            if key not in seen:
-                seen.add(key)
-                references.append(asset_reference(asset_type, "metal", symbol, name))
-
-    for alias, (asset_id, symbol) in sorted(
-        CRYPTO_ALIASES.items(), key=lambda item: len(item[0]), reverse=True
-    ):
-        if contains_term(folded, alias):
-            key = ("crypto", symbol)
-            if key not in seen:
-                seen.add(key)
-                references.append(
-                    asset_reference(
-                        "crypto",
-                        "crypto",
-                        symbol,
-                        asset_id.replace("-", " ").title(),
-                        asset_id,
-                    )
-                )
-
-    for alias, (asset_type, symbol, name) in sorted(
-        STOOQ_REFERENCE_ALIASES.items(), key=lambda item: len(item[0]), reverse=True
-    ):
-        if contains_term(folded, alias):
-            key = (asset_type, symbol)
-            if key not in seen:
-                seen.add(key)
-                references.append(asset_reference(asset_type, "stooq", symbol, name))
-
-    for raw_token in re.findall(r"\$?([A-Z]{1,5})\b", text or ""):
-        token = raw_token.upper()
-        if token in COMMON_TICKER_STOPWORDS or token in SUPPORTED_CURRENCY_CODES:
-            continue
-        key = ("stock", f"{token.lower()}.us")
-        if key not in seen:
-            seen.add(key)
-            references.append(asset_reference("stock", "stooq", f"{token.lower()}.us", token))
-
-    return references[:4]
-
-
-def detect_market_intent(text: str, references: list[dict[str, str]]) -> str:
-    folded = fold_text(text)
-    if any(keyword in folded for keyword in STRATEGY_KEYWORDS):
-        return "strategy"
-    if any(keyword in folded for keyword in COMPARE_KEYWORDS):
-        return "comparison"
-    if any(keyword in folded for keyword in OVERVIEW_KEYWORDS) and not references:
-        return "market-overview"
-    if any(keyword in folded for keyword in OUTLOOK_KEYWORDS):
-        return "outlook"
-    if any(keyword in folded for keyword in EXPLAIN_KEYWORDS):
-        return "explanation"
-    if references and any(keyword in folded for keyword in PRICE_KEYWORDS):
-        return "price-lookup"
-    if len(references) >= 2:
-        return "comparison"
-    if references:
-        return "asset-analysis"
-    return "general-market"
-
-
-def fetch_metal_quote(symbol: str, target_currency: str) -> MarketQuote | None:
-    url = GOLD_API_URL if symbol == "XAU" else SILVER_API_URL
-    payload = fetch_json(url)
-    raw_price = payload.get("price") if isinstance(payload, dict) else None
-    if not isinstance(raw_price, (int, float)):
-        return None
-
-    price_usd = float(raw_price)
-    converted_price = convert_quote_currency(price_usd, "USD", target_currency)
-    return MarketQuote(
-        assetType="gold" if symbol == "XAU" else "silver",
-        symbol=symbol,
-        name=str(payload.get("name") or ("Gold" if symbol == "XAU" else "Silver")),
-        price=price_usd,
-        currency="USD",
-        convertedPrice=converted_price if target_currency != "USD" else None,
-        convertedCurrency=target_currency if target_currency != "USD" else None,
-        updatedAt=str(payload.get("updatedAt") or utc_now_iso()),
-        source="gold-api.com",
-        note=f"Reference spot price for {symbol} per troy ounce.",
-    )
-
-
-def fetch_crypto_quote(asset_id: str, symbol: str, target_currency: str) -> MarketQuote | None:
-    vs_currency = target_currency.lower()
-    params = urlencode(
-        {
-            "ids": asset_id,
-            "vs_currencies": vs_currency,
-            "include_last_updated_at": "true",
+        model = joblib.load(model_path)
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        thresholds = {
+            "p90": float(metadata["thresholds"]["p90"]),
+            "p97": float(metadata["thresholds"]["p97"]),
+            "score_min": float(metadata["thresholds"]["score_min"]),
+            "score_max": float(metadata["thresholds"]["score_max"]),
         }
-    )
-    payload = fetch_json(f"{CRYPTO_API_URL}?{params}")
-    asset_data = payload.get(asset_id) if isinstance(payload, dict) else None
-    raw_price = asset_data.get(vs_currency) if isinstance(asset_data, dict) else None
-    if not isinstance(raw_price, (int, float)):
-        return None
+        feature_mean = np.asarray(metadata["feature_mean"], dtype=float)
+        feature_std = np.asarray(metadata["feature_std"], dtype=float)
+        countries = {str(country).lower() for country in metadata.get("countries", [])}
+        devices = {str(device).lower() for device in metadata.get("devices", [])}
+        _set_model_state(
+            model=model,
+            thresholds=thresholds,
+            feature_mean=feature_mean,
+            feature_std=feature_std,
+            countries=countries,
+            devices=devices,
+            trained_at=str(metadata.get("trained_at") or _now_iso()),
+            train_size=int(metadata.get("train_size", 0)),
+            source=f"artifact:{model_path.name}",
+            model_version=_resolve_model_version(
+                metadata=metadata,
+                model_path=model_path,
+                trained_at=str(metadata.get("trained_at") or None),
+            ),
+            model_path=str(model_path),
+            metadata_path=str(metadata_path),
+        )
+        app.state.model_trained_at_dt = _parse_iso_datetime(str(metadata.get("trained_at")))
+        app.state.load_error = None
+    except Exception as exc:
+        app.state.load_error = str(exc)
 
-    updated_at = asset_data.get("last_updated_at") if isinstance(asset_data, dict) else None
-    updated_label = (
-        datetime.fromtimestamp(updated_at, timezone.utc).isoformat()
-        if isinstance(updated_at, (int, float))
-        else utc_now_iso()
-    )
-    return MarketQuote(
-        assetType="crypto",
-        symbol=symbol,
-        name=asset_id.replace("-", " ").title(),
-        price=float(raw_price),
-        currency=target_currency,
-        updatedAt=updated_label,
-        source="CoinGecko",
-        note="Public spot crypto reference.",
-    )
 
+def _try_load_persisted_tx_model() -> None:
+    model_path, metadata_path = _resolve_tx_artifact_paths()
+    if not model_path.exists() or not metadata_path.exists():
+        app.state.tx_load_error = None
+        return
 
-def fetch_stooq_quote(
-    symbol: str, asset_type: str, name: str, target_currency: str
-) -> MarketQuote | None:
-    params = urlencode({"s": symbol.lower(), "i": "d"})
     try:
-        with urlopen(f"{STOCK_API_URL}?{params}", timeout=8) as response:
-            raw = response.read().decode("utf-8").strip()
-    except (URLError, TimeoutError, ValueError):
-        return None
-
-    parts = [part.strip() for part in raw.split(",")]
-    if len(parts) < 7 or parts[1] == "N/D":
-        return None
-
-    trade_date = parts[1]
-    trade_time = parts[2] if len(parts) > 2 else "000000"
-    open_price = parse_float(parts[3] if len(parts) > 3 else None)
-    high_price = parse_float(parts[4] if len(parts) > 4 else None)
-    low_price = parse_float(parts[5] if len(parts) > 5 else None)
-    close_price = parse_float(parts[6] if len(parts) > 6 else None)
-    if close_price is None:
-        return None
-
-    if asset_type in {"stock", "etf", "commodity"}:
-        currency = "USD"
-        converted_price = (
-            convert_quote_currency(close_price, "USD", target_currency)
-            if target_currency != "USD"
-            else None
+        model = joblib.load(model_path)
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        thresholds = {
+            "p90": float(metadata["thresholds"]["p90"]),
+            "p97": float(metadata["thresholds"]["p97"]),
+            "score_min": float(metadata["thresholds"]["score_min"]),
+            "score_max": float(metadata["thresholds"]["score_max"]),
+        }
+        feature_mean = np.asarray(metadata["feature_mean"], dtype=float)
+        feature_std = np.asarray(metadata["feature_std"], dtype=float)
+        countries = {str(country).lower() for country in metadata.get("countries", [])}
+        payment_methods = {str(method).lower() for method in metadata.get("payment_methods", [])}
+        merchant_categories = {str(category).lower() for category in metadata.get("merchant_categories", [])}
+        trained_at = str(metadata.get("trained_at") or _now_iso())
+        _set_tx_model_state(
+            model=model,
+            thresholds=thresholds,
+            feature_mean=feature_mean,
+            feature_std=feature_std,
+            countries=countries,
+            payment_methods=payment_methods,
+            merchant_categories=merchant_categories,
+            trained_at=trained_at,
+            train_size=int(metadata.get("train_size", 0)),
+            source=f"artifact:{model_path.name}",
+            model_version=_resolve_model_version(
+                metadata=metadata,
+                model_path=model_path,
+                trained_at=trained_at,
+            ),
+            model_path=str(model_path),
+            metadata_path=str(metadata_path),
         )
-        converted_currency = target_currency if target_currency != "USD" else None
-    else:
-        currency = "points"
-        converted_price = None
-        converted_currency = None
+        app.state.tx_model_trained_at_dt = _parse_iso_datetime(trained_at)
+        app.state.tx_load_error = None
+    except Exception as exc:
+        app.state.tx_load_error = str(exc)
 
-    session_change_pct = None
-    if open_price and open_price > 0:
-        session_change_pct = ((close_price - open_price) / open_price) * 100.0
 
-    updated_at = (
-        f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]} "
-        f"{trade_time[:2]}:{trade_time[2:4]} UTC"
-    )
-    note_map = {
-        "stock": "Public equity quote feed. Quotes may be delayed.",
-        "etf": "Public ETF quote feed. Quotes may be delayed.",
-        "index": "Public index feed. Values are market reference levels.",
-        "commodity": "Public commodity futures reference. Quotes may be delayed.",
+def _persist_login_model_artifacts(*, promote: bool = False) -> dict[str, Any]:
+    if not _state_ready():
+        return {"saved": False, "reason": "model_not_ready"}
+
+    model_path, metadata_path = _resolve_artifact_paths()
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+
+    metadata = {
+        "artifact_version": 1,
+        "model_type": "pyod.IForest",
+        "model_version": getattr(app.state, "model_version", "unknown"),
+        "trained_at": app.state.trained_at,
+        "contamination": DEFAULT_CONTAMINATION,
+        "feature_names": FEATURE_NAMES,
+        "train_size": int(app.state.train_size or 0),
+        "thresholds": {
+            "p90": float(app.state.thresholds["p90"]),
+            "p97": float(app.state.thresholds["p97"]),
+            "score_min": float(app.state.thresholds["score_min"]),
+            "score_max": float(app.state.thresholds["score_max"]),
+        },
+        "feature_mean": [float(x) for x in np.asarray(app.state.feature_mean, dtype=float).tolist()],
+        "feature_std": [float(x) for x in np.asarray(app.state.feature_std, dtype=float).tolist()],
+        "countries": sorted(app.state.countries),
+        "devices": sorted(app.state.devices),
+        "source": app.state.model_source,
     }
 
-    return MarketQuote(
-        assetType=asset_type,
-        symbol=symbol.replace(".us", "").replace("^", "").upper(),
-        name=name,
-        price=close_price,
-        currency=currency,
-        convertedPrice=converted_price,
-        convertedCurrency=converted_currency,
-        updatedAt=updated_at,
-        source="Stooq",
-        note=note_map.get(asset_type, "Public market quote feed."),
-        openPrice=open_price,
-        highPrice=high_price,
-        lowPrice=low_price,
-        sessionChangePct=session_change_pct,
-    )
+    joblib.dump(app.state.model, model_path)
+    metadata_path.write_text(json.dumps(metadata, ensure_ascii=True), encoding="utf-8")
+
+    if promote:
+        base_dir = Path(__file__).resolve().parents[1]
+        active_file = Path(os.getenv("AI_ACTIVE_MODEL_FILE", str(base_dir / "models" / "active_model.json")))
+        active_file.parent.mkdir(parents=True, exist_ok=True)
+        active_cfg = {
+            "model_version": getattr(app.state, "model_version", "unknown"),
+            "model_path": str(model_path),
+            "metadata_path": str(metadata_path),
+            "promoted_at": _now_iso(),
+        }
+        active_file.write_text(json.dumps(active_cfg, ensure_ascii=True), encoding="utf-8")
+    else:
+        active_file = None
+
+    app.state.model_path = str(model_path)
+    app.state.metadata_path = str(metadata_path)
+    return {
+        "saved": True,
+        "model_path": str(model_path),
+        "metadata_path": str(metadata_path),
+        "active_model_file": str(active_file) if active_file is not None else None,
+    }
 
 
-def fetch_market_quote(reference: dict[str, str], target_currency: str) -> MarketQuote | None:
-    provider = reference["provider"]
-    if provider == "metal":
-        return fetch_metal_quote(reference["symbol"], target_currency)
-    if provider == "crypto":
-        return fetch_crypto_quote(reference["id"], reference["symbol"], target_currency)
-    if provider == "stooq":
-        return fetch_stooq_quote(
-            reference["symbol"], reference["assetType"], reference["name"], target_currency
-        )
-    return None
+def _persist_tx_model_artifacts(*, promote: bool = False) -> dict[str, Any]:
+    if not _tx_state_ready():
+        return {"saved": False, "reason": "tx_model_not_ready"}
+
+    model_path, metadata_path = _resolve_tx_artifact_paths()
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+
+    metadata = {
+        "artifact_version": 1,
+        "model_type": "pyod.IForest",
+        "model_version": getattr(app.state, "tx_model_version", "unknown"),
+        "trained_at": app.state.tx_trained_at,
+        "contamination": DEFAULT_CONTAMINATION,
+        "feature_names": TX_FEATURE_NAMES,
+        "train_size": int(app.state.tx_train_size or 0),
+        "thresholds": {
+            "p90": float(app.state.tx_thresholds["p90"]),
+            "p97": float(app.state.tx_thresholds["p97"]),
+            "score_min": float(app.state.tx_thresholds["score_min"]),
+            "score_max": float(app.state.tx_thresholds["score_max"]),
+        },
+        "feature_mean": [float(x) for x in np.asarray(app.state.tx_feature_mean, dtype=float).tolist()],
+        "feature_std": [float(x) for x in np.asarray(app.state.tx_feature_std, dtype=float).tolist()],
+        "countries": sorted(app.state.tx_countries),
+        "payment_methods": sorted(app.state.tx_payment_methods),
+        "merchant_categories": sorted(app.state.tx_merchant_categories),
+        "source": app.state.tx_model_source,
+    }
+
+    joblib.dump(app.state.tx_model, model_path)
+    metadata_path.write_text(json.dumps(metadata, ensure_ascii=True), encoding="utf-8")
+
+    if promote:
+        base_dir = Path(__file__).resolve().parents[1]
+        active_file = Path(os.getenv("AI_TX_ACTIVE_MODEL_FILE", str(base_dir / "models" / "active_tx_model.json")))
+        active_file.parent.mkdir(parents=True, exist_ok=True)
+        active_cfg = {
+            "model_version": getattr(app.state, "tx_model_version", "unknown"),
+            "model_path": str(model_path),
+            "metadata_path": str(metadata_path),
+            "promoted_at": _now_iso(),
+        }
+        active_file.write_text(json.dumps(active_cfg, ensure_ascii=True), encoding="utf-8")
+    else:
+        active_file = None
+
+    app.state.tx_model_path = str(model_path)
+    app.state.tx_metadata_path = str(metadata_path)
+    return {
+        "saved": True,
+        "model_path": str(model_path),
+        "metadata_path": str(metadata_path),
+        "active_model_file": str(active_file) if active_file is not None else None,
+    }
 
 
-def build_market_overview(target_currency: str) -> list[MarketQuote]:
-    references = [
-        asset_reference("index", "stooq", "^spx", "S&P 500"),
-        asset_reference("index", "stooq", "^ndq", "Nasdaq 100"),
-        asset_reference("index", "stooq", "dx.f", "US Dollar Index"),
-        asset_reference("gold", "metal", "XAU", "Gold"),
-        asset_reference("silver", "metal", "XAG", "Silver"),
-        asset_reference("crypto", "crypto", "BTC", "Bitcoin", "bitcoin"),
+def _aggregate_risk_counts(db: Any, collection_name: str, cutoff_dt: datetime) -> dict[str, int]:
+    pipeline = [
+        {"$match": {"scoredAt": {"$gte": cutoff_dt}}},
+        {"$group": {"_id": "$result.riskLevel", "count": {"$sum": 1}}},
     ]
-    quotes: list[MarketQuote] = []
-    for reference in references:
-        quote = fetch_market_quote(reference, target_currency)
-        if quote:
-            quotes.append(quote)
-    return quotes
+    grouped = list(db[collection_name].aggregate(pipeline))
+    risk = {"LOW": 0, "MEDIUM": 0, "HIGH": 0}
+    for row in grouped:
+        key = str(row.get("_id") or "").upper()
+        if key in risk:
+            risk[key] = int(row.get("count", 0))
+    return risk
 
 
-def build_market_context(latest_user_message: str, payload: CopilotRequest) -> dict[str, Any]:
-    references = extract_market_references(latest_user_message)
-    intent = detect_market_intent(latest_user_message, references)
-    target_currency = extract_quote_currency(latest_user_message, payload, "USD")
-    quotes: list[MarketQuote] = []
+def _init_mongo() -> None:
+    uri = os.getenv("MONGODB_URI")
+    db_name = os.getenv("MONGODB_DB")
+    app.state.mongo_client = None
+    app.state.mongo_db = None
+    app.state.mongo_db_name = db_name
+    app.state.mongo_error = None
 
-    for reference in references:
-        quote = fetch_market_quote(reference, target_currency)
-        if quote:
-            quotes.append(quote)
+    if not uri or not db_name:
+        app.state.mongo_error = "Missing MONGODB_URI or MONGODB_DB"
+        return
 
-    overview_quotes: list[MarketQuote] = []
-    if intent == "market-overview" and not quotes:
-        overview_quotes = build_market_overview(target_currency)
+    try:
+        client = MongoClient(uri, serverSelectionTimeoutMS=3000)
+        client.admin.command("ping")
+        app.state.mongo_client = client
+        app.state.mongo_db = client[db_name]
+        app.state.mongo_error = None
+        _ensure_mongo_indexes()
+    except Exception as exc:
+        app.state.mongo_client = None
+        app.state.mongo_db = None
+        app.state.mongo_error = str(exc)
 
-    return {
-        "intent": intent,
-        "targetCurrency": target_currency,
-        "assetsDetected": [
-            {
-                "name": reference["name"],
-                "symbol": reference["symbol"],
-                "assetType": reference["assetType"],
+
+def _ensure_mongo_indexes() -> None:
+    if not _mongo_ready():
+        return
+    db = app.state.mongo_db
+    try:
+        db[LOGIN_EVENTS_COLLECTION].create_index([("createdAt", -1)])
+        db[LOGIN_EVENTS_COLLECTION].create_index([("userId", 1), ("createdAt", -1)])
+        db[LOGIN_EVENTS_COLLECTION].create_index([("userIdRaw", 1), ("createdAt", -1)])
+        db[LOGIN_EVENTS_COLLECTION].create_index([("country", 1), ("createdAt", -1)])
+        db[LOGIN_EVENTS_COLLECTION].create_index([("ipAddress", 1), ("createdAt", -1)])
+        db[LOGIN_EVENTS_COLLECTION].create_index([("requestKey", 1), ("createdAt", -1)])
+
+        db[AI_LOGIN_SCORES_COLLECTION].create_index([("scoredAt", -1)])
+        db[AI_LOGIN_SCORES_COLLECTION].create_index([("userId", 1), ("scoredAt", -1)])
+        db[AI_LOGIN_SCORES_COLLECTION].create_index([("result.riskLevel", 1), ("scoredAt", -1)])
+        db[AI_LOGIN_SCORES_COLLECTION].create_index(
+            [("requestKey", 1), ("model.version", 1)],
+            unique=True,
+            name="uniq_requestKey_modelVersion",
+            partialFilterExpression={"requestKey": {"$type": "string"}},
+        )
+
+        db[TRANSACTION_EVENTS_COLLECTION].create_index([("createdAt", -1)])
+        db[TRANSACTION_EVENTS_COLLECTION].create_index([("userId", 1), ("createdAt", -1)])
+        db[TRANSACTION_EVENTS_COLLECTION].create_index([("userIdRaw", 1), ("createdAt", -1)])
+        db[TRANSACTION_EVENTS_COLLECTION].create_index([("country", 1), ("createdAt", -1)])
+        db[TRANSACTION_EVENTS_COLLECTION].create_index([("paymentMethod", 1), ("createdAt", -1)])
+        db[TRANSACTION_EVENTS_COLLECTION].create_index([("requestKey", 1), ("createdAt", -1)])
+
+        db[AI_TRANSACTION_SCORES_COLLECTION].create_index([("scoredAt", -1)])
+        db[AI_TRANSACTION_SCORES_COLLECTION].create_index([("userId", 1), ("scoredAt", -1)])
+        db[AI_TRANSACTION_SCORES_COLLECTION].create_index([("result.riskLevel", 1), ("scoredAt", -1)])
+        db[AI_TRANSACTION_SCORES_COLLECTION].create_index(
+            [("requestKey", 1), ("model.version", 1)],
+            unique=True,
+            name="uniq_tx_requestKey_modelVersion",
+            partialFilterExpression={"requestKey": {"$type": "string"}},
+        )
+
+        db[AUDIT_LOGS_COLLECTION].create_index([("action", 1), ("createdAt", -1)])
+        db[AUDIT_LOGS_COLLECTION].create_index([("userId", 1), ("createdAt", -1)])
+        db[AUDIT_LOGS_COLLECTION].create_index([("ipAddress", 1), ("createdAt", -1)])
+    except Exception as exc:
+        app.state.mongo_error = f"{app.state.mongo_error}; index_error={exc}" if app.state.mongo_error else f"index_error={exc}"
+
+
+def _close_mongo() -> None:
+    client = getattr(app.state, "mongo_client", None)
+    if client is not None:
+        try:
+            client.close()
+        except Exception:
+            pass
+    app.state.mongo_client = None
+    app.state.mongo_db = None
+
+
+def _write_admin_alert(
+    *,
+    event: LoginEvent,
+    risk_level: str,
+    anomaly_score: float,
+    reasons: list[str],
+    login_event_id: str | None,
+) -> dict[str, Any]:
+    if not _mongo_ready():
+        return {"sent": False, "reason": "mongo_not_connected"}
+    if risk_level not in {"MEDIUM", "HIGH"}:
+        return {"sent": False, "reason": "risk_below_alert_threshold"}
+
+    mongo_db = app.state.mongo_db
+    user_oid = _safe_object_id(event.user_id)
+    try:
+        alert_doc = {
+            "userId": user_oid,
+            "actor": "ai-service",
+            "action": "AI_LOGIN_ALERT",
+            "details": {
+                "riskLevel": risk_level,
+                "anomalyScore": float(anomaly_score),
+                "reasons": reasons,
+                "loginEventId": _safe_object_id(login_event_id) if login_event_id else None,
+                "userIdRaw": event.user_id,
+                "country": event.country,
+                "region": event.region,
+                "city": event.city,
+                "ipAddress": event.ip,
+                "modelVersion": getattr(app.state, "model_version", "unknown"),
+                "modelSource": app.state.model_source,
+                "monitoringOnly": True,
+                "adminStatus": "PENDING_REVIEW",
+                "aiDecision": AI_ACTION,
+            },
+            "ipAddress": event.ip,
+            "createdAt": _now_dt(),
+        }
+        mongo_db[AUDIT_LOGS_COLLECTION].insert_one(alert_doc)
+        _metric_inc("admin_alerts_sent_total")
+        return {"sent": True}
+    except PyMongoError as exc:
+        _metric_inc("admin_alerts_error_total")
+        return {"sent": False, "reason": str(exc)}
+
+
+def _persist_score_to_mongo(
+    *,
+    event: LoginEvent,
+    features: np.ndarray,
+    anomaly_score: float,
+    raw_score: float,
+    risk_level_base: str,
+    risk_level_final: str,
+    reasons: list[str],
+    history_signals: dict[str, Any] | None = None,
+    request_key: str,
+) -> dict[str, Any]:
+    if not _mongo_ready():
+        return {"saved": False, "reason": "mongo_not_connected"}
+
+    mongo_db = app.state.mongo_db
+    now_dt = _now_dt()
+    user_oid = _safe_object_id(event.user_id)
+    login_event_oid = _safe_object_id(event.login_event_id)
+    history_signals = history_signals or {}
+    model_version = str(getattr(app.state, "model_version", None) or "unknown")
+
+    ai_query = {"requestKey": request_key, "model.version": model_version}
+    existing = mongo_db[AI_LOGIN_SCORES_COLLECTION].find_one(ai_query, {"_id": 1, "loginEventId": 1})
+    if existing:
+        return {
+            "saved": True,
+            "reused": True,
+            "login_event_id": str(existing.get("loginEventId")) if existing.get("loginEventId") else None,
+            "ai_score_id": str(existing.get("_id")),
+        }
+
+    try:
+        if login_event_oid is None:
+            login_doc = {
+                "userId": user_oid,
+                "userIdRaw": event.user_id,
+                "email": event.email,
+                "ipAddress": event.ip,
+                "userAgent": event.device,
+                "success": bool(event.success),
+                "anomaly": float(anomaly_score),
+                "location": event.country,
+                "country": event.country,
+                "region": event.region,
+                "city": event.city,
+                "device": event.device,
+                "failed10m": int(event.failed_10m),
+                "botScore": float(event.bot_score),
+                "requestId": event.request_id,
+                "requestKey": request_key,
+                "createdAt": event.timestamp,
+                "updatedAt": now_dt,
             }
-            for reference in references
-        ],
-        "quotes": [quote.model_dump() for quote in quotes],
-        "overview": [quote.model_dump() for quote in overview_quotes],
-        "hasLiveData": bool(quotes or overview_quotes),
-    }
+            login_insert = mongo_db[LOGIN_EVENTS_COLLECTION].insert_one(login_doc)
+            login_event_oid = login_insert.inserted_id
+
+        ai_doc = {
+            "requestKey": request_key,
+            "requestId": event.request_id,
+            "loginEventId": login_event_oid,
+            "userId": user_oid,
+            "inputSnapshot": {
+                "timestamp": event.timestamp,
+                "ipAddress": event.ip,
+                "country": event.country,
+                "region": event.region,
+                "city": event.city,
+                "device": event.device,
+                "success": bool(event.success),
+                "failed10m": int(event.failed_10m),
+                "botScore": float(event.bot_score),
+            },
+            "features": {
+                "hourOfDay": float(features[0]),
+                "dayOfWeek": float(features[1]),
+                "failed10m": float(features[2]),
+                "deviceLength": float(features[3]),
+                "botScore": float(features[4]),
+            },
+            "result": {
+                "anomalyScore": float(anomaly_score),
+                "rawScore": float(raw_score),
+                "riskLevel": risk_level_final,
+                "riskLevelBase": risk_level_base,
+                "riskLevelFinal": risk_level_final,
+                "reasons": reasons,
+                "monitoringOnly": True,
+                "action": AI_ACTION,
+                "requireOtpSms": bool(history_signals.get("require_otp_sms")),
+                "otpChannel": "sms" if history_signals.get("require_otp_sms") else None,
+                "otpReason": history_signals.get("otp_reason"),
+            },
+            "analysis": {
+                "ip": {
+                    "value": event.ip,
+                    "isNewIpForUser": bool(history_signals.get("is_new_ip")),
+                    "isPrivateOrLoopback": bool(history_signals.get("private_ip")),
+                },
+                "device": {
+                    "value": event.device,
+                    "isNewDeviceForUser": bool(history_signals.get("is_new_device")),
+                },
+                "location": {
+                    "country": event.country,
+                    "region": event.region,
+                    "city": event.city,
+                    "isNewCountryForUser": bool(history_signals.get("is_new_country")),
+                    "countryChangedRecently": bool(history_signals.get("country_changed_recently")),
+                    "lastCountry": history_signals.get("last_country"),
+                },
+                "time": {
+                    "hourOfDay": int(features[0]),
+                    "dayOfWeek": int(features[1]),
+                    "offHourForUser": bool(history_signals.get("off_hour_for_user")),
+                    "lastLoginAt": history_signals.get("last_timestamp"),
+                },
+                "session": {
+                    "hasSuccessHistory": bool(history_signals.get("has_success_history")),
+                    "lastSuccessIp": history_signals.get("last_success_ip"),
+                    "lastSuccessDevice": history_signals.get("last_success_device"),
+                    "lastSuccessTimestamp": history_signals.get("last_success_timestamp"),
+                    "differentIpFromLastSuccess": bool(history_signals.get("different_ip_from_last_success")),
+                    "differentDeviceFromLastSuccess": bool(history_signals.get("different_device_from_last_success")),
+                    "requireOtpSms": bool(history_signals.get("require_otp_sms")),
+                },
+                "frequency": {
+                    "failed10mInput": int(event.failed_10m),
+                    "recentAttempts10m": int(history_signals.get("recent_attempts_10m", 0)),
+                    "recentAttempts1h": int(history_signals.get("recent_attempts_1h", 0)),
+                    "recentFailed10mDb": int(history_signals.get("recent_failed_10m_db", 0)),
+                },
+            },
+            "model": {
+                "name": "pyod_iforest",
+                "version": model_version,
+                "source": app.state.model_source,
+                "trainedAt": getattr(app.state, "model_trained_at_dt", None),
+            },
+            "scoreStatus": "SUCCESS",
+            "error": None,
+            "scoredAt": now_dt,
+            "createdAt": now_dt,
+        }
+        ai_insert = mongo_db[AI_LOGIN_SCORES_COLLECTION].insert_one(ai_doc)
+        _metric_inc("mongo_write_success_total")
+        return {
+            "saved": True,
+            "reused": False,
+            "login_event_id": str(login_event_oid),
+            "ai_score_id": str(ai_insert.inserted_id),
+        }
+    except DuplicateKeyError:
+        existing = mongo_db[AI_LOGIN_SCORES_COLLECTION].find_one(ai_query, {"_id": 1, "loginEventId": 1})
+        return {
+            "saved": True,
+            "reused": True,
+            "login_event_id": str(existing.get("loginEventId")) if existing and existing.get("loginEventId") else None,
+            "ai_score_id": str(existing.get("_id")) if existing and existing.get("_id") else None,
+        }
+    except PyMongoError as exc:
+        _metric_inc("mongo_write_error_total")
+        return {"saved": False, "reason": str(exc)}
 
 
-def quote_risk_level(quote: MarketQuote) -> str:
-    if quote.assetType == "crypto":
-        return "high"
-    if quote.assetType in {"stock", "etf", "commodity"}:
-        return "medium"
-    return "low"
+def _write_transaction_alert(
+    *,
+    event: TransactionEvent,
+    risk_level: str,
+    anomaly_score: float,
+    reasons: list[str],
+    transaction_event_id: str | None,
+) -> dict[str, Any]:
+    if not _mongo_ready():
+        return {"sent": False, "reason": "mongo_not_connected"}
+    if risk_level not in {"MEDIUM", "HIGH"}:
+        return {"sent": False, "reason": "risk_below_alert_threshold"}
+
+    mongo_db = app.state.mongo_db
+    user_oid = _safe_object_id(event.user_id)
+    try:
+        alert_doc = {
+            "userId": user_oid,
+            "actor": "ai-service",
+            "action": "AI_TRANSACTION_ALERT",
+            "details": {
+                "riskLevel": risk_level,
+                "anomalyScore": float(anomaly_score),
+                "reasons": reasons,
+                "transactionEventId": _safe_object_id(transaction_event_id) if transaction_event_id else None,
+                "transactionId": event.transaction_id,
+                "userIdRaw": event.user_id,
+                "country": event.country,
+                "currency": event.currency,
+                "amount": float(event.amount),
+                "paymentMethod": event.payment_method,
+                "merchantCategory": event.merchant_category,
+                "modelVersion": getattr(app.state, "tx_model_version", "unknown"),
+                "modelSource": app.state.tx_model_source,
+                "monitoringOnly": True,
+                "adminStatus": "PENDING_REVIEW",
+                "aiDecision": AI_TX_ACTION,
+            },
+            "ipAddress": None,
+            "createdAt": _now_dt(),
+        }
+        mongo_db[AUDIT_LOGS_COLLECTION].insert_one(alert_doc)
+        _metric_inc("admin_alerts_sent_total")
+        return {"sent": True}
+    except PyMongoError as exc:
+        _metric_inc("admin_alerts_error_total")
+        return {"sent": False, "reason": str(exc)}
 
 
-def aggregate_risk_level(quotes: list[MarketQuote]) -> str:
-    levels = {quote_risk_level(quote) for quote in quotes}
-    if "high" in levels:
-        return "high"
-    if "medium" in levels:
-        return "medium"
-    return "low"
+def _persist_tx_score_to_mongo(
+    *,
+    event: TransactionEvent,
+    features: np.ndarray,
+    anomaly_score: float,
+    raw_score: float,
+    risk_level_base: str,
+    risk_level_final: str,
+    reasons: list[str],
+    request_key: str,
+) -> dict[str, Any]:
+    if not _mongo_ready():
+        return {"saved": False, "reason": "mongo_not_connected"}
 
+    mongo_db = app.state.mongo_db
+    now_dt = _now_dt()
+    user_oid = _safe_object_id(event.user_id)
+    transaction_event_oid = _safe_object_id(event.transaction_event_id)
+    model_version = str(getattr(app.state, "tx_model_version", None) or "unknown")
 
-def format_price(value: float, currency: str) -> str:
-    if currency == "points":
-        return format_number(value)
-    if currency in {"VND", "JPY", "KRW"}:
-        return f"{value:,.0f} {currency}"
-    return f"{format_number(value)} {currency}"
+    ai_query = {"requestKey": request_key, "model.version": model_version}
+    existing = mongo_db[AI_TRANSACTION_SCORES_COLLECTION].find_one(ai_query, {"_id": 1, "transactionEventId": 1})
+    if existing:
+        return {
+            "saved": True,
+            "reused": True,
+            "transaction_event_id": str(existing.get("transactionEventId")) if existing.get("transactionEventId") else None,
+            "ai_score_id": str(existing.get("_id")),
+        }
 
+    try:
+        if transaction_event_oid is None:
+            tx_doc = {
+                "userId": user_oid,
+                "userIdRaw": event.user_id,
+                "transactionId": event.transaction_id,
+                "amount": float(event.amount),
+                "currency": event.currency,
+                "country": event.country,
+                "paymentMethod": event.payment_method,
+                "merchantCategory": event.merchant_category,
+                "device": event.device,
+                "channel": event.channel,
+                "failedTx24h": int(event.failed_tx_24h),
+                "velocity1h": int(event.velocity_1h),
+                "requestId": event.request_id,
+                "requestKey": request_key,
+                "createdAt": event.timestamp,
+                "updatedAt": now_dt,
+            }
+            tx_insert = mongo_db[TRANSACTION_EVENTS_COLLECTION].insert_one(tx_doc)
+            transaction_event_oid = tx_insert.inserted_id
 
-def format_change(value: float, language: Literal["vi", "en"]) -> str:
-    prefix = "+" if value > 0 else ""
-    if language == "vi":
-        return f"{prefix}{value:.2f}% so với giá mở cửa"
-    return f"{prefix}{value:.2f}% versus the session open"
-
-
-def quote_summary_line(quote: MarketQuote, language: Literal["vi", "en"]) -> str:
-    line = f"{quote.name} ({quote.symbol}): {format_price(quote.price, quote.currency)}"
-    if quote.sessionChangePct is not None:
-        line += f", {format_change(quote.sessionChangePct, language)}"
-    if (
-        quote.convertedPrice is not None
-        and quote.convertedCurrency
-        and quote.convertedCurrency != quote.currency
-    ):
-        line += f" ({format_price(quote.convertedPrice, quote.convertedCurrency)})"
-    return line
-
-
-def build_market_price_reply(
-    quotes: list[MarketQuote], language: Literal["vi", "en"]
-) -> CopilotResponse:
-    lines = [quote_summary_line(quote, language) for quote in quotes[:4]]
-    if language == "vi":
-        reply = "Giá thị trường mới nhất tôi lấy được:\n" + "\n".join(lines)
-        actions = [
-            "Đây là dữ liệu tham chiếu công khai, có thể trễ nhẹ so với broker hoặc sàn giao dịch.",
-            "Bạn có thể yêu cầu so sánh thêm với tài sản khác hoặc đổi sang đơn vị tiền tệ khác.",
-            "Nếu cần, tôi có thể phân tích nhanh rủi ro ngắn hạn và dài hạn cho mã này.",
-        ]
-        follow_up = "Bạn muốn tôi so sánh tài sản này với vàng, bạc, USD hay một mã cổ phiếu khác không?"
-    else:
-        reply = "Latest market quotes I could ground:\n" + "\n".join(lines)
-        actions = [
-            "These are public reference quotes and can lag your broker or exchange feed.",
-            "Ask for a comparison or another quote currency if needed.",
-            "I can also give you a quick short-term versus long-term risk view.",
-        ]
-        follow_up = "Do you want a comparison against another asset or a quick risk view?"
-
-    return CopilotResponse(
-        reply=reply,
-        topic="market-price",
-        suggestedActions=actions,
-        suggestedDepositAmount=None,
-        riskLevel=aggregate_risk_level(quotes),
-        confidence=0.94,
-        followUpQuestion=follow_up,
-    )
-
-
-def build_market_overview_reply(
-    quotes: list[MarketQuote], language: Literal["vi", "en"]
-) -> CopilotResponse:
-    lines = [quote_summary_line(quote, language) for quote in quotes[:6]]
-    if language == "vi":
-        reply = "Toàn cảnh thị trường hiện tại:\n" + "\n".join(lines)
-        actions = [
-            "Nếu bạn đang tìm cơ hội giao dịch, hãy xác định rõ là bạn ưu tiên phòng thủ hay tăng trưởng.",
-            "Tôi có thể đào sâu vào một tài sản cụ thể như BTC, vàng, bạc, S&P 500 hoặc AAPL.",
-            "Nếu bạn muốn vào lệnh, nên xác định trước khung thời gian nắm giữ và mức lỗ tối đa chấp nhận được.",
-        ]
-        follow_up = "Bạn muốn tôi bóc tách sâu hơn asset nào trong bức tranh này?"
-    else:
-        reply = "Current market overview:\n" + "\n".join(lines)
-        actions = [
-            "Decide first whether you are leaning defensive or growth before acting on this snapshot.",
-            "I can drill into a single asset such as BTC, gold, silver, the S&P 500, or AAPL.",
-            "If you plan to trade, define your holding period and max tolerated drawdown first.",
-        ]
-        follow_up = "Which asset do you want me to break down next?"
-
-    return CopilotResponse(
-        reply=reply,
-        topic="market-overview",
-        suggestedActions=actions,
-        suggestedDepositAmount=None,
-        riskLevel="medium",
-        confidence=0.92,
-        followUpQuestion=follow_up,
-    )
-
-
-def build_market_comparison_reply(
-    quotes: list[MarketQuote], language: Literal["vi", "en"]
-) -> CopilotResponse:
-    lines = [quote_summary_line(quote, language) for quote in quotes[:4]]
-    asset_types = {quote.assetType for quote in quotes}
-    if language == "vi":
-        risk_line = (
-            "Nhóm tài sản này có độ biến động cao vì có crypto trong so sánh."
-            if "crypto" in asset_types
-            else "So sánh này thiên về cân bằng giữa tăng trưởng và phòng thủ."
-        )
-        reply = "So sánh nhanh theo dữ liệu hiện tại:\n" + "\n".join(lines) + f"\n{risk_line}"
-        actions = [
-            "So sánh giá tuyệt đối giữa các nhóm tài sản khác nhau không đủ ý nghĩa; nên so theo vai trò và rủi ro.",
-            "Crypto thường nhạy hơn với thanh khoản và tâm lý rủi ro, còn vàng/bạc nhạy hơn với USD và lãi suất thực.",
-            "Nếu bạn muốn, tôi có thể chuyển sang so sánh theo kịch bản ngắn hạn, trung hạn và dài hạn.",
-        ]
-        follow_up = "Bạn muốn tôi so sánh theo tiêu chí nào: an toàn vốn, tăng trưởng hay phòng thủ lạm phát?"
-    else:
-        risk_line = (
-            "This set is high volatility because crypto is part of the comparison."
-            if "crypto" in asset_types
-            else "This mix is more about balancing growth versus defense."
-        )
-        reply = "Quick comparison based on current data:\n" + "\n".join(lines) + f"\n{risk_line}"
-        actions = [
-            "Absolute price alone is not a useful cross-asset comparison; compare role, volatility, and drivers.",
-            "Crypto is usually more liquidity and sentiment sensitive, while gold and silver react more to USD and real yields.",
-            "I can turn this into bull, base, and bear-case scenarios if you want.",
-        ]
-        follow_up = "Do you want the comparison framed around capital preservation, growth, or inflation defense?"
-
-    return CopilotResponse(
-        reply=reply,
-        topic="market-comparison",
-        suggestedActions=actions,
-        suggestedDepositAmount=None,
-        riskLevel=aggregate_risk_level(quotes),
-        confidence=0.9,
-        followUpQuestion=follow_up,
-    )
-
-
-def build_market_strategy_reply(
-    quotes: list[MarketQuote], language: Literal["vi", "en"]
-) -> CopilotResponse:
-    anchor = quote_summary_line(quotes[0], language)
-    risk_level = aggregate_risk_level(quotes)
-    if language == "vi":
-        reply = (
-            f"Điểm neo hiện tại: {anchor}. "
-            "Nếu bạn đang cân nhắc vào lệnh, cách an toàn hơn là chia điểm mua theo từng phần thay vì all-in ngay một mức giá. "
-            "Quyết định hợp lý phụ thuộc chủ yếu vào thời gian nắm giữ, mức chịu lỗ và tỷ trọng tài sản này trong tổng danh mục."
-        )
-        actions = [
-            "Với ngắn hạn, ưu tiên chờ xác nhận xu hướng và đặt ngưỡng cắt lỗ rõ ràng.",
-            "Với dài hạn, giải ngân từng phần thường hợp lý hơn cố đoán đúng đáy.",
-            "Không nên để một vị thế rủi ro cao chiếm tỷ trọng quá lớn so với tiền mặt dự phòng.",
-        ]
-        follow_up = "Bạn định nắm giữ tài sản này trong bao lâu và chịu được drawdown khoảng bao nhiêu phần trăm?"
-    else:
-        reply = (
-            f"Current anchor point: {anchor}. "
-            "If you are considering an entry, scaling in is usually safer than going all-in at one price. "
-            "The sensible choice depends mostly on your time horizon, drawdown tolerance, and portfolio weight."
-        )
-        actions = [
-            "For short-term trades, wait for trend confirmation and define a hard stop first.",
-            "For long-term exposure, phased entries are usually more defensible than trying to call the exact bottom.",
-            "Do not let a high-risk position dominate the cash buffer you still need elsewhere.",
-        ]
-        follow_up = "What holding period and drawdown tolerance are you working with?"
-
-    return CopilotResponse(
-        reply=reply,
-        topic="market-strategy",
-        suggestedActions=actions,
-        suggestedDepositAmount=None,
-        riskLevel=risk_level,
-        confidence=0.83,
-        followUpQuestion=follow_up,
-    )
-
-
-def build_market_explanation_reply(
-    latest_user_message: str, language: Literal["vi", "en"]
-) -> CopilotResponse:
-    folded = fold_text(latest_user_message)
-    if "gold" in folded or "vang" in folded or "xau" in folded:
-        if language == "vi":
-            reply = (
-                "Vàng thường nhạy với ba biến chính: lãi suất thực của Mỹ, sức mạnh đồng USD và nhu cầu phòng thủ rủi ro. "
-                "Lãi suất thực tăng thường gây áp lực lên vàng, còn USD yếu hoặc rủi ro vĩ mô tăng thường hỗ trợ vàng."
-            )
-            actions = [
-                "Muốn nhìn vàng đúng hơn, nên theo dõi cùng lúc lợi suất thực, DXY và kỳ vọng lãi suất Fed.",
-                "Nếu bạn cần, tôi có thể gắn phần giải thích này với giá vàng hiện tại.",
-                "Tôi cũng có thể so sánh vai trò của vàng với bạc hoặc Bitcoin.",
-            ]
-            follow_up = "Bạn muốn tôi gắn phần giải thích này với diễn biến vàng hiện tại không?"
-        else:
-            reply = (
-                "Gold usually reacts to three big drivers: US real yields, the strength of the US dollar, and demand for risk hedges. "
-                "Higher real yields often pressure gold, while a weaker dollar or higher macro stress often supports it."
-            )
-            actions = [
-                "Watch real yields, DXY, and Fed rate expectations together rather than in isolation.",
-                "I can tie this explanation to the current gold quote if you want.",
-                "I can also compare the role of gold versus silver or Bitcoin.",
-            ]
-            follow_up = "Do you want me to connect that explanation to the current gold price?"
-    elif "silver" in folded or "bac" in folded or "xag" in folded:
-        if language == "vi":
-            reply = (
-                "Bạc vừa có tính chất kim loại quý vừa có thành phần nhu cầu công nghiệp, nên thường biến động mạnh hơn vàng. "
-                "Khi kỳ vọng tăng trưởng công nghiệp tốt, bạc có thể mạnh hơn vàng; khi thị trường phòng thủ mạnh, vàng thường ổn định hơn."
-            )
-            actions = [
-                "Nếu so bạc với vàng, hãy nhìn thêm tỷ lệ gold/silver và kỳ vọng tăng trưởng toàn cầu.",
-                "Tôi có thể lấy thêm giá bạc hiện tại để nối với phần giải thích này.",
-                "Tôi cũng có thể so bạc với vàng theo góc nhìn phòng thủ và biến động.",
-            ]
-            follow_up = "Bạn muốn tôi so bạc với vàng bằng dữ liệu hiện tại không?"
-        else:
-            reply = (
-                "Silver behaves partly like a precious metal and partly like an industrial metal, so it often moves more violently than gold. "
-                "When industrial growth expectations improve, silver can outperform gold; in stronger risk-off phases, gold is usually steadier."
-            )
-            actions = [
-                "If you compare silver with gold, also watch the gold/silver ratio and global growth expectations.",
-                "I can pull the current silver quote to ground this explanation.",
-                "I can also compare silver versus gold from a defense versus volatility angle.",
-            ]
-            follow_up = "Do you want a live silver versus gold comparison?"
-    else:
-        if language == "vi":
-            reply = (
-                "Tôi có thể giải thích theo góc nhìn thị trường, nhưng để trả lời sắc hơn bạn nên chỉ rõ tài sản hoặc biến số bạn muốn hỏi, "
-                "ví dụ lãi suất Fed, USD, vàng, bạc, Bitcoin, S&P 500 hoặc một mã cổ phiếu cụ thể."
-            )
-            actions = [
-                "Bạn có thể hỏi kiểu: Fed ảnh hưởng vàng thế nào, so sánh BTC với vàng, hay AAPL đang chịu rủi ro gì.",
-                "Nếu câu hỏi cần giá hiện tại, tôi có thể cố gắng lấy thêm dữ liệu live trước khi trả lời.",
-                "Nếu câu hỏi thiên về chiến lược, hãy nói thêm khung thời gian và mức chịu rủi ro.",
-            ]
-            follow_up = "Bạn muốn tôi giải thích tài sản hoặc biến số nào trước?"
-        else:
-            reply = (
-                "I can explain the market angle, but the answer will be sharper if you name the asset or driver first, "
-                "for example the Fed, USD, gold, silver, Bitcoin, the S&P 500, or a specific stock."
-            )
-            actions = [
-                "You can ask things like: how the Fed affects gold, BTC versus gold, or what risks AAPL is facing.",
-                "If the question needs current prices, I can try to ground it with live data first.",
-                "If it is more strategic, include your time horizon and risk tolerance.",
-            ]
-            follow_up = "Which asset or macro driver do you want explained first?"
-
-    return CopilotResponse(
-        reply=reply,
-        topic="market-explanation",
-        suggestedActions=actions,
-        suggestedDepositAmount=None,
-        riskLevel="medium",
-        confidence=0.8,
-        followUpQuestion=follow_up,
-    )
-
-
-def build_market_fallback_reply(
-    latest_user_message: str,
-    market_context: dict[str, Any],
-    language: Literal["vi", "en"],
-) -> CopilotResponse | None:
-    quotes = [MarketQuote.model_validate(item) for item in market_context.get("quotes", [])]
-    overview = [MarketQuote.model_validate(item) for item in market_context.get("overview", [])]
-    intent = market_context.get("intent", "general-market")
-
-    if intent == "market-overview" and overview:
-        return build_market_overview_reply(overview, language)
-    if intent == "comparison" and quotes:
-        return build_market_comparison_reply(quotes, language)
-    if intent in {"strategy", "outlook", "asset-analysis"} and quotes:
-        return build_market_strategy_reply(quotes, language)
-    if intent == "price-lookup" and quotes:
-        return build_market_price_reply(quotes, language)
-    if intent in {"explanation", "general-market"}:
-        return build_market_explanation_reply(latest_user_message, language)
-    if quotes:
-        return build_market_price_reply(quotes, language)
-    return None
-
-
-def build_deposit_plan(goal_text: str, balance: float, income: float, expenses: float):
-    goal = fold_text(goal_text)
-    balance = max(balance, 0)
-    income = max(income or 0, 0)
-    expenses = max(expenses or 0, 0)
-    disposable = max(income - expenses, 0)
-
-    base_amount = 100.0
-    reasons: list[str] = []
-    risk: Literal["low", "medium", "high"] = "low"
-    next_action = "Deposit the suggested amount now."
-    confidence = 0.83
-
-    if "emergency" in goal or "rainy" in goal or "du phong" in goal:
-        base_amount = max(
-            150.0,
-            min(ceil(max(disposable, 300) * 0.25 / 10) * 10, 1000.0),
-        )
-        reasons.append("Emergency goals benefit from steady cash-buffer deposits.")
-        reasons.append("The recommendation stays meaningful without overcommitting funds.")
-        next_action = "Start with this amount, then repeat weekly until you reach one month of expenses."
-        confidence = 0.88
-    elif "travel" in goal or "trip" in goal or "vacation" in goal:
-        base_amount = max(
-            120.0,
-            min(ceil(max(disposable, 240) * 0.2 / 10) * 10, 800.0),
-        )
-        reasons.append("Travel goals work best with predictable medium-sized deposits.")
-        reasons.append("This keeps progress visible while preserving room for daily spending.")
-        confidence = 0.82
-    elif "bill" in goal or "rent" in goal or "tuition" in goal:
-        base_amount = max(
-            100.0,
-            min(ceil(max(disposable, 200) * 0.35 / 10) * 10, 1500.0),
-        )
-        reasons.append("Upcoming obligations should be funded faster than lifestyle goals.")
-        reasons.append("The suggestion prioritizes liquidity and near-term certainty.")
-        risk = "medium"
-        next_action = "Deposit this amount and review again after the next paycheck."
-        confidence = 0.86
-    elif "invest" in goal or "business" in goal or "project" in goal:
-        base_amount = max(
-            200.0,
-            min(ceil(max(disposable, 400) * 0.3 / 10) * 10, 2000.0),
-        )
-        reasons.append("Growth-oriented goals can justify a larger top-up if cash flow supports it.")
-        reasons.append("The suggestion stays below a level that should not strain short-term spending.")
-        risk = "medium"
-        confidence = 0.79
-    else:
-        base_amount = max(
-            100.0,
-            min(ceil(max(disposable, 250) * 0.22 / 10) * 10, 900.0),
-        )
-        reasons.append("The goal was treated as a general savings target.")
-        reasons.append("The amount is sized to be practical for a first deposit.")
-
-    if balance < 100:
-        reasons.append("Current wallet balance is still low, so the recommendation leans slightly higher.")
-        base_amount += 50.0
-
-    if disposable <= 0:
-        reasons.append("Monthly cash-flow data is limited, so a conservative starter amount was used.")
-        base_amount = min(base_amount, 150.0)
-        risk = "medium"
-        confidence = 0.68
-
-    recommended = float(max(50.0, ceil(base_amount / 10) * 10))
-    return {
-        "recommendedAmount": recommended,
-        "reasoning": reasons,
-        "riskLevel": risk,
-        "nextAction": next_action,
-        "confidence": confidence,
-    }
-
-
-def build_copilot_reply(
-    payload: CopilotRequest,
-    language: Literal["vi", "en"],
-    market_context: dict[str, Any],
-) -> CopilotResponse:
-    latest_user_message = next(
-        (
-            message.content.strip()
-            for message in reversed(payload.messages)
-            if message.role == "user" and message.content.strip()
-        ),
-        "",
-    )
-    folded = fold_text(latest_user_message)
-    market_reply = build_market_fallback_reply(latest_user_message, market_context, language)
-    if market_reply:
-        return market_reply
-
-    income = max(payload.monthlyIncome or 0, 0)
-    expenses = max(payload.monthlyExpenses or 0, 0)
-    net_flow = income - expenses
-    transactions = payload.recentTransactions[:12]
-    credits = sum(tx.amount for tx in transactions if tx.direction == "credit")
-    debits = sum(tx.amount for tx in transactions if tx.direction != "credit")
-
-    if any(keyword in folded for keyword in DEPOSIT_KEYWORDS):
-        plan = build_deposit_plan(latest_user_message, payload.currentBalance, income, expenses)
-        return CopilotResponse(
-            reply=(
-                f"Một mức nạp hợp lý là khoảng {plan['recommendedAmount']:.0f} {payload.currency}. {plan['reasoning'][0]}"
-                if language == "vi"
-                else f"A practical top-up is about {plan['recommendedAmount']:.0f} {payload.currency}. {plan['reasoning'][0]}"
+        ai_doc = {
+            "requestKey": request_key,
+            "requestId": event.request_id,
+            "transactionEventId": transaction_event_oid,
+            "transactionId": event.transaction_id,
+            "userId": user_oid,
+            "inputSnapshot": {
+                "timestamp": event.timestamp,
+                "amount": float(event.amount),
+                "currency": event.currency,
+                "country": event.country,
+                "paymentMethod": event.payment_method,
+                "merchantCategory": event.merchant_category,
+                "device": event.device,
+                "channel": event.channel,
+                "failedTx24h": int(event.failed_tx_24h),
+                "velocity1h": int(event.velocity_1h),
+            },
+            "features": {
+                "hourOfDay": float(features[0]),
+                "dayOfWeek": float(features[1]),
+                "amountLog10": float(features[2]),
+                "failedTx24h": float(features[3]),
+                "velocity1h": float(features[4]),
+                "deviceLength": float(features[5]),
+            },
+            "result": {
+                "anomalyScore": float(anomaly_score),
+                "rawScore": float(raw_score),
+                "riskLevel": risk_level_final,
+                "riskLevelBase": risk_level_base,
+                "riskLevelFinal": risk_level_final,
+                "reasons": reasons,
+                "monitoringOnly": True,
+                "action": AI_TX_ACTION,
+            },
+            "model": {
+                "name": "pyod_iforest",
+                "version": model_version,
+                "source": app.state.tx_model_source,
+                "trainedAt": getattr(app.state, "tx_model_trained_at_dt", None),
+            },
+            "scoreStatus": "SUCCESS",
+            "error": None,
+            "scoredAt": now_dt,
+            "createdAt": now_dt,
+        }
+        ai_insert = mongo_db[AI_TRANSACTION_SCORES_COLLECTION].insert_one(ai_doc)
+        _metric_inc("mongo_write_success_total")
+        return {
+            "saved": True,
+            "reused": False,
+            "transaction_event_id": str(transaction_event_oid),
+            "ai_score_id": str(ai_insert.inserted_id),
+        }
+    except DuplicateKeyError:
+        existing = mongo_db[AI_TRANSACTION_SCORES_COLLECTION].find_one(ai_query, {"_id": 1, "transactionEventId": 1})
+        return {
+            "saved": True,
+            "reused": True,
+            "transaction_event_id": (
+                str(existing.get("transactionEventId")) if existing and existing.get("transactionEventId") else None
             ),
-            topic="deposit-planning",
-            suggestedActions=plan["reasoning"][:3],
-            suggestedDepositAmount=plan["recommendedAmount"],
-            riskLevel=plan["riskLevel"],
-            confidence=plan["confidence"],
-            followUpQuestion=(
-                "Bạn có muốn tôi lập kế hoạch tiết kiệm theo tuần cho mục tiêu này không?"
-                if language == "vi"
-                else "Do you want a weekly savings plan based on this target?"
-            ),
-        )
+            "ai_score_id": str(existing.get("_id")) if existing and existing.get("_id") else None,
+        }
+    except PyMongoError as exc:
+        _metric_inc("mongo_write_error_total")
+        return {"saved": False, "reason": str(exc)}
 
-    if any(keyword in folded for keyword in CASH_FLOW_KEYWORDS):
-        if language == "vi":
-            reply = (
-                f"{'Dòng tiền hàng tháng của bạn hiện vẫn đủ bù chi tiêu.' if net_flow >= 0 else 'Chi tiêu hàng tháng của bạn đang cao hơn dòng tiền vào.'} "
-                f"Số dư hiện tại là {payload.currentBalance:.2f} {payload.currency}. "
-                f"Theo các giao dịch gần nhất, khoảng {debits:.2f} đang đi ra so với {credits:.2f} đi vào."
-            )
-        else:
-            reply = (
-                f"{'Your monthly inflow appears to cover spending.' if net_flow >= 0 else 'Your monthly spending appears to be ahead of inflow.'} "
-                f"Current balance is {payload.currentBalance:.2f} {payload.currency}. "
-                f"From the latest recorded activity, about {debits:.2f} is going out versus {credits:.2f} coming in."
-            )
-        return CopilotResponse(
-            reply=reply,
-            topic="cash-flow",
-            suggestedActions=(
-                [
-                    "Hãy giới hạn một nhóm chi tiêu linh hoạt trong 7 ngày tới.",
-                    "Giữ ít nhất một tuần chi phí sinh hoạt ở dạng thanh khoản.",
-                    "Rà lại 10 giao dịch gần nhất để tìm khoản thất thoát lặp lại.",
-                ]
-                if language == "vi"
-                else [
-                    "Cap one discretionary category for the next 7 days.",
-                    "Keep at least one week of expenses in liquid form.",
-                    "Review the last 10 transactions for repeatable leaks.",
-                ]
-            ),
-            suggestedDepositAmount=None,
-            riskLevel="low" if net_flow >= 0 else "medium",
-            confidence=0.82,
-            followUpQuestion=(
-                "Bạn có muốn tôi tách dòng tiền thành khoản chi an toàn, hóa đơn và quỹ đệm không?"
-                if language == "vi"
-                else "Do you want me to break your cash flow into safe spend, bills, and buffer?"
-            ),
-        )
 
-    return CopilotResponse(
-        reply=(
-            "Tôi có thể hỗ trợ về thị trường tiền tệ, chứng khoán, vàng, bạc, crypto, tỷ giá, rủi ro danh mục và cả dòng tiền trong ví. "
-            "Bạn có thể hỏi giá hiện tại, so sánh tài sản, giải thích vì sao thị trường biến động, hoặc hỏi chiến lược theo khung thời gian của bạn."
-            if language == "vi"
-            else "I can help with currencies, stocks, gold, silver, crypto, exchange rates, portfolio risk, and wallet cash flow. "
-            "Ask for a current quote, an asset comparison, a market explanation, or a strategy view for your time horizon."
-        ),
-        topic="general",
-        suggestedActions=(
-            [
-                "Hỏi giá vàng, bạc, Bitcoin, USD/VND, S&P 500 hoặc một mã cổ phiếu cụ thể.",
-                "Hỏi so sánh như BTC với vàng, AAPL với S&P 500, hoặc vàng với bạc.",
-                "Nếu muốn chiến lược, hãy nói thêm thời gian nắm giữ và mức chịu rủi ro.",
-            ]
-            if language == "vi"
-            else [
-                "Ask for gold, silver, Bitcoin, USD/VND, the S&P 500, or a specific stock.",
-                "Ask for a comparison such as BTC versus gold or AAPL versus the S&P 500.",
-                "For strategy questions, include your time horizon and risk tolerance.",
-            ]
-        ),
-        suggestedDepositAmount=None,
-        riskLevel="low",
-        confidence=0.73,
-        followUpQuestion=(
-            "Bạn muốn tôi bắt đầu từ giá hiện tại, so sánh tài sản hay góc nhìn chiến lược?"
-            if language == "vi"
-            else "Do you want to start with live quotes, a comparison, or a strategy view?"
-        ),
-    )
+def _startup_app() -> None:
+    app.state.model = None
+    app.state.thresholds = None
+    app.state.feature_mean = None
+    app.state.feature_std = None
+    app.state.countries = set()
+    app.state.devices = set()
+    app.state.trained_at = None
+    app.state.model_trained_at_dt = None
+    app.state.train_size = 0
+    app.state.model_source = "none"
+    app.state.model_version = "unknown"
+    app.state.model_path = None
+    app.state.metadata_path = None
+    app.state.feature_names = FEATURE_NAMES
+    app.state.load_error = None
+    app.state.tx_model = None
+    app.state.tx_thresholds = None
+    app.state.tx_feature_mean = None
+    app.state.tx_feature_std = None
+    app.state.tx_countries = set()
+    app.state.tx_payment_methods = set()
+    app.state.tx_merchant_categories = set()
+    app.state.tx_trained_at = None
+    app.state.tx_model_trained_at_dt = None
+    app.state.tx_train_size = 0
+    app.state.tx_model_source = "none"
+    app.state.tx_model_version = "unknown"
+    app.state.tx_model_path = None
+    app.state.tx_metadata_path = None
+    app.state.tx_feature_names = TX_FEATURE_NAMES
+    app.state.tx_load_error = None
+    app.state.mongo_client = None
+    app.state.mongo_db = None
+    app.state.mongo_db_name = os.getenv("MONGODB_DB")
+    app.state.mongo_error = None
+    app.state.metrics = {key: 0.0 for key in METRICS_KEYS}
+    _try_load_persisted_model()
+    _try_load_persisted_tx_model()
+    _init_mongo()
+
+
+def _shutdown_app() -> None:
+    _close_mongo()
+
+
+@asynccontextmanager
+async def _app_lifespan(_: FastAPI):
+    _startup_app()
+    try:
+        yield
+    finally:
+        _shutdown_app()
+
+
+app.router.lifespan_context = _app_lifespan
+
+
+@app.get("/ui", response_class=HTMLResponse)
+def test_ui():
+    return TEST_UI_HTML
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "ai", "timestamp": utc_now_iso()}
+    return {
+        "status": "ok",
+        "service": "ai",
+        "timestamp": _now_iso(),
+        "auth_enabled": _auth_enabled(),
+        "auth_mode": _auth_mode(),
+        "model_loaded": _state_ready(),
+        "model_source": app.state.model_source,
+        "model_version": getattr(app.state, "model_version", "unknown"),
+        "tx_model_loaded": _tx_state_ready(),
+        "tx_model_source": app.state.tx_model_source,
+        "tx_model_version": getattr(app.state, "tx_model_version", "unknown"),
+        "mongo_connected": _mongo_ready(),
+        "mongo_db": getattr(app.state, "mongo_db_name", None),
+    }
+
+
+@app.get("/ai/status")
+def status(_: None = Depends(_require_api_key)):
+    return {
+        "model_loaded": _state_ready(),
+        "model_source": app.state.model_source,
+        "model_version": getattr(app.state, "model_version", "unknown"),
+        "model_path": getattr(app.state, "model_path", None),
+        "metadata_path": getattr(app.state, "metadata_path", None),
+        "trained_at": app.state.trained_at,
+        "train_size": app.state.train_size,
+        "features": FEATURE_NAMES,
+        "load_error": app.state.load_error,
+        "tx_model_loaded": _tx_state_ready(),
+        "tx_model_source": app.state.tx_model_source,
+        "tx_model_version": getattr(app.state, "tx_model_version", "unknown"),
+        "tx_model_path": getattr(app.state, "tx_model_path", None),
+        "tx_metadata_path": getattr(app.state, "tx_metadata_path", None),
+        "tx_trained_at": app.state.tx_trained_at,
+        "tx_train_size": app.state.tx_train_size,
+        "tx_features": TX_FEATURE_NAMES,
+        "tx_load_error": app.state.tx_load_error,
+        "mongo_connected": _mongo_ready(),
+        "mongo_db": getattr(app.state, "mongo_db_name", None),
+        "mongo_error": getattr(app.state, "mongo_error", None),
+        "auth_enabled": _auth_enabled(),
+        "auth_mode": _auth_mode(),
+    }
+
+
+@app.get("/ai/metrics")
+def metrics(_: None = Depends(_require_api_key)):
+    requests = app.state.metrics["score_requests_total"]
+    tx_requests = app.state.metrics["tx_score_requests_total"]
+    avg_latency = (app.state.metrics["score_latency_ms_total"] / requests) if requests > 0 else 0.0
+    avg_tx_latency = (app.state.metrics["tx_score_latency_ms_total"] / tx_requests) if tx_requests > 0 else 0.0
+    return {
+        "metrics": app.state.metrics,
+        "avg_score_latency_ms": round(avg_latency, 3),
+        "avg_tx_score_latency_ms": round(avg_tx_latency, 3),
+        "generated_at": _now_iso(),
+    }
+
+
+@app.get("/ai/admin/alerts")
+def admin_alerts(limit: int = 50, _: None = Depends(_require_api_key)):
+    if not _mongo_ready():
+        return {"alerts": [], "reason": "mongo_not_connected"}
+    capped = max(1, min(limit, 200))
+    db = app.state.mongo_db
+    try:
+        cursor = (
+            db[AUDIT_LOGS_COLLECTION]
+            .find({"action": {"$in": ["AI_LOGIN_ALERT", "AI_TRANSACTION_ALERT"]}})
+            .sort("createdAt", -1)
+            .limit(capped)
+        )
+        alerts: list[dict[str, Any]] = []
+        for item in cursor:
+            item["_id"] = str(item["_id"])
+            if item.get("userId") is not None:
+                item["userId"] = str(item["userId"])
+            details = item.get("details")
+            if isinstance(details, dict) and details.get("loginEventId") is not None:
+                details["loginEventId"] = str(details["loginEventId"])
+            if isinstance(details, dict) and details.get("transactionEventId") is not None:
+                details["transactionEventId"] = str(details["transactionEventId"])
+            alerts.append(item)
+        return {"alerts": alerts, "count": len(alerts)}
+    except PyMongoError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load alerts: {exc}")
+
+
+@app.get("/ai/admin/stats")
+def admin_stats(hours: int = 24, _: None = Depends(_require_api_key)):
+    if not _mongo_ready():
+        return {"stats": {}, "reason": "mongo_not_connected"}
+    safe_hours = max(1, min(hours, 24 * 30))
+    cutoff = _now_dt().timestamp() - safe_hours * 3600
+    cutoff_dt = datetime.fromtimestamp(cutoff, tz=timezone.utc)
+    db = app.state.mongo_db
+    try:
+        login_risk = _aggregate_risk_counts(db, AI_LOGIN_SCORES_COLLECTION, cutoff_dt)
+        tx_risk = _aggregate_risk_counts(db, AI_TRANSACTION_SCORES_COLLECTION, cutoff_dt)
+        combined_risk = {
+            "LOW": int(login_risk["LOW"] + tx_risk["LOW"]),
+            "MEDIUM": int(login_risk["MEDIUM"] + tx_risk["MEDIUM"]),
+            "HIGH": int(login_risk["HIGH"] + tx_risk["HIGH"]),
+        }
+        return {
+            "window_hours": safe_hours,
+            "risk_counts": login_risk,
+            "tx_risk_counts": tx_risk,
+            "combined_risk_counts": combined_risk,
+        }
+    except PyMongoError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load stats: {exc}")
+
+
+@app.post("/ai/reload-model")
+def reload_model(_: None = Depends(_require_api_key)):
+    _try_load_persisted_model()
+    _try_load_persisted_tx_model()
+    return {
+        "status": "reloaded",
+        "model_loaded": _state_ready(),
+        "model_source": app.state.model_source,
+        "model_version": app.state.model_version,
+        "model_path": app.state.model_path,
+        "metadata_path": app.state.metadata_path,
+        "load_error": app.state.load_error,
+        "tx_model_loaded": _tx_state_ready(),
+        "tx_model_source": app.state.tx_model_source,
+        "tx_model_version": app.state.tx_model_version,
+        "tx_model_path": app.state.tx_model_path,
+        "tx_metadata_path": app.state.tx_metadata_path,
+        "tx_load_error": app.state.tx_load_error,
+    }
+
+
+@app.post("/ai/train")
+def train(
+    payload: TrainRequest,
+    persist: bool = False,
+    promote: bool = False,
+    model_version: str | None = None,
+    _: None = Depends(_require_api_key),
+):
+    normalized_events = [_normalize_login_event(event) for event in payload.events]
+    normal_events = [event for event in normalized_events if int(event.success) == 1]
+    if len(normal_events) < 10:
+        raise HTTPException(
+            status_code=400,
+            detail="At least 10 normal login events (success=1) are required for training.",
+        )
+
+    feature_matrix = np.vstack([_build_features(event) for event in normal_events])
+    model, thresholds, feature_mean, feature_std = _fit_iforest(feature_matrix)
+    countries = {event.country.strip().lower() for event in normal_events}
+    devices = {_normalize_device(event.device) for event in normal_events}
+
+    _set_model_state(
+        model=model,
+        thresholds=thresholds,
+        feature_mean=feature_mean,
+        feature_std=feature_std,
+        countries=countries,
+        devices=devices,
+        trained_at=_now_iso(),
+        train_size=len(normal_events),
+        source="runtime:/ai/train",
+        model_version=model_version or f"runtime_iforest_{_now_dt().strftime('%Y%m%d_%H%M%S')}",
+        model_path=None,
+        metadata_path=None,
+    )
+    app.state.model_trained_at_dt = _parse_iso_datetime(app.state.trained_at)
+    artifact = _persist_login_model_artifacts(promote=promote) if persist else {"saved": False}
+
+    return {
+        "status": "trained",
+        "trained_at": app.state.trained_at,
+        "model_version": app.state.model_version,
+        "train_size": app.state.train_size,
+        "features": FEATURE_NAMES,
+        "model_source": app.state.model_source,
+        "artifact": artifact,
+    }
 
 
 @app.post("/ai/score")
-def score(event: LoginEvent):
-    score_value = 0.2 if event.userAgent else 0.5
-    reasons = ["stubbed-model"]
-    return {"score": score_value, "reasons": reasons, "received": event.model_dump()}
+def score(
+    event: LoginEvent,
+    _: None = Depends(_require_api_key),
+    x_idempotency_key: str | None = Header(default=None, alias="X-Idempotency-Key"),
+):
+    start = time.perf_counter()
+    _metric_inc("score_requests_total")
 
-
-@app.post("/ai/deposit-agent", response_model=DepositAgentResponse)
-def deposit_agent(payload: DepositAgentRequest):
-    plan = build_deposit_plan(
-        payload.goal,
-        payload.currentBalance,
-        payload.monthlyIncome or 0,
-        payload.monthlyExpenses or 0,
-    )
-    return DepositAgentResponse.model_validate(plan)
-
-
-@app.post("/ai/copilot-chat", response_model=CopilotResponse)
-def copilot_chat(payload: CopilotRequest):
-    latest_user_message = next(
-        (
-            message.content.strip()
-            for message in reversed(payload.messages)
-            if message.role == "user" and message.content.strip()
-        ),
-        "",
-    )
-    language = detect_language(latest_user_message)
-    live_fx_quote = maybe_get_exchange_rate_quote(latest_user_message, payload)
-    if live_fx_quote:
-        return build_exchange_rate_reply(live_fx_quote, language)
-
-    market_context = build_market_context(latest_user_message, payload)
-    fallback = build_copilot_reply(payload, language, market_context)
-    if not openai_client:
-        return fallback
-
-    try:
-        recent_messages = payload.messages[-8:]
-        prompt_payload = {
-            "userId": payload.userId or "unknown",
-            "currency": payload.currency,
-            "currentBalance": payload.currentBalance,
-            "monthlyIncome": payload.monthlyIncome or 0,
-            "monthlyExpenses": payload.monthlyExpenses or 0,
-            "recentTransactions": [
-                {
-                    "amount": tx.amount,
-                    "type": tx.type,
-                    "description": tx.description,
-                    "createdAt": tx.createdAt,
-                    "direction": tx.direction,
-                }
-                for tx in payload.recentTransactions[:12]
-            ],
-            "messages": [
-                {"role": message.role, "content": message.content}
-                for message in recent_messages
-            ],
-            "latestUserMessage": latest_user_message,
-            "language": language,
-            "marketContext": market_context,
-            "exchangeRateQuote": live_fx_quote.model_dump() if live_fx_quote else None,
-        }
-
-        response = openai_client.responses.create(
-            model=OPENAI_MODEL,
-            input=[
-                {"role": "system", "content": MARKET_SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False)},
-            ],
-            text={"format": {"type": "json_object"}},
+    if not _state_ready():
+        _metric_inc("score_errors_total")
+        raise HTTPException(
+            status_code=503,
+            detail="Login model is not trained yet. Train via /ai/train or load an artifact first.",
         )
 
-        raw = (getattr(response, "output_text", "") or "").strip()
-        if not raw:
-            return fallback
+    event = _normalize_login_event(event)
+    request_key = _resolve_request_key(event, x_idempotency_key)
+    features = _build_features(event)
+    history_signals = _get_history_signals(event)
+    score_value = float(app.state.model.decision_function(features.reshape(1, -1))[0])
+    anomaly_score = _scaled_score(
+        score_value,
+        float(app.state.thresholds["score_min"]),
+        float(app.state.thresholds["score_max"]),
+    )
+    risk_level_base = _score_to_level(score_value, app.state.thresholds)
+    risk_level = risk_level_base
+    risk_level = _adjust_risk_level(risk_level, event, history_signals)
+    reasons = _build_reasons(event, features, history_signals)
+    mongo_persist = _persist_score_to_mongo(
+        event=event,
+        features=features,
+        anomaly_score=anomaly_score,
+        raw_score=score_value,
+        risk_level_base=risk_level_base,
+        risk_level_final=risk_level,
+        reasons=reasons,
+        history_signals=history_signals,
+        request_key=request_key,
+    )
+    admin_alert = _write_admin_alert(
+        event=event,
+        risk_level=risk_level,
+        anomaly_score=anomaly_score,
+        reasons=reasons,
+        login_event_id=mongo_persist.get("login_event_id"),
+    )
+    if risk_level == "LOW":
+        _metric_inc("risk_low_total")
+    elif risk_level == "MEDIUM":
+        _metric_inc("risk_medium_total")
+    else:
+        _metric_inc("risk_high_total")
+    _metric_inc("score_success_total")
+    _metric_inc("score_latency_ms_total", (time.perf_counter() - start) * 1000.0)
 
-        parsed = CopilotResult.model_validate_json(raw)
-        recommended = None
-        if parsed.suggestedDepositAmount is not None and parsed.suggestedDepositAmount > 0:
-            recommended = float(max(50.0, ceil(parsed.suggestedDepositAmount / 10) * 10))
-        confidence = min(max(float(parsed.confidence), 0.0), 1.0)
+    return {
+        "anomaly_score": anomaly_score,
+        "raw_score": score_value,
+        "risk_level_base": risk_level_base,
+        "risk_level": risk_level,
+        "reasons": reasons,
+        "monitoring_only": True,
+        "action": AI_ACTION,
+        "require_otp_sms": bool(history_signals.get("require_otp_sms")),
+        "otp_channel": "sms" if history_signals.get("require_otp_sms") else None,
+        "otp_reason": history_signals.get("otp_reason"),
+        "model_source": app.state.model_source,
+        "model_version": getattr(app.state, "model_version", "unknown"),
+        "request_key": request_key,
+        "analysis_signals": {
+            "ip": {
+                "is_new_ip": bool(history_signals.get("is_new_ip")),
+                "private_or_loopback": bool(history_signals.get("private_ip")),
+            },
+            "device": {"is_new_device": bool(history_signals.get("is_new_device"))},
+            "location": {
+                "is_new_country": bool(history_signals.get("is_new_country")),
+                "country_changed_recently": bool(history_signals.get("country_changed_recently")),
+                "last_country": history_signals.get("last_country"),
+            },
+            "session": {
+                "has_success_history": bool(history_signals.get("has_success_history")),
+                "last_success_ip": history_signals.get("last_success_ip"),
+                "last_success_device": history_signals.get("last_success_device"),
+                "last_success_timestamp": history_signals.get("last_success_timestamp"),
+                "different_ip_from_last_success": bool(history_signals.get("different_ip_from_last_success")),
+                "different_device_from_last_success": bool(history_signals.get("different_device_from_last_success")),
+                "require_otp_sms": bool(history_signals.get("require_otp_sms")),
+            },
+            "time": {"off_hour_for_user": bool(history_signals.get("off_hour_for_user"))},
+            "frequency": {
+                "recent_attempts_10m": int(history_signals.get("recent_attempts_10m", 0)),
+                "recent_attempts_1h": int(history_signals.get("recent_attempts_1h", 0)),
+                "recent_failed_10m_db": int(history_signals.get("recent_failed_10m_db", 0)),
+            },
+        },
+        "mongo_persist": mongo_persist,
+        "admin_alert": admin_alert,
+    }
 
-        return CopilotResponse(
-            reply=parsed.reply.strip(),
-            topic=parsed.topic.strip() or fallback.topic,
-            suggestedActions=parsed.suggestedActions[:4] or fallback.suggestedActions,
-            suggestedDepositAmount=recommended,
-            riskLevel=parsed.riskLevel if parsed.riskLevel in {"low", "medium", "high"} else fallback.riskLevel,
-            confidence=confidence,
-            followUpQuestion=parsed.followUpQuestion.strip() if parsed.followUpQuestion else fallback.followUpQuestion,
+
+@app.post("/ai/tx/train")
+def train_transaction(
+    payload: TrainTransactionRequest,
+    persist: bool = False,
+    promote: bool = False,
+    model_version: str | None = None,
+    _: None = Depends(_require_api_key),
+):
+    normalized_events = [_normalize_transaction_event(event) for event in payload.events]
+    if len(normalized_events) < 10:
+        raise HTTPException(
+            status_code=400,
+            detail="At least 10 transactions are required for transaction model training.",
         )
-    except Exception:
-        return fallback
+
+    feature_matrix = np.vstack([_build_tx_features(event) for event in normalized_events])
+    model, thresholds, feature_mean, feature_std = _fit_iforest(feature_matrix)
+    countries = {event.country.strip().lower() for event in normalized_events if event.country}
+    payment_methods = {event.payment_method for event in normalized_events if event.payment_method}
+    merchant_categories = {event.merchant_category for event in normalized_events if event.merchant_category}
+
+    _set_tx_model_state(
+        model=model,
+        thresholds=thresholds,
+        feature_mean=feature_mean,
+        feature_std=feature_std,
+        countries=countries,
+        payment_methods=payment_methods,
+        merchant_categories=merchant_categories,
+        trained_at=_now_iso(),
+        train_size=len(normalized_events),
+        source="runtime:/ai/tx/train",
+        model_version=model_version or f"runtime_tx_iforest_{_now_dt().strftime('%Y%m%d_%H%M%S')}",
+        model_path=None,
+        metadata_path=None,
+    )
+    app.state.tx_model_trained_at_dt = _parse_iso_datetime(app.state.tx_trained_at)
+    artifact = _persist_tx_model_artifacts(promote=promote) if persist else {"saved": False}
+
+    return {
+        "status": "trained",
+        "trained_at": app.state.tx_trained_at,
+        "model_version": app.state.tx_model_version,
+        "train_size": app.state.tx_train_size,
+        "features": TX_FEATURE_NAMES,
+        "model_source": app.state.tx_model_source,
+        "artifact": artifact,
+    }
+
+
+@app.post("/ai/tx/score")
+def score_transaction(
+    event: TransactionEvent,
+    _: None = Depends(_require_api_key),
+    x_idempotency_key: str | None = Header(default=None, alias="X-Idempotency-Key"),
+):
+    start = time.perf_counter()
+    _metric_inc("tx_score_requests_total")
+
+    if not _tx_state_ready():
+        _metric_inc("tx_score_errors_total")
+        raise HTTPException(
+            status_code=503,
+            detail="Transaction model is not trained yet. Train via /ai/tx/train or load an artifact first.",
+        )
+
+    event = _normalize_transaction_event(event)
+    request_key = _resolve_tx_request_key(event, x_idempotency_key)
+    features = _build_tx_features(event)
+    score_value = float(app.state.tx_model.decision_function(features.reshape(1, -1))[0])
+    anomaly_score = _scaled_score(
+        score_value,
+        float(app.state.tx_thresholds["score_min"]),
+        float(app.state.tx_thresholds["score_max"]),
+    )
+    risk_level_base = _score_to_level(score_value, app.state.tx_thresholds)
+    risk_level = _adjust_tx_risk_level(risk_level_base, event)
+    reasons = _build_tx_reasons(event, features)
+    mongo_persist = _persist_tx_score_to_mongo(
+        event=event,
+        features=features,
+        anomaly_score=anomaly_score,
+        raw_score=score_value,
+        risk_level_base=risk_level_base,
+        risk_level_final=risk_level,
+        reasons=reasons,
+        request_key=request_key,
+    )
+    admin_alert = _write_transaction_alert(
+        event=event,
+        risk_level=risk_level,
+        anomaly_score=anomaly_score,
+        reasons=reasons,
+        transaction_event_id=mongo_persist.get("transaction_event_id"),
+    )
+
+    if risk_level == "LOW":
+        _metric_inc("tx_risk_low_total")
+    elif risk_level == "MEDIUM":
+        _metric_inc("tx_risk_medium_total")
+    else:
+        _metric_inc("tx_risk_high_total")
+    _metric_inc("tx_score_success_total")
+    _metric_inc("tx_score_latency_ms_total", (time.perf_counter() - start) * 1000.0)
+
+    return {
+        "anomaly_score": anomaly_score,
+        "raw_score": score_value,
+        "risk_level_base": risk_level_base,
+        "risk_level": risk_level,
+        "reasons": reasons,
+        "monitoring_only": True,
+        "action": AI_TX_ACTION,
+        "model_source": app.state.tx_model_source,
+        "model_version": getattr(app.state, "tx_model_version", "unknown"),
+        "request_key": request_key,
+        "analysis_signals": {
+            "amount": float(event.amount),
+            "currency": event.currency,
+            "country": event.country,
+            "payment_method": event.payment_method,
+            "merchant_category": event.merchant_category,
+            "failed_tx_24h": int(event.failed_tx_24h),
+            "velocity_1h": int(event.velocity_1h),
+            "daily_spend_avg_30d": float(event.daily_spend_avg_30d),
+            "today_spend_before": float(event.today_spend_before),
+            "projected_daily_spend": float(event.projected_daily_spend),
+        },
+        "mongo_persist": mongo_persist,
+        "admin_alert": admin_alert,
+    }
 
 
 if __name__ == "__main__":

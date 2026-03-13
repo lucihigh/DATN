@@ -6,6 +6,7 @@ import {
   useAuth,
   type AuthCompletionResult,
   type LoginResult,
+  type LoginMonitoring,
   type SessionReplacementAlert,
 } from "./context/AuthContext";
 import { useToast } from "./context/ToastContext";
@@ -199,6 +200,36 @@ type CopilotInsight = {
   followUpQuestion?: string | null;
 };
 
+type AiMonitoringSummary = {
+  score: number;
+  riskLevel: string;
+  reasons: string[];
+  monitoringOnly: boolean;
+  action?: string;
+  modelSource?: string | null;
+  modelVersion?: string | null;
+  requestKey?: string | null;
+};
+
+type AiOverview = {
+  status: {
+    modelLoaded: boolean;
+    modelVersion?: string | null;
+    modelSource?: string | null;
+    txModelLoaded: boolean;
+    txModelVersion?: string | null;
+    txModelSource?: string | null;
+    mongoConnected: boolean;
+    authMode?: string | null;
+  };
+  stats: {
+    windowHours: number;
+    loginRiskCounts: Record<string, number>;
+    txRiskCounts: Record<string, number>;
+    combinedRiskCounts: Record<string, number>;
+  };
+};
+
 function Ring({ value }: { value: number }) {
   const r = 36;
   const circ = 2 * Math.PI * r;
@@ -289,7 +320,7 @@ function BarChart({
 }
 
 function DashboardView() {
-  const { user, token } = useAuth();
+  const { user, token, sessionSecurity } = useAuth();
   const { toast } = useToast();
   const transferQrVideoRef = useRef<HTMLVideoElement>(null);
   const transferQrStreamRef = useRef<MediaStream | null>(null);
@@ -375,6 +406,8 @@ function DashboardView() {
   const [transferOtpExpiresAt, setTransferOtpExpiresAt] = useState("");
   const [transferOtpResendAt, setTransferOtpResendAt] = useState(0);
   const [transferOtpClock, setTransferOtpClock] = useState(Date.now());
+  const [transferMonitoring, setTransferMonitoring] =
+    useState<AiMonitoringSummary | null>(null);
   const [recentTransactions, setRecentTransactions] = useState<
     RecentTransaction[]
   >([]);
@@ -393,6 +426,9 @@ function DashboardView() {
   const [securityAlertsBusy, setSecurityAlertsBusy] = useState(false);
   const [securityAlertsError, setSecurityAlertsError] = useState("");
   const [securityAlertsModalOpen, setSecurityAlertsModalOpen] = useState(false);
+  const [aiOverview, setAiOverview] = useState<AiOverview | null>(null);
+  const [aiOverviewBusy, setAiOverviewBusy] = useState(false);
+  const [aiOverviewError, setAiOverviewError] = useState("");
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
   const [transferReceipt, setTransferReceipt] =
     useState<TransactionReceipt | null>(null);
@@ -430,12 +466,23 @@ function DashboardView() {
     transferAmount.trim().length > 0 &&
     Number.isFinite(transferAmountNumber) &&
     transferAmountNumber > Number(wallet.balance);
+  const restrictedTransferLimit =
+    sessionSecurity.restrictLargeTransfers &&
+    typeof sessionSecurity.maxTransferAmount === "number"
+      ? sessionSecurity.maxTransferAmount
+      : null;
+  const exceedsRestrictedTransferLimit =
+    restrictedTransferLimit !== null &&
+    transferAmount.trim().length > 0 &&
+    Number.isFinite(transferAmountNumber) &&
+    transferAmountNumber > restrictedTransferLimit;
   const canContinueTransferAmount =
     wallet !== null &&
     transferAmount.trim().length > 0 &&
     Number.isFinite(transferAmountNumber) &&
     transferAmountNumber > 0 &&
-    !isInsufficientBalance;
+    !isInsufficientBalance &&
+    !exceedsRestrictedTransferLimit;
   const ownQrPayload =
     wallet?.qrPayload ||
     (wallet?.accountNumber
@@ -582,6 +629,88 @@ function DashboardView() {
     return userAgent.length > 48 ? `${userAgent.slice(0, 48)}...` : userAgent;
   }, []);
 
+  const parseAiMonitoringSummary = useCallback(
+    (value: unknown): AiMonitoringSummary | null => {
+      if (!value || typeof value !== "object") return null;
+      const data = value as Record<string, unknown>;
+      const score =
+        typeof data.score === "number"
+          ? data.score
+          : typeof data.anomaly_score === "number"
+            ? data.anomaly_score
+            : 0;
+      return {
+        score,
+        riskLevel:
+          typeof data.riskLevel === "string"
+            ? data.riskLevel
+            : typeof data.risk_level === "string"
+              ? data.risk_level
+              : "low",
+        reasons: Array.isArray(data.reasons)
+          ? data.reasons.filter(
+              (item): item is string => typeof item === "string",
+            )
+          : [],
+        monitoringOnly: Boolean(
+          data.monitoringOnly ?? data.monitoring_only ?? true,
+        ),
+        action: typeof data.action === "string" ? data.action : undefined,
+        modelSource:
+          typeof data.modelSource === "string"
+            ? data.modelSource
+            : typeof data.model_source === "string"
+              ? data.model_source
+              : null,
+        modelVersion:
+          typeof data.modelVersion === "string"
+            ? data.modelVersion
+            : typeof data.model_version === "string"
+              ? data.model_version
+              : null,
+        requestKey:
+          typeof data.requestKey === "string"
+            ? data.requestKey
+            : typeof data.request_key === "string"
+              ? data.request_key
+              : null,
+      };
+    },
+    [],
+  );
+
+  const renderAiMonitoringPanel = useCallback(
+    (monitoring: AiMonitoringSummary | null, title: string) => {
+      if (!monitoring) return null;
+      const riskLevel = monitoring.riskLevel.toLowerCase();
+      const tone =
+        riskLevel === "high" || riskLevel === "medium" ? riskLevel : "low";
+      return (
+        <div className={`transfer-ai-card ${tone}`} data-risk={tone}>
+          <div className="transfer-ai-head">
+            <strong>{title}</strong>
+            <span className={`transfer-ai-pill ${tone}`}>
+              {tone.toUpperCase()} · {Math.round(monitoring.score * 100)}%
+            </span>
+          </div>
+          <p>
+            {monitoring.monitoringOnly
+              ? "This action is being monitored by the anomaly model."
+              : "This action is being evaluated by the anomaly model."}
+          </p>
+          {monitoring.reasons.length > 0 && (
+            <ul>
+              {monitoring.reasons.slice(0, 3).map((reason) => (
+                <li key={reason}>{reason}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      );
+    },
+    [],
+  );
+
   const refreshSecurityAlerts = useCallback(
     async (options?: { silent?: boolean }) => {
       if (!token) {
@@ -663,6 +792,58 @@ function DashboardView() {
       }
     },
     [formatSecurityAlertTime, token],
+  );
+
+  const refreshAiOverview = useCallback(
+    async (options?: { silent?: boolean }) => {
+      if (!token) {
+        setAiOverview(null);
+        setAiOverviewBusy(false);
+        setAiOverviewError("");
+        return;
+      }
+
+      if (!options?.silent) {
+        setAiOverviewBusy(true);
+      }
+      setAiOverviewError("");
+
+      try {
+        const resp = await fetch(`${API_BASE}/ai/overview`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const data = (await resp.json().catch(() => null)) as
+          | AiOverview
+          | { error?: string }
+          | null;
+
+        if (
+          !resp.ok ||
+          !data ||
+          !("status" in data) ||
+          !("stats" in data) ||
+          typeof data.status !== "object" ||
+          typeof data.stats !== "object"
+        ) {
+          throw new Error(
+            (data &&
+              "error" in data &&
+              typeof data.error === "string" &&
+              data.error) ||
+              "Cannot load AI overview",
+          );
+        }
+
+        setAiOverview(data as AiOverview);
+      } catch (err) {
+        setAiOverviewError(
+          err instanceof Error ? err.message : "Cannot load AI overview",
+        );
+      } finally {
+        setAiOverviewBusy(false);
+      }
+    },
+    [token],
   );
 
   const refreshWalletSnapshot = useCallback(
@@ -1446,12 +1627,17 @@ function DashboardView() {
   }, [refreshSecurityAlerts]);
 
   useEffect(() => {
+    void refreshAiOverview({ silent: true });
+  }, [refreshAiOverview]);
+
+  useEffect(() => {
     if (!token) return;
 
     const refreshIfVisible = () => {
       if (document.visibilityState === "hidden") return;
       void refreshWalletSnapshot();
       void refreshSecurityAlerts({ silent: true });
+      void refreshAiOverview({ silent: true });
     };
 
     const interval = window.setInterval(refreshIfVisible, 5000);
@@ -1463,7 +1649,7 @@ function DashboardView() {
       window.removeEventListener("focus", refreshIfVisible);
       document.removeEventListener("visibilitychange", refreshIfVisible);
     };
-  }, [refreshSecurityAlerts, refreshWalletSnapshot, token]);
+  }, [refreshAiOverview, refreshSecurityAlerts, refreshWalletSnapshot, token]);
 
   const generateOtp = () => {
     const next = String(Math.floor(100000 + Math.random() * 900000));
@@ -1527,6 +1713,7 @@ function DashboardView() {
     setTransferOtpDestination("");
     setTransferOtpExpiresAt("");
     setTransferOtpResendAt(0);
+    setTransferMonitoring(null);
     setTransferReceipt(null);
   };
 
@@ -1584,11 +1771,14 @@ function DashboardView() {
       destination?: string;
       expiresAt?: string;
       retryAfterSeconds?: number;
+      anomaly?: unknown;
     } | null;
     if (!resp.ok || !data?.challengeId) {
       toast(data?.error || "Failed to send OTP email", "error");
       return false;
     }
+    const monitoring = parseAiMonitoringSummary(data.anomaly);
+    setTransferMonitoring(monitoring);
     setTransferOtpChallengeId(data.challengeId);
     setTransferOtpDestination(data.destination || "");
     setTransferOtpExpiresAt(data.expiresAt || "");
@@ -1603,6 +1793,14 @@ function DashboardView() {
         : "OTP sent to your email",
       "info",
     );
+    if (monitoring && monitoring.riskLevel.toLowerCase() !== "low") {
+      toast(
+        `AI transfer monitoring flagged ${monitoring.riskLevel.toLowerCase()} risk (${Math.round(
+          monitoring.score * 100,
+        )}%).`,
+        "info",
+      );
+    }
     return true;
   };
   const continueTransferRecipient = async () => {
@@ -1657,6 +1855,13 @@ function DashboardView() {
     const amount = Number(transferAmount.replace(/,/g, ""));
     if (!transferAmount || Number.isNaN(amount) || amount <= 0) {
       toast("Please enter a valid transfer amount.", "error");
+      return;
+    }
+    if (exceedsRestrictedTransferLimit && restrictedTransferLimit !== null) {
+      toast(
+        `Large transfers above $${restrictedTransferLimit.toLocaleString("en-US")} are temporarily restricted for this sign-in.`,
+        "error",
+      );
       return;
     }
     if (!canContinueTransferAmount) {
@@ -1721,11 +1926,16 @@ function DashboardView() {
 
     const transferPayload = (await transferResp.json().catch(() => null)) as {
       reconciliationId?: string;
+      anomaly?: unknown;
       transaction?: {
         id: string;
         toAccount?: string;
       };
     } | null;
+    const confirmedMonitoring = parseAiMonitoringSummary(transferPayload?.anomaly);
+    if (confirmedMonitoring) {
+      setTransferMonitoring(confirmedMonitoring);
+    }
     const targetAccount =
       transferPayload?.transaction?.toAccount || transferAccount;
     setTransferReceipt({
@@ -1829,9 +2039,7 @@ function DashboardView() {
         <aside className="dashboard-actions-card">
           <h3>Quick Actions</h3>
           <div className="dashboard-actions-list">
-            {dashboardQuickActions
-              .filter((action) => action.id === "transfer")
-              .map((action) => (
+            {dashboardQuickActions.map((action) => (
                 <button
                   type="button"
                   className="dashboard-action-item"
@@ -1839,6 +2047,10 @@ function DashboardView() {
                   onClick={() => {
                     if (action.id === "transfer") {
                       openTransferModal();
+                    } else if (action.id === "deposit") {
+                      setDepositAgentOpen(true);
+                    } else if (action.id === "copilot") {
+                      setCopilotOpen(true);
                     }
                   }}
                 >
@@ -1851,11 +2063,71 @@ function DashboardView() {
                 </button>
               ))}
           </div>
-          <button type="button" className="dashboard-all-actions">
-            View all actions
+          <button
+            type="button"
+            className="dashboard-all-actions"
+            onClick={() => {
+              setCopilotOpen(true);
+            }}
+          >
+            Open AI workspace
           </button>
         </aside>
       </div>
+
+      <section className="dashboard-block ai-overview-block">
+        <div className="dashboard-block-head">
+          <h3>AI Runtime</h3>
+          <span className="dashboard-tag">
+            {aiOverview?.status.modelLoaded && aiOverview?.status.txModelLoaded
+              ? "ONLINE"
+              : "PARTIAL"}
+          </span>
+          <button
+            type="button"
+            className="dashboard-link"
+            onClick={() => void refreshAiOverview()}
+          >
+            {aiOverviewBusy ? "Refreshing..." : "Refresh AI"}
+          </button>
+        </div>
+        <div className="ai-runtime-grid">
+          <article className="ai-runtime-card">
+            <span>Login model</span>
+            <strong>
+              {aiOverview?.status.modelLoaded ? "Loaded" : "Unavailable"}
+            </strong>
+            <small>
+              {aiOverview?.status.modelVersion || "No active login model"}
+            </small>
+          </article>
+          <article className="ai-runtime-card">
+            <span>Transaction model</span>
+            <strong>
+              {aiOverview?.status.txModelLoaded ? "Loaded" : "Unavailable"}
+            </strong>
+            <small>
+              {aiOverview?.status.txModelVersion || "No active transaction model"}
+            </small>
+          </article>
+          <article className="ai-runtime-card">
+            <span>Combined risk window</span>
+            <strong>{aiOverview?.stats.windowHours || 24}h</strong>
+            <small>
+              High: {aiOverview?.stats.combinedRiskCounts.HIGH || 0} · Medium:{" "}
+              {aiOverview?.stats.combinedRiskCounts.MEDIUM || 0}
+            </small>
+          </article>
+          <article className="ai-runtime-card">
+            <span>Data backend</span>
+            <strong>
+              {aiOverview?.status.mongoConnected ? "Connected" : "Offline"}
+            </strong>
+            <small>{aiOverview?.status.authMode || "unknown auth mode"}</small>
+          </article>
+        </div>
+        {aiOverviewError && <div className="ai-runtime-error">{aiOverviewError}</div>}
+      </section>
 
       <section className="dashboard-block">
         <div className="dashboard-block-head">
@@ -2690,6 +2962,13 @@ function DashboardView() {
                       Insufficient balance
                     </small>
                   )}
+                  {exceedsRestrictedTransferLimit &&
+                    restrictedTransferLimit !== null && (
+                      <small className="transfer-input-error">
+                        This sign-in can only transfer up to $
+                        {restrictedTransferLimit.toLocaleString("en-US")}.
+                      </small>
+                    )}
                 </label>
                 <label className="form-group">
                   <span>Transfer Content</span>
@@ -2699,6 +2978,10 @@ function DashboardView() {
                     onChange={(e) => setTransferContent(e.target.value)}
                   />
                 </label>
+                {renderAiMonitoringPanel(
+                  transferMonitoring,
+                  "Transaction AI Monitoring",
+                )}
                 <div className="transfer-actions">
                   <button
                     type="button"
@@ -2751,6 +3034,10 @@ function DashboardView() {
                     </small>
                   </div>
                 )}
+                {renderAiMonitoringPanel(
+                  transferMonitoring,
+                  "Transfer Risk Review",
+                )}
                 <label className="form-group">
                   <span>Enter OTP</span>
                   <input
@@ -2797,6 +3084,10 @@ function DashboardView() {
                 <h4>Transfer Successful</h4>
                 {transferReceipt && (
                   <TransactionReceiptCard receipt={transferReceipt} />
+                )}
+                {renderAiMonitoringPanel(
+                  transferMonitoring,
+                  "Transaction Monitoring Result",
                 )}
                 <div className="transfer-actions">
                   <button
@@ -2850,7 +3141,7 @@ function DashboardView() {
         </div>
       )}
 
-      {false && copilotOpen && (
+      {copilotOpen && (
         <div
           className="modal-overlay"
           onClick={() => {
@@ -3010,7 +3301,7 @@ function DashboardView() {
         </div>
       )}
 
-      {false && depositAgentOpen && (
+      {depositAgentOpen && (
         <div
           className="modal-overlay"
           onClick={() => {
@@ -6698,6 +6989,7 @@ function AuthShell({
   onClearSessionAlert,
 }: AuthShellProps) {
   useTheme();
+  const { lastLoginMonitoring, clearLoginMonitoring } = useAuth();
 
   const { toast } = useToast();
   const [mode, setMode] = useState<
@@ -6739,6 +7031,7 @@ function AuthShell({
   const [loginOtpChallengeId, setLoginOtpChallengeId] = useState("");
   const [loginOtpDestination, setLoginOtpDestination] = useState("");
   const [loginOtpExpiresAt, setLoginOtpExpiresAt] = useState("");
+  const [loginOtpAvailableAt, setLoginOtpAvailableAt] = useState("");
   const [loginOtpResendAt, setLoginOtpResendAt] = useState(0);
   const [forgotOtpInput, setForgotOtpInput] = useState("");
   const [forgotChallengeId, setForgotChallengeId] = useState("");
@@ -6767,6 +7060,12 @@ function AuthShell({
     0,
     Math.ceil((loginOtpResendAt - authClock) / 1000),
   );
+  const loginOtpAvailableInSeconds = loginOtpAvailableAt
+    ? Math.max(
+        0,
+        Math.ceil((new Date(loginOtpAvailableAt).getTime() - authClock) / 1000),
+      )
+    : 0;
   const signupOtpCooldownSeconds = Math.max(
     0,
     Math.ceil((signupOtpResendAt - authClock) / 1000),
@@ -6786,6 +7085,51 @@ function AuthShell({
       })
     : "Just now";
 
+  const renderLoginMonitoring = (monitoring: LoginMonitoring | null) => {
+    if (!monitoring) return null;
+    const riskLevel = monitoring.riskLevel.toLowerCase();
+    const normalizedRisk =
+      riskLevel === "high" || riskLevel === "medium" ? riskLevel : "low";
+    const filteredReasons = monitoring.reasons
+      .filter((reason) => reason !== "AI monitoring unavailable")
+      .slice(0, 3);
+    if (normalizedRisk === "low" && !monitoring.requireOtp) return null;
+    const riskLabel =
+      normalizedRisk === "high"
+        ? "High risk"
+        : normalizedRisk === "medium"
+          ? "Medium risk"
+          : "Low risk";
+
+    return (
+      <div className={`auth-ai-monitor auth-ai-monitor-${normalizedRisk}`}>
+        <div className="auth-ai-monitor-head">
+          <strong>Security Review</strong>
+          <span className={`auth-ai-badge auth-ai-badge-${normalizedRisk}`}>
+            {riskLabel}
+          </span>
+        </div>
+        <p className="auth-ai-copy">
+          Additional security checks were triggered for this sign-in attempt.
+        </p>
+        {monitoring.requireOtp && (
+          <p className="auth-ai-signal">
+            Additional verification is required
+            {monitoring.otpChannel ? ` via ${monitoring.otpChannel}` : ""}.
+            {monitoring.otpReason ? ` ${monitoring.otpReason}` : ""}
+          </p>
+        )}
+        {filteredReasons.length > 0 && (
+          <ul className="auth-ai-reasons">
+            {filteredReasons.map((reason) => (
+              <li key={reason}>{reason}</li>
+            ))}
+          </ul>
+        )}
+      </div>
+    );
+  };
+
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!signinForm.email || !signinForm.password) {
@@ -6800,6 +7144,7 @@ function AuthShell({
       toast("Please complete reCAPTCHA", "error");
       return;
     }
+    clearLoginMonitoring();
     setAuthBusy(true);
     try {
       const data = await onRequestLoginOtp(
@@ -6811,10 +7156,14 @@ function AuthShell({
         setLoginOtpChallengeId("");
         setLoginOtpDestination("");
         setLoginOtpExpiresAt("");
+        setLoginOtpAvailableAt("");
         setLoginOtpResendAt(0);
         setLoginOtpInput("");
         setMode(null);
         toast("Signed in successfully");
+        if (data.monitoring && data.monitoring.riskLevel !== "low") {
+          toast("Additional security checks were applied to this sign-in.", "info");
+        }
         if (data.notice) {
           toast(data.notice, "info");
         }
@@ -6824,6 +7173,7 @@ function AuthShell({
       setLoginOtpChallengeId(data.challengeId);
       setLoginOtpDestination(data.destination);
       setLoginOtpExpiresAt(data.expiresAt);
+      setLoginOtpAvailableAt(data.availableAt || "");
       setLoginOtpResendAt(Date.now() + data.retryAfterSeconds * 1000);
       setLoginOtpInput("");
       setSigninRecaptchaToken("");
@@ -6990,9 +7340,17 @@ function AuthShell({
       toast("Please enter the 6-digit verification code", "error");
       return;
     }
+    if (loginOtpAvailableInSeconds > 0) {
+      toast(
+        `This new-device sign-in is still blocked. Try again in ${loginOtpAvailableInSeconds}s.`,
+        "error",
+      );
+      return;
+    }
     setAuthBusy(true);
     try {
       const result = await onVerifyLoginOtp(loginOtpChallengeId, loginOtpInput);
+      setLoginOtpAvailableAt("");
       toast("Signed in successfully");
       if (result.notice) {
         toast(result.notice, "info");
@@ -7017,6 +7375,7 @@ function AuthShell({
       toast("Please complete reCAPTCHA before resending OTP", "error");
       return;
     }
+    clearLoginMonitoring();
     setAuthBusy(true);
     try {
       const data = await onRequestLoginOtp(
@@ -7028,10 +7387,14 @@ function AuthShell({
         setLoginOtpChallengeId("");
         setLoginOtpDestination("");
         setLoginOtpExpiresAt("");
+        setLoginOtpAvailableAt("");
         setLoginOtpResendAt(0);
         setLoginOtpInput("");
         setMode(null);
         toast("Signed in successfully");
+        if (data.monitoring && data.monitoring.riskLevel !== "low") {
+          toast("Additional security checks were applied to this sign-in.", "info");
+        }
         if (data.notice) {
           toast(data.notice, "info");
         }
@@ -7040,6 +7403,7 @@ function AuthShell({
       setLoginOtpChallengeId(data.challengeId);
       setLoginOtpDestination(data.destination);
       setLoginOtpExpiresAt(data.expiresAt);
+      setLoginOtpAvailableAt(data.availableAt || "");
       setLoginOtpResendAt(Date.now() + data.retryAfterSeconds * 1000);
       setSigninRecaptchaToken("");
       signinRecaptchaRef.current?.reset();
@@ -7333,9 +7697,10 @@ function AuthShell({
                 <input
                   type="email"
                   value={signinForm.email}
-                  onChange={(e) =>
-                    setSigninForm({ ...signinForm, email: e.target.value })
-                  }
+                  onChange={(e) => {
+                    clearLoginMonitoring();
+                    setSigninForm({ ...signinForm, email: e.target.value });
+                  }}
                   placeholder="Enter your email"
                   required
                 />
@@ -7346,9 +7711,13 @@ function AuthShell({
                   <input
                     type={showPassword ? "text" : "password"}
                     value={signinForm.password}
-                    onChange={(e) =>
-                      setSigninForm({ ...signinForm, password: e.target.value })
-                    }
+                    onChange={(e) => {
+                      clearLoginMonitoring();
+                      setSigninForm({
+                        ...signinForm,
+                        password: e.target.value,
+                      });
+                    }}
                     placeholder="Enter your password"
                     required
                   />
@@ -7391,6 +7760,7 @@ function AuthShell({
                   reCAPTCHA is not configured for this environment.
                 </p>
               )}
+              {renderLoginMonitoring(lastLoginMonitoring)}
               <button
                 type="submit"
                 className="btn-primary auth-submit"
@@ -7442,6 +7812,11 @@ function AuthShell({
                   required
                 />
                 <span className="muted" style={{ fontSize: 12 }}>
+                  {loginOtpAvailableInSeconds > 0
+                    ? `This new-device sign-in can be verified in ${loginOtpAvailableInSeconds}s.`
+                    : null}
+                </span>
+                <span className="muted" style={{ fontSize: 12 }}>
                   {loginOtpExpiresAt
                     ? `Code expires at ${new Date(
                         loginOtpExpiresAt,
@@ -7449,9 +7824,10 @@ function AuthShell({
                         hour: "2-digit",
                         minute: "2-digit",
                       })}`
-                    : "Check your inbox for the latest code."}
+                    : "Check your messages for the latest code."}
                 </span>
               </label>
+              {renderLoginMonitoring(lastLoginMonitoring)}
               {RECAPTCHA_SITE_KEY ? (
                 <div className="auth-recaptcha">
                   <ReCAPTCHA
@@ -7476,7 +7852,7 @@ function AuthShell({
                 <button
                   type="submit"
                   className="btn-primary auth-submit"
-                  disabled={authBusy}
+                  disabled={authBusy || loginOtpAvailableInSeconds > 0}
                 >
                   {authBusy ? "Verifying..." : "Verify & Sign In"}
                 </button>
@@ -7923,3 +8299,4 @@ function AuthShell({
     </div>
   );
 }
+
