@@ -20,19 +20,32 @@ export type LoginOtpRequiredResult = {
   challengeId: string;
   destination: string;
   expiresAt: string;
+  availableAt?: string;
   retryAfterSeconds: number;
   notice?: string;
+  monitoring?: LoginMonitoring | null;
 };
 
 export type LoginAuthenticatedResult = {
   status: "authenticated";
   notice?: string;
+  monitoring?: LoginMonitoring | null;
+  security?: SessionSecurity;
 };
 
 export type LoginResult = LoginOtpRequiredResult | LoginAuthenticatedResult;
 
 export type AuthCompletionResult = {
   notice?: string;
+  security?: SessionSecurity;
+};
+
+export type SessionSecurity = {
+  riskLevel: string;
+  reviewReason?: string;
+  verificationMethod?: string | null;
+  restrictLargeTransfers: boolean;
+  maxTransferAmount?: number | null;
 };
 
 export type SessionReplacementAlert = {
@@ -59,9 +72,24 @@ export type SessionAlertResponse =
       retryAfterSeconds: number;
     };
 
+export type LoginMonitoring = {
+  score: number;
+  riskLevel: string;
+  reasons: string[];
+  monitoringOnly: boolean;
+  action?: string;
+  requireOtp: boolean;
+  otpChannel?: string | null;
+  otpReason?: string | null;
+  modelSource?: string | null;
+  modelVersion?: string | null;
+  requestKey?: string | null;
+};
+
 const USER_STORAGE_KEY = "fpipay_user";
 const TOKEN_STORAGE_KEY = "fpipay_token";
 const TOKEN_EXPIRES_AT_STORAGE_KEY = "fpipay_token_expires_at";
+const SESSION_SECURITY_STORAGE_KEY = "fpipay_session_security";
 const DEFAULT_AVATAR = "https://i.pravatar.cc/80?img=12";
 const API_BASE =
   (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ||
@@ -121,6 +149,9 @@ const AuthContext = createContext<{
     alertToken: string,
     action: "confirm" | "secure_account",
   ) => Promise<SessionAlertResponse>;
+  sessionSecurity: SessionSecurity;
+  lastLoginMonitoring: LoginMonitoring | null;
+  clearLoginMonitoring: () => void;
   updateUser: (patch: Partial<User>) => void;
   logout: () => void;
 } | null>(null);
@@ -187,6 +218,93 @@ const decodeJwtExpiresAt = (token: string) => {
   }
 };
 
+const toStringArray = (value: unknown) =>
+  Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+
+const parseSessionSecurity = (value: unknown): SessionSecurity => {
+  if (!value || typeof value !== "object") {
+    return {
+      riskLevel: "low",
+      restrictLargeTransfers: false,
+      maxTransferAmount: null,
+    };
+  }
+  const data = value as Record<string, unknown>;
+  return {
+    riskLevel:
+      typeof data.riskLevel === "string" ? data.riskLevel.toLowerCase() : "low",
+    reviewReason:
+      typeof data.reviewReason === "string" ? data.reviewReason : undefined,
+    verificationMethod:
+      typeof data.verificationMethod === "string"
+        ? data.verificationMethod
+        : null,
+    restrictLargeTransfers: Boolean(data.restrictLargeTransfers),
+    maxTransferAmount:
+      typeof data.maxTransferAmount === "number" &&
+      Number.isFinite(data.maxTransferAmount)
+        ? data.maxTransferAmount
+        : null,
+  };
+};
+
+const parseLoginMonitoring = (value: unknown): LoginMonitoring | null => {
+  if (!value || typeof value !== "object") return null;
+  const data = value as Record<string, unknown>;
+  const scoreRaw = data.score ?? data.anomaly_score;
+  const score = typeof scoreRaw === "number" && Number.isFinite(scoreRaw)
+    ? scoreRaw
+    : 0;
+
+  return {
+    score,
+    riskLevel:
+      typeof data.riskLevel === "string"
+        ? data.riskLevel
+        : typeof data.risk_level === "string"
+          ? data.risk_level
+          : "low",
+    reasons: toStringArray(data.reasons),
+    monitoringOnly: Boolean(
+      data.monitoringOnly ?? data.monitoring_only ?? true,
+    ),
+    action: typeof data.action === "string" ? data.action : undefined,
+    requireOtp: Boolean(data.requireOtp ?? data.require_otp_sms),
+    otpChannel:
+      typeof data.otpChannel === "string"
+        ? data.otpChannel
+        : typeof data.otp_channel === "string"
+          ? data.otp_channel
+          : null,
+    otpReason:
+      typeof data.otpReason === "string"
+        ? data.otpReason
+        : typeof data.otp_reason === "string"
+          ? data.otp_reason
+          : null,
+    modelSource:
+      typeof data.modelSource === "string"
+        ? data.modelSource
+        : typeof data.model_source === "string"
+          ? data.model_source
+          : null,
+    modelVersion:
+      typeof data.modelVersion === "string"
+        ? data.modelVersion
+        : typeof data.model_version === "string"
+          ? data.model_version
+          : null,
+    requestKey:
+      typeof data.requestKey === "string"
+        ? data.requestKey
+        : typeof data.request_key === "string"
+          ? data.request_key
+          : null,
+  };
+};
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const expireSession = useCallback(
     (
@@ -196,6 +314,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(null);
       setToken(null);
       setTokenExpiresAt(null);
+      setSessionSecurity(parseSessionSecurity(null));
       window.dispatchEvent(
         new CustomEvent(SESSION_EXPIRED_EVENT, {
           detail: { reason, sessionAlert },
@@ -265,6 +384,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return null;
     }
   });
+  const [sessionSecurity, setSessionSecurity] = useState<SessionSecurity>(() => {
+    try {
+      const raw = sessionStorage.getItem(SESSION_SECURITY_STORAGE_KEY);
+      return parseSessionSecurity(raw ? JSON.parse(raw) : null);
+    } catch {
+      return parseSessionSecurity(null);
+    }
+  });
+  const [lastLoginMonitoring, setLastLoginMonitoring] =
+    useState<LoginMonitoring | null>(null);
 
   useEffect(() => {
     try {
@@ -302,10 +431,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     try {
+      sessionStorage.setItem(
+        SESSION_SECURITY_STORAGE_KEY,
+        JSON.stringify(sessionSecurity),
+      );
+    } catch (err) {
+      console.warn("Cannot persist session security to sessionStorage", err);
+    }
+  }, [sessionSecurity]);
+
+  useEffect(() => {
+    try {
       // Remove legacy persistent auth data so closing/reopening web always requires login.
       localStorage.removeItem(USER_STORAGE_KEY);
       localStorage.removeItem(TOKEN_STORAGE_KEY);
       localStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
+      localStorage.removeItem(SESSION_SECURITY_STORAGE_KEY);
     } catch {
       // ignore storage permission errors
     }
@@ -340,16 +481,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const resp = await fetch(`${API_BASE}/auth/me`, {
           headers: { Authorization: `Bearer ${token}` },
         });
+        const data = (await resp.json().catch(() => null)) as {
+          error?: string;
+          code?: string;
+          sessionAlert?: SessionReplacementAlert;
+          security?: unknown;
+        } | null;
         if (!resp.ok) {
-          const data = (await resp.json().catch(() => null)) as {
-            error?: string;
-            code?: string;
-            sessionAlert?: SessionReplacementAlert;
-          } | null;
           const reason = getSessionExpiredReason(resp.status, data);
           if (!cancelled && reason) {
             expireSession(reason, data?.sessionAlert);
           }
+        } else if (!cancelled) {
+          setSessionSecurity(parseSessionSecurity(data?.security));
         }
       } catch {
         // ignore temporary network errors here
@@ -370,9 +514,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     (data: {
       token: string;
       user: { id: string; email: string; role: "USER" | "ADMIN" };
+      security?: SessionSecurity | null;
     }) => {
       setToken(data.token);
       setTokenExpiresAt(decodeJwtExpiresAt(data.token));
+      setSessionSecurity(
+        data.security ? parseSessionSecurity(data.security) : parseSessionSecurity(null),
+      );
       setUser((prev) => ({
         id: data.user.id,
         role: data.user.role,
@@ -405,11 +553,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           challengeId?: string;
           destination?: string;
           expiresAt?: string;
+          availableAt?: string;
           retryAfterSeconds?: number;
           notice?: string;
+          anomaly?: unknown;
+          security?: unknown;
           token?: string;
           user?: { id: string; email: string; role: "USER" | "ADMIN" };
         } | null;
+        const monitoring = parseLoginMonitoring(data?.anomaly);
+        setLastLoginMonitoring(monitoring);
 
         if (!resp.ok) {
           throw new Error(extractApiErrorMessage(data, "Login failed"));
@@ -419,10 +572,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           completeLogin({
             token: data.token,
             user: data.user,
+            security: parseSessionSecurity(data.security),
           });
           return {
             status: "authenticated",
             notice: data.notice,
+            monitoring,
+            security: parseSessionSecurity(data.security),
           };
         }
 
@@ -435,8 +591,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           challengeId: data.challengeId,
           destination: data.destination,
           expiresAt: data.expiresAt,
+          availableAt: data.availableAt,
           retryAfterSeconds: Number(data.retryAfterSeconds || 60),
           notice: data.notice,
+          monitoring,
         };
       } catch (err) {
         throw new Error(parseApiError(err));
@@ -456,6 +614,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const data = (await resp.json().catch(() => null)) as {
           error?: unknown;
           notice?: string;
+          security?: unknown;
           token?: string;
           user?: { id: string; email: string; role: "USER" | "ADMIN" };
         } | null;
@@ -469,8 +628,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         completeLogin({
           token: data.token,
           user: data.user,
+          security: parseSessionSecurity(data.security),
         });
-        return { notice: data.notice };
+        return {
+          notice: data.notice,
+          security: parseSessionSecurity(data.security),
+        };
       } catch (err) {
         throw new Error(parseApiError(err));
       }
@@ -676,10 +839,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser((prev) => (prev ? { ...prev, ...patch } : prev));
   }, []);
 
+  const clearLoginMonitoring = useCallback(() => {
+    setLastLoginMonitoring(null);
+  }, []);
+
   const logout = useCallback(() => {
     setUser(null);
     setToken(null);
     setTokenExpiresAt(null);
+    setSessionSecurity(parseSessionSecurity(null));
+    setLastLoginMonitoring(null);
   }, []);
 
   return (
@@ -694,6 +863,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         requestPasswordResetOtp,
         resetPasswordWithOtp,
         respondToSessionAlert,
+        sessionSecurity,
+        lastLoginMonitoring,
+        clearLoginMonitoring,
         updateUser,
         logout,
       }}

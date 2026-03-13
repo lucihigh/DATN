@@ -256,6 +256,7 @@ components:
         expiresAt: { type: string, format: date-time }
         retryAfterSeconds: { type: integer }
         notice: { type: string }
+        anomaly: { $ref: "#/components/schemas/AnomalyScore" }
     DepositRequest:
       type: object
       required: [amount]
@@ -284,9 +285,18 @@ components:
       type: object
       properties:
         score: { type: number, format: double }
+        riskLevel: { type: string, enum: [low, medium, high] }
         reasons:
           type: array
           items: { type: string }
+        monitoringOnly: { type: boolean }
+        action: { type: string }
+        requireOtp: { type: boolean }
+        otpChannel: { type: string, nullable: true }
+        otpReason: { type: string, nullable: true }
+        modelSource: { type: string, nullable: true }
+        modelVersion: { type: string, nullable: true }
+        requestKey: { type: string, nullable: true }
     SecurityAlert:
       type: object
       properties:

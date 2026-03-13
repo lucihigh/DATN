@@ -1,0 +1,12 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# Local training data
+Train/
+*.csv
+
+# Local trained artifacts (too large for git)
+models/*.joblib
+models/*_metadata.json
+models/active_model.json

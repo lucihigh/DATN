@@ -6,6 +6,7 @@ interface AuditEvent {
   details?: string | Record<string, unknown>;
   userId?: string;
   ipAddress?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export const logAuditEvent = async (event: AuditEvent) => {
@@ -13,6 +14,7 @@ export const logAuditEvent = async (event: AuditEvent) => {
     ...event,
     actor: event.actor || "system",
     details: event.details,
+    metadata: event.metadata,
   };
 
   try {

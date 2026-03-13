@@ -34,6 +34,7 @@ import { logAuditEvent } from "./services/audit";
 import {
   sendBalanceChangeEmail,
   sendLoginOtpEmail,
+  sendLoginRiskAlertEmail,
   sendPasswordResetOtpEmail,
   sendRegisterOtpEmail,
   sendTransferOtpEmail,
@@ -89,6 +90,7 @@ app.use(lockoutGuard);
 
 const PORT = process.env.PORT_API || 4000;
 const AI_URL = process.env.AI_SERVICE_URL || "http://localhost:8000";
+const AI_API_KEY = process.env.AI_API_KEY || "local-dev-key";
 const APP_TIMEZONE = process.env.APP_TIMEZONE || "Asia/Ho_Chi_Minh";
 const ADMIN_EMAIL = "ledanhdat56@gmail.com";
 const ADMIN_PASSWORD = "Ledanhdat2005@";
@@ -105,6 +107,12 @@ const RESET_PASSWORD_OTP_TTL_MINUTES = Number(
 );
 const OTP_MAX_ATTEMPTS = Number(process.env.OTP_MAX_ATTEMPTS || "5");
 const RECAPTCHA_SECRET_KEY = process.env.RECAPTCHA_SECRET_KEY || "";
+const MEDIUM_RISK_TRANSFER_LIMIT = Number(
+  process.env.MEDIUM_RISK_TRANSFER_LIMIT || "500",
+);
+const HIGH_RISK_LOGIN_BLOCK_MINUTES = Number(
+  process.env.HIGH_RISK_LOGIN_BLOCK_MINUTES || "10",
+);
 
 const normalizeEmail = (email: string) => email.trim().toLowerCase();
 
@@ -113,8 +121,145 @@ const getRequestIp = (req: Request) => resolveRequestIpAddress(req);
 const toAnomalyScore = (value: unknown) =>
   typeof value === "number" && Number.isFinite(value) ? value : 0;
 
-type AnomalyResponse = Partial<components["schemas"]["AnomalyScore"]> &
-  Record<string, unknown>;
+type AnomalyResponse = {
+  score: number;
+  riskLevel: "low" | "medium" | "high";
+  reasons: string[];
+  monitoringOnly: boolean;
+  action?: string;
+  requireOtp: boolean;
+  otpChannel?: string | null;
+  otpReason?: string | null;
+  modelSource?: string | null;
+  modelVersion?: string | null;
+  requestKey?: string | null;
+};
+
+type SessionSecurityState = {
+  riskLevel: "low" | "medium" | "high";
+  reviewReason?: string;
+  verificationMethod?: "password" | "email_otp" | "sms_otp";
+  restrictLargeTransfers?: boolean;
+  maxTransferAmount?: number;
+};
+
+const DEFAULT_AI_RESPONSE: AnomalyResponse = {
+  score: 0,
+  riskLevel: "low",
+  reasons: ["AI monitoring unavailable"],
+  monitoringOnly: true,
+  action: "NOTIFY_ADMIN_ONLY",
+  requireOtp: false,
+  otpChannel: null,
+  otpReason: null,
+  modelSource: "fallback",
+  modelVersion: null,
+  requestKey: null,
+};
+
+const toStringList = (value: unknown) =>
+  Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+
+const normalizeRiskLevel = (value: unknown): AnomalyResponse["riskLevel"] => {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (normalized === "high" || normalized === "medium") return normalized;
+  return "low";
+};
+
+const normalizeAiResponse = (value: unknown): AnomalyResponse => {
+  if (!value || typeof value !== "object") return DEFAULT_AI_RESPONSE;
+  const data = value as Record<string, unknown>;
+  return {
+    score: toAnomalyScore(data.anomaly_score ?? data.score),
+    riskLevel: normalizeRiskLevel(data.risk_level ?? data.riskLevel),
+    reasons: toStringList(data.reasons),
+    monitoringOnly: Boolean(
+      data.monitoring_only ?? data.monitoringOnly ?? true,
+    ),
+    action: typeof data.action === "string" ? data.action : undefined,
+    requireOtp: Boolean(data.require_otp_sms ?? data.requireOtp),
+    otpChannel:
+      typeof data.otp_channel === "string"
+        ? data.otp_channel
+        : typeof data.otpChannel === "string"
+          ? data.otpChannel
+          : null,
+    otpReason:
+      typeof data.otp_reason === "string"
+        ? data.otp_reason
+        : typeof data.otpReason === "string"
+          ? data.otpReason
+          : null,
+    modelSource:
+      typeof data.model_source === "string"
+        ? data.model_source
+        : typeof data.modelSource === "string"
+          ? data.modelSource
+          : null,
+    modelVersion:
+      typeof data.model_version === "string"
+        ? data.model_version
+        : typeof data.modelVersion === "string"
+          ? data.modelVersion
+          : null,
+    requestKey:
+      typeof data.request_key === "string"
+        ? data.request_key
+        : typeof data.requestKey === "string"
+          ? data.requestKey
+          : null,
+  };
+};
+
+const buildSessionSecurityState = (
+  riskLevel: AnomalyResponse["riskLevel"],
+  options?: {
+    reviewReason?: string;
+    verificationMethod?: "password" | "email_otp" | "sms_otp";
+  },
+): SessionSecurityState => ({
+  riskLevel,
+  reviewReason: options?.reviewReason,
+  verificationMethod: options?.verificationMethod ?? "password",
+  restrictLargeTransfers: riskLevel === "medium",
+  maxTransferAmount:
+    riskLevel === "medium" ? MEDIUM_RISK_TRANSFER_LIMIT : undefined,
+});
+
+const isTransferBlockedBySessionSecurity = (input: {
+  amount: number;
+  sessionSecurity?: SessionSecurityState;
+}) => {
+  const sessionSecurity = input.sessionSecurity;
+  if (
+    !sessionSecurity?.restrictLargeTransfers ||
+    typeof sessionSecurity.maxTransferAmount !== "number"
+  ) {
+    return false;
+  }
+
+  return input.amount > sessionSecurity.maxTransferAmount;
+};
+
+const getRequestCountry = (req: Request) => {
+  const headerCandidates = [
+    req.headers["cf-ipcountry"],
+    req.headers["x-vercel-ip-country"],
+    req.headers["cloudfront-viewer-country"],
+  ];
+
+  for (const candidate of headerCandidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim().slice(0, 2).toUpperCase();
+    }
+  }
+
+  return "UNK";
+};
 
 type DepositAgentResponse = {
   recommendedAmount: number;
@@ -147,7 +292,212 @@ type CopilotResponsePayload = {
   followUpQuestion?: string | null;
 };
 
+type AiOverviewResponse = {
+  status: {
+    modelLoaded: boolean;
+    modelVersion?: string | null;
+    modelSource?: string | null;
+    txModelLoaded: boolean;
+    txModelVersion?: string | null;
+    txModelSource?: string | null;
+    mongoConnected: boolean;
+    authMode?: string | null;
+  };
+  stats: {
+    windowHours: number;
+    loginRiskCounts: Record<string, number>;
+    txRiskCounts: Record<string, number>;
+    combinedRiskCounts: Record<string, number>;
+  };
+};
+
 const DEFAULT_SECURITY_POLICY = getDefaultSecurityPolicy();
+
+const buildAiServiceHeaders = (extra?: Record<string, string>) => ({
+  "Content-Type": "application/json",
+  "X-AI-API-KEY": AI_API_KEY,
+  ...(extra || {}),
+});
+
+const buildStoredAiMonitoring = (input: AnomalyResponse) => ({
+  score: input.score,
+  riskLevel: input.riskLevel,
+  reasons: input.reasons,
+  monitoringOnly: input.monitoringOnly,
+  action: input.action ?? null,
+  requireOtp: input.requireOtp,
+  otpChannel: input.otpChannel ?? null,
+  otpReason: input.otpReason ?? null,
+  modelSource: input.modelSource ?? null,
+  modelVersion: input.modelVersion ?? null,
+  requestKey: input.requestKey ?? null,
+  scoredAt: new Date().toISOString(),
+});
+
+const clamp = (value: number, min: number, max: number) =>
+  Math.min(max, Math.max(min, value));
+
+const roundMoney = (value: number) => Math.round(value * 100) / 100;
+
+const summarizeRecentTransactions = (transactions: CopilotTransactionPayload[]) =>
+  transactions.slice(0, 12);
+
+const buildHeuristicDepositPlan = (input: {
+  goal: string;
+  currentBalance: number;
+  monthlyIncome: number;
+  monthlyExpenses: number;
+  currency: string;
+}): DepositAgentResponse => {
+  const income = Math.max(0, Number(input.monthlyIncome || 0));
+  const expenses = Math.max(0, Number(input.monthlyExpenses || 0));
+  const buffer = Math.max(0, income - expenses);
+  const goal = input.goal.trim().toLowerCase();
+  let multiplier = 0.3;
+  let riskLevel = "low";
+
+  if (/emergency|safety|buffer|reserve/.test(goal)) {
+    multiplier = 1.2;
+  } else if (/travel|tuition|device|laptop|phone|school/.test(goal)) {
+    multiplier = 0.65;
+  } else if (/invest|crypto|stock|trading/.test(goal)) {
+    multiplier = 0.4;
+    riskLevel = "medium";
+  }
+
+  if (expenses > income && income > 0) {
+    riskLevel = "high";
+  } else if (buffer <= 0 && income > 0) {
+    riskLevel = "medium";
+  }
+
+  const baseline =
+    buffer > 0 ? buffer * multiplier : Math.max(100, input.currentBalance * 0.1);
+  const recommendedAmount = roundMoney(clamp(baseline, 50, 10000));
+  const confidence = clamp(
+    income > 0 ? 0.82 : input.currentBalance > 0 ? 0.68 : 0.61,
+    0.55,
+    0.92,
+  );
+
+  const reasoning = [
+    `Current balance is ${input.currency} ${roundMoney(input.currentBalance).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`,
+    income > 0
+      ? `Estimated monthly free cash flow is ${input.currency} ${roundMoney(buffer).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`
+      : "Monthly income and expense data were not fully provided, so the suggestion uses a conservative baseline.",
+    /emergency|safety|buffer|reserve/.test(goal)
+      ? "Emergency-fund intent detected, so the recommendation prioritizes liquidity and runway."
+      : "Recommendation balances your stated goal with preserving working balance.",
+  ];
+
+  return {
+    recommendedAmount,
+    reasoning,
+    riskLevel,
+    nextAction:
+      riskLevel === "high"
+        ? "Deposit only a small buffer first and review recurring expenses before larger top-ups."
+        : "Top up the suggested amount and review again after your next salary cycle.",
+    confidence,
+  };
+};
+
+const buildHeuristicCopilotResponse = (input: {
+  currentBalance: number;
+  currency: string;
+  monthlyIncome: number;
+  monthlyExpenses: number;
+  recentTransactions: CopilotTransactionPayload[];
+  latestMessage: string;
+}): CopilotResponsePayload => {
+  const latest = input.latestMessage.trim().toLowerCase();
+  const income = Math.max(0, Number(input.monthlyIncome || 0));
+  const expenses = Math.max(0, Number(input.monthlyExpenses || 0));
+  const balance = Math.max(0, Number(input.currentBalance || 0));
+  const recentTransactions = summarizeRecentTransactions(input.recentTransactions);
+  const netCashFlow = income - expenses;
+  const recentSpend = recentTransactions
+    .filter((tx) => tx.direction === "debit")
+    .reduce((sum, tx) => sum + Math.max(0, Number(tx.amount || 0)), 0);
+
+  const suggestedDepositAmount =
+    netCashFlow > 0 ? roundMoney(clamp(netCashFlow * 0.35, 50, 5000)) : null;
+
+  if (/deposit|top up|fund|emergency|save/.test(latest)) {
+    return {
+      reply:
+        netCashFlow > 0
+          ? `Your wallet can likely absorb a planned top-up without stressing monthly cash flow. Based on the numbers you entered, a staged deposit is safer than moving a large amount at once.`
+          : `Your current inputs show limited free cash flow, so I would avoid an aggressive top-up and preserve liquidity first.`,
+      topic: "deposit-planning",
+      suggestedActions: [
+        "Keep at least one monthly expense cycle liquid before larger deposits.",
+        suggestedDepositAmount
+          ? `Start with a deposit around ${input.currency} ${suggestedDepositAmount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`
+          : "Update monthly income and expenses to improve the deposit recommendation.",
+        "Review recurring debit transactions for expenses that can be reduced this month.",
+      ],
+      suggestedDepositAmount,
+      riskLevel: netCashFlow > 0 ? "low" : "medium",
+      confidence: netCashFlow > 0 ? 0.84 : 0.7,
+      followUpQuestion:
+        "Do you want a tighter recommendation for emergency fund, tuition, or investment cash allocation?",
+    };
+  }
+
+  if (/spend|expense|budget|cash flow|cashflow/.test(latest)) {
+    return {
+      reply: `Recent debit activity totals about ${input.currency} ${roundMoney(recentSpend).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}. Your estimated monthly net cash flow is ${input.currency} ${roundMoney(netCashFlow).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`,
+      topic: "budget-review",
+      suggestedActions: [
+        netCashFlow >= 0
+          ? "Preserve positive cash flow by capping non-essential transfers for the rest of the cycle."
+          : "Your expenses are outpacing income; reduce discretionary debits before adding new commitments.",
+        "Tag recent debit transactions by necessity vs optional spend.",
+        "Set a weekly transfer budget if you frequently move funds out of the wallet.",
+      ],
+      suggestedDepositAmount,
+      riskLevel: netCashFlow >= 0 ? "low" : "high",
+      confidence: 0.78,
+      followUpQuestion:
+        "Do you want me to turn this into a weekly spending cap suggestion?",
+    };
+  }
+
+  if (/bitcoin|btc|gold|stock|usd|vnd|exchange/.test(latest)) {
+    return {
+      reply:
+        "This workspace does not currently stream live market data, so I can only give wallet-context guidance here. For live quotes, wire a market data provider or re-enable a live-data backend.",
+      topic: "market-context",
+      suggestedActions: [
+        "Treat volatile assets as high-risk capital, not emergency liquidity.",
+        "Keep transfer and deposit decisions anchored to your wallet runway first.",
+        "Add a live quote provider if you want real-time FX, gold, or crypto answers in the copilot.",
+      ],
+      suggestedDepositAmount: null,
+      riskLevel: "medium",
+      confidence: 0.63,
+      followUpQuestion:
+        "Do you want portfolio-allocation guidance based on your wallet balance instead of live quotes?",
+    };
+  }
+
+  return {
+    reply:
+      "I can help with cash flow, deposit planning, transfer readiness, and budget hygiene using your wallet context. Ask for a deposit plan, spending review, or transfer-risk check.",
+    topic: "wallet-guidance",
+    suggestedActions: [
+      "Ask for a deposit recommendation tied to a specific goal.",
+      "Ask for a spending review using recent transactions.",
+      "Use transfer monitoring before high-value internal transfers.",
+    ],
+    suggestedDepositAmount,
+    riskLevel: "low",
+    confidence: 0.72,
+    followUpQuestion:
+      "What do you want to optimize first: savings, transfers, or monthly spending?",
+  };
+};
 
 const sanitizeUser = (user: UserEntity | null) => {
   if (!user) return null;
@@ -159,7 +509,11 @@ const sanitizeUser = (user: UserEntity | null) => {
 const buildAuthPayload = (
   userDoc: UserEntity,
   sessionId: string,
-  extra?: { notice?: string; status?: "authenticated" },
+  extra?: {
+    notice?: string;
+    status?: "authenticated";
+    security?: SessionSecurityState;
+  },
 ) => {
   const user: components["schemas"]["User"] = {
     id: userDoc.id,
@@ -177,6 +531,7 @@ const buildAuthPayload = (
     }),
     user,
     notice: extra?.notice,
+    security: extra?.security ?? buildSessionSecurityState("low"),
   };
 };
 
@@ -255,6 +610,7 @@ const issueExclusiveUserSession = async (input: {
   authState: ReturnType<typeof getAuthSecurityState>;
   ipAddress?: string;
   userAgent?: string;
+  security?: SessionSecurityState;
 }) => {
   const nextSessionId = crypto.randomUUID();
   const previousSession = input.authState.activeSession;
@@ -262,6 +618,7 @@ const issueExclusiveUserSession = async (input: {
     sessionId: nextSessionId,
     ipAddress: input.ipAddress,
     userAgent: input.userAgent,
+    security: input.security,
   });
 
   await persistAuthSecurityState(
@@ -281,6 +638,72 @@ const countRecentFailedAttempts = async (email: string, minutes: number) => {
   const loginEventRepository = createLoginEventRepository();
   const windowStart = new Date(Date.now() - minutes * 60 * 1000);
   return loginEventRepository.countRecentFailures(email, windowStart);
+};
+
+const countRecentFailedTransfers = async (userId: string, hours: number) =>
+  prisma.transaction.count({
+    where: {
+      fromUserId: userId,
+      status: "FAILED",
+      createdAt: {
+        gte: new Date(Date.now() - hours * 60 * 60 * 1000),
+      },
+    },
+  });
+
+const countRecentTransferVelocity = async (userId: string, hours: number) =>
+  prisma.transaction.count({
+    where: {
+      fromUserId: userId,
+      type: "TRANSFER",
+      createdAt: {
+        gte: new Date(Date.now() - hours * 60 * 60 * 1000),
+      },
+    },
+  });
+
+const getTransferSpendProfile = async (userId: string, pendingAmount: number) => {
+  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const rows = await prisma.transaction.findMany({
+    where: {
+      fromUserId: userId,
+      type: "TRANSFER",
+      status: "COMPLETED",
+      createdAt: {
+        gte: since,
+      },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  const dailyTotals = new Map<string, number>();
+  for (const row of rows) {
+    const tx = decryptStoredTransaction(row);
+    const metadata =
+      tx.metadata && typeof tx.metadata === "object"
+        ? (tx.metadata as Record<string, unknown>)
+        : {};
+    if (metadata.entry !== "DEBIT") continue;
+    const dayKey = tx.createdAt.toISOString().slice(0, 10);
+    dailyTotals.set(dayKey, (dailyTotals.get(dayKey) || 0) + Number(tx.amount || 0));
+  }
+
+  const activeDayTotals = [...dailyTotals.values()].filter((value) => value > 0);
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const todaySpendBefore = dailyTotals.get(todayKey) || 0;
+  const dailySpendAvg30d = activeDayTotals.length
+    ? activeDayTotals.reduce((sum, value) => sum + value, 0) / activeDayTotals.length
+    : 0;
+  const projectedDailySpend = todaySpendBefore + Math.max(0, pendingAmount);
+  const spendSurgeRatio =
+    dailySpendAvg30d > 0 ? projectedDailySpend / dailySpendAvg30d : null;
+
+  return {
+    todaySpendBefore,
+    dailySpendAvg30d,
+    projectedDailySpend,
+    spendSurgeRatio,
+  };
 };
 
 const lockUserAccount = async (
@@ -558,6 +981,7 @@ const executeTransfer = async (input: {
     userId: string | null;
     metadata: unknown;
   } | null;
+  aiMonitoring?: AnomalyResponse;
 }) => {
   return prisma.$transaction(async (tx) => {
     const senderWallet = await tx.wallet.findFirst({
@@ -622,6 +1046,9 @@ const executeTransfer = async (input: {
                 reconciliationId,
                 fromAccount: input.senderAccountNumber,
                 toAccount: input.receiverAccountNumber,
+                aiMonitoring: input.aiMonitoring
+                  ? buildStoredAiMonitoring(input.aiMonitoring)
+                  : undefined,
               },
             },
           }),
@@ -649,6 +1076,12 @@ const executeTransfer = async (input: {
               reconciliationId,
               fromAccount: input.senderAccountNumber,
               toAccount: input.receiverAccountNumber,
+              aiMonitoring: input.aiMonitoring
+                ? {
+                    ...buildStoredAiMonitoring(input.aiMonitoring),
+                    perspective: "receiver_credit",
+                  }
+                : undefined,
             },
           },
         }),
@@ -784,12 +1217,176 @@ app.get("/health", async (_req, res) => {
   }
 });
 
-app.post("/ai/deposit-agent", requireAuth, async (_req, res) => {
-  return res.status(404).json({ error: "Feature removed" });
+app.get("/ai/overview", requireAuth, async (_req, res) => {
+  const fallback: AiOverviewResponse = {
+    status: {
+      modelLoaded: false,
+      modelVersion: null,
+      modelSource: "unavailable",
+      txModelLoaded: false,
+      txModelVersion: null,
+      txModelSource: "unavailable",
+      mongoConnected: false,
+      authMode: null,
+    },
+    stats: {
+      windowHours: 24,
+      loginRiskCounts: { LOW: 0, MEDIUM: 0, HIGH: 0 },
+      txRiskCounts: { LOW: 0, MEDIUM: 0, HIGH: 0 },
+      combinedRiskCounts: { LOW: 0, MEDIUM: 0, HIGH: 0 },
+    },
+  };
+
+  try {
+    const [statusResp, statsResp] = await Promise.all([
+      fetch(`${AI_URL}/ai/status`, {
+        headers: buildAiServiceHeaders(),
+      }),
+      fetch(`${AI_URL}/ai/admin/stats`, {
+        headers: buildAiServiceHeaders(),
+      }),
+    ]);
+
+    const statusData = (await statusResp.json().catch(() => null)) as
+      | Record<string, unknown>
+      | null;
+    const statsData = (await statsResp.json().catch(() => null)) as
+      | Record<string, unknown>
+      | null;
+
+    return res.json({
+      status: {
+        modelLoaded: Boolean(statusData?.model_loaded),
+        modelVersion:
+          typeof statusData?.model_version === "string"
+            ? statusData.model_version
+            : null,
+        modelSource:
+          typeof statusData?.model_source === "string"
+            ? statusData.model_source
+            : null,
+        txModelLoaded: Boolean(statusData?.tx_model_loaded),
+        txModelVersion:
+          typeof statusData?.tx_model_version === "string"
+            ? statusData.tx_model_version
+            : null,
+        txModelSource:
+          typeof statusData?.tx_model_source === "string"
+            ? statusData.tx_model_source
+            : null,
+        mongoConnected: Boolean(statusData?.mongo_connected),
+        authMode:
+          typeof statusData?.auth_mode === "string"
+            ? statusData.auth_mode
+            : null,
+      },
+      stats: {
+        windowHours:
+          typeof statsData?.window_hours === "number"
+            ? statsData.window_hours
+            : 24,
+        loginRiskCounts:
+          statsData?.risk_counts && typeof statsData.risk_counts === "object"
+            ? (statsData.risk_counts as Record<string, number>)
+            : fallback.stats.loginRiskCounts,
+        txRiskCounts:
+          statsData?.tx_risk_counts &&
+          typeof statsData.tx_risk_counts === "object"
+            ? (statsData.tx_risk_counts as Record<string, number>)
+            : fallback.stats.txRiskCounts,
+        combinedRiskCounts:
+          statsData?.combined_risk_counts &&
+          typeof statsData.combined_risk_counts === "object"
+            ? (statsData.combined_risk_counts as Record<string, number>)
+            : fallback.stats.combinedRiskCounts,
+      },
+    } satisfies AiOverviewResponse);
+  } catch (err) {
+    console.warn("Cannot load AI overview from ai-service", err);
+    return res.json(fallback);
+  }
 });
 
-app.post("/ai/copilot-chat", requireAuth, async (_req, res) => {
-  return res.status(404).json({ error: "Feature removed" });
+app.post("/ai/deposit-agent", requireAuth, async (req, res) => {
+  const body = req.body as {
+    goal?: unknown;
+    currentBalance?: unknown;
+    currency?: unknown;
+    monthlyIncome?: unknown;
+    monthlyExpenses?: unknown;
+  };
+  const goal = typeof body.goal === "string" ? body.goal.trim() : "";
+  if (!goal) {
+    return res.status(400).json({ error: "Goal is required" });
+  }
+
+  const plan = buildHeuristicDepositPlan({
+    goal,
+    currentBalance: Number(body.currentBalance || 0),
+    currency:
+      typeof body.currency === "string" && body.currency.trim()
+        ? body.currency.trim().toUpperCase()
+        : "USD",
+    monthlyIncome: Number(body.monthlyIncome || 0),
+    monthlyExpenses: Number(body.monthlyExpenses || 0),
+  });
+
+  return res.json(plan);
+});
+
+app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
+  const body = req.body as {
+    currency?: unknown;
+    currentBalance?: unknown;
+    monthlyIncome?: unknown;
+    monthlyExpenses?: unknown;
+    recentTransactions?: unknown;
+    messages?: unknown;
+  };
+
+  const messages = Array.isArray(body.messages)
+    ? body.messages.filter(
+        (item): item is CopilotMessagePayload =>
+          Boolean(item) &&
+          typeof item === "object" &&
+          (item as { role?: unknown }).role !== undefined &&
+          typeof (item as { content?: unknown }).content === "string",
+      )
+    : [];
+
+  const latestUserMessage = [...messages]
+    .reverse()
+    .find((message) => message.role === "user");
+  if (!latestUserMessage?.content?.trim()) {
+    return res.status(400).json({ error: "A user message is required" });
+  }
+
+  const recentTransactions = Array.isArray(body.recentTransactions)
+    ? body.recentTransactions.filter(
+        (item): item is CopilotTransactionPayload =>
+          Boolean(item) &&
+          typeof item === "object" &&
+          typeof (item as { amount?: unknown }).amount === "number" &&
+          typeof (item as { type?: unknown }).type === "string" &&
+          typeof (item as { createdAt?: unknown }).createdAt === "string" &&
+          ((item as { direction?: unknown }).direction === "credit" ||
+            (item as { direction?: unknown }).direction === "debit"),
+      )
+    : [];
+
+  const response = buildHeuristicCopilotResponse({
+    currency:
+      typeof body.currency === "string" && body.currency.trim()
+        ? body.currency.trim().toUpperCase()
+        : "USD",
+    currentBalance: Number(body.currentBalance || 0),
+    monthlyIncome: Number(body.monthlyIncome || 0),
+    monthlyExpenses: Number(body.monthlyExpenses || 0),
+    recentTransactions,
+    latestMessage: latestUserMessage.content,
+  });
+
+  return res.json(response);
 });
 
 app.post("/auth/register", async (req, res) => {
@@ -1041,26 +1638,52 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
       return res.status(403).json({ error: "reCAPTCHA verification failed" });
     }
 
+    const userDoc = await userRepository.findByEmail(email);
+    const failedBefore = await countRecentFailedAttempts(
+      email,
+      policy.lockoutMinutes,
+    );
+    const isPasswordValid = userDoc
+      ? await verifyPassword(parsed.data.password, userDoc.passwordHash)
+      : false;
     const loginEventPayload = {
+      userId: userDoc?.id || email,
+      email,
       ipAddress: getRequestIp(req),
+      location: getRequestCountry(req),
       userAgent,
       timestamp: new Date().toISOString(),
+      success: isPasswordValid ? 1 : 0,
+      failed10m: failedBefore,
+      botScore: 0.1,
     };
 
-    let aiResult: AnomalyResponse = { score: 0.1, reasons: ["stubbed"] };
+    let aiResult = DEFAULT_AI_RESPONSE;
     try {
       const resp = await fetch(`${AI_URL}/ai/score`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-AI-API-KEY": AI_API_KEY,
+        },
         body: JSON.stringify(loginEventPayload),
       });
-      aiResult = (await resp.json()) as AnomalyResponse;
+      const rawResult = (await resp.json().catch(() => null)) as unknown;
+      if (!resp.ok) {
+        throw new Error(
+          `AI scoring failed with status ${resp.status}${
+            rawResult && typeof rawResult === "object" && "detail" in rawResult
+              ? `: ${String((rawResult as { detail?: unknown }).detail || "")}`
+              : ""
+          }`,
+        );
+      }
+      aiResult = normalizeAiResponse(rawResult);
     } catch (err) {
       console.warn("AI service not reachable, using default", err);
     }
 
-    const userDoc = await userRepository.findByEmail(email);
-    const score = toAnomalyScore(aiResult?.score);
+    const score = aiResult.score;
 
     if (userDoc?.status === "DISABLED") {
       await loginEventRepository.createLoginEvent({
@@ -1084,10 +1707,6 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
         .json({ error: "Account is locked. Please contact support." });
     }
 
-    const failedBefore = await countRecentFailedAttempts(
-      email,
-      policy.lockoutMinutes,
-    );
     if (failedBefore >= policy.maxLoginAttempts) {
       if (userDoc?.id) {
         await lockUserAccount(
@@ -1111,10 +1730,6 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
         .json({ error: "Account temporarily locked due to repeated failures" });
     }
 
-    const isPasswordValid = userDoc
-      ? await verifyPassword(parsed.data.password, userDoc.passwordHash)
-      : false;
-
     await loginEventRepository.createLoginEvent({
       userId: userDoc?.id,
       email,
@@ -1130,7 +1745,7 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
         actor: email,
         userId: userDoc?.id,
         action: "AI_ALERT",
-        details: { score, reasons: aiResult?.reasons ?? [] },
+        details: { score, riskLevel: aiResult.riskLevel, reasons: aiResult.reasons },
         ipAddress: getRequestIp(req),
       });
     }
@@ -1181,26 +1796,148 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
         ? req.headers["user-agent"]
         : undefined;
     const authSecurityState = getAuthSecurityState(userDoc.metadata);
-    if (isTrustedIp(authSecurityState, currentIp)) {
-      const notice = buildRecentIpNotice(
-        authSecurityState,
-        currentIp,
-        APP_TIMEZONE,
-      );
-      const nextAuthState = recordSuccessfulLoginIp(
-        authSecurityState,
-        currentIp,
-      );
+    const wasTrustedIp = isTrustedIp(authSecurityState, currentIp);
+    const previousTrustedIp = getLatestDifferentTrustedIp(
+      authSecurityState,
+      currentIp,
+    );
+    const effectiveRiskLevel =
+      aiResult.riskLevel === "high" && wasTrustedIp ? "low" : aiResult.riskLevel;
+    const effectiveAiResult =
+      effectiveRiskLevel === aiResult.riskLevel
+        ? aiResult
+        : {
+            ...aiResult,
+            riskLevel: effectiveRiskLevel,
+            requireOtp: false,
+            otpChannel: null,
+            otpReason: null,
+          };
+    const reviewReason =
+      aiResult.reasons[0] ||
+      (wasTrustedIp
+        ? "Trusted sign-in"
+        : "New or unusual device detected for this sign-in");
 
-      await userRepository.touchLastLogin(userDoc.id);
-      const sessionResult = await issueExclusiveUserSession({
-        userRepository,
-        userDoc,
-        authState: nextAuthState,
+    if (!wasTrustedIp && effectiveRiskLevel === "high") {
+      const blockedUntil = new Date(
+        Date.now() + HIGH_RISK_LOGIN_BLOCK_MINUTES * 60 * 1000,
+      );
+      const otpChallenge = await createEmailOtpChallenge({
+        userId: userDoc.id,
+        purpose: "LOGIN_HIGH_RISK",
+        destination: userDoc.email,
+        ttlMinutes: LOGIN_OTP_TTL_MINUTES,
+        maxAttempts: OTP_MAX_ATTEMPTS,
+        metadata: {
+          anomalyScore: score,
+          aiReasons: Array.isArray(aiResult?.reasons) ? aiResult.reasons : [],
+          currentIp,
+          previousTrustedIp: previousTrustedIp?.ipAddress,
+          blockedUntil: blockedUntil.toISOString(),
+          sessionSecurity: buildSessionSecurityState("high", {
+            reviewReason,
+            verificationMethod: "email_otp",
+          }),
+        },
+      });
+      await sendLoginOtpEmail({
+        to: userDoc.email,
+        recipientName: userDoc.fullName || userDoc.email.split("@")[0] || "User",
+        otpCode: otpChallenge.otpCode,
+        expiresInMinutes: LOGIN_OTP_TTL_MINUTES,
+      });
+      await sendLoginRiskAlertEmail({
+        to: userDoc.email,
+        recipientName: userDoc.fullName || userDoc.email.split("@")[0] || "User",
         ipAddress: currentIp,
         userAgent: currentUserAgent,
+        reason: reviewReason,
       });
 
+      await logAuditEvent({
+        actor: email,
+        action: "LOGIN_HIGH_RISK_EMAIL_OTP_SENT",
+        userId: userDoc.id,
+        details: {
+          anomaly: score,
+          challengeId: otpChallenge.challengeId,
+          currentIp,
+          previousTrustedIp: previousTrustedIp?.ipAddress,
+          blockedUntil: blockedUntil.toISOString(),
+        },
+        ipAddress: currentIp,
+      });
+
+      return res.json({
+        status: "otp_required",
+        challengeId: otpChallenge.challengeId,
+        destination: maskEmail(userDoc.email),
+        expiresAt: otpChallenge.expiresAt.toISOString(),
+        retryAfterSeconds: otpChallenge.retryAfterSeconds,
+        notice:
+          `New device sign-in is temporarily blocked for ${HIGH_RISK_LOGIN_BLOCK_MINUTES} minutes. A verification code has been sent to your email.`,
+        availableAt: blockedUntil.toISOString(),
+        anomaly: effectiveAiResult,
+      });
+    }
+
+    const sessionSecurity = buildSessionSecurityState(effectiveRiskLevel, {
+      reviewReason,
+    });
+    const nextAuthState = recordSuccessfulLoginIp(authSecurityState, currentIp, {
+      trustIp: effectiveRiskLevel === "low",
+    });
+
+    await userRepository.touchLastLogin(userDoc.id);
+    const sessionResult = await issueExclusiveUserSession({
+      userRepository,
+      userDoc,
+      authState: nextAuthState,
+      ipAddress: currentIp,
+      userAgent: currentUserAgent,
+      security: sessionSecurity,
+    });
+
+    if (sessionResult.replacedSession) {
+      await logAuditEvent({
+        actor: email,
+        action: "SESSION_REPLACED",
+        userId: userDoc.id,
+        details: {
+          previousSessionId: sessionResult.replacedSession.sessionId,
+          previousIp: sessionResult.replacedSession.ipAddress,
+          previousUserAgent: sessionResult.replacedSession.userAgent,
+          newIp: currentIp,
+          newUserAgent: currentUserAgent,
+        },
+        ipAddress: currentIp,
+      });
+    }
+
+    let notice: string | undefined;
+    if (effectiveRiskLevel === "medium") {
+      notice = `New or unusual device detected. Large transfers above $${MEDIUM_RISK_TRANSFER_LIMIT.toLocaleString("en-US")} are temporarily restricted for this session.`;
+      await sendLoginRiskAlertEmail({
+        to: userDoc.email,
+        recipientName: userDoc.fullName || userDoc.email.split("@")[0] || "User",
+        ipAddress: currentIp,
+        userAgent: currentUserAgent,
+        reason: reviewReason,
+      });
+      await logAuditEvent({
+        actor: email,
+        action: "LOGIN_MEDIUM_RISK",
+        userId: userDoc.id,
+        details: {
+          anomaly: score,
+          transferLimit: MEDIUM_RISK_TRANSFER_LIMIT,
+          currentIp,
+        },
+        ipAddress: currentIp,
+      });
+    } else if (wasTrustedIp) {
+      notice = buildRecentIpNotice(authSecurityState, currentIp, APP_TIMEZONE);
       await logAuditEvent({
         actor: email,
         action: "LOGIN_TRUSTED_IP",
@@ -1209,80 +1946,16 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
           anomaly: score,
           trustedIp: currentIp,
         },
-        ipAddress: getRequestIp(req),
-      });
-
-      if (sessionResult.replacedSession) {
-        await logAuditEvent({
-          actor: email,
-          action: "SESSION_REPLACED",
-          userId: userDoc.id,
-          details: {
-            previousSessionId: sessionResult.replacedSession.sessionId,
-            previousIp: sessionResult.replacedSession.ipAddress,
-            previousUserAgent: sessionResult.replacedSession.userAgent,
-            newIp: currentIp,
-            newUserAgent: currentUserAgent,
-          },
-          ipAddress: currentIp,
-        });
-      }
-
-      return res.json({
-        ...buildAuthPayload(userDoc, sessionResult.sessionId, { notice }),
-        anomaly: aiResult,
+        ipAddress: currentIp,
       });
     }
 
-    const previousTrustedIp = getLatestDifferentTrustedIp(
-      authSecurityState,
-      currentIp,
-    );
-    const otpNotice = previousTrustedIp
-      ? `New IP detected. Verification code sent. Most recent trusted IP: ${previousTrustedIp.ipAddress}.`
-      : "New IP detected. Verification code sent to your email.";
-
-    const otpChallenge = await createEmailOtpChallenge({
-      userId: userDoc.id,
-      purpose: "LOGIN",
-      destination: userDoc.email,
-      ttlMinutes: LOGIN_OTP_TTL_MINUTES,
-      maxAttempts: OTP_MAX_ATTEMPTS,
-      metadata: {
-        anomalyScore: score,
-        aiReasons: Array.isArray(aiResult?.reasons) ? aiResult.reasons : [],
-        currentIp,
-        previousTrustedIp: previousTrustedIp?.ipAddress,
-      },
-    });
-    await sendLoginOtpEmail({
-      to: userDoc.email,
-      recipientName: userDoc.fullName || userDoc.email.split("@")[0] || "User",
-      otpCode: otpChallenge.otpCode,
-      expiresInMinutes: LOGIN_OTP_TTL_MINUTES,
-    });
-
-    await logAuditEvent({
-      actor: email,
-      action: "LOGIN_OTP_SENT",
-      userId: userDoc.id,
-      details: {
-        anomaly: score,
-        challengeId: otpChallenge.challengeId,
-        currentIp,
-        previousTrustedIp: previousTrustedIp?.ipAddress,
-      },
-      ipAddress: getRequestIp(req),
-    });
-
     return res.json({
-      status: "otp_required",
-      challengeId: otpChallenge.challengeId,
-      destination: maskEmail(userDoc.email),
-      expiresAt: otpChallenge.expiresAt.toISOString(),
-      retryAfterSeconds: otpChallenge.retryAfterSeconds,
-      notice: otpNotice,
-      anomaly: aiResult,
+      ...buildAuthPayload(userDoc, sessionResult.sessionId, {
+        notice,
+        security: sessionSecurity,
+      }),
+      anomaly: effectiveAiResult,
     });
   } catch (err) {
     if (err instanceof Error && err.message === "OTP_COOLDOWN_ACTIVE") {
@@ -1320,15 +1993,42 @@ app.post("/auth/login/verify", async (req, res) => {
     });
     if (
       !challenge ||
-      challenge.purpose !== "LOGIN" ||
+      (challenge.purpose !== "LOGIN" && challenge.purpose !== "LOGIN_HIGH_RISK") ||
       challenge.channel !== "EMAIL"
     ) {
       return res.status(404).json({ error: "OTP challenge not found" });
     }
 
+    const loginPurpose = challenge.purpose;
+    const metadata =
+      challenge.metadata && typeof challenge.metadata === "object"
+        ? (challenge.metadata as Record<string, unknown>)
+        : {};
+    const blockedUntil =
+      typeof metadata.blockedUntil === "string" &&
+      !Number.isNaN(Date.parse(metadata.blockedUntil))
+        ? new Date(metadata.blockedUntil)
+        : null;
+    if (
+      loginPurpose === "LOGIN_HIGH_RISK" &&
+      blockedUntil &&
+      blockedUntil.getTime() > Date.now()
+    ) {
+      return res.status(423).json({
+        error: `This new-device sign-in stays blocked until ${blockedUntil.toLocaleTimeString(
+          "en-US",
+          {
+            hour: "2-digit",
+            minute: "2-digit",
+          },
+        )}.`,
+        availableAt: blockedUntil.toISOString(),
+      });
+    }
+
     await verifyEmailOtpChallenge({
       userId: challenge.userId,
-      purpose: "LOGIN",
+      purpose: loginPurpose,
       challengeId,
       otp,
     });
@@ -1342,11 +2042,6 @@ app.post("/auth/login/verify", async (req, res) => {
 
     await consumeOtpChallenge(challengeId);
     await userRepository.touchLastLogin(userDoc.id);
-
-    const metadata =
-      challenge.metadata && typeof challenge.metadata === "object"
-        ? (challenge.metadata as Record<string, unknown>)
-        : {};
     const anomalyScore =
       typeof metadata.anomalyScore === "number" ? metadata.anomalyScore : 0;
     const verifiedIp = normalizeIpAddress(
@@ -1359,6 +2054,13 @@ app.post("/auth/login/verify", async (req, res) => {
         ? metadata.previousTrustedIp
         : undefined,
     );
+    const sessionSecurity =
+      loginPurpose === "LOGIN_HIGH_RISK"
+        ? buildSessionSecurityState("high", {
+            reviewReason: "New-device sign-in verified by email OTP",
+            verificationMethod: "email_otp",
+          })
+        : buildSessionSecurityState("low");
     const nextAuthState = recordSuccessfulLoginIp(
       getAuthSecurityState(userDoc.metadata),
       verifiedIp,
@@ -1374,13 +2076,19 @@ app.post("/auth/login/verify", async (req, res) => {
       authState: nextAuthState,
       ipAddress: verifiedIp,
       userAgent: currentUserAgent,
+      security: sessionSecurity,
     });
 
-    const notice = verifiedIp
-      ? previousTrustedIp && previousTrustedIp !== verifiedIp
-        ? `IP ${verifiedIp} is now trusted. Previous trusted IP: ${previousTrustedIp}.`
-        : `IP ${verifiedIp} is now trusted for future sign-ins.`
-      : undefined;
+    const notice =
+      loginPurpose === "LOGIN_HIGH_RISK"
+        ? `Email verification successful. Large transfers above $${MEDIUM_RISK_TRANSFER_LIMIT.toLocaleString(
+            "en-US",
+          )} remain temporarily restricted for this session.`
+        : verifiedIp
+          ? previousTrustedIp && previousTrustedIp !== verifiedIp
+            ? `IP ${verifiedIp} is now trusted. Previous trusted IP: ${previousTrustedIp}.`
+            : `IP ${verifiedIp} is now trusted for future sign-ins.`
+          : undefined;
 
     await logAuditEvent({
       actor: userDoc.email,
@@ -1410,7 +2118,10 @@ app.post("/auth/login/verify", async (req, res) => {
     }
 
     return res.json(
-      buildAuthPayload(userDoc, sessionResult.sessionId, { notice }),
+      buildAuthPayload(userDoc, sessionResult.sessionId, {
+        notice,
+        security: sessionSecurity,
+      }),
     );
   } catch (err) {
     if (err instanceof Error && err.message === "OTP_CHALLENGE_NOT_FOUND") {
@@ -1747,6 +2458,7 @@ app.get("/auth/me", requireAuth, async (req, res) => {
       userDoc.metadata && typeof userDoc.metadata === "object"
         ? (userDoc.metadata as Record<string, unknown>)
         : {};
+    const authSecurityState = getAuthSecurityState(userDoc.metadata);
 
     return res.json({
       id: userDoc.id,
@@ -1758,6 +2470,7 @@ app.get("/auth/me", requireAuth, async (req, res) => {
       dob: typeof userDoc.dob === "string" ? userDoc.dob : "",
       avatar: typeof metadata.avatar === "string" ? metadata.avatar : undefined,
       metadata,
+      security: authSecurityState.activeSession?.security ?? buildSessionSecurityState("low"),
     });
   } catch (err) {
     console.error("Failed to get profile", err);
@@ -2239,6 +2952,18 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
   };
   const amount = toPositiveAmount(body.amount);
   if (!amount) return res.status(400).json({ error: "Invalid amount" });
+  if (
+    isTransferBlockedBySessionSecurity({
+      amount,
+      sessionSecurity: req.sessionSecurity,
+    })
+  ) {
+    return res.status(403).json({
+      error: `Large transfers above $${Number(
+        req.sessionSecurity?.maxTransferAmount || MEDIUM_RISK_TRANSFER_LIMIT,
+      ).toLocaleString("en-US")} are temporarily restricted for this sign-in.`,
+    });
+  }
 
   try {
     const context = await resolveTransferContext({
@@ -2252,6 +2977,83 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
     const user = await userRepository.findValidatedById(senderUserId);
     if (!user) return res.status(404).json({ error: "User not found" });
 
+    const [failedTx24h, velocity1h, spendProfile] = await Promise.all([
+      countRecentFailedTransfers(senderUserId, 24),
+      countRecentTransferVelocity(senderUserId, 1),
+      getTransferSpendProfile(senderUserId, context.amount),
+    ]);
+
+    let aiResult = DEFAULT_AI_RESPONSE;
+    try {
+      const aiResp = await fetch(`${AI_URL}/ai/tx/score`, {
+        method: "POST",
+        headers: buildAiServiceHeaders(),
+        body: JSON.stringify({
+          userId: senderUserId,
+          transactionId: crypto.randomUUID(),
+          timestamp: new Date().toISOString(),
+          amount: context.amount,
+          currency: context.senderWallet.currency,
+          location: getRequestCountry(req),
+          paymentMethod: "wallet_balance",
+          merchantCategory: "p2p_transfer",
+          device:
+            typeof req.headers["user-agent"] === "string"
+              ? req.headers["user-agent"]
+              : "unknown",
+          channel: "web",
+          failedTx24h,
+          velocity1h,
+          dailySpendAvg30d: spendProfile.dailySpendAvg30d,
+          todaySpendBefore: spendProfile.todaySpendBefore,
+          projectedDailySpend: spendProfile.projectedDailySpend,
+        }),
+      });
+      const rawResult = (await aiResp.json().catch(() => null)) as unknown;
+      if (!aiResp.ok) {
+        throw new Error(
+          `AI transaction scoring failed with status ${aiResp.status}`,
+        );
+      }
+      aiResult = normalizeAiResponse(rawResult);
+    } catch (err) {
+      console.warn("AI transaction service not reachable, using default", err);
+    }
+
+    const isSpendSpikeHigh =
+      spendProfile.dailySpendAvg30d > 0 &&
+      spendProfile.projectedDailySpend >= spendProfile.dailySpendAvg30d * 100 &&
+      spendProfile.projectedDailySpend - spendProfile.dailySpendAvg30d >= 20000;
+    if (aiResult.riskLevel === "high" || isSpendSpikeHigh) {
+      await logAuditEvent({
+        actor: req.user?.email,
+        userId: senderUserId,
+        action: "AI_TRANSACTION_ALERT",
+        details: {
+          message:
+            spendProfile.dailySpendAvg30d > 0
+              ? `Projected spend ${spendProfile.projectedDailySpend.toLocaleString(
+                  "en-US",
+                )} is sharply above normal daily behavior (${spendProfile.dailySpendAvg30d.toLocaleString(
+                  "en-US",
+                  { maximumFractionDigits: 2 },
+                )}).`
+              : "High-risk transaction detected by transaction monitoring.",
+          riskLevel: aiResult.riskLevel,
+          amount: context.amount,
+          dailySpendAvg30d: spendProfile.dailySpendAvg30d,
+          todaySpendBefore: spendProfile.todaySpendBefore,
+          projectedDailySpend: spendProfile.projectedDailySpend,
+          spendSurgeRatio: spendProfile.spendSurgeRatio,
+          reasons: aiResult.reasons,
+        },
+        metadata: {
+          aiMonitoring: buildStoredAiMonitoring(aiResult),
+        },
+        ipAddress: getRequestIp(req),
+      });
+    }
+
     const otpChallenge = await createEmailOtpChallenge({
       userId: senderUserId,
       purpose: "TRANSFER",
@@ -2263,6 +3065,8 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
         toAccount: context.receiverAccountNumber,
         amount: context.amount,
         note: context.note,
+        txAiResult: aiResult,
+        txSpendProfile: spendProfile,
       },
     });
 
@@ -2283,6 +3087,11 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
         challengeId: otpChallenge.challengeId,
         amount: context.amount,
         toAccount: context.receiverAccountNumber,
+        txRiskLevel: aiResult.riskLevel,
+        txScore: aiResult.score,
+      },
+      metadata: {
+        aiMonitoring: buildStoredAiMonitoring(aiResult),
       },
       ipAddress: getRequestIp(req),
     });
@@ -2293,6 +3102,7 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       expiresAt: otpChallenge.expiresAt.toISOString(),
       destination: maskEmail(user.email),
       retryAfterSeconds: otpChallenge.retryAfterSeconds,
+      anomaly: aiResult,
     });
   } catch (err) {
     if (err instanceof Error && err.message === "OTP_COOLDOWN_ACTIVE") {
@@ -2362,6 +3172,9 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
     const toUserId =
       typeof metadata.toUserId === "string" ? metadata.toUserId : "";
     const note = typeof metadata.note === "string" ? metadata.note : "";
+    const transferAiResult = normalizeAiResponse(
+      metadata.txAiResult as Record<string, unknown> | undefined,
+    );
     if (!amount || (!toAccount && !toUserId)) {
       return res
         .status(400)
@@ -2389,6 +3202,7 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
       senderAccountNumber: context.senderAccountNumber,
       receiverAccountNumber: context.receiverAccountNumber,
       receiverWalletByAccount: context.receiverWalletByAccount,
+      aiMonitoring: transferAiResult,
     });
 
     await consumeOtpChallenge(challenge.id);
@@ -2400,6 +3214,11 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
       details: {
         challengeId: challenge.id,
         transactionId: transferResult.transaction.id,
+        txRiskLevel: transferAiResult.riskLevel,
+        txScore: transferAiResult.score,
+      },
+      metadata: {
+        aiMonitoring: buildStoredAiMonitoring(transferAiResult),
       },
       ipAddress: getRequestIp(req),
     });
@@ -2435,6 +3254,7 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
     return res.json({
       status: "ok",
       reconciliationId: transferResult.reconciliationId,
+      anomaly: transferAiResult,
       transaction: {
         id: transferResult.transaction.id,
         amount: transferResult.transaction.amount,
@@ -2503,6 +3323,18 @@ app.post("/transfer", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "Missing recipient account" });
   }
   if (!amount) return res.status(400).json({ error: "Invalid amount" });
+  if (
+    isTransferBlockedBySessionSecurity({
+      amount,
+      sessionSecurity: req.sessionSecurity,
+    })
+  ) {
+    return res.status(403).json({
+      error: `Large transfers above $${Number(
+        req.sessionSecurity?.maxTransferAmount || MEDIUM_RISK_TRANSFER_LIMIT,
+      ).toLocaleString("en-US")} are temporarily restricted for this sign-in.`,
+    });
+  }
 
   try {
     const userRepository = createUserRepository();
