@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from pyod.models.iforest import IForest
 
 from app.main import app
+from app.transaction_model import TransactionEvent, adjust_tx_risk_level
 
 JWT_TEST_SECRET = "jwt-test-secret-32-characters-long!"
 
@@ -238,6 +239,46 @@ def test_train_and_score_transaction_monitoring_only():
         assert body["action"] == "REVIEW_TRANSACTION_ONLY"
         assert body["request_key"] == "idem-tx-1"
         assert body["risk_level"] in {"LOW", "MEDIUM", "HIGH"}
+
+
+def test_small_full_balance_transfer_does_not_raise_drain_risk():
+    event = TransactionEvent(
+        user_id="u-low-drain",
+        transaction_id="tx-low-drain",
+        timestamp=datetime(2026, 3, 5, 3, 12, tzinfo=timezone.utc),
+        amount=443,
+        currency="USD",
+        country="US",
+        payment_method="wallet_balance",
+        merchant_category="p2p_transfer",
+        device="Mozilla/5.0 Chrome",
+        failed_tx_24h=0,
+        velocity_1h=1,
+        balance_before=443,
+        remaining_balance=0,
+    )
+
+    assert adjust_tx_risk_level("LOW", event) == "LOW"
+
+
+def test_large_full_balance_transfer_still_raises_drain_risk():
+    event = TransactionEvent(
+        user_id="u-high-drain",
+        transaction_id="tx-high-drain",
+        timestamp=datetime(2026, 3, 5, 3, 12, tzinfo=timezone.utc),
+        amount=1500,
+        currency="USD",
+        country="US",
+        payment_method="wallet_balance",
+        merchant_category="p2p_transfer",
+        device="Mozilla/5.0 Chrome",
+        failed_tx_24h=0,
+        velocity_1h=1,
+        balance_before=1500,
+        remaining_balance=0,
+    )
+
+    assert adjust_tx_risk_level("LOW", event) == "HIGH"
 
 
 def test_train_login_can_persist_artifact(tmp_path, monkeypatch):

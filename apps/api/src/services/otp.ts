@@ -146,11 +146,24 @@ export const verifyEmailOtpChallenge = async (input: {
 
   const expectedHash = hashOtpCode(input.otp);
   if (expectedHash !== challenge.codeHash) {
+    const nextAttempts = challenge.attempts + 1;
+    const remainingAttempts = Math.max(challenge.maxAttempts - nextAttempts, 0);
     await prisma.otpChallenge.update({
       where: { id: challenge.id },
-      data: { attempts: { increment: 1 } },
+      data: { attempts: nextAttempts },
     });
-    throw new Error("OTP_INCORRECT");
+    if (nextAttempts >= challenge.maxAttempts) {
+      const error = new Error("OTP_TOO_MANY_ATTEMPTS") as Error & {
+        remainingAttempts: number;
+      };
+      error.remainingAttempts = 0;
+      throw error;
+    }
+    const error = new Error("OTP_INCORRECT") as Error & {
+      remainingAttempts: number;
+    };
+    error.remainingAttempts = remainingAttempts;
+    throw error;
   }
 
   const metadata =

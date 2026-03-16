@@ -136,6 +136,7 @@ type RequestIpInput = {
 export const resolveRequestIpAddress = (input: RequestIpInput) => {
   const headers = input.headers ?? {};
   const candidates = [
+    ...readHeaderValues(headers["x-demo-public-ip"]),
     ...readHeaderValues(headers["cf-connecting-ip"]),
     ...readHeaderValues(headers["true-client-ip"]),
     ...readHeaderValues(headers["x-real-ip"]),
@@ -157,7 +158,7 @@ export const resolveRequestIpAddress = (input: RequestIpInput) => {
   const nonLoopbackIp = candidates.find((value) => !isLoopbackIpAddress(value));
   if (nonLoopbackIp) return nonLoopbackIp;
 
-  return undefined;
+  return candidates.find((value) => isLoopbackIpAddress(value));
 };
 
 const toTrustedIpEntry = (value: unknown): TrustedIpEntry | null => {

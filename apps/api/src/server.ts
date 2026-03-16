@@ -1,5 +1,7 @@
 import crypto from "crypto";
+import { existsSync } from "fs";
 import path from "path";
+import { spawn } from "child_process";
 
 import cors from "cors";
 import dotenv from "dotenv";
@@ -7,6 +9,7 @@ import express, { type ErrorRequestHandler, type Request } from "express";
 import fetch from "node-fetch";
 import helmet from "helmet";
 import morgan from "morgan";
+import OpenAI from "openai";
 import type { Wallet } from "@prisma/client";
 
 import { loginSchema, registerSchema } from "@secure-wallet/shared";
@@ -79,6 +82,14 @@ dotenv.config({
   override: true,
 });
 
+const AI_SERVICE_WORKDIR =
+  [
+    path.resolve(process.cwd(), "../ai-service"),
+    path.resolve(process.cwd(), "apps/ai-service"),
+    path.resolve(process.cwd(), "../../apps/ai-service"),
+  ].find((candidate) => existsSync(candidate)) ||
+  path.resolve(process.cwd(), "../ai-service");
+
 const app = express();
 app.set("trust proxy", true);
 app.use(cors());
@@ -91,6 +102,18 @@ app.use(lockoutGuard);
 const PORT = process.env.PORT_API || 4000;
 const AI_URL = process.env.AI_SERVICE_URL || "http://localhost:8000";
 const AI_API_KEY = process.env.AI_API_KEY || "local-dev-key";
+const OLLAMA_URL =
+  (process.env.OLLAMA_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "";
+const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || "15000");
+const OLLAMA_FALLBACK_MODEL = process.env.OLLAMA_FALLBACK_MODEL || "";
+const OLLAMA_FALLBACK_TIMEOUT_MS = Number(
+  process.env.OLLAMA_FALLBACK_TIMEOUT_MS || "20000",
+);
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
+const OPENAI_REASONING_EFFORT =
+  process.env.OPENAI_REASONING_EFFORT || "low";
 const APP_TIMEZONE = process.env.APP_TIMEZONE || "Asia/Ho_Chi_Minh";
 const ADMIN_EMAIL = "ledanhdat56@gmail.com";
 const ADMIN_PASSWORD = "Ledanhdat2005@";
@@ -100,23 +123,89 @@ const TRANSFER_OTP_TTL_MINUTES = Number(
 const TRANSFER_OTP_MAX_ATTEMPTS = Number(
   process.env.TRANSFER_OTP_MAX_ATTEMPTS || "5",
 );
+const LARGE_TRANSFER_ADVISORY_AMOUNT = Number(
+  process.env.LARGE_TRANSFER_ADVISORY_AMOUNT || "1000",
+);
+const HIGH_TRANSFER_ADVISORY_AMOUNT = Number(
+  process.env.HIGH_TRANSFER_ADVISORY_AMOUNT || "5000",
+);
+const BALANCE_DRAIN_ADVISORY_RATIO = Number(
+  process.env.BALANCE_DRAIN_ADVISORY_RATIO || "0.85",
+);
+const BALANCE_DRAIN_WARNING_RATIO = Number(
+  process.env.BALANCE_DRAIN_WARNING_RATIO || "0.95",
+);
+const LOW_REMAINING_BALANCE_ADVISORY = Number(
+  process.env.LOW_REMAINING_BALANCE_ADVISORY || "25",
+);
+const BALANCE_DRAIN_ADVISORY_MIN_AMOUNT = Number(
+  process.env.BALANCE_DRAIN_ADVISORY_MIN_AMOUNT ||
+    LARGE_TRANSFER_ADVISORY_AMOUNT,
+);
+const BALANCE_DRAIN_WARNING_MIN_AMOUNT = Number(
+  process.env.BALANCE_DRAIN_WARNING_MIN_AMOUNT ||
+    Math.max(LARGE_TRANSFER_ADVISORY_AMOUNT, 2000),
+);
+const TRANSFER_SCAM_BLOCK_MIN_AMOUNT = Number(
+  process.env.TRANSFER_SCAM_BLOCK_MIN_AMOUNT || "100000",
+);
+const TRANSFER_SCAM_BLOCK_MAX_REMAINING_BALANCE = Number(
+  process.env.TRANSFER_SCAM_BLOCK_MAX_REMAINING_BALANCE || "0.01",
+);
+const TRANSFER_SCAM_BLOCK_SPEND_SURGE_RATIO = Number(
+  process.env.TRANSFER_SCAM_BLOCK_SPEND_SURGE_RATIO || "6",
+);
+const TRANSFER_SCAM_HOLD_MINUTES = Number(
+  process.env.TRANSFER_SCAM_HOLD_MINUTES || "30",
+);
+const KNOWN_RECIPIENT_LOOKBACK_DAYS = Number(
+  process.env.KNOWN_RECIPIENT_LOOKBACK_DAYS || "180",
+);
 const LOGIN_OTP_TTL_MINUTES = Number(process.env.LOGIN_OTP_TTL_MINUTES || "5");
+const HIGH_RISK_LOGIN_OTP_MAX_ATTEMPTS = Number(
+  process.env.HIGH_RISK_LOGIN_OTP_MAX_ATTEMPTS || "3",
+);
 const REGISTER_OTP_TTL_MINUTES = LOGIN_OTP_TTL_MINUTES;
 const RESET_PASSWORD_OTP_TTL_MINUTES = Number(
   process.env.RESET_PASSWORD_OTP_TTL_MINUTES || "10",
 );
 const OTP_MAX_ATTEMPTS = Number(process.env.OTP_MAX_ATTEMPTS || "5");
-const RECAPTCHA_SECRET_KEY = process.env.RECAPTCHA_SECRET_KEY || "";
+const CAPTCHA_TRACK_WIDTH_PX = Number(
+  process.env.CAPTCHA_TRACK_WIDTH_PX || "440",
+);
+const CAPTCHA_PIECE_WIDTH_PX = Number(
+  process.env.CAPTCHA_PIECE_WIDTH_PX || "82",
+);
+const CAPTCHA_TOLERANCE_PX = Number(
+  process.env.CAPTCHA_TOLERANCE_PX || "12",
+);
+const CAPTCHA_TTL_MS = Number(process.env.CAPTCHA_TTL_SECONDS || "180") * 1000;
+const CAPTCHA_SECRET_KEY =
+  process.env.CAPTCHA_SECRET_KEY ||
+  process.env.JWT_SECRET ||
+  "dev-insecure-captcha-secret";
 const MEDIUM_RISK_TRANSFER_LIMIT = Number(
   process.env.MEDIUM_RISK_TRANSFER_LIMIT || "500",
 );
 const HIGH_RISK_LOGIN_BLOCK_MINUTES = Number(
   process.env.HIGH_RISK_LOGIN_BLOCK_MINUTES || "10",
 );
+const AUTO_START_LOCAL_AI_SERVICE = !["0", "false", "no"].includes(
+  String(process.env.AUTO_START_LOCAL_AI_SERVICE || "1").trim().toLowerCase(),
+);
 
 const normalizeEmail = (email: string) => email.trim().toLowerCase();
 
 const getRequestIp = (req: Request) => resolveRequestIpAddress(req);
+
+const isLocalAiServiceUrl = (value: string) => {
+  try {
+    const parsed = new URL(value);
+    return parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
+  } catch {
+    return false;
+  }
+};
 
 const toAnomalyScore = (value: unknown) =>
   typeof value === "number" && Number.isFinite(value) ? value : 0;
@@ -135,12 +224,116 @@ type AnomalyResponse = {
   requestKey?: string | null;
 };
 
+type TransferSafetyAdvisory = {
+  requestKey: string | null;
+  severity: "caution" | "warning" | "blocked";
+  title: string;
+  message: string;
+  confirmationLabel: string;
+  reasons: string[];
+  requiresAcknowledgement: boolean;
+  transferRatio: number;
+  remainingBalance: number;
+  remainingBalanceRatio: number;
+  amount: number;
+  currency: string;
+  blockedUntil?: string | null;
+};
+
+type TransferSpendProfile = {
+  todaySpendBefore: number;
+  dailySpendAvg30d: number;
+  projectedDailySpend: number;
+  spendSurgeRatio: number | null;
+};
+
+type TransferRecipientProfile = {
+  isKnownRecipient: boolean;
+  completedTransfers: number;
+  totalSent: number;
+  lastTransferAt: string | null;
+};
+
+type TransferSafetyHold = {
+  toAccount: string;
+  toUserId: string;
+  amount: number;
+  requestKey: string | null;
+  reason: string;
+  blockedUntil: string;
+  createdAt: string;
+};
+
+type AdminAlertStatus =
+  | "pending_review"
+  | "confirmed_risk"
+  | "false_positive"
+  | "escalated";
+
+type AdminAlertSignal = {
+  label: string;
+  value: string;
+  tone: "neutral" | "warn" | "info";
+};
+
+type AdminAlertResponse = {
+  id: string;
+  type: "login" | "transaction";
+  sourceAction: string;
+  actor: string;
+  userId: string | null;
+  createdAt: string;
+  ipAddress: string | null;
+  riskLevel: AnomalyResponse["riskLevel"];
+  anomalyScore: number;
+  reasons: string[];
+  summary: string;
+  explanation: string;
+  keySignals: AdminAlertSignal[];
+  adminStatus: AdminAlertStatus;
+  adminNote: string | null;
+  reviewedAt: string | null;
+  reviewedBy: string | null;
+  monitoringOnly: boolean;
+  aiDecision: string | null;
+  modelVersion: string | null;
+  modelSource: string | null;
+  eventId: string | null;
+  transactionId: string | null;
+  amount: number | null;
+  currency: string | null;
+  location: string | null;
+  paymentMethod: string | null;
+  merchantCategory: string | null;
+};
+
 type SessionSecurityState = {
   riskLevel: "low" | "medium" | "high";
   reviewReason?: string;
   verificationMethod?: "password" | "email_otp" | "sms_otp";
   restrictLargeTransfers?: boolean;
   maxTransferAmount?: number;
+};
+
+type ClientDeviceContext = {
+  browser?: string;
+  browserVersion?: string;
+  platform?: string;
+  platformVersion?: string;
+  deviceType?: string;
+  mobile?: boolean;
+  deviceTitle?: string;
+  deviceDetail?: string;
+};
+
+type SliderCaptchaPayload = {
+  kind: "slider_v1";
+  nonce: string;
+  issuedAt: number;
+  expiresAt: number;
+  targetOffsetPx: number;
+  maxOffsetPx: number;
+  tolerancePx: number;
 };
 
 const DEFAULT_AI_RESPONSE: AnomalyResponse = {
@@ -155,6 +348,56 @@ const DEFAULT_AI_RESPONSE: AnomalyResponse = {
   modelSource: "fallback",
   modelVersion: null,
   requestKey: null,
+};
+
+const buildHeuristicLoginAiResponse = (input: {
+  currentIp?: string;
+  wasTrustedIp: boolean;
+  previousTrustedIp?: string | null;
+  failedBefore: number;
+  isPasswordValid: boolean;
+}): AnomalyResponse => {
+  let score = 0.12;
+  const reasons = ["Heuristic login risk estimate was used."];
+
+  if (!input.wasTrustedIp) {
+    score += 0.38;
+    reasons.push("Sign-in came from a new or untrusted IP.");
+  }
+
+  if (input.previousTrustedIp && input.previousTrustedIp !== input.currentIp) {
+    score += 0.08;
+    reasons.push("IP differs from the most recent trusted sign-in.");
+  }
+
+  if (input.failedBefore >= 3) {
+    score += 0.22;
+    reasons.push("There were multiple recent failed attempts.");
+  } else if (input.failedBefore >= 1) {
+    score += 0.1;
+    reasons.push("There was at least one recent failed attempt.");
+  }
+
+  if (!input.isPasswordValid) {
+    score += 0.1;
+    reasons.push("Credential verification failed.");
+  }
+
+  score = clamp(score, 0.05, 0.98);
+
+  return {
+    score,
+    riskLevel: score >= 0.7 ? "high" : score >= 0.4 ? "medium" : "low",
+    reasons,
+    monitoringOnly: false,
+    action: "NOTIFY_ADMIN_ONLY",
+    requireOtp: !input.wasTrustedIp,
+    otpChannel: !input.wasTrustedIp ? "email" : null,
+    otpReason: !input.wasTrustedIp ? "New IP sign-in verification" : null,
+    modelSource: "api-heuristic-fallback",
+    modelVersion: "login-risk-v1",
+    requestKey: null,
+  };
 };
 
 const toStringList = (value: unknown) =>
@@ -215,6 +458,227 @@ const normalizeAiResponse = (value: unknown): AnomalyResponse => {
   };
 };
 
+const AI_ALERT_ACTIONS = [
+  "AI_LOGIN_ALERT",
+  "AI_TRANSACTION_ALERT",
+  "AI_ALERT",
+] as const;
+
+const normalizeRecord = (value: unknown): Record<string, unknown> => {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return {};
+};
+
+const asStringOrNull = (value: unknown) =>
+  typeof value === "string" && value.trim() ? value.trim() : null;
+
+const asNumberOrNull = (value: unknown) =>
+  typeof value === "number" && Number.isFinite(value) ? value : null;
+
+const toTitleCase = (value: string) =>
+  value
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+
+const normalizeAdminAlertStatus = (value: unknown): AdminAlertStatus => {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (
+    normalized === "confirmed_risk" ||
+    normalized === "false_positive" ||
+    normalized === "escalated"
+  ) {
+    return normalized;
+  }
+  return "pending_review";
+};
+
+const buildAdminAlertExplanation = (input: {
+  type: "login" | "transaction";
+  riskLevel: AnomalyResponse["riskLevel"];
+  reasons: string[];
+  monitoringOnly: boolean;
+  aiDecision?: string | null;
+}) => {
+  const subject = input.type === "transaction" ? "transaction" : "login";
+  const reasonText = input.reasons.length
+    ? input.reasons.join(", ")
+    : "unusual behavior";
+  const modeText = input.monitoringOnly
+    ? "The model is currently operating in monitoring mode."
+    : "The model is currently configured to trigger an active response.";
+  const decisionText = input.aiDecision
+    ? ` Current AI decision: ${toTitleCase(input.aiDecision)}.`
+    : "";
+
+  return {
+    summary: `${toTitleCase(input.riskLevel)} risk ${subject} alert`,
+    explanation: `AI flagged this ${subject} because it detected ${reasonText}. ${modeText}${decisionText}`,
+  };
+};
+
+const buildAdminAlertSignals = (
+  type: "login" | "transaction",
+  detail: Record<string, unknown>,
+  riskLevel: AnomalyResponse["riskLevel"],
+): AdminAlertSignal[] => {
+  const signals: AdminAlertSignal[] = [
+    {
+      label: "Risk level",
+      value: toTitleCase(riskLevel),
+      tone: riskLevel === "high" ? "warn" : riskLevel === "medium" ? "info" : "neutral",
+    },
+  ];
+
+  const anomalyScore = asNumberOrNull(detail.anomalyScore);
+  if (anomalyScore !== null) {
+    signals.push({
+      label: "Anomaly score",
+      value: `${Math.round(anomalyScore * 100)}%`,
+      tone: anomalyScore >= 0.9 ? "warn" : anomalyScore >= 0.7 ? "info" : "neutral",
+    });
+  }
+
+  const modelVersion = asStringOrNull(detail.modelVersion);
+  if (modelVersion) {
+    signals.push({
+      label: "Model version",
+      value: modelVersion,
+      tone: "neutral",
+    });
+  }
+
+  if (type === "login") {
+    const ipAddress = asStringOrNull(detail.ipAddress);
+    const country = asStringOrNull(detail.country);
+    const region = asStringOrNull(detail.region);
+    const city = asStringOrNull(detail.city);
+    if (ipAddress) {
+      signals.push({ label: "IP address", value: ipAddress, tone: "warn" });
+    }
+    const location = [city, region, country].filter(Boolean).join(", ");
+    if (location) {
+      signals.push({ label: "Location", value: location, tone: "info" });
+    }
+  } else {
+    const amount = asNumberOrNull(detail.amount);
+    const currency = asStringOrNull(detail.currency) ?? "USD";
+    const country = asStringOrNull(detail.country);
+    const paymentMethod = asStringOrNull(detail.paymentMethod);
+    const merchantCategory = asStringOrNull(detail.merchantCategory);
+    if (amount !== null) {
+      signals.push({
+        label: "Amount",
+        value: `${amount.toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })} ${currency}`,
+        tone: amount >= 1000 ? "warn" : "info",
+      });
+    }
+    if (country) {
+      signals.push({ label: "Country", value: country, tone: "info" });
+    }
+    if (paymentMethod) {
+      signals.push({
+        label: "Payment method",
+        value: paymentMethod,
+        tone: "neutral",
+      });
+    }
+    if (merchantCategory) {
+      signals.push({
+        label: "Merchant category",
+        value: merchantCategory,
+        tone: "neutral",
+      });
+    }
+  }
+
+  return signals;
+};
+
+const buildAdminAlertResponse = (log: {
+  id: string;
+  userId: string | null;
+  actor: string;
+  action: string;
+  details: unknown;
+  ipAddress: string | null;
+  createdAt: Date;
+  metadata: unknown;
+}): AdminAlertResponse => {
+  const detail = normalizeRecord(log.details);
+  const metadata = normalizeRecord(log.metadata);
+  const type =
+    log.action === "AI_TRANSACTION_ALERT" ? "transaction" : "login";
+  const reasons = toStringList(detail.reasons);
+  const riskLevel = normalizeRiskLevel(
+    detail.riskLevel ?? metadata.riskLevel ?? "low",
+  );
+  const monitoringOnly = Boolean(
+    detail.monitoringOnly ?? metadata.monitoringOnly ?? true,
+  );
+  const explanation = buildAdminAlertExplanation({
+    type,
+    riskLevel,
+    reasons,
+    monitoringOnly,
+    aiDecision: asStringOrNull(detail.aiDecision),
+  });
+  const country = asStringOrNull(detail.country);
+  const region = asStringOrNull(detail.region);
+  const city = asStringOrNull(detail.city);
+  const location = [city, region, country].filter(Boolean).join(", ") || country;
+
+  return {
+    id: log.id,
+    type,
+    sourceAction: log.action,
+    actor: log.actor,
+    userId: log.userId,
+    createdAt: log.createdAt.toISOString(),
+    ipAddress: log.ipAddress ?? asStringOrNull(detail.ipAddress),
+    riskLevel,
+    anomalyScore: toAnomalyScore(detail.anomalyScore ?? detail.score),
+    reasons,
+    summary: explanation.summary,
+    explanation: explanation.explanation,
+    keySignals: buildAdminAlertSignals(type, detail, riskLevel),
+    adminStatus: normalizeAdminAlertStatus(
+      detail.adminStatus ?? metadata.adminStatus,
+    ),
+    adminNote: asStringOrNull(detail.adminNote ?? metadata.adminNote),
+    reviewedAt: asStringOrNull(detail.reviewedAt ?? metadata.reviewedAt),
+    reviewedBy: asStringOrNull(detail.reviewedBy ?? metadata.reviewedBy),
+    monitoringOnly,
+    aiDecision: asStringOrNull(detail.aiDecision),
+    modelVersion:
+      asStringOrNull(detail.modelVersion) ??
+      asStringOrNull(metadata.modelVersion),
+    modelSource:
+      asStringOrNull(detail.modelSource) ?? asStringOrNull(metadata.modelSource),
+    eventId:
+      asStringOrNull(detail.loginEventId) ??
+      asStringOrNull(detail.transactionEventId) ??
+      asStringOrNull(metadata.loginEventId) ??
+      asStringOrNull(metadata.transactionEventId),
+    transactionId:
+      asStringOrNull(detail.transactionId) ??
+      asStringOrNull(metadata.transactionId),
+    amount: asNumberOrNull(detail.amount),
+    currency: asStringOrNull(detail.currency),
+    location,
+    paymentMethod: asStringOrNull(detail.paymentMethod),
+    merchantCategory: asStringOrNull(detail.merchantCategory),
+  };
+};
+
 const buildSessionSecurityState = (
   riskLevel: AnomalyResponse["riskLevel"],
   options?: {
@@ -245,20 +709,222 @@ const isTransferBlockedBySessionSecurity = (input: {
   return input.amount > sessionSecurity.maxTransferAmount;
 };
 
-const getRequestCountry = (req: Request) => {
-  const headerCandidates = [
-    req.headers["cf-ipcountry"],
-    req.headers["x-vercel-ip-country"],
-    req.headers["cloudfront-viewer-country"],
-  ];
+const LOCATION_PLACEHOLDER_VALUES = new Set([
+  "UNK",
+  "UNKNOWN",
+  "UNKNOWN LOCATION",
+  "XX",
+  "ZZ",
+  "T1",
+  "N/A",
+]);
 
-  for (const candidate of headerCandidates) {
-    if (typeof candidate === "string" && candidate.trim()) {
-      return candidate.trim().slice(0, 2).toUpperCase();
+const countryDisplayNames =
+  typeof Intl !== "undefined" && "DisplayNames" in Intl
+    ? new Intl.DisplayNames(["en"], { type: "region" })
+    : null;
+
+const readRequestHeaderString = (value: unknown) => {
+  if (Array.isArray(value)) {
+    const firstString = value.find(
+      (item): item is string => typeof item === "string" && item.trim().length > 0,
+    );
+    return firstString?.trim();
+  }
+
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+};
+
+const normalizeLocationLabelValue = (value: unknown) => {
+  const raw = readRequestHeaderString(value);
+  if (!raw) return undefined;
+  const upper = raw.toUpperCase();
+  if (LOCATION_PLACEHOLDER_VALUES.has(upper)) return undefined;
+
+  if (/^[A-Z]{2}$/.test(upper)) {
+    try {
+      return countryDisplayNames?.of(upper) || upper;
+    } catch {
+      return upper;
     }
   }
 
-  return "UNK";
+  return raw;
+};
+
+const normalizeClientDeviceContext = (
+  value: unknown,
+): ClientDeviceContext | undefined => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const raw = value as Record<string, unknown>;
+  const readString = (input: unknown) =>
+    typeof input === "string" && input.trim() ? input.trim() : undefined;
+
+  const deviceContext: ClientDeviceContext = {
+    browser: readString(raw.browser),
+    browserVersion: readString(raw.browserVersion),
+    platform: readString(raw.platform),
+    platformVersion: readString(raw.platformVersion),
+    deviceType: readString(raw.deviceType),
+    mobile: typeof raw.mobile === "boolean" ? raw.mobile : undefined,
+    deviceTitle: readString(raw.deviceTitle),
+    deviceDetail: readString(raw.deviceDetail),
+  };
+
+  return Object.values(deviceContext).some((entry) => entry !== undefined)
+    ? deviceContext
+    : undefined;
+};
+
+const readClientDeviceContext = (payload: unknown) => {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return undefined;
+  }
+
+  const body = payload as Record<string, unknown>;
+  return normalizeClientDeviceContext(body.deviceContext);
+};
+
+const buildUserAgentDeviceSummary = (
+  userAgent?: string,
+  deviceContext?: ClientDeviceContext,
+) => {
+  if (deviceContext?.deviceTitle || deviceContext?.deviceDetail) {
+    return {
+      title: deviceContext.deviceTitle || "Unknown device",
+      detail:
+        deviceContext.deviceDetail ||
+        [deviceContext.browser, deviceContext.browserVersion]
+          .filter(Boolean)
+          .join(" ") ||
+        "Browser and device details unavailable",
+    };
+  }
+
+  const agent = userAgent?.trim() || "";
+  if (!agent) {
+    return {
+      title: "Unknown device",
+      detail: "Browser and device details unavailable",
+    };
+  }
+
+  let browserLabel = "";
+  const browserMatchers: Array<[RegExp, string]> = [
+    [/Edg\/(\d+)/, "Edge"],
+    [/Chrome\/(\d+)/, "Chrome"],
+    [/Firefox\/(\d+)/, "Firefox"],
+    [/Version\/(\d+).+Safari\//, "Safari"],
+  ];
+  for (const [pattern, label] of browserMatchers) {
+    const match = agent.match(pattern);
+    if (match) {
+      browserLabel = `${label}${match[1] ? ` ${match[1]}` : ""}`;
+      break;
+    }
+  }
+
+  if (/Windows/i.test(agent)) {
+    return {
+      title: "Windows PC",
+      detail: [browserLabel, "Windows"].filter(Boolean).join(" | "),
+    };
+  }
+  if (/Mac OS X/i.test(agent)) {
+    return {
+      title: "Mac device",
+      detail: [browserLabel, "macOS"].filter(Boolean).join(" | "),
+    };
+  }
+  if (/iPhone/i.test(agent)) {
+    return {
+      title: "iPhone",
+      detail: [browserLabel, "iOS"].filter(Boolean).join(" | "),
+    };
+  }
+  if (/iPad/i.test(agent)) {
+    return {
+      title: "iPad",
+      detail: [browserLabel, "iPadOS"].filter(Boolean).join(" | "),
+    };
+  }
+  if (/Android/i.test(agent)) {
+    return {
+      title: /Mobile/i.test(agent) ? "Android phone" : "Android device",
+      detail: [browserLabel, "Android"].filter(Boolean).join(" | "),
+    };
+  }
+  if (/Linux/i.test(agent)) {
+    return {
+      title: "Linux device",
+      detail: [browserLabel, "Linux"].filter(Boolean).join(" | "),
+    };
+  }
+
+  return {
+    title: "Unknown device",
+    detail: browserLabel || (agent.length > 64 ? `${agent.slice(0, 64)}...` : agent),
+  };
+};
+
+const isPrivateOrLoopbackIpAddress = (value?: string | null) => {
+  const normalized = normalizeIpAddress(value);
+  if (!normalized) return false;
+  if (normalized === "127.0.0.1" || normalized === "::1") return true;
+
+  if (normalized.includes(".")) {
+    const parts = normalized.split(".").map((part) => Number(part));
+    if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part))) {
+      return false;
+    }
+    const [a, b] = parts;
+    return (
+      a === 10 ||
+      a === 127 ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 169 && b === 254)
+    );
+  }
+
+  const lower = normalized.toLowerCase();
+  return (
+    lower === "::1" ||
+    lower.startsWith("fc") ||
+    lower.startsWith("fd") ||
+    lower.startsWith("fe80:")
+  );
+};
+
+const getRequestLocation = (req: Request) => {
+  const city = normalizeLocationLabelValue(
+    req.headers["x-vercel-ip-city"] ?? req.headers["cf-ipcity"],
+  );
+  const region = normalizeLocationLabelValue(
+    req.headers["x-vercel-ip-country-region"] ?? req.headers["cf-region-code"],
+  );
+  const country = normalizeLocationLabelValue(
+    req.headers["cf-ipcountry"] ??
+      req.headers["x-vercel-ip-country"] ??
+      req.headers["cloudfront-viewer-country"],
+  );
+
+  const locationParts = [city, region, country].filter(
+    (part, index, parts): part is string =>
+      Boolean(part) && parts.findIndex((candidate) => candidate === part) === index,
+  );
+  if (locationParts.length) {
+    return locationParts.join(", ");
+  }
+
+  const ipAddress = getRequestIp(req);
+  if (!ipAddress) return undefined;
+  if (ipAddress === "127.0.0.1") return "Local device";
+  if (isPrivateOrLoopbackIpAddress(ipAddress)) return "Private network";
+  return undefined;
 };
 
 type DepositAgentResponse = {
@@ -291,6 +957,52 @@ type CopilotResponsePayload = {
   confidence: number;
   followUpQuestion?: string | null;
 };
+
+type MarketIntent = {
+  assetClass: "fx" | "crypto" | "commodity" | "stock" | "index";
+  symbol: string;
+  label: string;
+  quoteHint?: string | null;
+};
+
+type MarketQuoteSnapshot = {
+  symbol: string;
+  label: string;
+  assetClass: MarketIntent["assetClass"];
+  price: number;
+  currency: string;
+  previousClose: number | null;
+  change: number | null;
+  changePercent: number | null;
+  exchangeName: string | null;
+  marketState: string | null;
+  asOf: Date;
+  source: "Yahoo Finance";
+};
+
+const openaiClient = OPENAI_API_KEY
+  ? new OpenAI({ apiKey: OPENAI_API_KEY })
+  : null;
+
+type OpenAiCopilotResult =
+  | { status: "disabled" }
+  | { status: "ok"; payload: CopilotResponsePayload }
+  | {
+      status: "error";
+      code: string;
+      message: string;
+    };
+
+type OllamaCopilotResult =
+  | { status: "disabled" }
+  | { status: "ok"; payload: CopilotResponsePayload }
+  | {
+      status: "error";
+      code: string;
+      message: string;
+    };
+
+type CopilotLanguage = "vi" | "en";
 
 type AiOverviewResponse = {
   status: {
@@ -339,8 +1051,1111 @@ const clamp = (value: number, min: number, max: number) =>
 
 const roundMoney = (value: number) => Math.round(value * 100) / 100;
 
-const summarizeRecentTransactions = (transactions: CopilotTransactionPayload[]) =>
-  transactions.slice(0, 12);
+const formatMoneyAmount = (currency: string, amount: number) =>
+  `${currency} ${roundMoney(Math.max(0, amount)).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+
+const normalizeMetadataRecord = (value: unknown) =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+
+const suspiciousTransferNotePatterns: Array<{
+  pattern: RegExp;
+  reason: string;
+}> = [
+  {
+    pattern:
+      /\b(urgent|immediately|right now|act now|safe account|security team|unlock|verify|verification fee|release funds|refund|customs|tax|penalty)\b/i,
+    reason: "Transfer note contains urgency or account-verification wording often used in scams.",
+  },
+  {
+    pattern:
+      /\b(invest|investment|profit|guaranteed return|crypto signal|forex|broker|loan fee|commission)\b/i,
+    reason: "Transfer note references high-pressure investing or fee collection language.",
+  },
+  {
+    pattern:
+      /\b(khan cap|gap|chuyen ngay|tai khoan an toan|tai khoan bao mat|xac minh|phi mo khoa|hoan tien|hai quan|thue|phat)\b/i,
+    reason: "Transfer note contains urgent or account-verification terms commonly seen in scams.",
+  },
+  {
+    pattern:
+      /\b(dau tu|loi nhuan|bao lai|tin hieu|san forex|phi vay|hoa hong)\b/i,
+    reason: "Transfer note references investment or fee-collection language often used in fraud.",
+  },
+];
+
+const getSuspiciousTransferNoteReasons = (note: string) => {
+  const normalizedNote = note.trim();
+  if (!normalizedNote) return [];
+  return suspiciousTransferNotePatterns
+    .filter((entry) => entry.pattern.test(normalizedNote))
+    .map((entry) => entry.reason);
+};
+
+const getTransferSafetyHold = (metadata: unknown): TransferSafetyHold | null => {
+  const root = normalizeMetadataRecord(metadata);
+  const hold = normalizeMetadataRecord(root.transferSafetyHold);
+  if (
+    typeof hold.blockedUntil !== "string" ||
+    Number.isNaN(Date.parse(hold.blockedUntil))
+  ) {
+    return null;
+  }
+  return {
+    toAccount: typeof hold.toAccount === "string" ? hold.toAccount : "",
+    toUserId: typeof hold.toUserId === "string" ? hold.toUserId : "",
+    amount: typeof hold.amount === "number" ? hold.amount : 0,
+    requestKey: typeof hold.requestKey === "string" ? hold.requestKey : null,
+    reason:
+      typeof hold.reason === "string"
+        ? hold.reason
+        : "This transfer is temporarily blocked for safety review.",
+    blockedUntil: hold.blockedUntil,
+    createdAt:
+      typeof hold.createdAt === "string"
+        ? hold.createdAt
+        : new Date().toISOString(),
+  };
+};
+
+const setTransferSafetyHold = (
+  metadata: unknown,
+  hold: TransferSafetyHold | null,
+) => {
+  const root = { ...normalizeMetadataRecord(metadata) };
+  if (!hold) {
+    delete root.transferSafetyHold;
+    return root;
+  }
+  root.transferSafetyHold = hold;
+  return root;
+};
+
+const matchesTransferSafetyHold = (
+  hold: TransferSafetyHold,
+  input: { toAccount: string; toUserId: string },
+) =>
+  Boolean(
+    (hold.toAccount && input.toAccount && hold.toAccount === input.toAccount) ||
+      (hold.toUserId && input.toUserId && hold.toUserId === input.toUserId),
+  );
+
+const buildBlockedTransferAdvisory = (input: {
+  requestKey?: string | null;
+  amount: number;
+  currency: string;
+  senderBalance: number;
+  reasons: string[];
+  blockedUntil: string;
+  title?: string;
+  message?: string;
+}) => {
+  const senderBalance = Math.max(0, Number(input.senderBalance) || 0);
+  const amount = Math.max(0, Number(input.amount) || 0);
+  const remainingBalance = Math.max(0, roundMoney(senderBalance - amount));
+  return {
+    requestKey: input.requestKey || null,
+    severity: "blocked" as const,
+    title: input.title || "Transfer temporarily blocked for safety review",
+    message:
+      input.message ||
+      `This transfer is paused until ${new Date(input.blockedUntil).toLocaleString(
+        "en-US",
+      )} so you have time to verify the recipient through a trusted channel.`,
+    confirmationLabel: "Blocked for safety review",
+    reasons: input.reasons,
+    requiresAcknowledgement: false,
+    transferRatio: senderBalance > 0 ? amount / senderBalance : 0,
+    remainingBalance,
+    remainingBalanceRatio:
+      senderBalance > 0 ? remainingBalance / senderBalance : 0,
+    amount,
+    currency: input.currency,
+    blockedUntil: input.blockedUntil,
+  } satisfies TransferSafetyAdvisory;
+};
+
+const buildTransferSafetyAdvisory = (input: {
+  amount: number;
+  senderBalance: number;
+  currency: string;
+  aiResult: AnomalyResponse;
+  spendProfile: TransferSpendProfile;
+  recipientProfile: TransferRecipientProfile;
+  note: string;
+  requestKey?: string | null;
+}) => {
+  const senderBalance = Math.max(0, Number(input.senderBalance) || 0);
+  const amount = Math.max(0, Number(input.amount) || 0);
+  if (!senderBalance || !amount) return null;
+
+  const remainingBalance = Math.max(0, roundMoney(senderBalance - amount));
+  const transferRatio = amount / senderBalance;
+  const remainingBalanceRatio =
+    senderBalance > 0 ? remainingBalance / senderBalance : 0;
+  const hasMaterialDrainAmount = amount >= BALANCE_DRAIN_ADVISORY_MIN_AMOUNT;
+  const hasWarningDrainAmount = amount >= BALANCE_DRAIN_WARNING_MIN_AMOUNT;
+  const noteRiskReasons = getSuspiciousTransferNoteReasons(input.note);
+  const reasons = new Set<string>();
+  let severity: TransferSafetyAdvisory["severity"] = "caution";
+  const hasStrongWarningSignal =
+    amount >= HIGH_TRANSFER_ADVISORY_AMOUNT ||
+    (hasWarningDrainAmount &&
+      transferRatio >= BALANCE_DRAIN_WARNING_RATIO) ||
+    (input.spendProfile.dailySpendAvg30d > 0 &&
+      input.spendProfile.spendSurgeRatio !== null &&
+      input.spendProfile.spendSurgeRatio >= 8) ||
+    (noteRiskReasons.length > 0 &&
+      amount >= Math.max(500, LARGE_TRANSFER_ADVISORY_AMOUNT * 0.5));
+
+  if (hasMaterialDrainAmount && transferRatio >= BALANCE_DRAIN_ADVISORY_RATIO) {
+    reasons.add(
+      `This transfer uses ${Math.round(transferRatio * 100)}% of your available wallet balance.`,
+    );
+  }
+  if (
+    hasWarningDrainAmount &&
+    transferRatio >= BALANCE_DRAIN_WARNING_RATIO
+  ) {
+    severity = "warning";
+  }
+
+  if (
+    hasMaterialDrainAmount &&
+    remainingBalance <= LOW_REMAINING_BALANCE_ADVISORY
+  ) {
+    reasons.add(
+      `You would keep only ${formatMoneyAmount(input.currency, remainingBalance)} after this transfer.`,
+    );
+  }
+
+  if (amount >= LARGE_TRANSFER_ADVISORY_AMOUNT) {
+    reasons.add(
+      `This is a high-value transfer for a consumer wallet (${formatMoneyAmount(input.currency, amount)}).`,
+    );
+  }
+  if (amount >= HIGH_TRANSFER_ADVISORY_AMOUNT) {
+    severity = "warning";
+  }
+
+  if (!input.recipientProfile.isKnownRecipient) {
+    reasons.add(
+      "This recipient is new compared with your recent completed transfers.",
+    );
+    if (amount >= HIGH_TRANSFER_ADVISORY_AMOUNT) {
+      severity = "warning";
+    }
+  }
+
+  for (const noteReason of noteRiskReasons) {
+    reasons.add(noteReason);
+  }
+  if (
+    noteRiskReasons.length > 0 &&
+    amount >= Math.max(500, LARGE_TRANSFER_ADVISORY_AMOUNT * 0.5)
+  ) {
+    severity = "warning";
+  }
+
+  if (
+    input.spendProfile.dailySpendAvg30d > 0 &&
+    input.spendProfile.spendSurgeRatio !== null &&
+    input.spendProfile.spendSurgeRatio >= 4
+  ) {
+    reasons.add(
+      `Today's projected transfer spend is ${input.spendProfile.spendSurgeRatio.toFixed(
+        1,
+      )}x above your recent daily average.`,
+    );
+  }
+  if (
+    input.spendProfile.dailySpendAvg30d > 0 &&
+    input.spendProfile.spendSurgeRatio !== null &&
+    input.spendProfile.spendSurgeRatio >= 8
+  ) {
+    severity = "warning";
+  }
+
+  if (input.aiResult.riskLevel === "medium") {
+    reasons.add(
+      "Our fraud monitor sees behavior that is less typical than your recent transfers.",
+    );
+  }
+  if (input.aiResult.riskLevel === "high") {
+    if (hasStrongWarningSignal) {
+      severity = "warning";
+    }
+    reasons.add(
+      "Our fraud monitor found multiple signals that often appear in scam-driven transfers.",
+    );
+  }
+
+  const advisoryReasons = [...reasons];
+  if (!advisoryReasons.length) return null;
+
+  const hasBlockSizedAmount = amount > TRANSFER_SCAM_BLOCK_MIN_AMOUNT;
+  const hasNearZeroRemainingBalance =
+    remainingBalance <= TRANSFER_SCAM_BLOCK_MAX_REMAINING_BALANCE;
+  const shouldBlock = hasBlockSizedAmount && hasNearZeroRemainingBalance;
+
+  if (shouldBlock) {
+    const blockedUntil = new Date(
+      Date.now() + TRANSFER_SCAM_HOLD_MINUTES * 60 * 1000,
+    ).toISOString();
+    return buildBlockedTransferAdvisory({
+      requestKey: input.requestKey,
+      amount,
+      currency: input.currency,
+      senderBalance,
+      blockedUntil,
+      reasons: advisoryReasons,
+      message: `This transfer is temporarily blocked until ${new Date(
+        blockedUntil,
+      ).toLocaleString(
+        "en-US",
+      )}. Our AI monitor sees a high-risk pattern: a new recipient combined with scam-like behavior signals.`,
+    });
+  }
+
+  const messageLead =
+    hasMaterialDrainAmount && transferRatio >= BALANCE_DRAIN_ADVISORY_RATIO
+      ? `You are about to transfer ${Math.round(
+          transferRatio * 100,
+        )}% of your balance and keep ${formatMoneyAmount(
+          input.currency,
+          remainingBalance,
+        )}.`
+      : `You are about to send ${formatMoneyAmount(
+          input.currency,
+          amount,
+        )} from your wallet.`;
+
+  const messageTail =
+    severity === "warning"
+      ? "If anyone pressured you to act quickly, stop and confirm the recipient through a trusted channel before continuing."
+      : "Pause for a moment and make sure you know the recipient and why this transfer is needed.";
+
+  return {
+    requestKey: input.requestKey || null,
+    severity,
+    title:
+      severity === "warning"
+        ? "High-risk transfer needs confirmation"
+        : "Review this transfer before continuing",
+    message: `${messageLead} ${messageTail}`,
+    confirmationLabel:
+      severity === "warning"
+        ? "I reviewed the warning, continue to OTP"
+        : "I understand, continue to OTP",
+    reasons: advisoryReasons,
+    requiresAcknowledgement: true,
+    transferRatio,
+    remainingBalance,
+    remainingBalanceRatio,
+    amount,
+    currency: input.currency,
+    blockedUntil: null,
+  } satisfies TransferSafetyAdvisory;
+};
+
+const normalizeTransferSafetyAdvisory = (value: unknown) => {
+  if (!value || typeof value !== "object") return null;
+  const data = value as Record<string, unknown>;
+  const severity =
+    data.severity === "warning" ||
+    data.severity === "caution" ||
+    data.severity === "blocked"
+      ? data.severity
+      : null;
+  if (
+    (data.requestKey !== null && typeof data.requestKey !== "string") ||
+    !severity ||
+    typeof data.title !== "string" ||
+    typeof data.message !== "string" ||
+    typeof data.confirmationLabel !== "string" ||
+    typeof data.requiresAcknowledgement !== "boolean" ||
+    typeof data.transferRatio !== "number" ||
+    typeof data.remainingBalance !== "number" ||
+    typeof data.remainingBalanceRatio !== "number" ||
+    typeof data.amount !== "number" ||
+    typeof data.currency !== "string" ||
+    (data.blockedUntil !== undefined &&
+      data.blockedUntil !== null &&
+      typeof data.blockedUntil !== "string")
+  ) {
+    return null;
+  }
+
+  return {
+    requestKey: typeof data.requestKey === "string" ? data.requestKey : null,
+    severity,
+    title: data.title,
+    message: data.message,
+    confirmationLabel: data.confirmationLabel,
+    reasons: Array.isArray(data.reasons)
+      ? data.reasons.filter((item): item is string => typeof item === "string")
+      : [],
+    requiresAcknowledgement: data.requiresAcknowledgement,
+    transferRatio: data.transferRatio,
+    remainingBalance: data.remainingBalance,
+    remainingBalanceRatio: data.remainingBalanceRatio,
+    amount: data.amount,
+    currency: data.currency,
+    blockedUntil:
+      typeof data.blockedUntil === "string" ? data.blockedUntil : null,
+  } satisfies TransferSafetyAdvisory;
+};
+
+const summarizeRecentTransactions = (
+  transactions: CopilotTransactionPayload[],
+) => transactions.slice(0, 12);
+
+const formatCopilotMoney = (currency: string, amount: number) =>
+  `${currency} ${roundMoney(Math.max(0, amount)).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+
+const normalizeCopilotRiskLevel = (value: unknown) => {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+  return normalized === "high" || normalized === "medium" ? normalized : "low";
+};
+
+const sanitizeCopilotText = (value: string) =>
+  value
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+
+const parseOpenAiCopilotPayload = (
+  value: string,
+): CopilotResponsePayload | null => {
+  try {
+    const parsed = JSON.parse(sanitizeCopilotText(value)) as Record<
+      string,
+      unknown
+    >;
+    if (typeof parsed.reply !== "string" || !parsed.reply.trim()) return null;
+
+    const suggestedActions = Array.isArray(parsed.suggestedActions)
+      ? parsed.suggestedActions.filter(
+          (item): item is string => typeof item === "string" && item.trim().length > 0,
+        )
+      : [];
+
+    return {
+      reply: parsed.reply.trim(),
+      topic:
+        typeof parsed.topic === "string" && parsed.topic.trim()
+          ? parsed.topic.trim()
+          : "financial-guidance",
+      suggestedActions: suggestedActions.slice(0, 5),
+      suggestedDepositAmount:
+        typeof parsed.suggestedDepositAmount === "number" &&
+        Number.isFinite(parsed.suggestedDepositAmount)
+          ? parsed.suggestedDepositAmount
+          : null,
+      riskLevel: normalizeCopilotRiskLevel(parsed.riskLevel),
+      confidence: clamp(Number(parsed.confidence || 0.72), 0.4, 0.99),
+      followUpQuestion:
+        typeof parsed.followUpQuestion === "string" &&
+        parsed.followUpQuestion.trim()
+          ? parsed.followUpQuestion.trim()
+          : null,
+    };
+  } catch {
+    return null;
+  }
+};
+
+const summarizeCopilotConversation = (messages: CopilotMessagePayload[]) =>
+  messages
+    .slice(-8)
+    .map(
+      (message) =>
+        `${message.role === "assistant" ? "Assistant" : message.role === "system" ? "System" : "User"}: ${message.content.trim()}`,
+    )
+    .join("\n");
+
+const summarizeCopilotTransactions = (
+  transactions: CopilotTransactionPayload[],
+  currency: string,
+) =>
+  summarizeRecentTransactions(transactions)
+    .map((transaction) => {
+      const amount = Math.max(0, Number(transaction.amount || 0));
+      const when = new Date(transaction.createdAt);
+      const whenLabel = Number.isNaN(when.getTime())
+        ? transaction.createdAt
+        : when.toISOString();
+      return [
+        transaction.direction === "debit" ? "debit" : "credit",
+        `${currency} ${formatMarketPrice(amount)}`,
+        transaction.type,
+        transaction.description || "no description",
+        whenLabel,
+      ].join(" | ");
+    })
+    .join("\n");
+
+const buildOpenAiCopilotInput = (input: {
+  currency: string;
+  currentBalance: number;
+  monthlyIncome: number;
+  monthlyExpenses: number;
+  recentTransactions: CopilotTransactionPayload[];
+  messages: CopilotMessagePayload[];
+  language: CopilotLanguage;
+}) => {
+  const now = formatMarketTimestamp(new Date());
+  const transactionSummary = summarizeCopilotTransactions(
+    input.recentTransactions,
+    input.currency,
+  );
+  const conversationSummary = summarizeCopilotConversation(input.messages);
+
+  return [
+    `Current time: ${now}`,
+    `Preferred response language: ${input.language === "vi" ? "Vietnamese" : "English"}`,
+    `Wallet currency: ${input.currency}`,
+    `Wallet balance: ${input.currency} ${formatMarketPrice(
+      Math.max(0, input.currentBalance),
+    )}`,
+    `Estimated monthly income: ${input.currency} ${formatMarketPrice(
+      Math.max(0, input.monthlyIncome),
+    )}`,
+    `Estimated monthly expenses: ${input.currency} ${formatMarketPrice(
+      Math.max(0, input.monthlyExpenses),
+    )}`,
+    "Recent wallet transactions:",
+    transactionSummary || "No recent transactions available.",
+    "Conversation transcript:",
+    conversationSummary,
+  ].join("\n\n");
+};
+
+const buildCopilotSystemInstructions = (language: CopilotLanguage) =>
+  [
+    "You are FPIPay Financial Copilot.",
+    "Answer as a practical financial assistant for a wallet app.",
+    "Use the wallet context and transaction context provided.",
+    `Reply in ${language === "vi" ? "Vietnamese" : "English"} and keep the same language as the user's latest message.`,
+    "Do not claim real-time market prices unless they were already provided by another tool in the app context.",
+    "If the user asks for exact live market prices and no live quote is present, say that live quote support should be used.",
+    "Return valid JSON only with these keys:",
+    "reply, topic, suggestedActions, suggestedDepositAmount, riskLevel, confidence, followUpQuestion",
+    "riskLevel must be one of: low, medium, high.",
+    "confidence must be a number between 0 and 1.",
+    "suggestedActions must be an array of short strings.",
+    "suggestedDepositAmount must be a number or null.",
+    "followUpQuestion must be a string or null.",
+  ].join(" ");
+
+const callOllamaCopilotWithModel = async (
+  input: {
+    currency: string;
+    currentBalance: number;
+    monthlyIncome: number;
+    monthlyExpenses: number;
+    recentTransactions: CopilotTransactionPayload[];
+    messages: CopilotMessagePayload[];
+    language: CopilotLanguage;
+  },
+  options: { model: string; timeoutMs: number },
+): Promise<OllamaCopilotResult> => {
+  if (!options.model.trim()) return { status: "disabled" };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
+
+  try {
+    const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: options.model,
+        prompt: buildOpenAiCopilotInput(input),
+        system: buildCopilotSystemInstructions(input.language),
+        format: "json",
+        stream: false,
+        options: {
+          temperature: 0.2,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      return {
+        status: "error",
+        code:
+          response.status === 404
+            ? "ollama_model_not_found"
+            : response.status === 400
+              ? "ollama_bad_request"
+              : `ollama_http_${response.status}`,
+        message:
+          errorText || `Ollama request failed with status ${response.status}`,
+      };
+    }
+
+    const payload = (await response.json().catch(() => null)) as
+      | Record<string, unknown>
+      | null;
+    const responseText =
+      payload && typeof payload.response === "string"
+        ? payload.response.trim()
+        : "";
+    if (!responseText) {
+      return {
+        status: "error",
+        code: "ollama_empty_response",
+        message: "Ollama returned an empty response.",
+      };
+    }
+
+    const parsed = parseOpenAiCopilotPayload(responseText);
+    if (!parsed) {
+      return {
+        status: "error",
+        code: "ollama_invalid_response_format",
+        message:
+          "Ollama returned a response that did not match the expected format.",
+      };
+    }
+
+    return { status: "ok", payload: parsed };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const code =
+      message.includes("ECONNREFUSED") || message.includes("fetch failed")
+        ? "ollama_unreachable"
+        : message.includes("aborted")
+          ? "ollama_timeout"
+          : "ollama_unknown_error";
+    return { status: "error", code, message };
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+const callOllamaCopilot = async (input: {
+  currency: string;
+  currentBalance: number;
+  monthlyIncome: number;
+  monthlyExpenses: number;
+  recentTransactions: CopilotTransactionPayload[];
+  messages: CopilotMessagePayload[];
+  language: CopilotLanguage;
+}): Promise<OllamaCopilotResult> => {
+  if (!OLLAMA_MODEL.trim()) return { status: "disabled" };
+
+  const primaryResult = await callOllamaCopilotWithModel(input, {
+    model: OLLAMA_MODEL,
+    timeoutMs: OLLAMA_TIMEOUT_MS,
+  });
+  if (primaryResult.status === "ok" || primaryResult.status === "disabled") {
+    return primaryResult;
+  }
+
+  const fallbackModel = OLLAMA_FALLBACK_MODEL.trim();
+  if (!fallbackModel || fallbackModel === OLLAMA_MODEL.trim()) {
+    return primaryResult;
+  }
+
+  if (
+    primaryResult.code !== "ollama_timeout" &&
+    primaryResult.code !== "ollama_model_not_found" &&
+    primaryResult.code !== "ollama_unreachable" &&
+    primaryResult.code !== "ollama_invalid_response_format"
+  ) {
+    return primaryResult;
+  }
+
+  const fallbackResult = await callOllamaCopilotWithModel(input, {
+    model: fallbackModel,
+    timeoutMs: OLLAMA_FALLBACK_TIMEOUT_MS,
+  });
+  return fallbackResult.status === "ok" ? fallbackResult : primaryResult;
+};
+
+const callOpenAiCopilot = async (input: {
+  currency: string;
+  currentBalance: number;
+  monthlyIncome: number;
+  monthlyExpenses: number;
+  recentTransactions: CopilotTransactionPayload[];
+  messages: CopilotMessagePayload[];
+  language: CopilotLanguage;
+}): Promise<OpenAiCopilotResult> => {
+  if (!openaiClient) return { status: "disabled" };
+
+  try {
+    const response = await openaiClient.responses.create({
+      model: OPENAI_MODEL,
+      reasoning: { effort: OPENAI_REASONING_EFFORT as "low" | "medium" | "high" },
+      instructions: buildCopilotSystemInstructions(input.language),
+      input: buildOpenAiCopilotInput(input),
+    });
+
+    const responseText =
+      typeof response.output_text === "string" && response.output_text.trim()
+        ? response.output_text.trim()
+        : "";
+    if (!responseText) {
+      return {
+        status: "error",
+        code: "empty_response",
+        message: "OpenAI returned an empty response.",
+      };
+    }
+
+    const parsed = parseOpenAiCopilotPayload(responseText);
+    if (!parsed) {
+      return {
+        status: "error",
+        code: "invalid_response_format",
+        message: "OpenAI returned a response that did not match the expected format.",
+      };
+    }
+
+    return { status: "ok", payload: parsed };
+  } catch (err) {
+    console.warn("OpenAI copilot request failed", err);
+    const errorCode =
+      err && typeof err === "object" && "code" in err && typeof err.code === "string"
+        ? err.code
+        : "unknown_error";
+    const errorMessage =
+      err instanceof Error && err.message
+        ? err.message
+        : "OpenAI request failed";
+    return {
+      status: "error",
+      code: errorCode,
+      message: errorMessage,
+    };
+  }
+};
+
+const COPILOT_MARKET_TIMEOUT_MS = Number(
+  process.env.COPILOT_MARKET_TIMEOUT_MS || "7000",
+);
+const COPILOT_COMPANY_ALIASES: Record<string, MarketIntent> = {
+  apple: { assetClass: "stock", symbol: "AAPL", label: "Apple" },
+  tesla: { assetClass: "stock", symbol: "TSLA", label: "Tesla" },
+  nvidia: { assetClass: "stock", symbol: "NVDA", label: "NVIDIA" },
+  microsoft: { assetClass: "stock", symbol: "MSFT", label: "Microsoft" },
+  google: { assetClass: "stock", symbol: "GOOGL", label: "Alphabet" },
+  alphabet: { assetClass: "stock", symbol: "GOOGL", label: "Alphabet" },
+  amazon: { assetClass: "stock", symbol: "AMZN", label: "Amazon" },
+  meta: { assetClass: "stock", symbol: "META", label: "Meta" },
+  netflix: { assetClass: "stock", symbol: "NFLX", label: "Netflix" },
+  fpt: { assetClass: "stock", symbol: "FPT.VN", label: "FPT" },
+  vnm: { assetClass: "stock", symbol: "VNM.VN", label: "Vinamilk" },
+  hpg: { assetClass: "stock", symbol: "HPG.VN", label: "Hoa Phat" },
+  vcb: { assetClass: "stock", symbol: "VCB.VN", label: "Vietcombank" },
+  vic: { assetClass: "stock", symbol: "VIC.VN", label: "Vingroup" },
+  vhm: { assetClass: "stock", symbol: "VHM.VN", label: "Vinhomes" },
+  mwg: { assetClass: "stock", symbol: "MWG.VN", label: "Mobile World" },
+};
+const COPILOT_INDEX_ALIASES: Record<string, MarketIntent> = {
+  "sp500": { assetClass: "index", symbol: "^GSPC", label: "S&P 500" },
+  "s&p500": { assetClass: "index", symbol: "^GSPC", label: "S&P 500" },
+  "s&p 500": { assetClass: "index", symbol: "^GSPC", label: "S&P 500" },
+  nasdaq: { assetClass: "index", symbol: "^IXIC", label: "NASDAQ Composite" },
+  dowjones: { assetClass: "index", symbol: "^DJI", label: "Dow Jones" },
+  "dow jones": { assetClass: "index", symbol: "^DJI", label: "Dow Jones" },
+  vnindex: { assetClass: "index", symbol: "^VNINDEX", label: "VN-Index" },
+  "vn-index": { assetClass: "index", symbol: "^VNINDEX", label: "VN-Index" },
+};
+const COPILOT_COMMON_MARKET_SYMBOLS = new Set([
+  "AAPL",
+  "AMZN",
+  "BTC",
+  "DJI",
+  "ETH",
+  "EUR",
+  "FPT",
+  "GC",
+  "GOOGL",
+  "META",
+  "MSFT",
+  "NASDAQ",
+  "NVDA",
+  "S&P",
+  "SPY",
+  "TSLA",
+  "USD",
+  "VND",
+  "VNINDEX",
+  "VNM",
+  "XAU",
+]);
+
+const normalizeCopilotText = (value: string) =>
+  value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+
+const VIETNAMESE_CHAR_REGEX =
+  /[ăâđêôơưáàạảãấầậẩẫắằặẳẵéèẹẻẽếềệểễíìịỉĩóòọỏõốồộổỗớờợởỡúùụủũứừựửữýỳỵỷỹ]/i;
+
+const localizeCopilotText = (
+  language: CopilotLanguage,
+  vi: string,
+  en: string,
+) => (language === "vi" ? vi : en);
+
+const detectCopilotLanguage = (message: string): CopilotLanguage => {
+  const trimmed = message.trim();
+  if (!trimmed) return "en";
+  if (VIETNAMESE_CHAR_REGEX.test(trimmed)) return "vi";
+
+  const normalized = normalizeCopilotText(trimmed);
+  return /\b(xin chao|chao|toi|minh|ban|giup|bao nhieu|nhu the nao|tai sao|la gi|hom nay|tien|chung khoan|co phieu|ti gia|ty gia|dong tien|tai chinh|tiet kiem|chi tieu|thu nhap|chi phi)\b/.test(
+    normalized,
+  )
+    ? "vi"
+    : "en";
+};
+
+const isLikelyMarketQuestion = (normalizedMessage: string) =>
+  /ty gia|ti gia|exchange rate|fx|forex|gia vang|gold|bitcoin|btc|ethereum|eth|co phieu|chung khoan|stock|share price|ticker|index|nasdaq|dow jones|s&p|vn-index|vnindex|price|bao nhieu|how much|hom nay|today/.test(
+    normalizedMessage,
+  );
+
+const extractFxIntent = (
+  normalizedMessage: string,
+): MarketIntent | null => {
+  const compactMessage = normalizedMessage.replace(/\s+/g, "");
+  const slashPair = normalizedMessage.match(/\b([a-z]{3})\s*[/-]\s*([a-z]{3})\b/);
+  const compactPair = compactMessage.match(/\b([a-z]{3})([a-z]{3})\b/);
+  const pair = slashPair || compactPair;
+  if (!pair) return null;
+
+  const base = pair[1].toUpperCase();
+  const quote = pair[2].toUpperCase();
+  if (base === quote) return null;
+  if (
+    !/[a-z]{3}/.test(pair[1]) ||
+    !/[a-z]{3}/.test(pair[2]) ||
+    !/(ty gia|ti gia|exchange|rate|fx|forex|usd|eur|jpy|gbp|aud|cad|sgd|vnd)/.test(
+      normalizedMessage,
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    assetClass: "fx",
+    symbol: `${base}${quote}=X`,
+    label: `${base}/${quote}`,
+    quoteHint: quote,
+  };
+};
+
+const extractTickerIntent = (
+  originalMessage: string,
+  normalizedMessage: string,
+): MarketIntent | null => {
+  const hasTickerCue =
+    /co phieu|chung khoan|stock|share|ticker|symbol|index|nasdaq|dow|s&p|gia|price|bao nhieu|how much|hom nay|today/.test(
+      normalizedMessage,
+    );
+
+  for (const [alias, intent] of Object.entries(COPILOT_COMPANY_ALIASES)) {
+    if (normalizedMessage.includes(alias) && hasTickerCue) return intent;
+  }
+
+  for (const [alias, intent] of Object.entries(COPILOT_INDEX_ALIASES)) {
+    if (normalizedMessage.includes(alias) && hasTickerCue) return intent;
+  }
+
+  const explicitTicker =
+    originalMessage.match(/\b(?:ticker|symbol|ma)\s*[:\-]?\s*([A-Za-z^][A-Za-z0-9.=^-]{0,9})\b/i)?.[1] ||
+    originalMessage.match(/\b([A-Z]{1,5}(?:\.[A-Z]{1,3})?)\b/)?.[1];
+
+  if (!explicitTicker) return null;
+  const symbol = explicitTicker.toUpperCase();
+  if (!COPILOT_COMMON_MARKET_SYMBOLS.has(symbol) && symbol.length < 2) {
+    return null;
+  }
+
+  if (!hasTickerCue) {
+    return null;
+  }
+
+  return {
+    assetClass:
+      /index|nasdaq|dow|s&p|vnindex|vn-index/.test(normalizedMessage)
+        ? "index"
+        : "stock",
+    symbol,
+    label: symbol,
+  };
+};
+
+const detectMarketIntent = (message: string): MarketIntent | null => {
+  const normalizedMessage = normalizeCopilotText(message);
+  if (!isLikelyMarketQuestion(normalizedMessage)) return null;
+
+  if (/bitcoin|\bbtc\b/.test(normalizedMessage)) {
+    return {
+      assetClass: "crypto",
+      symbol: "BTC-USD",
+      label: "Bitcoin",
+      quoteHint: "USD",
+    };
+  }
+
+  if (/ethereum|\beth\b/.test(normalizedMessage)) {
+    return {
+      assetClass: "crypto",
+      symbol: "ETH-USD",
+      label: "Ethereum",
+      quoteHint: "USD",
+    };
+  }
+
+  if (/gia vang|gold|\bxau\b/.test(normalizedMessage)) {
+    return {
+      assetClass: "commodity",
+      symbol: "GC=F",
+      label: "Gold futures",
+      quoteHint: "USD",
+    };
+  }
+
+  return (
+    extractFxIntent(normalizedMessage) ||
+    extractTickerIntent(message, normalizedMessage)
+  );
+};
+
+const formatMarketPrice = (value: number) => {
+  const decimals =
+    value >= 1000 ? 2 : value >= 100 ? 2 : value >= 1 ? 4 : 6;
+  return value.toLocaleString("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: decimals,
+  });
+};
+
+const formatMarketDelta = (value: number, currency: string) =>
+  `${value >= 0 ? "+" : "-"}${currency} ${formatMarketPrice(Math.abs(value))}`;
+
+const formatMarketTimestamp = (value: Date) =>
+  value.toLocaleString("en-US", {
+    timeZone: APP_TIMEZONE,
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+    timeZoneName: "short",
+  });
+
+const fetchMarketQuote = async (
+  intent: MarketIntent,
+): Promise<MarketQuoteSnapshot | null> => {
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    COPILOT_MARKET_TIMEOUT_MS,
+  );
+
+  try {
+    const response = await fetch(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+        intent.symbol,
+      )}?interval=1d&range=5d&includePrePost=false`,
+      {
+        headers: {
+          "User-Agent": "Mozilla/5.0 FPIPay/1.0",
+          Accept: "application/json",
+        },
+        signal: controller.signal,
+      },
+    );
+    if (!response.ok) return null;
+
+    const payload = (await response.json().catch(() => null)) as unknown;
+    const chart = normalizeRecord(payload);
+    const chartBody = normalizeRecord(chart.chart);
+    const result = Array.isArray(chartBody.result)
+      ? normalizeRecord(chartBody.result[0])
+      : {};
+    const meta = normalizeRecord(result.meta);
+    const timestamps = Array.isArray(result.timestamp)
+      ? result.timestamp.filter(
+          (item): item is number => typeof item === "number" && Number.isFinite(item),
+        )
+      : [];
+    const indicators = normalizeRecord(result.indicators);
+    const quoteGroup = Array.isArray(indicators.quote)
+      ? normalizeRecord(indicators.quote[0])
+      : {};
+    const closes = Array.isArray(quoteGroup.close)
+      ? quoteGroup.close.filter(
+          (item): item is number => typeof item === "number" && Number.isFinite(item),
+        )
+      : [];
+    const price =
+      asNumberOrNull(meta.regularMarketPrice) ??
+      asNumberOrNull(closes.length ? closes[closes.length - 1] : null) ??
+      null;
+    const previousClose =
+      asNumberOrNull(meta.previousClose) ??
+      asNumberOrNull(meta.chartPreviousClose) ??
+      null;
+    const marketTime =
+      asNumberOrNull(meta.regularMarketTime) ??
+      asNumberOrNull(
+        timestamps.length ? timestamps[timestamps.length - 1] : null,
+      ) ??
+      null;
+    const currency =
+      asStringOrNull(meta.currency) ?? intent.quoteHint ?? "USD";
+
+    if (price === null || marketTime === null) return null;
+
+    const change =
+      previousClose !== null && Number.isFinite(previousClose)
+        ? roundMoney(price - previousClose)
+        : null;
+    const changePercent =
+      previousClose && Number.isFinite(previousClose) && previousClose !== 0
+        ? roundMoney(((price - previousClose) / previousClose) * 100)
+        : null;
+
+    return {
+      symbol: intent.symbol,
+      label: intent.label,
+      assetClass: intent.assetClass,
+      price,
+      currency,
+      previousClose,
+      change,
+      changePercent,
+      exchangeName: asStringOrNull(meta.exchangeName),
+      marketState: asStringOrNull(meta.marketState),
+      asOf: new Date(marketTime * 1000),
+      source: "Yahoo Finance",
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+const buildLiveMarketCopilotResponse = async (
+  latestMessage: string,
+): Promise<CopilotResponsePayload | null> => {
+  const language = detectCopilotLanguage(latestMessage);
+  const intent = detectMarketIntent(latestMessage);
+  if (!intent) return null;
+
+  const quote = await fetchMarketQuote(intent);
+  if (!quote) {
+    return {
+      reply: localizeCopilotText(
+        language,
+        "Tôi nhận ra đây là câu hỏi về dữ liệu thị trường, nhưng nguồn live quote hiện chưa trả về dữ liệu dùng được. Hãy thử lại với mã rõ ràng như AAPL, BTC-USD hoặc USD/VND.",
+        "I recognized this as a market-data question, but the live quote provider did not return a usable quote right now. Try again with an explicit ticker like AAPL, BTC-USD, or USD/VND.",
+      ),
+      topic: "market-data-unavailable",
+      suggestedActions:
+        language === "vi"
+          ? [
+              "Thử lại cùng mã sau vài giây.",
+              "Dùng mã rõ ràng như USD/VND, BTC-USD, AAPL hoặc ^GSPC.",
+              "Với cổ phiếu Việt Nam, hãy hỏi bằng đúng ticker tương thích Yahoo.",
+            ]
+          : [
+              "Retry the same quote in a few seconds.",
+              "Use an explicit symbol like USD/VND, BTC-USD, AAPL, or ^GSPC.",
+              "For Vietnam-listed equities, ask with the exact Yahoo-compatible ticker.",
+            ],
+      suggestedDepositAmount: null,
+      riskLevel: "medium",
+      confidence: 0.58,
+      followUpQuestion: localizeCopilotText(
+        language,
+        "Bạn muốn tôi kiểm tra mã khác hay chuyển sang tư vấn dòng tiền ví?",
+        "Do you want me to check another ticker or switch to wallet cash-flow guidance?",
+      ),
+    };
+  }
+
+  const changeText =
+    quote.change !== null && quote.changePercent !== null
+      ? language === "vi"
+        ? `${formatMarketDelta(quote.change, quote.currency)} (${quote.changePercent >= 0 ? "+" : ""}${quote.changePercent.toFixed(2)}%) so với giá đóng cửa trước đó`
+        : `${formatMarketDelta(quote.change, quote.currency)} (${quote.changePercent >= 0 ? "+" : ""}${quote.changePercent.toFixed(2)}%) versus the previous close`
+      : language === "vi"
+        ? "chưa có dữ liệu biến động so với giá đóng cửa trước đó"
+        : "change versus previous close is unavailable";
+  const marketStateText = quote.marketState
+    ? language === "vi"
+      ? ` Trang thai thi truong: ${quote.marketState}.`
+      : ` Market state: ${quote.marketState}.`
+    : "";
+  const exchangeText = quote.exchangeName
+    ? language === "vi"
+      ? ` San: ${quote.exchangeName}.`
+      : ` Exchange: ${quote.exchangeName}.`
+    : "";
+
+  return {
+    reply:
+      language === "vi"
+        ? `Giá gần nhất của ${quote.label} là ${quote.currency} ${formatMarketPrice(
+            quote.price,
+          )} tại ${formatMarketTimestamp(quote.asOf)}. Biến động là ${changeText}.${exchangeText}${marketStateText} Nguồn: ${quote.source}.`
+        : `Latest available quote for ${quote.label} is ${quote.currency} ${formatMarketPrice(
+            quote.price,
+          )} as of ${formatMarketTimestamp(quote.asOf)}. That is ${changeText}.${exchangeText}${marketStateText} Source: ${quote.source}.`,
+    topic: "live-market-quote",
+    suggestedActions:
+      language === "vi"
+        ? [
+            "Hỏi thêm quote realtime với mã như AAPL, NVDA, BTC-USD hoặc USD/JPY.",
+            "Dùng quote realtime để tham khảo; giá khớp lệnh thực tế vẫn có thể khác.",
+            "Nếu muốn, tôi có thể liên hệ biến động này với dòng tiền hoặc phân bổ ví của bạn.",
+          ]
+        : [
+            "Ask another live quote using a ticker like AAPL, NVDA, BTC-USD, or USD/JPY.",
+            "Use live quotes for context; your execution price can still differ at order time.",
+            "If you want, I can relate this market move back to your wallet cash flow or allocation.",
+          ],
+    suggestedDepositAmount: null,
+    riskLevel:
+      quote.assetClass === "crypto"
+        ? "high"
+        : quote.assetClass === "stock" || quote.assetClass === "commodity"
+          ? "medium"
+          : "low",
+    confidence: 0.93,
+    followUpQuestion: localizeCopilotText(
+      language,
+      "Bạn muốn xem thêm quote realtime hay để tôi nối thông tin này với ví và dòng tiền của bạn?",
+      "Do you want another live quote, or should I connect this to your wallet and cash-flow context?",
+    ),
+  };
+};
 
 const buildHeuristicDepositPlan = (input: {
   goal: string;
@@ -372,7 +2187,9 @@ const buildHeuristicDepositPlan = (input: {
   }
 
   const baseline =
-    buffer > 0 ? buffer * multiplier : Math.max(100, input.currentBalance * 0.1);
+    buffer > 0
+      ? buffer * multiplier
+      : Math.max(100, input.currentBalance * 0.1);
   const recommendedAmount = roundMoney(clamp(baseline, 50, 10000));
   const confidence = clamp(
     income > 0 ? 0.82 : input.currentBalance > 0 ? 0.68 : 0.61,
@@ -410,11 +2227,14 @@ const buildHeuristicCopilotResponse = (input: {
   recentTransactions: CopilotTransactionPayload[];
   latestMessage: string;
 }): CopilotResponsePayload => {
-  const latest = input.latestMessage.trim().toLowerCase();
+  const language = detectCopilotLanguage(input.latestMessage);
+  const latest = normalizeCopilotText(input.latestMessage);
   const income = Math.max(0, Number(input.monthlyIncome || 0));
   const expenses = Math.max(0, Number(input.monthlyExpenses || 0));
   const balance = Math.max(0, Number(input.currentBalance || 0));
-  const recentTransactions = summarizeRecentTransactions(input.recentTransactions);
+  const recentTransactions = summarizeRecentTransactions(
+    input.recentTransactions,
+  );
   const netCashFlow = income - expenses;
   const recentSpend = recentTransactions
     .filter((tx) => tx.direction === "debit")
@@ -423,79 +2243,363 @@ const buildHeuristicCopilotResponse = (input: {
   const suggestedDepositAmount =
     netCashFlow > 0 ? roundMoney(clamp(netCashFlow * 0.35, 50, 5000)) : null;
 
-  if (/deposit|top up|fund|emergency|save/.test(latest)) {
+  if (/deposit|top up|fund|emergency|save|nap tien|gui tien|tiet kiem|quy du phong|du phong/.test(latest)) {
     return {
       reply:
-        netCashFlow > 0
-          ? `Your wallet can likely absorb a planned top-up without stressing monthly cash flow. Based on the numbers you entered, a staged deposit is safer than moving a large amount at once.`
-          : `Your current inputs show limited free cash flow, so I would avoid an aggressive top-up and preserve liquidity first.`,
+        language === "vi"
+          ? netCashFlow > 0
+            ? "Vi cua ban co kha nang hap thu mot khoan nap them co ke hoach ma khong gay ap luc lon len dong tien hang thang. Dua tren cac so lieu ban nhap, nap theo tung dot se an toan hon chuyen mot khoan lon ngay lap tuc."
+            : "Du lieu hien tai cho thay dong tien tu do dang han che, vi vay toi se uu tien giu thanh khoan va tranh nap them qua manh o luc nay."
+          : netCashFlow > 0
+            ? "Your wallet can likely absorb a planned top-up without stressing monthly cash flow. Based on the numbers you entered, a staged deposit is safer than moving a large amount at once."
+            : "Your current inputs show limited free cash flow, so I would avoid an aggressive top-up and preserve liquidity first.",
       topic: "deposit-planning",
-      suggestedActions: [
-        "Keep at least one monthly expense cycle liquid before larger deposits.",
-        suggestedDepositAmount
-          ? `Start with a deposit around ${input.currency} ${suggestedDepositAmount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`
-          : "Update monthly income and expenses to improve the deposit recommendation.",
-        "Review recurring debit transactions for expenses that can be reduced this month.",
-      ],
+      suggestedActions:
+        language === "vi"
+          ? [
+              "Giu lai it nhat mot chu ky chi phi hang thang o trang thai thanh khoan truoc khi nap them lon.",
+              suggestedDepositAmount
+                ? `Bat dau voi muc nap khoang ${input.currency} ${suggestedDepositAmount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`
+                : "Cap nhat thu nhap va chi phi hang thang de toi de xuat muc nap chinh xac hon.",
+              "Ra soat cac giao dich ghi no dinh ky de cat giam nhung khoan co the toi uu trong thang nay.",
+            ]
+          : [
+              "Keep at least one monthly expense cycle liquid before larger deposits.",
+              suggestedDepositAmount
+                ? `Start with a deposit around ${input.currency} ${suggestedDepositAmount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`
+                : "Update monthly income and expenses to improve the deposit recommendation.",
+              "Review recurring debit transactions for expenses that can be reduced this month.",
+            ],
       suggestedDepositAmount,
       riskLevel: netCashFlow > 0 ? "low" : "medium",
       confidence: netCashFlow > 0 ? 0.84 : 0.7,
-      followUpQuestion:
+      followUpQuestion: localizeCopilotText(
+        language,
+        "Ban muon toi de xuat sat hon cho quy du phong, hoc phi hay phan bo tien dau tu khong?",
         "Do you want a tighter recommendation for emergency fund, tuition, or investment cash allocation?",
+      ),
     };
   }
 
-  if (/spend|expense|budget|cash flow|cashflow/.test(latest)) {
+  if (/spend|expense|budget|cash flow|cashflow|chi tieu|chi phi|ngan sach|dong tien/.test(latest)) {
     return {
-      reply: `Recent debit activity totals about ${input.currency} ${roundMoney(recentSpend).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}. Your estimated monthly net cash flow is ${input.currency} ${roundMoney(netCashFlow).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`,
+      reply:
+        language === "vi"
+          ? `Tong chi tieu gan day uoc tinh khoang ${input.currency} ${roundMoney(recentSpend).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}. Dong tien rong hang thang uoc tinh cua ban la ${input.currency} ${roundMoney(netCashFlow).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`
+          : `Recent debit activity totals about ${input.currency} ${roundMoney(recentSpend).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}. Your estimated monthly net cash flow is ${input.currency} ${roundMoney(netCashFlow).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`,
       topic: "budget-review",
-      suggestedActions: [
-        netCashFlow >= 0
-          ? "Preserve positive cash flow by capping non-essential transfers for the rest of the cycle."
-          : "Your expenses are outpacing income; reduce discretionary debits before adding new commitments.",
-        "Tag recent debit transactions by necessity vs optional spend.",
-        "Set a weekly transfer budget if you frequently move funds out of the wallet.",
-      ],
+      suggestedActions:
+        language === "vi"
+          ? [
+              netCashFlow >= 0
+                ? "Giu dong tien duong bang cach gioi han cac khoan chuyen khong thiet yeu trong phan con lai cua chu ky."
+                : "Chi phi dang vuot thu nhap; hay giam cac khoan chi tuy y truoc khi them cam ket moi.",
+              "Gan nhan giao dich ghi no gan day theo nhom can thiet va tuy chon.",
+              "Dat ngan sach chuyen tien theo tuan neu ban thuong xuyen rut tien khoi vi.",
+            ]
+          : [
+              netCashFlow >= 0
+                ? "Preserve positive cash flow by capping non-essential transfers for the rest of the cycle."
+                : "Your expenses are outpacing income; reduce discretionary debits before adding new commitments.",
+              "Tag recent debit transactions by necessity vs optional spend.",
+              "Set a weekly transfer budget if you frequently move funds out of the wallet.",
+            ],
       suggestedDepositAmount,
       riskLevel: netCashFlow >= 0 ? "low" : "high",
       confidence: 0.78,
-      followUpQuestion:
+      followUpQuestion: localizeCopilotText(
+        language,
+        "Ban co muon toi doi phan nay thanh goi y muc chi tieu theo tuan khong?",
         "Do you want me to turn this into a weekly spending cap suggestion?",
+      ),
     };
   }
 
-  if (/bitcoin|btc|gold|stock|usd|vnd|exchange/.test(latest)) {
+  if (/bitcoin|btc|gold|stock|usd|vnd|exchange|vang|co phieu|chung khoan|ti gia|ty gia/.test(latest)) {
     return {
-      reply:
+      reply: localizeCopilotText(
+        language,
+        "Khong gian lam viec nay hien chua stream du lieu thi truong theo thoi gian thuc, nen toi chi co the dua ra huong dan dua tren ngu canh vi. Neu ban can quote realtime, hay ket noi nha cung cap du lieu thi truong hoac bat lai backend du lieu song.",
         "This workspace does not currently stream live market data, so I can only give wallet-context guidance here. For live quotes, wire a market data provider or re-enable a live-data backend.",
+      ),
       topic: "market-context",
-      suggestedActions: [
-        "Treat volatile assets as high-risk capital, not emergency liquidity.",
-        "Keep transfer and deposit decisions anchored to your wallet runway first.",
-        "Add a live quote provider if you want real-time FX, gold, or crypto answers in the copilot.",
-      ],
+      suggestedActions:
+        language === "vi"
+          ? [
+              "Xem tai san bien dong manh la von rui ro cao, khong phai thanh khoan khan cap.",
+              "Uu tien quyet dinh chuyen tien va nap tien dua tren runway cua vi truoc.",
+              "Them nha cung cap quote realtime neu ban muon hoi FX, vang hoac crypto theo thoi diem thuc.",
+            ]
+          : [
+              "Treat volatile assets as high-risk capital, not emergency liquidity.",
+              "Keep transfer and deposit decisions anchored to your wallet runway first.",
+              "Add a live quote provider if you want real-time FX, gold, or crypto answers in the copilot.",
+            ],
       suggestedDepositAmount: null,
       riskLevel: "medium",
       confidence: 0.63,
-      followUpQuestion:
+      followUpQuestion: localizeCopilotText(
+        language,
+        "Ban co muon toi goi y phan bo danh muc dua tren so du vi thay vi quote realtime khong?",
         "Do you want portfolio-allocation guidance based on your wallet balance instead of live quotes?",
+      ),
     };
   }
 
   return {
-    reply:
+    reply: localizeCopilotText(
+      language,
+      "Toi co the ho tro dong tien, ke hoach nap tien, do san sang giao dich va toi uu chi tieu dua tren ngu canh vi cua ban. Hay hoi ve ke hoach nap tien, danh gia chi tieu hoac kiem tra rui ro giao dich.",
       "I can help with cash flow, deposit planning, transfer readiness, and budget hygiene using your wallet context. Ask for a deposit plan, spending review, or transfer-risk check.",
+    ),
     topic: "wallet-guidance",
-    suggestedActions: [
-      "Ask for a deposit recommendation tied to a specific goal.",
-      "Ask for a spending review using recent transactions.",
-      "Use transfer monitoring before high-value internal transfers.",
-    ],
+    suggestedActions:
+      language === "vi"
+        ? [
+            "Hoi muc goi y nap tien gan voi mot muc tieu cu the.",
+            "Hoi danh gia chi tieu dua tren giao dich gan day.",
+            "Dung transfer monitoring truoc cac giao dich noi bo gia tri lon.",
+          ]
+        : [
+            "Ask for a deposit recommendation tied to a specific goal.",
+            "Ask for a spending review using recent transactions.",
+            "Use transfer monitoring before high-value internal transfers.",
+          ],
     suggestedDepositAmount,
     riskLevel: "low",
     confidence: 0.72,
-    followUpQuestion:
+    followUpQuestion: localizeCopilotText(
+      language,
+      "Ban muon toi uu dieu gi truoc: tiet kiem, chuyen tien hay chi tieu hang thang?",
       "What do you want to optimize first: savings, transfers, or monthly spending?",
+    ),
+  };
+};
+
+const isTodayTransactionReportIntent = (message: string) => {
+  const normalized = normalizeCopilotText(message);
+  const asksForToday = /\b(today|hom nay)\b/.test(normalized);
+  const asksForTransactions =
+    /\b(transaction|transactions|giao dich|dong tien|thu chi|money flow|cash flow)\b/.test(
+      normalized,
+    );
+  const asksForReport =
+    /\b(report|summary|summarize|list|bao cao|tong hop|liet ke|thong ke)\b/.test(
+      normalized,
+    ) || /giao dich hom nay|transactions today|today transaction/.test(normalized);
+
+  return asksForToday && asksForTransactions && asksForReport;
+};
+
+const formatCopilotTransactionLine = (input: {
+  language: CopilotLanguage;
+  currency: string;
+  createdAt: Date;
+  amount: number;
+  direction: "credit" | "debit";
+  description: string;
+  type: string;
+}) => {
+  const timeLabel = input.createdAt.toLocaleTimeString(
+    input.language === "vi" ? "vi-VN" : "en-US",
+    {
+      timeZone: APP_TIMEZONE,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: input.language !== "vi",
+    },
+  );
+  const amountLabel = formatCopilotMoney(input.currency, input.amount);
+  const signedAmount =
+    input.direction === "credit" ? `+${amountLabel}` : `-${amountLabel}`;
+
+  return input.language === "vi"
+    ? `- ${timeLabel} | ${input.direction === "credit" ? "Vao" : "Ra"} | ${signedAmount} | ${input.description} (${input.type})`
+    : `- ${timeLabel} | ${input.direction === "credit" ? "Inflow" : "Outflow"} | ${signedAmount} | ${input.description} (${input.type})`;
+};
+
+const buildTodayTransactionReportResponse = async (input: {
+  userId: string;
+  currency: string;
+  language: CopilotLanguage;
+}): Promise<CopilotResponsePayload> => {
+  const wallets = await prisma.wallet.findMany({
+    where: { userId: input.userId },
+    select: { id: true },
+  });
+  const walletIds = wallets.map((wallet) => wallet.id);
+  const now = new Date();
+  const startOfDay = new Date(now);
+  startOfDay.setHours(0, 0, 0, 0);
+  const endOfDay = new Date(startOfDay);
+  endOfDay.setDate(endOfDay.getDate() + 1);
+
+  const txns = await prisma.transaction.findMany({
+    where: {
+      ...(walletIds.length
+        ? { walletId: { in: walletIds } }
+        : { walletId: "__NO_WALLET__" }),
+      createdAt: {
+        gte: startOfDay,
+        lt: endOfDay,
+      },
+    },
+    orderBy: { createdAt: "asc" },
+    take: 500,
+  });
+
+  const transactions = txns
+    .map((txn) => safelyDecryptTransaction(txn, "/ai/copilot-chat:today-report"))
+    .filter((txn): txn is NonNullable<typeof txn> => Boolean(txn))
+    .map((txn) => {
+      const metadata =
+        txn.metadata && typeof txn.metadata === "object"
+          ? (txn.metadata as Record<string, unknown>)
+          : null;
+      const direction: "credit" | "debit" =
+        txn.type === "DEPOSIT" || metadata?.entry === "CREDIT"
+          ? "credit"
+          : "debit";
+
+      return {
+        id: txn.id,
+        amount: Math.max(0, Number(txn.amount || 0)),
+        createdAt: txn.createdAt,
+        direction,
+        type: txn.type,
+        description:
+          txn.description?.trim() ||
+          (txn.type === "DEPOSIT"
+            ? "Wallet deposit"
+            : txn.type === "WITHDRAW"
+              ? "Wallet withdrawal"
+              : "Wallet transfer"),
+      };
+    });
+
+  if (!transactions.length) {
+    return {
+      reply: localizeCopilotText(
+        input.language,
+        `Hom nay chua co giao dich nao trong vi. Toi da kiem tra toan bo dong tien vao va ra tu 00:00 den hien tai (${APP_TIMEZONE}).`,
+        `There are no wallet transactions today yet. I checked the full inflow and outflow window from 00:00 until now (${APP_TIMEZONE}).`,
+      ),
+      topic: "today-transaction-report",
+      suggestedActions:
+        input.language === "vi"
+          ? [
+              "Thu lai sau khi co giao dich moi.",
+              "Neu can, toi co the tong hop rieng tien vao hoac tien ra trong ngay.",
+            ]
+          : [
+              "Ask again after a new transaction lands.",
+              "I can also break out only inflows or only outflows for today.",
+            ],
+      suggestedDepositAmount: null,
+      riskLevel: "low",
+      confidence: 0.99,
+      followUpQuestion: localizeCopilotText(
+        input.language,
+        "Ban co muon toi tong hop them giao dich tuan nay khong?",
+        "Do you want a summary for this week as well?",
+      ),
+    };
+  }
+
+  const inflows = transactions.filter((transaction) => transaction.direction === "credit");
+  const outflows = transactions.filter((transaction) => transaction.direction === "debit");
+  const totalInflow = roundMoney(
+    inflows.reduce((sum, transaction) => sum + transaction.amount, 0),
+  );
+  const totalOutflow = roundMoney(
+    outflows.reduce((sum, transaction) => sum + transaction.amount, 0),
+  );
+  const netFlow = roundMoney(totalInflow - totalOutflow);
+
+  const inflowLines =
+    inflows.length > 0
+      ? inflows
+          .map((transaction) =>
+            formatCopilotTransactionLine({
+              language: input.language,
+              currency: input.currency,
+              createdAt: transaction.createdAt,
+              amount: transaction.amount,
+              direction: transaction.direction,
+              description: transaction.description,
+              type: transaction.type,
+            }),
+          )
+          .join("\n")
+      : localizeCopilotText(input.language, "- Khong co dong tien vao hom nay.", "- No inflows today.");
+
+  const outflowLines =
+    outflows.length > 0
+      ? outflows
+          .map((transaction) =>
+            formatCopilotTransactionLine({
+              language: input.language,
+              currency: input.currency,
+              createdAt: transaction.createdAt,
+              amount: transaction.amount,
+              direction: transaction.direction,
+              description: transaction.description,
+              type: transaction.type,
+            }),
+          )
+          .join("\n")
+      : localizeCopilotText(input.language, "- Khong co dong tien ra hom nay.", "- No outflows today.");
+
+  return {
+    reply:
+      input.language === "vi"
+        ? [
+            `Bao cao giao dich hom nay (${APP_TIMEZONE}, 00:00 den hien tai):`,
+            `Tong tien vao: ${formatCopilotMoney(input.currency, totalInflow)}`,
+            `Tong tien ra: ${formatCopilotMoney(input.currency, totalOutflow)}`,
+            `Dong tien rong: ${netFlow >= 0 ? "+" : "-"}${formatCopilotMoney(input.currency, Math.abs(netFlow))}`,
+            `So giao dich: ${transactions.length}`,
+            "",
+            "Dong tien vao:",
+            inflowLines,
+            "",
+            "Dong tien ra:",
+            outflowLines,
+          ].join("\n")
+        : [
+            `Today's transaction report (${APP_TIMEZONE}, 00:00 until now):`,
+            `Total inflow: ${formatCopilotMoney(input.currency, totalInflow)}`,
+            `Total outflow: ${formatCopilotMoney(input.currency, totalOutflow)}`,
+            `Net flow: ${netFlow >= 0 ? "+" : "-"}${formatCopilotMoney(input.currency, Math.abs(netFlow))}`,
+            `Transaction count: ${transactions.length}`,
+            "",
+            "Inflows:",
+            inflowLines,
+            "",
+            "Outflows:",
+            outflowLines,
+          ].join("\n"),
+    topic: "today-transaction-report",
+    suggestedActions:
+      input.language === "vi"
+        ? [
+            "Hoi them bao cao giao dich tuan nay neu ban muon xem xu huong rong hon.",
+            "Hoi rieng tong tien vao hoac tong tien ra neu ban muon rut gon bao cao.",
+            "Yeu cau toi danh dau giao dich nao lon nhat trong ngay.",
+          ]
+        : [
+            "Ask for this week's transaction report if you want a wider trend.",
+            "Ask for inflows only or outflows only if you want a shorter report.",
+            "Ask me to highlight the largest transaction of the day.",
+          ],
+    suggestedDepositAmount: null,
+    riskLevel: totalOutflow > totalInflow ? "medium" : "low",
+    confidence: 0.99,
+    followUpQuestion: localizeCopilotText(
+      input.language,
+      "Ban co muon toi tach them theo giao dich nap tien, nhan tien va chuyen tien khong?",
+      "Do you want me to break this down further by deposit, received transfer, and sent transfer?",
+    ),
   };
 };
 
@@ -504,6 +2608,21 @@ const sanitizeUser = (user: UserEntity | null) => {
   const { passwordHash, ...rest } = user;
   void passwordHash;
   return rest;
+};
+
+const safelyDecryptTransaction = (
+  transaction: Parameters<typeof decryptStoredTransaction>[0],
+  context: string,
+) => {
+  try {
+    return decryptStoredTransaction(transaction);
+  } catch (err) {
+    console.warn(`Skipping undecryptable transaction in ${context}`, {
+      transactionId: transaction.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 };
 
 const buildAuthPayload = (
@@ -535,35 +2654,133 @@ const buildAuthPayload = (
   };
 };
 
-const verifyRecaptchaToken = async (token: string, remoteIp?: string) => {
-  if (!RECAPTCHA_SECRET_KEY) {
-    throw new Error("RECAPTCHA_NOT_CONFIGURED");
-  }
-
-  const body = new URLSearchParams({
-    secret: RECAPTCHA_SECRET_KEY,
-    response: token,
-  });
-  if (remoteIp) {
-    body.set("remoteip", remoteIp);
-  }
-
-  const response = await fetch(
-    "https://www.google.com/recaptcha/api/siteverify",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: body.toString(),
-    },
+const encodeSliderCaptchaToken = (payload: SliderCaptchaPayload) => {
+  const encodedPayload = Buffer.from(JSON.stringify(payload)).toString(
+    "base64url",
   );
-  const data = (await response.json().catch(() => null)) as {
-    success?: boolean;
-    ["error-codes"]?: string[];
-  } | null;
+  const signature = crypto
+    .createHmac("sha256", CAPTCHA_SECRET_KEY)
+    .update(encodedPayload)
+    .digest("base64url");
+  return `${encodedPayload}.${signature}`;
+};
 
-  return Boolean(data?.success);
+const decodeSliderCaptchaToken = (captchaToken: string) => {
+  const [encodedPayload, signature] = captchaToken.split(".");
+  if (!encodedPayload || !signature) {
+    throw new Error("INVALID_CAPTCHA");
+  }
+
+  const expectedSignature = crypto
+    .createHmac("sha256", CAPTCHA_SECRET_KEY)
+    .update(encodedPayload)
+    .digest("base64url");
+
+  if (
+    signature.length !== expectedSignature.length ||
+    !crypto.timingSafeEqual(
+      Buffer.from(signature),
+      Buffer.from(expectedSignature),
+    )
+  ) {
+    throw new Error("INVALID_CAPTCHA");
+  }
+
+  let parsed: Partial<SliderCaptchaPayload>;
+  try {
+    parsed = JSON.parse(
+      Buffer.from(encodedPayload, "base64url").toString("utf8"),
+    ) as Partial<SliderCaptchaPayload>;
+  } catch {
+    throw new Error("INVALID_CAPTCHA");
+  }
+  if (
+    parsed.kind !== "slider_v1" ||
+    typeof parsed.nonce !== "string" ||
+    typeof parsed.issuedAt !== "number" ||
+    typeof parsed.expiresAt !== "number" ||
+    typeof parsed.targetOffsetPx !== "number" ||
+    typeof parsed.maxOffsetPx !== "number" ||
+    typeof parsed.tolerancePx !== "number"
+  ) {
+    throw new Error("INVALID_CAPTCHA");
+  }
+
+  if (parsed.expiresAt <= Date.now()) {
+    throw new Error("CAPTCHA_EXPIRED");
+  }
+
+  return parsed as SliderCaptchaPayload;
+};
+
+const buildSliderCaptchaChallenge = () => {
+  const stageWidthPx = Math.max(220, CAPTCHA_TRACK_WIDTH_PX);
+  const pieceWidthPx = Math.min(
+    Math.max(40, CAPTCHA_PIECE_WIDTH_PX),
+    stageWidthPx - 32,
+  );
+  const maxOffsetPx = stageWidthPx - pieceWidthPx;
+  const tolerancePx = Math.max(6, CAPTCHA_TOLERANCE_PX);
+  const minOffsetPx = Math.max(28, Math.round(maxOffsetPx * 0.18));
+  const maxTargetPx = Math.max(
+    minOffsetPx + tolerancePx * 2,
+    maxOffsetPx - 28,
+  );
+  const targetOffsetPx = crypto.randomInt(minOffsetPx, maxTargetPx + 1);
+  const issuedAt = Date.now();
+  const payload: SliderCaptchaPayload = {
+    kind: "slider_v1",
+    nonce: crypto.randomUUID(),
+    issuedAt,
+    expiresAt: issuedAt + CAPTCHA_TTL_MS,
+    targetOffsetPx,
+    maxOffsetPx,
+    tolerancePx,
+  };
+
+  return {
+    captchaToken: encodeSliderCaptchaToken(payload),
+    targetOffsetPx,
+    tolerancePx,
+    stageWidthPx,
+    pieceWidthPx,
+    expiresAt: new Date(payload.expiresAt).toISOString(),
+  };
+};
+
+const readSliderCaptchaSubmission = (body: unknown) => {
+  const payload =
+    body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+  const captchaToken =
+    typeof payload.captchaToken === "string" ? payload.captchaToken.trim() : "";
+  const rawOffset =
+    typeof payload.captchaOffset === "number" ||
+    typeof payload.captchaOffset === "string"
+      ? Number(payload.captchaOffset)
+      : Number.NaN;
+  return {
+    captchaToken,
+    captchaOffset: Number.isFinite(rawOffset) ? Math.round(rawOffset) : NaN,
+  };
+};
+
+const verifySliderCaptchaSubmission = (
+  captchaToken: string,
+  captchaOffset: number,
+) => {
+  if (!captchaToken) {
+    throw new Error("MISSING_CAPTCHA");
+  }
+  if (!Number.isFinite(captchaOffset)) {
+    throw new Error("INVALID_CAPTCHA");
+  }
+
+  const payload = decodeSliderCaptchaToken(captchaToken);
+  if (captchaOffset < 0 || captchaOffset > payload.maxOffsetPx) {
+    throw new Error("INVALID_CAPTCHA");
+  }
+
+  return Math.abs(captchaOffset - payload.targetOffsetPx) <= payload.tolerancePx;
 };
 
 const getRecipientName = (input: {
@@ -636,8 +2853,26 @@ const issueExclusiveUserSession = async (input: {
 
 const countRecentFailedAttempts = async (email: string, minutes: number) => {
   const loginEventRepository = createLoginEventRepository();
+  const userRepository = createUserRepository();
   const windowStart = new Date(Date.now() - minutes * 60 * 1000);
-  return loginEventRepository.countRecentFailures(email, windowStart);
+  const user = await userRepository.findByEmail(email);
+  const lockoutResetAtRaw =
+    user?.metadata &&
+    typeof user.metadata === "object" &&
+    typeof (user.metadata as Record<string, unknown>).lockoutResetAt ===
+      "string"
+      ? ((user.metadata as Record<string, unknown>).lockoutResetAt as string)
+      : "";
+  const lockoutResetAt = !lockoutResetAtRaw
+    ? null
+    : Number.isNaN(Date.parse(lockoutResetAtRaw))
+      ? null
+      : new Date(lockoutResetAtRaw);
+  const effectiveWindowStart =
+    lockoutResetAt && lockoutResetAt.getTime() > windowStart.getTime()
+      ? lockoutResetAt
+      : windowStart;
+  return loginEventRepository.countRecentFailures(email, effectiveWindowStart);
 };
 
 const countRecentFailedTransfers = async (userId: string, hours: number) =>
@@ -662,7 +2897,10 @@ const countRecentTransferVelocity = async (userId: string, hours: number) =>
     },
   });
 
-const getTransferSpendProfile = async (userId: string, pendingAmount: number) => {
+const getTransferSpendProfile = async (
+  userId: string,
+  pendingAmount: number,
+): Promise<TransferSpendProfile> => {
   const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
   const rows = await prisma.transaction.findMany({
     where: {
@@ -678,21 +2916,28 @@ const getTransferSpendProfile = async (userId: string, pendingAmount: number) =>
 
   const dailyTotals = new Map<string, number>();
   for (const row of rows) {
-    const tx = decryptStoredTransaction(row);
+    const tx = safelyDecryptTransaction(row, "getTransferSpendProfile");
+    if (!tx) continue;
     const metadata =
       tx.metadata && typeof tx.metadata === "object"
         ? (tx.metadata as Record<string, unknown>)
         : {};
     if (metadata.entry !== "DEBIT") continue;
     const dayKey = tx.createdAt.toISOString().slice(0, 10);
-    dailyTotals.set(dayKey, (dailyTotals.get(dayKey) || 0) + Number(tx.amount || 0));
+    dailyTotals.set(
+      dayKey,
+      (dailyTotals.get(dayKey) || 0) + Number(tx.amount || 0),
+    );
   }
 
-  const activeDayTotals = [...dailyTotals.values()].filter((value) => value > 0);
+  const activeDayTotals = [...dailyTotals.values()].filter(
+    (value) => value > 0,
+  );
   const todayKey = new Date().toISOString().slice(0, 10);
   const todaySpendBefore = dailyTotals.get(todayKey) || 0;
   const dailySpendAvg30d = activeDayTotals.length
-    ? activeDayTotals.reduce((sum, value) => sum + value, 0) / activeDayTotals.length
+    ? activeDayTotals.reduce((sum, value) => sum + value, 0) /
+      activeDayTotals.length
     : 0;
   const projectedDailySpend = todaySpendBefore + Math.max(0, pendingAmount);
   const spendSurgeRatio =
@@ -703,6 +2948,56 @@ const getTransferSpendProfile = async (userId: string, pendingAmount: number) =>
     dailySpendAvg30d,
     projectedDailySpend,
     spendSurgeRatio,
+  };
+};
+
+const getTransferRecipientProfile = async (input: {
+  userId: string;
+  toUserId: string;
+  toAccount: string;
+}): Promise<TransferRecipientProfile> => {
+  const since = new Date(
+    Date.now() - KNOWN_RECIPIENT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
+  );
+  const rows = await prisma.transaction.findMany({
+    where: {
+      fromUserId: input.userId,
+      type: "TRANSFER",
+      status: "COMPLETED",
+      createdAt: {
+        gte: since,
+      },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  let completedTransfers = 0;
+  let totalSent = 0;
+  let lastTransferAt: string | null = null;
+
+  for (const row of rows) {
+    const tx = safelyDecryptTransaction(row, "getTransferRecipientProfile");
+    if (!tx) continue;
+    const metadata = normalizeMetadataRecord(tx.metadata);
+    if (metadata.entry !== "DEBIT") continue;
+    const txToAccount =
+      typeof metadata.toAccount === "string" ? metadata.toAccount : "";
+    const isSameRecipient =
+      (input.toAccount && txToAccount === input.toAccount) ||
+      (input.toUserId && tx.toUserId === input.toUserId);
+    if (!isSameRecipient) continue;
+    completedTransfers += 1;
+    totalSent += Number(tx.amount || 0);
+    if (!lastTransferAt) {
+      lastTransferAt = tx.createdAt.toISOString();
+    }
+  }
+
+  return {
+    isKnownRecipient: completedTransfers > 0,
+    completedTransfers,
+    totalSent: roundMoney(totalSent),
+    lastTransferAt,
   };
 };
 
@@ -756,11 +3051,13 @@ const buildSecurityLocationLabel = (input: {
   location?: string;
   ipAddress?: string;
 }) => {
-  const location =
-    typeof input.location === "string" ? input.location.trim() : "";
+  const location = normalizeLocationLabelValue(input.location);
   if (location) return location;
   const ipAddress = normalizeIpAddress(input.ipAddress);
-  return ipAddress ? `IP ${ipAddress}` : "Unknown location";
+  if (!ipAddress) return "Unknown location";
+  if (ipAddress === "127.0.0.1") return "Local device";
+  if (isPrivateOrLoopbackIpAddress(ipAddress)) return "Private network";
+  return `IP ${ipAddress}`;
 };
 
 const buildUserSecurityAlert = (
@@ -840,6 +3137,54 @@ const buildUserSecurityAlert = (
         : ("info" as const),
     occurredAt: event.createdAt.toISOString(),
   };
+};
+
+const isSyntheticAiLoginEvent = (event: LoginEventEntity) => {
+  if (event.id.startsWith("ai-login-")) {
+    return true;
+  }
+
+  const metadata =
+    event.metadata && typeof event.metadata === "object"
+      ? (event.metadata as Record<string, unknown>)
+      : null;
+
+  if (!metadata) {
+    return false;
+  }
+
+  return (
+    typeof metadata.requestKey === "string" &&
+    !("aiResult" in metadata) &&
+    !("deviceContext" in metadata)
+  );
+};
+
+const isFallbackMonitoringLoginEvent = (event: LoginEventEntity) => {
+  const metadata =
+    event.metadata && typeof event.metadata === "object"
+      ? (event.metadata as Record<string, unknown>)
+      : null;
+  const aiResult =
+    metadata?.aiResult && typeof metadata.aiResult === "object"
+      ? (metadata.aiResult as Record<string, unknown>)
+      : null;
+  if (!aiResult) return false;
+
+  const monitoringOnly = Boolean(aiResult.monitoringOnly);
+  const modelSource =
+    typeof aiResult.modelSource === "string" ? aiResult.modelSource : "";
+  const reasons = Array.isArray(aiResult.reasons)
+    ? aiResult.reasons.filter((reason): reason is string => typeof reason === "string")
+    : [];
+
+  return (
+    monitoringOnly &&
+    (modelSource === "fallback" ||
+      reasons.some((reason) =>
+        reason.toLowerCase().includes("ai monitoring unavailable"),
+      ))
+  );
 };
 
 const serializeCard = (card: StoredCard) => ({
@@ -982,6 +3327,7 @@ const executeTransfer = async (input: {
     metadata: unknown;
   } | null;
   aiMonitoring?: AnomalyResponse;
+  transferAdvisory?: TransferSafetyAdvisory | null;
 }) => {
   return prisma.$transaction(async (tx) => {
     const senderWallet = await tx.wallet.findFirst({
@@ -1046,6 +3392,7 @@ const executeTransfer = async (input: {
                 reconciliationId,
                 fromAccount: input.senderAccountNumber,
                 toAccount: input.receiverAccountNumber,
+                transferAdvisory: input.transferAdvisory || undefined,
                 aiMonitoring: input.aiMonitoring
                   ? buildStoredAiMonitoring(input.aiMonitoring)
                   : undefined,
@@ -1071,15 +3418,21 @@ const executeTransfer = async (input: {
             counterpartyWalletId: senderWallet.id,
             fromUserId: input.senderUserId,
             toUserId: input.resolvedReceiverUserId,
-            metadata: {
-              entry: "CREDIT",
-              reconciliationId,
-              fromAccount: input.senderAccountNumber,
-              toAccount: input.receiverAccountNumber,
-              aiMonitoring: input.aiMonitoring
-                ? {
-                    ...buildStoredAiMonitoring(input.aiMonitoring),
-                    perspective: "receiver_credit",
+              metadata: {
+                entry: "CREDIT",
+                reconciliationId,
+                fromAccount: input.senderAccountNumber,
+                toAccount: input.receiverAccountNumber,
+                transferAdvisory: input.transferAdvisory
+                  ? {
+                      ...input.transferAdvisory,
+                      perspective: "receiver_credit",
+                    }
+                  : undefined,
+                aiMonitoring: input.aiMonitoring
+                  ? {
+                      ...buildStoredAiMonitoring(input.aiMonitoring),
+                      perspective: "receiver_credit",
                   }
                 : undefined,
             },
@@ -1179,6 +3532,70 @@ const getOrCreateWalletByUserId = async (userId: string) => {
   return attachWalletIdentity(created);
 };
 
+let aiServiceSpawnRequested = false;
+
+const probeAiServiceHealth = async () => {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1500);
+    const response = await fetch(`${AI_URL}/health`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!response.ok) return false;
+    const data = (await response.json().catch(() => null)) as
+      | { service?: unknown }
+      | null;
+    return data?.service === "ai";
+  } catch {
+    return false;
+  }
+};
+
+const ensureLocalAiService = async () => {
+  if (!AUTO_START_LOCAL_AI_SERVICE || !isLocalAiServiceUrl(AI_URL)) {
+    return;
+  }
+  if (await probeAiServiceHealth()) {
+    return;
+  }
+  await sleep(2000);
+  if (await probeAiServiceHealth()) {
+    return;
+  }
+  if (aiServiceSpawnRequested) {
+    return;
+  }
+
+  aiServiceSpawnRequested = true;
+  try {
+    const child = spawn(process.execPath, ["dev.mjs"], {
+      cwd: AI_SERVICE_WORKDIR,
+      env: process.env,
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    child.unref();
+    console.log(
+      `[ai-service] Starting local AI runtime from ${AI_SERVICE_WORKDIR}...`,
+    );
+
+    for (let attempt = 1; attempt <= 8; attempt += 1) {
+      await sleep(1000);
+      if (await probeAiServiceHealth()) {
+        console.log(`[ai-service] Local AI runtime is ready at ${AI_URL}.`);
+        return;
+      }
+    }
+    console.warn(
+      `[ai-service] Local AI runtime did not become healthy at ${AI_URL}.`,
+    );
+  } catch (err) {
+    console.warn("[ai-service] Failed to auto-start local AI runtime.", err);
+  }
+};
+
 const registerShutdownHooks = () => {
   let shuttingDown = false;
 
@@ -1247,12 +3664,14 @@ app.get("/ai/overview", requireAuth, async (_req, res) => {
       }),
     ]);
 
-    const statusData = (await statusResp.json().catch(() => null)) as
-      | Record<string, unknown>
-      | null;
-    const statsData = (await statsResp.json().catch(() => null)) as
-      | Record<string, unknown>
-      | null;
+    const statusData = (await statusResp.json().catch(() => null)) as Record<
+      string,
+      unknown
+    > | null;
+    const statsData = (await statsResp.json().catch(() => null)) as Record<
+      string,
+      unknown
+    > | null;
 
     return res.json({
       status: {
@@ -1274,7 +3693,9 @@ app.get("/ai/overview", requireAuth, async (_req, res) => {
           typeof statusData?.tx_model_source === "string"
             ? statusData.tx_model_source
             : null,
-        mongoConnected: Boolean(statusData?.mongo_connected),
+        mongoConnected: Boolean(
+          statusData?.postgres_connected ?? statusData?.mongo_connected,
+        ),
         authMode:
           typeof statusData?.auth_mode === "string"
             ? statusData.auth_mode
@@ -1360,6 +3781,7 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
   if (!latestUserMessage?.content?.trim()) {
     return res.status(400).json({ error: "A user message is required" });
   }
+  const language = detectCopilotLanguage(latestUserMessage.content);
 
   const recentTransactions = Array.isArray(body.recentTransactions)
     ? body.recentTransactions.filter(
@@ -1374,11 +3796,146 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
       )
     : [];
 
+  const currency =
+    typeof body.currency === "string" && body.currency.trim()
+      ? body.currency.trim().toUpperCase()
+      : "USD";
+
+  if (req.user?.sub && isTodayTransactionReportIntent(latestUserMessage.content)) {
+    const todayReport = await buildTodayTransactionReportResponse({
+      userId: req.user.sub,
+      currency,
+      language,
+    });
+    return res.json(todayReport);
+  }
+
+  const marketResponse = await buildLiveMarketCopilotResponse(
+    latestUserMessage.content,
+  );
+  if (marketResponse) {
+    return res.json(marketResponse);
+  }
+
+  const copilotInput = {
+    currency,
+    currentBalance: Number(body.currentBalance || 0),
+    monthlyIncome: Number(body.monthlyIncome || 0),
+    monthlyExpenses: Number(body.monthlyExpenses || 0),
+    recentTransactions,
+    messages,
+    language,
+  };
+
+  const ollamaResult = await callOllamaCopilot(copilotInput);
+  if (ollamaResult.status === "ok") {
+    return res.json(ollamaResult.payload);
+  }
+
+  const openAiResult = await callOpenAiCopilot(copilotInput);
+  if (openAiResult.status === "ok") {
+    return res.json(openAiResult.payload);
+  }
+  if (
+    ollamaResult.status === "error" &&
+    (ollamaResult.code === "ollama_unreachable" ||
+      ollamaResult.code === "ollama_timeout" ||
+      ollamaResult.code === "ollama_model_not_found")
+  ) {
+    return res.json({
+      reply: localizeCopilotText(
+        language,
+        "Local copilot chua san sang. Hay cai Ollama, tai model local, sau do khoi dong lai API. Trong luc do, app van co the tra loi cac luong co dinh va quote thi truong realtime.",
+        "Local copilot is not ready yet. Install Ollama, pull a local model, then restart the API. Until then, the app can still answer fixed wallet and live quote flows.",
+      ),
+      topic: "ollama-setup-required",
+      suggestedActions:
+        language === "vi"
+          ? [
+              "Cai Ollama tu https://ollama.com/download",
+              `Chay: ollama pull ${OLLAMA_MODEL || "qwen2.5:3b"}`,
+              `Dat OLLAMA_MODEL=${OLLAMA_MODEL || "qwen2.5:3b"} trong file .env cua backend va khoi dong lai apps/api`,
+            ]
+          : [
+              "Install Ollama from https://ollama.com/download",
+              `Run: ollama pull ${OLLAMA_MODEL || "qwen2.5:3b"}`,
+              `Set OLLAMA_MODEL=${OLLAMA_MODEL || "qwen2.5:3b"} in the backend .env file and restart apps/api`,
+            ],
+      suggestedDepositAmount: null,
+      riskLevel: "low",
+      confidence: 0.97,
+      followUpQuestion: localizeCopilotText(
+        language,
+        "Sau khi Ollama chay xong, hay hoi lai va toi se xu ly cac cau hoi mo bang local AI.",
+        "After Ollama is running, ask me again and I should handle open-ended questions locally.",
+      ),
+    } satisfies CopilotResponsePayload);
+  }
+  if (openAiResult.status === "error") {
+    if (openAiResult.code === "insufficient_quota") {
+      return res.json({
+        reply: localizeCopilotText(
+          language,
+          "OpenAI copilot da duoc cau hinh, nhung project API nay hien khong con quota kha dung. Hay nap them credits hoac bat billing tren OpenAI, sau do khoi dong lai API neu can.",
+          "OpenAI copilot is configured, but this API project has no usable quota right now. Add credits or enable billing in OpenAI, then restart the API if needed.",
+        ),
+        topic: "openai-quota-required",
+        suggestedActions:
+          language === "vi"
+            ? [
+                "Mo OpenAI Usage/Billing va nap credits cho project hien tai.",
+                "Tao secret key moi sau khi billing da hoat dong neu key cu da bi lo.",
+                "Tam thoi van dung live market quotes; chat tu do se hoat dong lai sau khi co quota.",
+              ]
+            : [
+                "Open OpenAI Usage/Billing and add credits to the current project.",
+                "Create a fresh secret key after billing is active if this key was exposed.",
+                "Keep using live market quotes here; broader free-form chat will work again after quota is available.",
+              ],
+        suggestedDepositAmount: null,
+        riskLevel: "medium",
+        confidence: 0.98,
+        followUpQuestion: localizeCopilotText(
+          language,
+          "Sau khi nap credits, hay hoi lai va toi se tra loi duoc ngoai cac luong co dinh.",
+          "After you add credits, ask me again and I should answer outside the fixed wallet flows.",
+        ),
+      } satisfies CopilotResponsePayload);
+    }
+    if (openAiResult.code === "invalid_api_key") {
+      return res.json({
+        reply: localizeCopilotText(
+          language,
+          "OpenAI copilot da duoc bat trong code, nhung API key hien tai khong hop le. Hay thay OPENAI_API_KEY bang secret key moi hop le va khoi dong lai API server.",
+          "OpenAI copilot is enabled in code, but the current API key is invalid. Replace OPENAI_API_KEY with a new valid secret key and restart the API server.",
+        ),
+        topic: "openai-key-invalid",
+        suggestedActions:
+          language === "vi"
+            ? [
+                "Tao secret key moi trong OpenAI Platform.",
+                "Cap nhat OPENAI_API_KEY trong file .env cua backend.",
+                "Khoi dong lai apps/api sau khi luu key moi.",
+              ]
+            : [
+                "Create a new secret key in OpenAI Platform.",
+                "Update OPENAI_API_KEY in the backend .env file.",
+                "Restart apps/api after saving the new key.",
+              ],
+        suggestedDepositAmount: null,
+        riskLevel: "medium",
+        confidence: 0.98,
+        followUpQuestion: localizeCopilotText(
+          language,
+          "Khi key da hop le, ban co muon toi test lai route copilot khong?",
+          "Once the key is valid, do you want me to retest the copilot route?",
+        ),
+      } satisfies CopilotResponsePayload);
+    }
+  }
+
   const response = buildHeuristicCopilotResponse({
-    currency:
-      typeof body.currency === "string" && body.currency.trim()
-        ? body.currency.trim().toUpperCase()
-        : "USD",
+    currency,
     currentBalance: Number(body.currentBalance || 0),
     monthlyIncome: Number(body.monthlyIncome || 0),
     monthlyExpenses: Number(body.monthlyExpenses || 0),
@@ -1389,30 +3946,34 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
   return res.json(response);
 });
 
+app.get("/auth/captcha/slider", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  return res.json(buildSliderCaptchaChallenge());
+});
+
 app.post("/auth/register", async (req, res) => {
   type RegisterReq = components["schemas"]["RegisterRequest"];
-  const recaptchaToken =
-    typeof req.body?.recaptchaToken === "string"
-      ? req.body.recaptchaToken.trim()
-      : "";
+  const { captchaToken, captchaOffset } = readSliderCaptchaSubmission(req.body);
   const parsed = registerSchema.safeParse(req.body as RegisterReq);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
-  if (!recaptchaToken) {
-    return res.status(400).json({ error: "Missing reCAPTCHA token" });
+  if (!captchaToken || !Number.isFinite(captchaOffset)) {
+    return res.status(400).json({ error: "Complete the slider captcha first" });
   }
 
   const userRepository = createUserRepository();
   const email = normalizeEmail(parsed.data.email);
 
   try {
-    const recaptchaVerified = await verifyRecaptchaToken(
-      recaptchaToken,
-      getRequestIp(req),
+    const captchaVerified = verifySliderCaptchaSubmission(
+      captchaToken,
+      captchaOffset,
     );
-    if (!recaptchaVerified) {
-      return res.status(403).json({ error: "reCAPTCHA verification failed" });
+    if (!captchaVerified) {
+      return res
+        .status(403)
+        .json({ error: "Slider captcha verification failed" });
     }
 
     const existingUser = await userRepository.findByEmail(email);
@@ -1490,8 +4051,13 @@ app.post("/auth/register", async (req, res) => {
             : 60,
       });
     }
-    if (err instanceof Error && err.message === "RECAPTCHA_NOT_CONFIGURED") {
-      return res.status(500).json({ error: "reCAPTCHA is not configured" });
+    if (err instanceof Error && err.message === "CAPTCHA_EXPIRED") {
+      return res
+        .status(400)
+        .json({ error: "Slider captcha expired. Please drag again." });
+    }
+    if (err instanceof Error && err.message === "INVALID_CAPTCHA") {
+      return res.status(400).json({ error: "Invalid slider captcha payload" });
     }
     console.error("Failed to register user", err);
     return res.status(500).json({ error: "Internal error" });
@@ -1607,22 +4173,20 @@ app.post("/auth/register/verify", async (req, res) => {
 
 app.post("/auth/login", loginRateLimiter, async (req, res) => {
   type LoginReq = components["schemas"]["LoginRequest"];
-  const recaptchaToken =
-    typeof req.body?.recaptchaToken === "string"
-      ? req.body.recaptchaToken.trim()
-      : "";
+  const { captchaToken, captchaOffset } = readSliderCaptchaSubmission(req.body);
   const parsed = loginSchema.safeParse(req.body as LoginReq);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
-  if (!recaptchaToken) {
-    return res.status(400).json({ error: "Missing reCAPTCHA token" });
+  if (!captchaToken || !Number.isFinite(captchaOffset)) {
+    return res.status(400).json({ error: "Complete the slider captcha first" });
   }
 
   const userRepository = createUserRepository();
   const loginEventRepository = createLoginEventRepository();
   const email = normalizeEmail(parsed.data.email);
   const policy = await getSecurityPolicy();
+  const clientDeviceContext = readClientDeviceContext(req.body);
 
   const userAgent =
     typeof req.headers["user-agent"] === "string"
@@ -1630,12 +4194,14 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
       : "unknown";
 
   try {
-    const recaptchaVerified = await verifyRecaptchaToken(
-      recaptchaToken,
-      getRequestIp(req),
+    const captchaVerified = verifySliderCaptchaSubmission(
+      captchaToken,
+      captchaOffset,
     );
-    if (!recaptchaVerified) {
-      return res.status(403).json({ error: "reCAPTCHA verification failed" });
+    if (!captchaVerified) {
+      return res
+        .status(403)
+        .json({ error: "Slider captcha verification failed" });
     }
 
     const userDoc = await userRepository.findByEmail(email);
@@ -1646,11 +4212,19 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
     const isPasswordValid = userDoc
       ? await verifyPassword(parsed.data.password, userDoc.passwordHash)
       : false;
+    const currentIp = getRequestIp(req);
+    const currentUserAgent = userAgent !== "unknown" ? userAgent : undefined;
+    const authSecurityState = getAuthSecurityState(userDoc?.metadata);
+    const wasTrustedIp = isTrustedIp(authSecurityState, currentIp);
+    const previousTrustedIp = getLatestDifferentTrustedIp(
+      authSecurityState,
+      currentIp,
+    );
     const loginEventPayload = {
       userId: userDoc?.id || email,
       email,
-      ipAddress: getRequestIp(req),
-      location: getRequestCountry(req),
+      ipAddress: currentIp,
+      location: getRequestLocation(req),
       userAgent,
       timestamp: new Date().toISOString(),
       success: isPasswordValid ? 1 : 0,
@@ -1681,6 +4255,13 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
       aiResult = normalizeAiResponse(rawResult);
     } catch (err) {
       console.warn("AI service not reachable, using default", err);
+      aiResult = buildHeuristicLoginAiResponse({
+        currentIp,
+        wasTrustedIp,
+        previousTrustedIp: previousTrustedIp?.ipAddress,
+        failedBefore,
+        isPasswordValid,
+      });
     }
 
     const score = aiResult.score;
@@ -1693,7 +4274,11 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
         userAgent,
         success: false,
         anomaly: score,
-        metadata: { aiResult, reason: "ACCOUNT_DISABLED" },
+        metadata: {
+          aiResult,
+          reason: "ACCOUNT_DISABLED",
+          ...(clientDeviceContext ? { deviceContext: clientDeviceContext } : {}),
+        },
       });
       await logAuditEvent({
         actor: email,
@@ -1723,7 +4308,11 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
         userAgent,
         success: false,
         anomaly: score,
-        metadata: { aiResult, reason: "LOCKOUT_THRESHOLD" },
+        metadata: {
+          aiResult,
+          reason: "LOCKOUT_THRESHOLD",
+          ...(clientDeviceContext ? { deviceContext: clientDeviceContext } : {}),
+        },
       });
       return res
         .status(423)
@@ -1737,7 +4326,10 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
       userAgent,
       success: isPasswordValid,
       anomaly: score,
-      metadata: { aiResult },
+      metadata: {
+        aiResult,
+        ...(clientDeviceContext ? { deviceContext: clientDeviceContext } : {}),
+      },
     });
 
     if (score >= policy.anomalyAlertThreshold) {
@@ -1745,7 +4337,11 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
         actor: email,
         userId: userDoc?.id,
         action: "AI_ALERT",
-        details: { score, riskLevel: aiResult.riskLevel, reasons: aiResult.reasons },
+        details: {
+          score,
+          riskLevel: aiResult.riskLevel,
+          reasons: aiResult.reasons,
+        },
         ipAddress: getRequestIp(req),
       });
     }
@@ -1790,19 +4386,10 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
         .json({ error: "Account is not active", anomaly: aiResult });
     }
 
-    const currentIp = getRequestIp(req);
-    const currentUserAgent =
-      typeof req.headers["user-agent"] === "string"
-        ? req.headers["user-agent"]
-        : undefined;
-    const authSecurityState = getAuthSecurityState(userDoc.metadata);
-    const wasTrustedIp = isTrustedIp(authSecurityState, currentIp);
-    const previousTrustedIp = getLatestDifferentTrustedIp(
-      authSecurityState,
-      currentIp,
-    );
     const effectiveRiskLevel =
-      aiResult.riskLevel === "high" && wasTrustedIp ? "low" : aiResult.riskLevel;
+      aiResult.riskLevel === "high" && wasTrustedIp
+        ? "low"
+        : aiResult.riskLevel;
     const effectiveAiResult =
       effectiveRiskLevel === aiResult.riskLevel
         ? aiResult
@@ -1818,23 +4405,21 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
       (wasTrustedIp
         ? "Trusted sign-in"
         : "New or unusual device detected for this sign-in");
+    const requiresNewIpOtp = !wasTrustedIp;
 
-    if (!wasTrustedIp && effectiveRiskLevel === "high") {
-      const blockedUntil = new Date(
-        Date.now() + HIGH_RISK_LOGIN_BLOCK_MINUTES * 60 * 1000,
-      );
+    if (requiresNewIpOtp) {
       const otpChallenge = await createEmailOtpChallenge({
         userId: userDoc.id,
         purpose: "LOGIN_HIGH_RISK",
         destination: userDoc.email,
         ttlMinutes: LOGIN_OTP_TTL_MINUTES,
-        maxAttempts: OTP_MAX_ATTEMPTS,
+        maxAttempts: HIGH_RISK_LOGIN_OTP_MAX_ATTEMPTS,
         metadata: {
           anomalyScore: score,
           aiReasons: Array.isArray(aiResult?.reasons) ? aiResult.reasons : [],
           currentIp,
           previousTrustedIp: previousTrustedIp?.ipAddress,
-          blockedUntil: blockedUntil.toISOString(),
+          deviceContext: clientDeviceContext,
           sessionSecurity: buildSessionSecurityState("high", {
             reviewReason,
             verificationMethod: "email_otp",
@@ -1843,13 +4428,15 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
       });
       await sendLoginOtpEmail({
         to: userDoc.email,
-        recipientName: userDoc.fullName || userDoc.email.split("@")[0] || "User",
+        recipientName:
+          userDoc.fullName || userDoc.email.split("@")[0] || "User",
         otpCode: otpChallenge.otpCode,
         expiresInMinutes: LOGIN_OTP_TTL_MINUTES,
       });
       await sendLoginRiskAlertEmail({
         to: userDoc.email,
-        recipientName: userDoc.fullName || userDoc.email.split("@")[0] || "User",
+        recipientName:
+          userDoc.fullName || userDoc.email.split("@")[0] || "User",
         ipAddress: currentIp,
         userAgent: currentUserAgent,
         reason: reviewReason,
@@ -1864,7 +4451,6 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
           challengeId: otpChallenge.challengeId,
           currentIp,
           previousTrustedIp: previousTrustedIp?.ipAddress,
-          blockedUntil: blockedUntil.toISOString(),
         },
         ipAddress: currentIp,
       });
@@ -1876,8 +4462,7 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
         expiresAt: otpChallenge.expiresAt.toISOString(),
         retryAfterSeconds: otpChallenge.retryAfterSeconds,
         notice:
-          `New device sign-in is temporarily blocked for ${HIGH_RISK_LOGIN_BLOCK_MINUTES} minutes. A verification code has been sent to your email.`,
-        availableAt: blockedUntil.toISOString(),
+          "New device or VPN sign-in detected. A verification code has been sent to your email.",
         anomaly: effectiveAiResult,
       });
     }
@@ -1885,9 +4470,13 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
     const sessionSecurity = buildSessionSecurityState(effectiveRiskLevel, {
       reviewReason,
     });
-    const nextAuthState = recordSuccessfulLoginIp(authSecurityState, currentIp, {
-      trustIp: effectiveRiskLevel === "low",
-    });
+    const nextAuthState = recordSuccessfulLoginIp(
+      authSecurityState,
+      currentIp,
+      {
+        trustIp: effectiveRiskLevel === "low",
+      },
+    );
 
     await userRepository.touchLastLogin(userDoc.id);
     const sessionResult = await issueExclusiveUserSession({
@@ -1920,7 +4509,8 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
       notice = `New or unusual device detected. Large transfers above $${MEDIUM_RISK_TRANSFER_LIMIT.toLocaleString("en-US")} are temporarily restricted for this session.`;
       await sendLoginRiskAlertEmail({
         to: userDoc.email,
-        recipientName: userDoc.fullName || userDoc.email.split("@")[0] || "User",
+        recipientName:
+          userDoc.fullName || userDoc.email.split("@")[0] || "User",
         ipAddress: currentIp,
         userAgent: currentUserAgent,
         reason: reviewReason,
@@ -1967,8 +4557,13 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
             : 60,
       });
     }
-    if (err instanceof Error && err.message === "RECAPTCHA_NOT_CONFIGURED") {
-      return res.status(500).json({ error: "reCAPTCHA is not configured" });
+    if (err instanceof Error && err.message === "CAPTCHA_EXPIRED") {
+      return res
+        .status(400)
+        .json({ error: "Slider captcha expired. Please drag again." });
+    }
+    if (err instanceof Error && err.message === "INVALID_CAPTCHA") {
+      return res.status(400).json({ error: "Invalid slider captcha payload" });
     }
     console.error("Failed to login user", err);
     return res.status(500).json({ error: "Internal error" });
@@ -1987,55 +4582,40 @@ app.post("/auth/login/verify", async (req, res) => {
     return res.status(400).json({ error: "Invalid login OTP payload" });
   }
 
+  let challengeUserId = "";
+  let challengePurpose = "";
+  let challengeEmail = "";
   try {
     const challenge = await prisma.otpChallenge.findUnique({
       where: { id: challengeId },
     });
     if (
       !challenge ||
-      (challenge.purpose !== "LOGIN" && challenge.purpose !== "LOGIN_HIGH_RISK") ||
+      (challenge.purpose !== "LOGIN" &&
+        challenge.purpose !== "LOGIN_HIGH_RISK") ||
       challenge.channel !== "EMAIL"
     ) {
       return res.status(404).json({ error: "OTP challenge not found" });
     }
 
+    challengeUserId = challenge.userId;
+    challengePurpose = challenge.purpose;
     const loginPurpose = challenge.purpose;
     const metadata =
       challenge.metadata && typeof challenge.metadata === "object"
         ? (challenge.metadata as Record<string, unknown>)
         : {};
-    const blockedUntil =
-      typeof metadata.blockedUntil === "string" &&
-      !Number.isNaN(Date.parse(metadata.blockedUntil))
-        ? new Date(metadata.blockedUntil)
-        : null;
-    if (
-      loginPurpose === "LOGIN_HIGH_RISK" &&
-      blockedUntil &&
-      blockedUntil.getTime() > Date.now()
-    ) {
-      return res.status(423).json({
-        error: `This new-device sign-in stays blocked until ${blockedUntil.toLocaleTimeString(
-          "en-US",
-          {
-            hour: "2-digit",
-            minute: "2-digit",
-          },
-        )}.`,
-        availableAt: blockedUntil.toISOString(),
-      });
-    }
-
     await verifyEmailOtpChallenge({
-      userId: challenge.userId,
+      userId: challengeUserId,
       purpose: loginPurpose,
       challengeId,
       otp,
     });
 
     const userRepository = createUserRepository();
-    const userDoc = await userRepository.findValidatedById(challenge.userId);
+    const userDoc = await userRepository.findValidatedById(challengeUserId);
     if (!userDoc) return res.status(404).json({ error: "User not found" });
+    challengeEmail = userDoc.email;
     if (userDoc.status !== "ACTIVE") {
       return res.status(423).json({ error: "Account is not active" });
     }
@@ -2134,10 +4714,42 @@ app.post("/auth/login/verify", async (req, res) => {
       return res.status(400).json({ error: "OTP has expired" });
     }
     if (err instanceof Error && err.message === "OTP_TOO_MANY_ATTEMPTS") {
-      return res.status(429).json({ error: "Too many invalid OTP attempts" });
+      if (
+        challengeUserId &&
+        (challengePurpose === "LOGIN" || challengePurpose === "LOGIN_HIGH_RISK")
+      ) {
+        await lockUserAccount(
+          challengeUserId,
+          challengeEmail || "system",
+          challengePurpose === "LOGIN_HIGH_RISK"
+            ? "Exceeded high-risk OTP attempts after IP change"
+            : "Exceeded login OTP attempts",
+          getRequestIp(req),
+        );
+      }
+      return res.status(423).json({
+        error:
+          challengePurpose === "LOGIN_HIGH_RISK"
+            ? "Account locked after 3 incorrect OTP attempts on a new IP."
+            : "Account locked after too many incorrect OTP attempts.",
+        remainingAttempts:
+          "remainingAttempts" in err
+            ? (err as { remainingAttempts?: number }).remainingAttempts ?? 0
+            : 0,
+      });
     }
     if (err instanceof Error && err.message === "OTP_INCORRECT") {
-      return res.status(400).json({ error: "Incorrect OTP" });
+      const remainingAttempts =
+        "remainingAttempts" in err
+          ? (err as { remainingAttempts?: number }).remainingAttempts ?? null
+          : null;
+      return res.status(400).json({
+        error:
+          remainingAttempts === null
+            ? "Incorrect OTP."
+            : `Incorrect OTP. ${remainingAttempts} attempt${remainingAttempts === 1 ? "" : "s"} remaining.`,
+        remainingAttempts,
+      });
     }
     console.error("Failed to login user", err);
     return res.status(500).json({ error: "Internal error" });
@@ -2147,24 +4759,23 @@ app.post("/auth/login/verify", async (req, res) => {
 app.post("/auth/password/otp/send", async (req, res) => {
   const email =
     typeof req.body?.email === "string" ? normalizeEmail(req.body.email) : "";
-  const recaptchaToken =
-    typeof req.body?.recaptchaToken === "string"
-      ? req.body.recaptchaToken.trim()
-      : "";
+  const { captchaToken, captchaOffset } = readSliderCaptchaSubmission(req.body);
   if (!email) {
     return res.status(400).json({ error: "Email is required" });
   }
-  if (!recaptchaToken) {
-    return res.status(400).json({ error: "Missing reCAPTCHA token" });
+  if (!captchaToken || !Number.isFinite(captchaOffset)) {
+    return res.status(400).json({ error: "Complete the slider captcha first" });
   }
 
   try {
-    const recaptchaVerified = await verifyRecaptchaToken(
-      recaptchaToken,
-      getRequestIp(req),
+    const captchaVerified = verifySliderCaptchaSubmission(
+      captchaToken,
+      captchaOffset,
     );
-    if (!recaptchaVerified) {
-      return res.status(403).json({ error: "reCAPTCHA verification failed" });
+    if (!captchaVerified) {
+      return res
+        .status(403)
+        .json({ error: "Slider captcha verification failed" });
     }
 
     const userRepository = createUserRepository();
@@ -2215,8 +4826,13 @@ app.post("/auth/password/otp/send", async (req, res) => {
             : 60,
       });
     }
-    if (err instanceof Error && err.message === "RECAPTCHA_NOT_CONFIGURED") {
-      return res.status(500).json({ error: "reCAPTCHA is not configured" });
+    if (err instanceof Error && err.message === "CAPTCHA_EXPIRED") {
+      return res
+        .status(400)
+        .json({ error: "Slider captcha expired. Please drag again." });
+    }
+    if (err instanceof Error && err.message === "INVALID_CAPTCHA") {
+      return res.status(400).json({ error: "Invalid slider captcha payload" });
     }
     console.error("Failed to send password reset OTP", err);
     return res.status(500).json({ error: "Failed to send password reset OTP" });
@@ -2470,7 +5086,9 @@ app.get("/auth/me", requireAuth, async (req, res) => {
       dob: typeof userDoc.dob === "string" ? userDoc.dob : "",
       avatar: typeof metadata.avatar === "string" ? metadata.avatar : undefined,
       metadata,
-      security: authSecurityState.activeSession?.security ?? buildSessionSecurityState("low"),
+      security:
+        authSecurityState.activeSession?.security ??
+        buildSessionSecurityState("low"),
     });
   } catch (err) {
     console.error("Failed to get profile", err);
@@ -2949,6 +5567,8 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
     toAccount?: string;
     amount?: unknown;
     note?: string;
+    advisoryAcknowledged?: boolean;
+    advisoryRequestKey?: string;
   };
   const amount = toPositiveAmount(body.amount);
   if (!amount) return res.status(400).json({ error: "Invalid amount" });
@@ -2977,10 +5597,35 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
     const user = await userRepository.findValidatedById(senderUserId);
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    const [failedTx24h, velocity1h, spendProfile] = await Promise.all([
+    const existingSafetyHold = getTransferSafetyHold(user.metadata);
+    const hasMatchingSafetyHold = Boolean(
+      existingSafetyHold &&
+        matchesTransferSafetyHold(existingSafetyHold, {
+          toAccount: context.receiverAccountNumber,
+          toUserId: context.resolvedReceiverUserId,
+        }),
+    );
+    if (existingSafetyHold) {
+      const isExpired =
+        new Date(existingSafetyHold.blockedUntil).getTime() <= Date.now();
+      if (isExpired) {
+        await userRepository.updateMetadata(
+          user.id,
+          setTransferSafetyHold(user.metadata, null),
+        );
+      }
+    }
+
+    const [failedTx24h, velocity1h, spendProfile, recipientProfile] =
+      await Promise.all([
       countRecentFailedTransfers(senderUserId, 24),
       countRecentTransferVelocity(senderUserId, 1),
       getTransferSpendProfile(senderUserId, context.amount),
+      getTransferRecipientProfile({
+        userId: senderUserId,
+        toUserId: context.resolvedReceiverUserId,
+        toAccount: context.receiverAccountNumber,
+      }),
     ]);
 
     let aiResult = DEFAULT_AI_RESPONSE;
@@ -2994,7 +5639,7 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
           timestamp: new Date().toISOString(),
           amount: context.amount,
           currency: context.senderWallet.currency,
-          location: getRequestCountry(req),
+          location: getRequestLocation(req),
           paymentMethod: "wallet_balance",
           merchantCategory: "p2p_transfer",
           device:
@@ -3007,6 +5652,11 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
           dailySpendAvg30d: spendProfile.dailySpendAvg30d,
           todaySpendBefore: spendProfile.todaySpendBefore,
           projectedDailySpend: spendProfile.projectedDailySpend,
+          balanceBefore: Number(context.senderWallet.balance),
+          remainingBalance: Math.max(
+            0,
+            Number(context.senderWallet.balance) - context.amount,
+          ),
         }),
       });
       const rawResult = (await aiResp.json().catch(() => null)) as unknown;
@@ -3024,6 +5674,22 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       spendProfile.dailySpendAvg30d > 0 &&
       spendProfile.projectedDailySpend >= spendProfile.dailySpendAvg30d * 100 &&
       spendProfile.projectedDailySpend - spendProfile.dailySpendAvg30d >= 20000;
+    const transferAdvisory = buildTransferSafetyAdvisory({
+      amount: context.amount,
+      senderBalance: Number(context.senderWallet.balance),
+      currency: context.senderWallet.currency,
+      aiResult,
+      spendProfile,
+      recipientProfile,
+      note: context.note,
+      requestKey: aiResult.requestKey,
+    });
+    if (hasMatchingSafetyHold && transferAdvisory?.severity !== "blocked") {
+      await userRepository.updateMetadata(
+        user.id,
+        setTransferSafetyHold(user.metadata, null),
+      );
+    }
     if (aiResult.riskLevel === "high" || isSpendSpikeHigh) {
       await logAuditEvent({
         actor: req.user?.email,
@@ -3048,6 +5714,119 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
           reasons: aiResult.reasons,
         },
         metadata: {
+          requestKey: aiResult.requestKey || null,
+          spendProfile,
+          transferAdvisory: transferAdvisory || undefined,
+          aiMonitoring: buildStoredAiMonitoring(aiResult),
+        },
+        ipAddress: getRequestIp(req),
+      });
+    }
+
+    if (transferAdvisory?.severity === "blocked") {
+      const blockedHold: TransferSafetyHold = {
+        toAccount: context.receiverAccountNumber,
+        toUserId: context.resolvedReceiverUserId,
+        amount: context.amount,
+        requestKey: transferAdvisory.requestKey || null,
+        reason:
+          transferAdvisory.reasons[0] ||
+          "This transfer matched a high-risk scam pattern.",
+        blockedUntil:
+          transferAdvisory.blockedUntil ||
+          new Date(Date.now() + TRANSFER_SCAM_HOLD_MINUTES * 60 * 1000).toISOString(),
+        createdAt: new Date().toISOString(),
+      };
+      await userRepository.updateMetadata(
+        user.id,
+        setTransferSafetyHold(user.metadata, blockedHold),
+      );
+      await logAuditEvent({
+        actor: req.user?.email,
+        userId: senderUserId,
+        action: "TRANSFER_SAFETY_BLOCKED",
+        details: {
+          amount: context.amount,
+          toAccount: context.receiverAccountNumber,
+          riskLevel: aiResult.riskLevel,
+          blockedUntil: blockedHold.blockedUntil,
+          reasons: transferAdvisory.reasons,
+        },
+        metadata: {
+          requestKey: aiResult.requestKey || null,
+          spendProfile,
+          recipientProfile,
+          transferAdvisory,
+          aiMonitoring: buildStoredAiMonitoring(aiResult),
+        },
+        ipAddress: getRequestIp(req),
+      });
+
+      return res.status(423).json({
+        error:
+          "This transfer has been temporarily blocked because it matches a high-risk scam pattern.",
+        transferAdvisory,
+        anomaly: aiResult,
+      });
+    }
+
+    if (
+      transferAdvisory?.severity === "warning" &&
+      body.advisoryAcknowledged !== true
+    ) {
+
+      await logAuditEvent({
+        actor: req.user?.email,
+        userId: senderUserId,
+        action: "TRANSFER_ADVISORY_PRESENTED",
+        details: {
+          amount: context.amount,
+          toAccount: context.receiverAccountNumber,
+          severity: transferAdvisory.severity,
+          transferRatio: transferAdvisory.transferRatio,
+          remainingBalance: transferAdvisory.remainingBalance,
+        },
+        metadata: {
+          requestKey: aiResult.requestKey || null,
+          spendProfile,
+          recipientProfile,
+          transferAdvisory,
+          aiMonitoring: buildStoredAiMonitoring(aiResult),
+        },
+        ipAddress: getRequestIp(req),
+      });
+
+      return res.status(409).json({
+        error:
+          transferAdvisory.severity === "warning"
+            ? "Please review this high-risk transfer before continuing."
+            : "Please review this transfer before continuing.",
+        transferAdvisory,
+        anomaly: aiResult,
+      });
+    }
+
+    if (
+      transferAdvisory &&
+      body.advisoryAcknowledged === true &&
+      body.advisoryRequestKey === transferAdvisory.requestKey
+    ) {
+      await logAuditEvent({
+        actor: req.user?.email,
+        userId: senderUserId,
+        action: "TRANSFER_ADVISORY_ACKNOWLEDGED",
+        details: {
+          amount: context.amount,
+          toAccount: context.receiverAccountNumber,
+          severity: transferAdvisory.severity,
+          transferRatio: transferAdvisory.transferRatio,
+          remainingBalance: transferAdvisory.remainingBalance,
+        },
+        metadata: {
+          requestKey: transferAdvisory.requestKey,
+          spendProfile,
+          recipientProfile,
+          transferAdvisory,
           aiMonitoring: buildStoredAiMonitoring(aiResult),
         },
         ipAddress: getRequestIp(req),
@@ -3067,6 +5846,8 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
         note: context.note,
         txAiResult: aiResult,
         txSpendProfile: spendProfile,
+        txRecipientProfile: recipientProfile,
+        transferAdvisory,
       },
     });
 
@@ -3089,8 +5870,13 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
         toAccount: context.receiverAccountNumber,
         txRiskLevel: aiResult.riskLevel,
         txScore: aiResult.score,
+        transferAdvisorySeverity: transferAdvisory?.severity || null,
       },
       metadata: {
+        requestKey: aiResult.requestKey || null,
+        spendProfile,
+        recipientProfile,
+        transferAdvisory: transferAdvisory || undefined,
         aiMonitoring: buildStoredAiMonitoring(aiResult),
       },
       ipAddress: getRequestIp(req),
@@ -3103,6 +5889,7 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       destination: maskEmail(user.email),
       retryAfterSeconds: otpChallenge.retryAfterSeconds,
       anomaly: aiResult,
+      transferAdvisory,
     });
   } catch (err) {
     if (err instanceof Error && err.message === "OTP_COOLDOWN_ACTIVE") {
@@ -3137,6 +5924,50 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
     console.error("Failed to send transfer OTP", err);
     return res.status(500).json({ error: "Failed to send transfer OTP" });
   }
+});
+
+app.post("/transfer/advisory/dismiss", requireAuth, async (req, res) => {
+  const senderUserId = req.user?.sub;
+  if (!senderUserId) return res.status(401).json({ error: "Unauthorized" });
+
+  const body = req.body as {
+    requestKey?: unknown;
+    advisory?: unknown;
+    toAccount?: unknown;
+    amount?: unknown;
+  };
+  const requestKey =
+    typeof body.requestKey === "string" ? body.requestKey.trim() : "";
+  const transferAdvisory = normalizeTransferSafetyAdvisory(body.advisory);
+  const amount = toPositiveAmount(body.amount);
+  const toAccount =
+    typeof body.toAccount === "string"
+      ? body.toAccount.replace(/\D/g, "").slice(0, 19)
+      : "";
+
+  if (!requestKey && !transferAdvisory) {
+    return res.status(400).json({ error: "Missing advisory reference" });
+  }
+
+  await logAuditEvent({
+    actor: req.user?.email,
+    userId: senderUserId,
+    action: "TRANSFER_ADVISORY_DISMISSED",
+    details: {
+      amount: amount || transferAdvisory?.amount || null,
+      toAccount: toAccount || null,
+      severity: transferAdvisory?.severity || null,
+      transferRatio: transferAdvisory?.transferRatio || null,
+      remainingBalance: transferAdvisory?.remainingBalance || null,
+    },
+    metadata: {
+      requestKey: requestKey || transferAdvisory?.requestKey || null,
+      transferAdvisory: transferAdvisory || undefined,
+    },
+    ipAddress: getRequestIp(req),
+  });
+
+  return res.json({ status: "ok" });
 });
 
 app.post("/transfer/confirm", requireAuth, async (req, res) => {
@@ -3175,6 +6006,13 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
     const transferAiResult = normalizeAiResponse(
       metadata.txAiResult as Record<string, unknown> | undefined,
     );
+    const transferAdvisory = normalizeTransferSafetyAdvisory(
+      metadata.transferAdvisory,
+    );
+    const transferSpendProfile =
+      metadata.txSpendProfile && typeof metadata.txSpendProfile === "object"
+        ? (metadata.txSpendProfile as Record<string, unknown>)
+        : undefined;
     if (!amount || (!toAccount && !toUserId)) {
       return res
         .status(400)
@@ -3203,6 +6041,7 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
       receiverAccountNumber: context.receiverAccountNumber,
       receiverWalletByAccount: context.receiverWalletByAccount,
       aiMonitoring: transferAiResult,
+      transferAdvisory,
     });
 
     await consumeOtpChallenge(challenge.id);
@@ -3216,8 +6055,12 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
         transactionId: transferResult.transaction.id,
         txRiskLevel: transferAiResult.riskLevel,
         txScore: transferAiResult.score,
+        transferAdvisorySeverity: transferAdvisory?.severity || null,
       },
       metadata: {
+        requestKey: transferAiResult.requestKey || transferAdvisory?.requestKey || null,
+        spendProfile: transferSpendProfile,
+        transferAdvisory: transferAdvisory || undefined,
         aiMonitoring: buildStoredAiMonitoring(transferAiResult),
       },
       ipAddress: getRequestIp(req),
@@ -3301,144 +6144,10 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
 });
 
 app.post("/transfer", requireAuth, async (req, res) => {
-  const senderUserId = req.user?.sub;
-  if (!senderUserId) return res.status(401).json({ error: "Unauthorized" });
-
-  const body = req.body as {
-    toUserId?: string;
-    toAccount?: string;
-    amount?: unknown;
-    note?: string;
-  };
-  const toUserId =
-    typeof body.toUserId === "string" ? body.toUserId.trim() : "";
-  const toAccount =
-    typeof body.toAccount === "string"
-      ? body.toAccount.replace(/\D/g, "").slice(0, 19)
-      : "";
-  const note = typeof body.note === "string" ? body.note.trim() : "";
-  const amount = toPositiveAmount(body.amount);
-
-  if (!toUserId && !toAccount) {
-    return res.status(400).json({ error: "Missing recipient account" });
-  }
-  if (!amount) return res.status(400).json({ error: "Invalid amount" });
-  if (
-    isTransferBlockedBySessionSecurity({
-      amount,
-      sessionSecurity: req.sessionSecurity,
-    })
-  ) {
-    return res.status(403).json({
-      error: `Large transfers above $${Number(
-        req.sessionSecurity?.maxTransferAmount || MEDIUM_RISK_TRANSFER_LIMIT,
-      ).toLocaleString("en-US")} are temporarily restricted for this sign-in.`,
-    });
-  }
-
-  try {
-    const userRepository = createUserRepository();
-    const senderUser = await userRepository.findValidatedById(senderUserId);
-    if (!senderUser) return res.status(404).json({ error: "User not found" });
-
-    const senderWallet = await getOrCreateWalletByUserId(senderUserId);
-    const senderMeta =
-      senderWallet.metadata && typeof senderWallet.metadata === "object"
-        ? (senderWallet.metadata as Record<string, unknown>)
-        : {};
-    const senderAccountNumber =
-      typeof senderMeta.accountNumber === "string"
-        ? senderMeta.accountNumber
-        : "";
-
-    let resolvedReceiverUserId = toUserId;
-    let receiverWalletByAccount: {
-      id: string;
-      userId: string | null;
-      metadata: unknown;
-    } | null = null;
-
-    if (toAccount) {
-      receiverWalletByAccount = await findWalletByAccountNumber(toAccount);
-      if (!receiverWalletByAccount?.userId) {
-        return res.status(404).json({ error: "Recipient account not found" });
-      }
-      resolvedReceiverUserId = receiverWalletByAccount.userId;
-    }
-
-    if (resolvedReceiverUserId === senderUserId) {
-      return res.status(400).json({ error: "Cannot transfer to self" });
-    }
-
-    if (!resolvedReceiverUserId) {
-      return res.status(404).json({ error: "Recipient not found" });
-    }
-
-    const receiver = await prisma.user.findUnique({
-      where: { id: resolvedReceiverUserId },
-    });
-    if (!receiver)
-      return res.status(404).json({ error: "Recipient not found" });
-    const transferResult = await executeTransfer({
-      senderUserId,
-      resolvedReceiverUserId,
-      amount,
-      note,
-      senderAccountNumber,
-      receiverAccountNumber:
-        toAccount || buildAccountNumber(resolvedReceiverUserId),
-      receiverWalletByAccount,
-    });
-
-    notifyBalanceChange({
-      to: senderUser.email,
-      recipientName: getRecipientName(senderUser),
-      direction: "debit",
-      amount,
-      balance: transferResult.senderBalance,
-      currency: transferResult.currency,
-      transactionType: "TRANSFER",
-      description:
-        transferResult.transaction.description ??
-        `Transfer to ${transferResult.receiverAccountNumber}`,
-      occurredAt: transferResult.transaction.createdAt.toISOString(),
-      counterpartyLabel: getRecipientName(receiver),
-    });
-    notifyBalanceChange({
-      to: receiver.email,
-      recipientName: getRecipientName(receiver),
-      direction: "credit",
-      amount,
-      balance: transferResult.receiverBalance,
-      currency: transferResult.currency,
-      transactionType: "TRANSFER",
-      description: note || `Receive from ${senderAccountNumber}`,
-      occurredAt: transferResult.transaction.createdAt.toISOString(),
-      counterpartyLabel: getRecipientName(senderUser),
-    });
-
-    return res.json({
-      status: "ok",
-      reconciliationId: transferResult.reconciliationId,
-      transaction: {
-        id: transferResult.transaction.id,
-        amount: transferResult.transaction.amount,
-        type: transferResult.transaction.type,
-        description: transferResult.transaction.description ?? undefined,
-        createdAt: transferResult.transaction.createdAt.toISOString(),
-        toAccount: transferResult.receiverAccountNumber,
-      },
-    });
-  } catch (err) {
-    if (err instanceof Error && err.message === "SENDER_WALLET_NOT_FOUND") {
-      return res.status(400).json({ error: "Sender wallet not found" });
-    }
-    if (err instanceof Error && err.message === "INSUFFICIENT_BALANCE") {
-      return res.status(400).json({ error: "Insufficient balance" });
-    }
-    console.error("Failed to transfer", err);
-    return res.status(500).json({ error: "Internal error" });
-  }
+  return res.status(410).json({
+    error:
+      "Direct transfers are disabled. Use /transfer/otp/send and /transfer/confirm so AI scam checks and OTP protection cannot be bypassed.",
+  });
 });
 
 app.get("/transactions", requireAuth, async (req, res) => {
@@ -3463,9 +6172,10 @@ app.get("/transactions", requireAuth, async (req, res) => {
     });
 
     return res.json(
-      txns.map((txn) => {
-        const decrypted = decryptStoredTransaction(txn);
-        return {
+      txns
+        .map((txn) => safelyDecryptTransaction(txn, "/transactions"))
+        .filter((txn): txn is NonNullable<typeof txn> => Boolean(txn))
+        .map((decrypted) => ({
           id: decrypted.id,
           amount: decrypted.amount,
           type: decrypted.type,
@@ -3473,8 +6183,7 @@ app.get("/transactions", requireAuth, async (req, res) => {
           description: decrypted.description ?? undefined,
           createdAt: decrypted.createdAt.toISOString(),
           metadata: decrypted.metadata,
-        };
-      }),
+        })),
     );
   } catch (err) {
     console.error("Failed to list transactions", err);
@@ -3499,6 +6208,11 @@ app.get("/security/overview", requireAuth, async (req, res) => {
     if (!userDoc) return res.status(404).json({ error: "User not found" });
 
     const authSecurityState = getAuthSecurityState(userDoc.metadata);
+    const activeSession = authSecurityState.activeSession;
+    const currentRequestLocation = getRequestLocation(req);
+    const activeSessionReferenceTime = Date.parse(
+      authSecurityState.lastLoginAt || activeSession?.issuedAt || "",
+    );
     const repo = createLoginEventRepository();
     const since = new Date(
       Date.now() - SECURITY_OVERVIEW_WINDOW_DAYS * 24 * 60 * 60 * 1000,
@@ -3508,7 +6222,10 @@ app.get("/security/overview", requireAuth, async (req, res) => {
       authSecurityState.trustedIps.map((entry) => [entry.ipAddress, entry]),
     );
 
-    const alerts = events.slice(0, 12).map((event) => {
+    const userFacingEvents = events.filter((event) => !isSyntheticAiLoginEvent(event));
+    const visibleEvents = userFacingEvents.length ? userFacingEvents : events;
+
+    const alerts = visibleEvents.slice(0, 12).map((event) => {
       const normalizedIp = normalizeIpAddress(event.ipAddress);
       return buildUserSecurityAlert(
         event,
@@ -3517,25 +6234,65 @@ app.get("/security/overview", requireAuth, async (req, res) => {
       );
     });
 
-    const recentLogins = events.slice(0, 20).map((event) => {
-      const normalizedIp = normalizeIpAddress(event.ipAddress);
-      const trustedIp = normalizedIp
-        ? trustedByIp.get(normalizedIp)
+    const recentLogins = visibleEvents.slice(0, 20).map((event) => {
+      const storedDeviceContext =
+        event.metadata && typeof event.metadata === "object"
+          ? normalizeClientDeviceContext(
+              (event.metadata as Record<string, unknown>).deviceContext,
+            )
+          : undefined;
+      const eventIsCurrentSessionLogin =
+        Boolean(event.success) &&
+        Boolean(activeSession) &&
+        Number.isFinite(activeSessionReferenceTime) &&
+        Math.abs(event.createdAt.getTime() - activeSessionReferenceTime) <=
+          30 * 60 * 1000 &&
+        (!activeSession?.userAgent ||
+          !event.userAgent ||
+          event.userAgent === activeSession.userAgent);
+      const effectiveIp = normalizeIpAddress(
+        event.ipAddress ||
+          (eventIsCurrentSessionLogin
+            ? activeSession?.ipAddress || authSecurityState.lastLoginIp
+            : undefined),
+      );
+      const effectiveUserAgent =
+        event.userAgent ||
+        (eventIsCurrentSessionLogin ? activeSession?.userAgent : undefined);
+      const currentSessionLocation =
+        eventIsCurrentSessionLogin &&
+        currentRequestLocation !== "Local device" &&
+        currentRequestLocation !== "Private network"
+          ? currentRequestLocation
+          : undefined;
+      const effectiveLocation = buildSecurityLocationLabel({
+        location: event.location || currentSessionLocation,
+        ipAddress: effectiveIp,
+      });
+      const deviceSummary = buildUserAgentDeviceSummary(
+        effectiveUserAgent,
+        storedDeviceContext,
+      );
+      const trustedIp = effectiveIp
+        ? trustedByIp.get(effectiveIp)
         : undefined;
       return {
         id: event.id,
-        location: buildSecurityLocationLabel(event),
-        ipAddress: normalizedIp ?? undefined,
-        userAgent: event.userAgent ?? "Unknown device",
+        location: effectiveLocation,
+        ipAddress: effectiveIp ?? undefined,
+        userAgent: effectiveUserAgent ?? "Unknown device",
+        deviceTitle: deviceSummary.title,
+        deviceDetail: deviceSummary.detail,
         success: Boolean(event.success),
         anomaly: event.anomaly ?? 0,
+        riskUnavailable: isFallbackMonitoringLoginEvent(event),
         createdAt: event.createdAt.toISOString(),
         trustedIp: Boolean(trustedIp),
       };
     });
 
     const trustedDevices = authSecurityState.trustedIps.map((entry, index) => {
-      const matchingEvent = events.find(
+      const matchingEvent = visibleEvents.find(
         (event) =>
           Boolean(event.success) &&
           normalizeIpAddress(event.ipAddress) === entry.ipAddress,
@@ -3612,11 +6369,43 @@ app.patch(
 
     try {
       const userRepository = createUserRepository();
+      const policy = await getSecurityPolicy();
+      const existingUser = await userRepository.findValidatedById(req.params.id);
+      const lockoutWindowStart = new Date(
+        Date.now() - policy.lockoutMinutes * 60 * 1000,
+      );
       await userRepository.setStatus(
         req.params.id,
         statusNormalized as UserStatus,
       );
-      const updated = await userRepository.findValidatedById(req.params.id);
+      let updated = await userRepository.findValidatedById(req.params.id);
+      if (
+        updated &&
+        existingUser &&
+        statusNormalized === "ACTIVE"
+      ) {
+        await prisma.loginEvent.deleteMany({
+          where: {
+            email: existingUser.email,
+            success: false,
+            createdAt: { gte: lockoutWindowStart },
+          },
+        });
+        await prisma.otpChallenge.updateMany({
+          where: {
+            userId: req.params.id,
+            purpose: { in: ["LOGIN", "LOGIN_HIGH_RISK"] },
+            consumedAt: null,
+          },
+          data: {
+            consumedAt: new Date(),
+          },
+        });
+        updated = await userRepository.updateMetadata(req.params.id, {
+          ...(updated.metadata ?? {}),
+          lockoutResetAt: new Date().toISOString(),
+        });
+      }
       const sanitized = sanitizeUser(updated);
 
       await logAuditEvent({
@@ -3778,9 +6567,10 @@ app.get(
       orderBy: { createdAt: "desc" },
       take: limit,
     });
-    const normalized = txns.map((txn) => {
-      const decrypted = decryptStoredTransaction(txn);
-      return {
+    const normalized = txns
+      .map((txn) => safelyDecryptTransaction(txn, "/admin/transactions"))
+      .filter((txn): txn is NonNullable<typeof txn> => Boolean(txn))
+      .map((decrypted) => ({
         id: decrypted.id,
         amount: decrypted.amount,
         type: decrypted.type,
@@ -3789,8 +6579,7 @@ app.get(
         createdAt: decrypted.createdAt,
         fromUserId: decrypted.fromUserId ?? undefined,
         toUserId: decrypted.toUserId ?? undefined,
-      };
-    });
+      }));
     res.json(normalized);
   },
 );
@@ -3799,21 +6588,122 @@ app.get(
   "/admin/alerts",
   requireAuth,
   requireRole(["ADMIN"]),
-  async (_req, res) => {
-    const policy = await getSecurityPolicy();
-    const repo = createLoginEventRepository();
-    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const events = await repo.findSince(since, 100);
-    const alerts = events
-      .filter(
-        (evt) =>
-          !evt.success || (evt.anomaly ?? 0) >= policy.anomalyAlertThreshold,
+  async (req, res) => {
+    const limit = Math.min(
+      parseInt(String(req.query.limit ?? "100"), 10) || 100,
+      200,
+    );
+    const statusFilter = normalizeAdminAlertStatus(req.query.status);
+
+    const alertLogs = await prisma.auditLog.findMany({
+      where: {
+        action: { in: [...AI_ALERT_ACTIONS] },
+      },
+      orderBy: { createdAt: "desc" },
+      take: limit,
+    });
+
+    const alerts = alertLogs
+      .map((log) =>
+        buildAdminAlertResponse({
+          id: log.id,
+          userId: log.userId,
+          actor: log.actor,
+          action: log.action,
+          details: log.details,
+          ipAddress: log.ipAddress,
+          createdAt: log.createdAt,
+          metadata: log.metadata,
+        }),
       )
-      .map((evt) => ({
-        ...buildAlertFromLoginEvent(evt, policy.anomalyAlertThreshold),
-        severity: !evt.success ? "high" : "medium",
-      }));
+      .filter((alert) => {
+        const requestedStatus =
+          typeof req.query.status === "string" ? req.query.status.trim() : "";
+        return requestedStatus ? alert.adminStatus === statusFilter : true;
+      });
+
     res.json(alerts);
+  },
+);
+
+app.patch(
+  "/admin/alerts/:id",
+  requireAuth,
+  requireRole(["ADMIN"]),
+  async (req, res) => {
+    const alertId = String(req.params.id || "").trim();
+    if (!alertId) {
+      return res.status(400).json({ error: "Alert id is required" });
+    }
+
+    const status = normalizeAdminAlertStatus(req.body?.status);
+    const note =
+      typeof req.body?.note === "string" ? req.body.note.trim() : "";
+
+    const existing = await prisma.auditLog.findUnique({
+      where: { id: alertId },
+    });
+    if (!existing || !AI_ALERT_ACTIONS.includes(existing.action as (typeof AI_ALERT_ACTIONS)[number])) {
+      return res.status(404).json({ error: "Alert not found" });
+    }
+
+    const existingDetails = normalizeRecord(existing.details);
+    const existingMetadata = normalizeRecord(existing.metadata);
+    const reviewedAt = new Date().toISOString();
+    const reviewedBy = req.user?.email || "admin";
+
+    const nextDetails = {
+      ...existingDetails,
+      adminStatus: status,
+      adminNote: note || null,
+      reviewedAt,
+      reviewedBy,
+    };
+    const nextMetadata = {
+      ...existingMetadata,
+      adminStatus: status,
+      adminNote: note || null,
+      reviewedAt,
+      reviewedBy,
+    };
+
+    const updated = await prisma.auditLog.update({
+      where: { id: alertId },
+      data: {
+        details: nextDetails as never,
+        metadata: nextMetadata as never,
+      },
+    });
+
+    await logAuditEvent({
+      actor: reviewedBy,
+      userId: updated.userId ?? undefined,
+      action: "AI_ALERT_REVIEW_UPDATED",
+      details: {
+        alertId,
+        sourceAction: updated.action,
+        status,
+        note: note || null,
+      },
+      ipAddress: getRequestIp(req),
+      metadata: {
+        alertId,
+        status,
+      },
+    });
+
+    return res.json(
+      buildAdminAlertResponse({
+        id: updated.id,
+        userId: updated.userId,
+        actor: updated.actor,
+        action: updated.action,
+        details: updated.details,
+        ipAddress: updated.ipAddress,
+        createdAt: updated.createdAt,
+        metadata: updated.metadata,
+      }),
+    );
   },
 );
 
@@ -4045,6 +6935,7 @@ const start = async () => {
       console.error("Failed to start API server", err);
       process.exit(1);
     });
+    void ensureLocalAiService();
     void initializeDatabase();
   } catch (err) {
     console.error("Failed to start API server", err);

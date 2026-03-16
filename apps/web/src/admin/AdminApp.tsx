@@ -102,6 +102,49 @@ type AuditLogView = {
   location?: string;
 };
 
+type AlertSignal = {
+  label: string;
+  value: string;
+  tone: "neutral" | "warn" | "info";
+};
+
+type AdminAlertStatus =
+  | "pending_review"
+  | "confirmed_risk"
+  | "false_positive"
+  | "escalated";
+
+type AdminAlertApi = {
+  id: string;
+  type: "login" | "transaction";
+  sourceAction: string;
+  actor: string;
+  userId: string | null;
+  createdAt: string;
+  ipAddress: string | null;
+  riskLevel: "low" | "medium" | "high";
+  anomalyScore: number;
+  reasons: string[];
+  summary: string;
+  explanation: string;
+  keySignals: AlertSignal[];
+  adminStatus: AdminAlertStatus;
+  adminNote?: string | null;
+  reviewedAt?: string | null;
+  reviewedBy?: string | null;
+  monitoringOnly: boolean;
+  aiDecision?: string | null;
+  modelVersion?: string | null;
+  modelSource?: string | null;
+  eventId?: string | null;
+  transactionId?: string | null;
+  amount?: number | null;
+  currency?: string | null;
+  location?: string | null;
+  paymentMethod?: string | null;
+  merchantCategory?: string | null;
+};
+
 const prettyAction = (action: string) =>
   action
     .toLowerCase()
@@ -203,6 +246,25 @@ const mapAuditDocToView = (doc: AuditLogDoc): AuditLogView => {
   };
 };
 
+const formatRiskLabel = (value: string) =>
+  value ? `${value.charAt(0).toUpperCase()}${value.slice(1)} risk` : "Low risk";
+
+const formatAlertStatusLabel = (value: AdminAlertStatus) => {
+  switch (value) {
+    case "confirmed_risk":
+      return "Confirmed risk";
+    case "false_positive":
+      return "False positive";
+    case "escalated":
+      return "Escalated";
+    default:
+      return "Pending review";
+  }
+};
+
+const formatAlertTypeLabel = (value: AdminAlertApi["type"]) =>
+  value === "transaction" ? "Transaction" : "Login";
+
 const parseCurrencyAmount = (value: string): number => {
   const parsed = Number(value.replace(/[^0-9.-]/g, ""));
   return Number.isFinite(parsed) ? parsed : 0;
@@ -229,6 +291,36 @@ const styles = `
     justify-content: space-between;
     gap: 16px;
     margin-bottom: 14px;
+  }
+  .ana-status-banner {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 16px;
+    border-radius: 14px;
+    margin-bottom: 16px;
+    border: 1px solid transparent;
+  }
+  .ana-status-banner strong {
+    display: block;
+    margin-bottom: 4px;
+    font-size: 14px;
+  }
+  .ana-status-banner p {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .ana-status-banner.error {
+    background: rgba(127, 29, 29, 0.2);
+    border-color: rgba(248, 113, 113, 0.35);
+    color: #fecaca;
+  }
+  .ana-status-banner.loading {
+    background: rgba(37, 99, 235, 0.12);
+    border-color: rgba(96, 165, 250, 0.35);
+    color: #bfdbfe;
   }
   .ana-title h1 { margin: 0; font-size: 26px; }
   .ana-title p { margin: 2px 0 0; color: #6b7280; }
@@ -783,6 +875,193 @@ const styles = `
   .theme-light .audit-meta strong { color: #0f172a; }
   .theme-light .audit-pagination { color: #64748b; }
 
+  /* AI alerts */
+  .alerts-card {
+    background: linear-gradient(180deg, #08192d 0%, #091425 100%);
+    border: 1px solid #1a3351;
+    border-radius: 18px;
+    box-shadow: 0 22px 40px rgba(4, 11, 24, 0.45);
+    padding: 18px;
+    color: #d6e6ff;
+  }
+  .alerts-head {
+    display:flex;
+    justify-content:space-between;
+    align-items:flex-end;
+    gap:14px;
+    flex-wrap:wrap;
+    margin-bottom:18px;
+  }
+  .alerts-head h2 { margin:0 0 4px; font-size:28px; color:#eef4ff; }
+  .alerts-head p { margin:0; color:#89a3c8; }
+  .alerts-filters { display:flex; gap:10px; flex-wrap:wrap; }
+  .alerts-filter,
+  .alerts-search {
+    min-width:160px;
+    padding:10px 12px;
+    border:1px solid #284564;
+    border-radius:12px;
+    background:#10233c;
+    color:#e7f1ff;
+    font-weight:600;
+  }
+  .alerts-search { min-width:240px; }
+  .alerts-list { display:grid; gap:14px; }
+  .alerts-item {
+    border:1px solid #1f3857;
+    border-radius:16px;
+    background:#0d1f35;
+    padding:16px;
+  }
+  .alerts-item[data-risk="high"] { border-color:#6b2d3b; box-shadow: inset 0 0 0 1px rgba(255,122,149,0.16); }
+  .alerts-item[data-risk="medium"] { border-color:#665422; box-shadow: inset 0 0 0 1px rgba(243,199,66,0.12); }
+  .alerts-top {
+    display:flex;
+    justify-content:space-between;
+    gap:14px;
+    flex-wrap:wrap;
+    margin-bottom:10px;
+  }
+  .alerts-summary { display:grid; gap:6px; }
+  .alerts-summary h3 { margin:0; color:#eef4ff; font-size:19px; }
+  .alerts-meta-line {
+    display:flex;
+    gap:8px;
+    align-items:center;
+    flex-wrap:wrap;
+    color:#89a3c8;
+    font-size:13px;
+  }
+  .alerts-badge,
+  .alerts-status-pill,
+  .alerts-tone-pill {
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    padding:6px 10px;
+    border-radius:999px;
+    font-size:12px;
+    font-weight:800;
+    border:1px solid transparent;
+  }
+  .alerts-badge.low { background:#103a2d; border-color:#1a644b; color:#7ff0b4; }
+  .alerts-badge.medium { background:#3c3218; border-color:#665422; color:#f3c742; }
+  .alerts-badge.high { background:#41202a; border-color:#6b2d3b; color:#ff9aae; }
+  .alerts-status-pill.pending_review { background:#20324d; border-color:#2f4a72; color:#9fc1f7; }
+  .alerts-status-pill.confirmed_risk { background:#41202a; border-color:#6b2d3b; color:#ff9aae; }
+  .alerts-status-pill.false_positive { background:#103a2d; border-color:#1a644b; color:#7ff0b4; }
+  .alerts-status-pill.escalated { background:#3c3218; border-color:#665422; color:#f3c742; }
+  .alerts-tone-pill { background:#132742; border-color:#27456b; color:#9fc1f7; }
+  .alerts-explanation {
+    margin: 0 0 12px;
+    color:#dbe8ff;
+    line-height:1.6;
+  }
+  .alerts-reasons {
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+    margin:0 0 14px;
+  }
+  .alerts-reason {
+    padding:6px 10px;
+    border-radius:999px;
+    background:#142b49;
+    border:1px solid #25476f;
+    color:#d7e7ff;
+    font-size:12px;
+    font-weight:700;
+  }
+  .alerts-signals {
+    display:grid;
+    grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));
+    gap:10px;
+    margin-bottom:14px;
+  }
+  .alerts-signal {
+    border:1px solid #1d3a5b;
+    border-radius:12px;
+    padding:10px 12px;
+    background:#0b1a2f;
+  }
+  .alerts-signal strong {
+    display:block;
+    color:#89a3c8;
+    font-size:12px;
+    margin-bottom:4px;
+  }
+  .alerts-signal span { color:#eef4ff; font-weight:700; }
+  .alerts-signal[data-tone="warn"] { border-color:#6b2d3b; }
+  .alerts-signal[data-tone="info"] { border-color:#2f4a72; }
+  .alerts-actions {
+    display:flex;
+    justify-content:space-between;
+    gap:12px;
+    flex-wrap:wrap;
+    align-items:center;
+  }
+  .alerts-buttons {
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+  }
+  .alerts-btn {
+    border:1px solid #284564;
+    background:#10233c;
+    color:#e7f1ff;
+    border-radius:10px;
+    padding:9px 12px;
+    cursor:pointer;
+    font-weight:700;
+  }
+  .alerts-btn.primary { background:#1f6bff; border-color:#1f6bff; }
+  .alerts-btn.warn { background:#3c3218; border-color:#665422; color:#f8dc84; }
+  .alerts-btn.safe { background:#103a2d; border-color:#1a644b; color:#7ff0b4; }
+  .alerts-btn:disabled { opacity:0.65; cursor:not-allowed; }
+  .alerts-extra {
+    margin-top:12px;
+    border-top:1px solid #1a3350;
+    padding-top:12px;
+    display:grid;
+    grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));
+    gap:10px;
+    color:#99b2d5;
+    font-size:13px;
+  }
+  .alerts-extra strong { display:block; color:#d9e8ff; margin-bottom:4px; font-size:12px; }
+  .alerts-empty {
+    border:1px dashed #2b4768;
+    border-radius:16px;
+    padding:26px;
+    text-align:center;
+    color:#89a3c8;
+  }
+  .theme-light .alerts-card {
+    background:#ffffff;
+    border-color:#dbe5f3;
+    box-shadow: 0 16px 32px rgba(15, 23, 42, 0.08);
+    color:#0f172a;
+  }
+  .theme-light .alerts-head h2,
+  .theme-light .alerts-summary h3,
+  .theme-light .alerts-signal span,
+  .theme-light .alerts-extra strong { color:#0f172a; }
+  .theme-light .alerts-head p,
+  .theme-light .alerts-meta-line,
+  .theme-light .alerts-extra { color:#64748b; }
+  .theme-light .alerts-filter,
+  .theme-light .alerts-search,
+  .theme-light .alerts-btn,
+  .theme-light .alerts-item,
+  .theme-light .alerts-signal {
+    background:#ffffff;
+    color:#0f172a;
+    border-color:#dbe5f3;
+  }
+  .theme-light .alerts-reason { background:#f8fbff; border-color:#dbe5f3; color:#0f172a; }
+  .theme-light .alerts-explanation { color:#334155; }
+  .theme-light .alerts-tone-pill { background:#eff6ff; border-color:#bfdbfe; color:#1d4ed8; }
+
   /* Compact desktop layout for 16:9 screens */
   @media (min-width: 1280px) and (min-aspect-ratio: 16/9) {
     .mf-sidebar { width: 220px; padding: 20px 14px; gap: 14px; }
@@ -824,6 +1103,8 @@ const styles = `
     .audit-table-wrap { overflow-x: auto; }
     .audit-table { min-width: 780px; }
     .audit-pagination { justify-content: center; }
+    .alerts-filters { width:100%; }
+    .alerts-filter, .alerts-search { flex:1 1 180px; min-width:0; }
   }
 `;
 
@@ -862,7 +1143,7 @@ function AdminApp() {
     return now.toISOString().slice(0, 10);
   });
   const [active, setActive] = useState<
-    "dashboard" | "users" | "audit" | "profile" | "setting"
+    "dashboard" | "alerts" | "users" | "audit" | "profile" | "setting"
   >("dashboard");
   useEffect(() => {
     if (typeof document !== "undefined") {
@@ -887,7 +1168,10 @@ function AdminApp() {
   }, [active]);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [alerts, setAlerts] = useState<AdminAlertApi[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLogView[]>([]);
+  const [adminDataLoading, setAdminDataLoading] = useState(false);
+  const [adminDataError, setAdminDataError] = useState("");
 
   const mapAdminTxnToView = (t: AdminTransactionApi): Transaction => ({
     id: t.id,
@@ -937,10 +1221,14 @@ function AdminApp() {
     });
 
     const load = async () => {
+      setAdminDataLoading(true);
+      setAdminDataError("");
+
       try {
-        const [usersResp, txResp, auditResp] = await Promise.all([
+        const [usersResp, txResp, alertsResp, auditResp] = await Promise.all([
           fetch(`${API_BASE}/admin/users`, { headers }),
           fetch(`${API_BASE}/admin/transactions`, { headers }),
+          fetch(`${API_BASE}/admin/alerts`, { headers }),
           fetch(`${API_BASE}/admin/audit-logs`, { headers }),
         ]);
 
@@ -950,6 +1238,9 @@ function AdminApp() {
         const txData = (await txResp
           .json()
           .catch(() => [])) as AdminTransactionApi[];
+        const alertsData = (await alertsResp
+          .json()
+          .catch(() => [])) as AdminAlertApi[];
         const auditData = (await auditResp.json().catch(() => [])) as Array<{
           id: string;
           actor?: string;
@@ -960,7 +1251,11 @@ function AdminApp() {
         }>;
 
         if (usersResp.ok) setUsers(usersData.map(mapUser));
+        else setUsers([]);
         if (txResp.ok) setTransactions(txData.map(mapAdminTxnToView));
+        else setTransactions([]);
+        if (alertsResp.ok) setAlerts(alertsData);
+        else setAlerts([]);
         if (auditResp.ok) {
           const mapped = auditData.map((d) =>
             mapAuditDocToView({
@@ -974,11 +1269,34 @@ function AdminApp() {
             }),
           );
           setAuditLogs(mapped);
+        } else {
+          setAuditLogs([]);
         }
-      } catch {
+
+        const responseErrors = [
+          !usersResp.ok ? `/admin/users: ${usersResp.status}` : null,
+          !txResp.ok ? `/admin/transactions: ${txResp.status}` : null,
+          !alertsResp.ok ? `/admin/alerts: ${alertsResp.status}` : null,
+          !auditResp.ok ? `/admin/audit-logs: ${auditResp.status}` : null,
+        ].filter(Boolean);
+
+        if (responseErrors.length > 0) {
+          setAdminDataError(
+            `Admin data could not be loaded from the API. ${responseErrors.join(", ")}`,
+          );
+        }
+      } catch (err) {
         setUsers([]);
         setTransactions([]);
+        setAlerts([]);
         setAuditLogs([]);
+        setAdminDataError(
+          err instanceof Error
+            ? `Admin API is unavailable: ${err.message}. Check that the API server is running and can reach the database.`
+            : "Admin API is unavailable. Check that the API server is running and can reach the database.",
+        );
+      } finally {
+        setAdminDataLoading(false);
       }
     };
 
@@ -1013,6 +1331,21 @@ function AdminApp() {
   const [userPage, setUserPage] = useState(1);
   const userPageSize = 7;
   const [txUser, setTxUser] = useState<AdminUser | null>(null);
+  const [expandedAlert, setExpandedAlert] = useState<string | null>(null);
+  const [alertStatusFilter, setAlertStatusFilter] = useState<
+    "all" | AdminAlertStatus
+  >("all");
+  const [alertRiskFilter, setAlertRiskFilter] = useState<
+    "all" | "low" | "medium" | "high"
+  >("all");
+  const [alertTypeFilter, setAlertTypeFilter] = useState<
+    "all" | "login" | "transaction"
+  >("all");
+  const [alertSearch, setAlertSearch] = useState("");
+  const [alertPage, setAlertPage] = useState(1);
+  const [alertActionBusyId, setAlertActionBusyId] = useState<string | null>(
+    null,
+  );
   const [expandedAudit, setExpandedAudit] = useState<string | null>(null);
   const [auditRange, setAuditRange] = useState<"7" | "30" | "90">("7");
   const [auditActivity, setAuditActivity] = useState<
@@ -1024,6 +1357,7 @@ function AdminApp() {
   const [auditAccountQuery, setAuditAccountQuery] = useState("");
   const [auditPage, setAuditPage] = useState(1);
   const auditPageSize = 5;
+  const alertPageSize = 4;
 
   const openAvatarPicker = () => {
     avatarInputRef.current?.click();
@@ -1090,6 +1424,109 @@ function AdminApp() {
     () => (txUser ? transactions.filter((t) => t.userId === txUser.id) : []),
     [transactions, txUser],
   );
+
+  useEffect(() => {
+    setAlertPage(1);
+  }, [alertStatusFilter, alertRiskFilter, alertTypeFilter, alertSearch]);
+
+  const filteredAlerts = useMemo(() => {
+    const query = alertSearch.trim().toLowerCase();
+    const list = alerts.filter((alert) => {
+      if (alertStatusFilter !== "all" && alert.adminStatus !== alertStatusFilter)
+        return false;
+      if (alertRiskFilter !== "all" && alert.riskLevel !== alertRiskFilter)
+        return false;
+      if (alertTypeFilter !== "all" && alert.type !== alertTypeFilter)
+        return false;
+      if (!query) return true;
+
+      const haystack = [
+        alert.summary,
+        alert.explanation,
+        alert.actor,
+        alert.ipAddress,
+        alert.location,
+        alert.transactionId,
+        alert.eventId,
+        ...(alert.reasons || []),
+        ...(alert.keySignals || []).map((signal) => `${signal.label} ${signal.value}`),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return haystack.includes(query);
+    });
+
+    if (expandedAlert && !list.some((item) => item.id === expandedAlert)) {
+      setExpandedAlert(null);
+    }
+
+    return list;
+  }, [
+    alerts,
+    alertStatusFilter,
+    alertRiskFilter,
+    alertTypeFilter,
+    alertSearch,
+    expandedAlert,
+  ]);
+
+  const totalAlertPages = Math.max(
+    1,
+    Math.ceil(filteredAlerts.length / alertPageSize),
+  );
+  const currentAlertPage = Math.min(alertPage, totalAlertPages);
+  const paginatedAlerts = useMemo(() => {
+    const start = (currentAlertPage - 1) * alertPageSize;
+    return filteredAlerts.slice(start, start + alertPageSize);
+  }, [filteredAlerts, currentAlertPage]);
+
+  const handleAlertReview = async (
+    alertId: string,
+    status: AdminAlertStatus,
+  ) => {
+    if (!token) return;
+
+    const notePrompt =
+      status === "false_positive"
+        ? "Why is this a false positive?"
+        : status === "escalated"
+          ? "What should the team investigate next?"
+          : "Add an optional admin note";
+    const note = window.prompt(notePrompt, "") ?? "";
+
+    try {
+      setAlertActionBusyId(alertId);
+      const resp = await fetch(`${API_BASE}/admin/alerts/${alertId}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ status, note }),
+      });
+      const payload = (await resp.json().catch(() => null)) as
+        | AdminAlertApi
+        | { error?: string }
+        | null;
+      const nextAlert =
+        payload && !("error" in payload) ? (payload as AdminAlertApi) : null;
+      if (!resp.ok || !nextAlert) {
+        window.alert(
+          (payload && "error" in payload && payload.error) ||
+            "Could not update alert status.",
+        );
+        return;
+      }
+
+      setAlerts((list) =>
+        list.map((item) => (item.id === alertId ? nextAlert : item)),
+      );
+    } finally {
+      setAlertActionBusyId(null);
+    }
+  };
 
   useEffect(() => {
     setAuditPage(1);
@@ -1505,6 +1942,15 @@ function AdminApp() {
           </li>
           <li>
             <button
+              className={active === "alerts" ? "active" : ""}
+              onClick={() => setActive("alerts")}
+            >
+              <span className="mf-ico audit">AI</span>
+              Alerts
+            </button>
+          </li>
+          <li>
+            <button
               className={active === "users" ? "active" : ""}
               onClick={() => setActive("users")}
             >
@@ -1556,6 +2002,25 @@ function AdminApp() {
       <div
         className={`mf-main ana-page ${active === "profile" ? "no-scroll" : ""}`}
       >
+        {adminDataError ? (
+          <div className="ana-status-banner error">
+            <div>
+              <strong>Admin data is unavailable</strong>
+              <p>{adminDataError}</p>
+            </div>
+          </div>
+        ) : null}
+        {adminDataLoading && !adminDataError ? (
+          <div className="ana-status-banner loading">
+            <div>
+              <strong>Loading admin data</strong>
+              <p>
+                Fetching users, AI alerts, transactions, and audit logs from
+                the API.
+              </p>
+            </div>
+          </div>
+        ) : null}
         {active === "dashboard" && (
           <>
             <header className="ana-header">
@@ -1720,6 +2185,301 @@ function AdminApp() {
               </div>
             </section>
           </>
+        )}
+
+        {active === "alerts" && (
+          <div className="alerts-card">
+            <div className="alerts-head">
+              <div>
+                <h2>AI Alert Review</h2>
+                <p>
+                  Review why the model flagged each case, then confirm,
+                  dismiss, or escalate it.
+                </p>
+              </div>
+              <div className="alerts-filters">
+                <select
+                  className="alerts-filter"
+                  value={alertStatusFilter}
+                  onChange={(e) =>
+                    setAlertStatusFilter(
+                      e.target.value as typeof alertStatusFilter,
+                    )
+                  }
+                >
+                  <option value="all">All statuses</option>
+                  <option value="pending_review">Pending review</option>
+                  <option value="confirmed_risk">Confirmed risk</option>
+                  <option value="false_positive">False positive</option>
+                  <option value="escalated">Escalated</option>
+                </select>
+                <select
+                  className="alerts-filter"
+                  value={alertRiskFilter}
+                  onChange={(e) =>
+                    setAlertRiskFilter(e.target.value as typeof alertRiskFilter)
+                  }
+                >
+                  <option value="all">All risk levels</option>
+                  <option value="high">High risk</option>
+                  <option value="medium">Medium risk</option>
+                  <option value="low">Low risk</option>
+                </select>
+                <select
+                  className="alerts-filter"
+                  value={alertTypeFilter}
+                  onChange={(e) =>
+                    setAlertTypeFilter(e.target.value as typeof alertTypeFilter)
+                  }
+                >
+                  <option value="all">All alert types</option>
+                  <option value="login">Login</option>
+                  <option value="transaction">Transaction</option>
+                </select>
+                <input
+                  className="alerts-search"
+                  type="search"
+                  value={alertSearch}
+                  onChange={(e) => setAlertSearch(e.target.value)}
+                  placeholder="Search reason, IP, location, event..."
+                />
+              </div>
+            </div>
+
+            {filteredAlerts.length === 0 ? (
+              <div className="alerts-empty">
+                No alerts match the current filters.
+              </div>
+            ) : (
+              <>
+                <div className="alerts-list">
+                  {paginatedAlerts.map((alert) => {
+                    const createdAt = new Date(alert.createdAt);
+                    const reviewedAt = alert.reviewedAt
+                      ? new Date(alert.reviewedAt)
+                      : null;
+                    const isExpanded = expandedAlert === alert.id;
+                    return (
+                      <article
+                        key={alert.id}
+                        className="alerts-item"
+                        data-risk={alert.riskLevel}
+                      >
+                        <div className="alerts-top">
+                          <div className="alerts-summary">
+                            <div className="alerts-meta-line">
+                              <span className={`alerts-badge ${alert.riskLevel}`}>
+                                {formatRiskLabel(alert.riskLevel)}
+                              </span>
+                              <span
+                                className={`alerts-status-pill ${alert.adminStatus}`}
+                              >
+                                {formatAlertStatusLabel(alert.adminStatus)}
+                              </span>
+                              <span className="alerts-tone-pill">
+                                {formatAlertTypeLabel(alert.type)}
+                              </span>
+                            </div>
+                            <h3>{alert.summary}</h3>
+                            <div className="alerts-meta-line">
+                              <span>
+                                {Number.isNaN(createdAt.getTime())
+                                  ? alert.createdAt
+                                  : createdAt.toLocaleString("en-US")}
+                              </span>
+                              <span>•</span>
+                              <span>{alert.ipAddress || "IP unavailable"}</span>
+                              {alert.location ? (
+                                <>
+                                  <span>•</span>
+                                  <span>{alert.location}</span>
+                                </>
+                              ) : null}
+                            </div>
+                          </div>
+                          <button
+                            className="alerts-btn"
+                            type="button"
+                            onClick={() =>
+                              setExpandedAlert((prev) =>
+                                prev === alert.id ? null : alert.id,
+                              )
+                            }
+                          >
+                            {isExpanded ? "Hide details" : "More details"}
+                          </button>
+                        </div>
+
+                        <p className="alerts-explanation">{alert.explanation}</p>
+
+                        <div className="alerts-reasons">
+                          {alert.reasons.length ? (
+                            alert.reasons.map((reason) => (
+                              <span key={reason} className="alerts-reason">
+                                {reason}
+                              </span>
+                            ))
+                          ) : (
+                            <span className="alerts-reason">No explicit reason</span>
+                          )}
+                        </div>
+
+                        <div className="alerts-signals">
+                          {alert.keySignals.map((signal) => (
+                            <div
+                              key={`${alert.id}-${signal.label}`}
+                              className="alerts-signal"
+                              data-tone={signal.tone}
+                            >
+                              <strong>{signal.label}</strong>
+                              <span>{signal.value}</span>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div className="alerts-actions">
+                          <div className="alerts-buttons">
+                            <button
+                              className="alerts-btn primary"
+                              type="button"
+                              disabled={alertActionBusyId === alert.id}
+                              onClick={() =>
+                                void handleAlertReview(
+                                  alert.id,
+                                  "confirmed_risk",
+                                )
+                              }
+                            >
+                              Confirm risk
+                            </button>
+                            <button
+                              className="alerts-btn safe"
+                              type="button"
+                              disabled={alertActionBusyId === alert.id}
+                              onClick={() =>
+                                void handleAlertReview(
+                                  alert.id,
+                                  "false_positive",
+                                )
+                              }
+                            >
+                              False positive
+                            </button>
+                            <button
+                              className="alerts-btn warn"
+                              type="button"
+                              disabled={alertActionBusyId === alert.id}
+                              onClick={() =>
+                                void handleAlertReview(alert.id, "escalated")
+                              }
+                            >
+                              Escalate
+                            </button>
+                            <button
+                              className="alerts-btn"
+                              type="button"
+                              disabled={alertActionBusyId === alert.id}
+                              onClick={() =>
+                                void handleAlertReview(
+                                  alert.id,
+                                  "pending_review",
+                                )
+                              }
+                            >
+                              Reset
+                            </button>
+                          </div>
+                          {alertActionBusyId === alert.id ? (
+                            <span className="alerts-meta-line">
+                              Updating review state...
+                            </span>
+                          ) : null}
+                        </div>
+
+                        {isExpanded ? (
+                          <div className="alerts-extra">
+                            <div>
+                              <strong>AI action</strong>
+                              <span>{alert.aiDecision || "Monitoring only"}</span>
+                            </div>
+                            <div>
+                              <strong>Model</strong>
+                              <span>
+                                {alert.modelVersion || "unknown"}
+                                {alert.modelSource
+                                  ? ` · ${alert.modelSource}`
+                                  : ""}
+                              </span>
+                            </div>
+                            <div>
+                              <strong>Event reference</strong>
+                              <span>
+                                {alert.transactionId ||
+                                  alert.eventId ||
+                                  "Unavailable"}
+                              </span>
+                            </div>
+                            <div>
+                              <strong>Reviewed by</strong>
+                              <span>
+                                {alert.reviewedBy || "-"}
+                                {reviewedAt &&
+                                !Number.isNaN(reviewedAt.getTime())
+                                  ? ` · ${reviewedAt.toLocaleString("en-US")}`
+                                  : ""}
+                              </span>
+                            </div>
+                            <div>
+                              <strong>Admin note</strong>
+                              <span>{alert.adminNote || "No note"}</span>
+                            </div>
+                            <div>
+                              <strong>Source</strong>
+                              <span>{alert.sourceAction}</span>
+                            </div>
+                          </div>
+                        ) : null}
+                      </article>
+                    );
+                  })}
+                </div>
+
+                <div className="audit-pagination">
+                  <div className="pager">
+                    <button
+                      disabled={currentAlertPage === 1}
+                      onClick={() => setAlertPage((p) => Math.max(1, p - 1))}
+                    >
+                      {"<"}
+                    </button>
+                    {Array.from(
+                      { length: Math.min(totalAlertPages, 5) },
+                      (_, i) => i + 1,
+                    ).map((n) => (
+                      <button
+                        key={n}
+                        className={n === currentAlertPage ? "active" : ""}
+                        onClick={() => setAlertPage(n)}
+                      >
+                        {n}
+                      </button>
+                    ))}
+                    <button
+                      disabled={
+                        currentAlertPage === totalAlertPages ||
+                        totalAlertPages === 0
+                      }
+                      onClick={() =>
+                        setAlertPage((p) => Math.min(totalAlertPages, p + 1))
+                      }
+                    >
+                      {">"}
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
         )}
 
         {active === "profile" && (
