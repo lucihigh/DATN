@@ -1,6 +1,7 @@
 import argparse
 import csv
 import json
+import sys
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,7 +10,11 @@ import joblib
 import numpy as np
 from pyod.models.iforest import IForest
 
-FEATURE_NAMES = ["hour_of_day", "day_of_week", "amount_log10", "failed_tx_24h", "velocity_1h", "device_length"]
+AI_SERVICE_ROOT = Path(__file__).resolve().parents[1]
+if str(AI_SERVICE_ROOT) not in sys.path:
+    sys.path.insert(0, str(AI_SERVICE_ROOT))
+
+from app.transaction_model import TX_FEATURE_NAMES as FEATURE_NAMES
 
 
 def parse_args() -> argparse.Namespace:
@@ -75,6 +80,12 @@ def _safe_log10_amount(amount: float) -> float:
     return float(np.log10(max(amount, 0.0) + 1.0))
 
 
+def _safe_ratio(numerator: float, denominator: float) -> float:
+    if denominator > 0:
+        return float(max(numerator, 0.0) / denominator)
+    return float(max(numerator, 0.0))
+
+
 def stream_tx_rows(
     csv_path: Path, progress_prefix: str, progress_every: int, fill_array: np.ndarray | None = None
 ) -> dict:
@@ -93,6 +104,7 @@ def stream_tx_rows(
     # step unit in this dataset is hour.
     recent_24h_fraud_by_user: dict[str, deque[int]] = {}
     recent_1h_tx_by_user: dict[str, deque[int]] = {}
+    daily_totals_by_user: dict[str, dict[int, float]] = {}
 
     with csv_path.open("r", encoding="utf-8", newline="") as file:
         reader = csv.DictReader(file)
@@ -133,6 +145,30 @@ def stream_tx_rows(
             day_of_week = (step // 24) % 7
             device_length_proxy = len(tx_type)
             amount_log10 = _safe_log10_amount(amount)
+            day_number = step // 24
+            user_daily_totals = daily_totals_by_user.get(user_id)
+            if user_daily_totals is None:
+                user_daily_totals = {}
+            active_day_totals = [
+                float(total)
+                for day, total in user_daily_totals.items()
+                if total > 0 and (day_number - day) <= 30
+            ]
+            today_spend_before = float(user_daily_totals.get(day_number, 0.0))
+            daily_spend_avg_30d = (
+                float(sum(active_day_totals) / len(active_day_totals)) if active_day_totals else 0.0
+            )
+            projected_daily_spend = today_spend_before + max(amount, 0.0)
+            projected_spend_ratio_log10 = _safe_log10_amount(
+                _safe_ratio(projected_daily_spend, daily_spend_avg_30d)
+            )
+            amount_to_daily_avg_ratio_log10 = _safe_log10_amount(
+                _safe_ratio(amount, daily_spend_avg_30d)
+            )
+            today_spend_before_log10 = _safe_log10_amount(today_spend_before)
+            projected_spend_delta_log10 = _safe_log10_amount(
+                max(projected_daily_spend - daily_spend_avg_30d, 0.0)
+            )
 
             if not is_fraud:
                 normal_rows += 1
@@ -143,6 +179,10 @@ def stream_tx_rows(
                     fill_array[write_idx, 3] = float(failed_tx_24h)
                     fill_array[write_idx, 4] = float(velocity_1h)
                     fill_array[write_idx, 5] = float(device_length_proxy)
+                    fill_array[write_idx, 6] = float(projected_spend_ratio_log10)
+                    fill_array[write_idx, 7] = float(amount_to_daily_avg_ratio_log10)
+                    fill_array[write_idx, 8] = float(today_spend_before_log10)
+                    fill_array[write_idx, 9] = float(projected_spend_delta_log10)
                     write_idx += 1
             else:
                 fraud_rows += 1
@@ -151,6 +191,8 @@ def stream_tx_rows(
             user_tx_history.append(step)
             recent_24h_fraud_by_user[user_id] = user_fraud_history
             recent_1h_tx_by_user[user_id] = user_tx_history
+            user_daily_totals[day_number] = today_spend_before + max(amount, 0.0)
+            daily_totals_by_user[user_id] = user_daily_totals
 
             if rows_seen % progress_every == 0:
                 message = (
@@ -266,6 +308,10 @@ def main() -> None:
             "failed_tx_24h": "rolling count of prior isFraud=1 by nameOrig in 24h window",
             "velocity_1h": "rolling count of prior transactions by nameOrig in 1h window",
             "device_length": "len(type) as proxy",
+            "projected_spend_ratio_log10": "log10(projectedDailySpend / dailySpendAvg30d + 1) proxy",
+            "amount_to_daily_avg_ratio_log10": "log10(amount / dailySpendAvg30d + 1) proxy",
+            "today_spend_before_log10": "log10(todaySpendBefore + 1) proxy",
+            "projected_spend_delta_log10": "log10(max(projectedDailySpend - dailySpendAvg30d, 0) + 1) proxy",
             "country": "UNK (not present in CSV)",
             "merchant_category": "mapped from type",
         },

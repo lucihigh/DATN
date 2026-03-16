@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import ReCAPTCHA from "react-google-recaptcha";
 import jsQR from "jsqr";
 
 import {
@@ -9,6 +8,10 @@ import {
   type LoginMonitoring,
   type SessionReplacementAlert,
 } from "./context/AuthContext";
+import {
+  SliderCaptcha,
+  type SliderCaptchaValue,
+} from "./components/SliderCaptcha";
 import { useToast } from "./context/ToastContext";
 import { useTheme } from "./context/ThemeContext";
 import "./index.css";
@@ -16,12 +19,10 @@ import "./index.css";
 const API_BASE =
   (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ||
   "http://localhost:4000";
-const RECAPTCHA_SITE_KEY = import.meta.env.VITE_RECAPTCHA_SITE_KEY as
-  | string
-  | undefined;
 const SESSION_REPLACEMENT_ALERT_STORAGE_KEY =
   "fpipay_session_replacement_alert";
 const NOTIFICATION_READ_STORAGE_PREFIX = "fpipay_notification_reads";
+const COPILOT_REQUEST_TIMEOUT_MS = 90000;
 
 const NAV_ITEMS: {
   id: string;
@@ -141,8 +142,11 @@ type SecurityRecentLoginItem = {
   location: string;
   ipAddress?: string;
   userAgent: string;
+  deviceTitle?: string;
+  deviceDetail?: string;
   success: boolean;
   anomaly: number;
+  riskUnavailable?: boolean;
   createdAt: string;
   trustedIp: boolean;
 };
@@ -171,6 +175,22 @@ type SecurityOverviewResponse = {
   alerts: SecurityOverviewAlert[];
   recentLogins: SecurityRecentLoginItem[];
   trustedDevices: SecurityTrustedDeviceItem[];
+};
+
+type TransferSafetyAdvisory = {
+  requestKey?: string | null;
+  severity: "caution" | "warning" | "blocked";
+  title: string;
+  message: string;
+  confirmationLabel: string;
+  reasons: string[];
+  requiresAcknowledgement: boolean;
+  transferRatio: number;
+  remainingBalance: number;
+  remainingBalanceRatio: number;
+  amount: number;
+  currency: string;
+  blockedUntil?: string | null;
 };
 
 type ActivityNotificationType = "transactions" | "security";
@@ -209,25 +229,6 @@ type AiMonitoringSummary = {
   modelSource?: string | null;
   modelVersion?: string | null;
   requestKey?: string | null;
-};
-
-type AiOverview = {
-  status: {
-    modelLoaded: boolean;
-    modelVersion?: string | null;
-    modelSource?: string | null;
-    txModelLoaded: boolean;
-    txModelVersion?: string | null;
-    txModelSource?: string | null;
-    mongoConnected: boolean;
-    authMode?: string | null;
-  };
-  stats: {
-    windowHours: number;
-    loginRiskCounts: Record<string, number>;
-    txRiskCounts: Record<string, number>;
-    combinedRiskCounts: Record<string, number>;
-  };
 };
 
 function Ring({ value }: { value: number }) {
@@ -343,24 +344,6 @@ function DashboardView() {
   const [otpError, setOtpError] = useState("");
   const [otpAttempts, setOtpAttempts] = useState(0);
   const [transferOpen, setTransferOpen] = useState(false);
-  const [depositAgentOpen, setDepositAgentOpen] = useState(false);
-  const [depositAgentBusy, setDepositAgentBusy] = useState(false);
-  const [depositGoal, setDepositGoal] = useState("");
-  const [depositIncome, setDepositIncome] = useState("");
-  const [depositExpenses, setDepositExpenses] = useState("");
-  const [depositAgentPlan, setDepositAgentPlan] = useState<{
-    recommendedAmount: number;
-    reasoning: string[];
-    riskLevel: string;
-    nextAction: string;
-    confidence: number;
-  }>({
-    recommendedAmount: 0,
-    reasoning: [],
-    riskLevel: "low",
-    nextAction: "",
-    confidence: 0,
-  });
   const [copilotOpen, setCopilotOpen] = useState(false);
   const [copilotBusy, setCopilotBusy] = useState(false);
   const [copilotInput, setCopilotInput] = useState("");
@@ -368,7 +351,7 @@ function DashboardView() {
     {
       role: "assistant",
       content:
-        "I can help with budget, spending, savings targets, and market context. Ask me what you want to improve.",
+        "I can help with budget, spending, savings targets, and live FX, gold, crypto, and stock quotes. Ask me what you want to improve.",
     },
   ]);
   const [copilotInsight, setCopilotInsight] = useState<CopilotInsight>({
@@ -388,9 +371,10 @@ function DashboardView() {
   const [transferAmount, setTransferAmount] = useState("");
   const [transferContent, setTransferContent] = useState("");
   const [transferQrFile, setTransferQrFile] = useState("");
-  const [transferQrRaw, setTransferQrRaw] = useState("");
   const [transferQrCameraOn, setTransferQrCameraOn] = useState(false);
   const [transferQrCameraError, setTransferQrCameraError] = useState("");
+  const [transferQrCameraPanelOpen, setTransferQrCameraPanelOpen] =
+    useState(false);
   const [transferQrFacingMode, setTransferQrFacingMode] = useState<
     "environment" | "user"
   >("environment");
@@ -408,6 +392,11 @@ function DashboardView() {
   const [transferOtpClock, setTransferOtpClock] = useState(Date.now());
   const [transferMonitoring, setTransferMonitoring] =
     useState<AiMonitoringSummary | null>(null);
+  const [transferOtpBusy, setTransferOtpBusy] = useState(false);
+  const [transferAdvisory, setTransferAdvisory] =
+    useState<TransferSafetyAdvisory | null>(null);
+  const [transferAdvisoryAcknowledged, setTransferAdvisoryAcknowledged] =
+    useState(false);
   const [recentTransactions, setRecentTransactions] = useState<
     RecentTransaction[]
   >([]);
@@ -426,9 +415,6 @@ function DashboardView() {
   const [securityAlertsBusy, setSecurityAlertsBusy] = useState(false);
   const [securityAlertsError, setSecurityAlertsError] = useState("");
   const [securityAlertsModalOpen, setSecurityAlertsModalOpen] = useState(false);
-  const [aiOverview, setAiOverview] = useState<AiOverview | null>(null);
-  const [aiOverviewBusy, setAiOverviewBusy] = useState(false);
-  const [aiOverviewError, setAiOverviewError] = useState("");
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
   const [transferReceipt, setTransferReceipt] =
     useState<TransactionReceipt | null>(null);
@@ -483,6 +469,20 @@ function DashboardView() {
     transferAmountNumber > 0 &&
     !isInsufficientBalance &&
     !exceedsRestrictedTransferLimit;
+  const isTransferHardBlocked = transferAdvisory?.severity === "blocked";
+  const isTransferPreOtpWarning =
+    transferAdvisory?.severity === "warning" ||
+    transferAdvisory?.severity === "blocked";
+  const transferContinueLabel =
+    transferOtpBusy
+      ? isTransferPreOtpWarning && !transferAdvisoryAcknowledged
+        ? "Reviewing transfer..."
+        : "Sending OTP..."
+      : isTransferHardBlocked
+        ? "Blocked for safety review"
+      : isTransferPreOtpWarning && !transferAdvisoryAcknowledged
+        ? transferAdvisory.confirmationLabel
+        : "Continue to OTP";
   const ownQrPayload =
     wallet?.qrPayload ||
     (wallet?.accountNumber
@@ -497,8 +497,24 @@ function DashboardView() {
     0,
     Math.ceil((transferOtpResendAt - transferOtpClock) / 1000),
   );
-  const monthlyIncomeValue = Number(depositIncome || 0);
-  const monthlyExpensesValue = Number(depositExpenses || 0);
+  const monthlyIncomeValue = 0;
+  const monthlyExpensesValue = 0;
+  const copilotSuggestedPrompts = [
+    "What is the USD/VND exchange rate today?",
+    "What is the gold price today?",
+    "How much is Bitcoin today?",
+    "What is AAPL stock price today?",
+  ];
+  const copilotHasInsight = Boolean(
+    copilotInsight.topic ||
+      copilotInsight.suggestedActions.length ||
+      copilotInsight.suggestedDepositAmount ||
+      copilotInsight.followUpQuestion,
+  );
+  const copilotRiskTone =
+    copilotInsight.riskLevel === "high" || copilotInsight.riskLevel === "medium"
+      ? copilotInsight.riskLevel
+      : "low";
 
   const buildTransactionReceipt = useCallback(
     (tx: {
@@ -586,8 +602,13 @@ function DashboardView() {
     });
   }, []);
 
-  const summarizeUserAgent = useCallback((value?: string) => {
-    if (!value?.trim()) return "Unknown device";
+  const parseUserAgentSummary = useCallback((value?: string) => {
+    if (!value?.trim()) {
+      return {
+        title: "Unknown device",
+        detail: "Browser and device details unavailable",
+      };
+    }
 
     const userAgent = value.trim();
     const browserMatchers: Array<[RegExp, string]> = [
@@ -595,15 +616,6 @@ function DashboardView() {
       [/Chrome\/(\d+)/, "Chrome"],
       [/Firefox\/(\d+)/, "Firefox"],
       [/Version\/(\d+).+Safari\//, "Safari"],
-    ];
-    const osMatchers: Array<[RegExp, string]> = [
-      [/Windows NT 10\.0/, "Windows 10"],
-      [/Windows NT 11\.0/, "Windows 11"],
-      [/Windows NT 6\.3/, "Windows 8.1"],
-      [/Mac OS X ([\d_]+)/, "macOS"],
-      [/Android (\d+)/, "Android"],
-      [/(iPhone|iPad|iPod).*OS ([\d_]+)/, "iOS"],
-      [/Linux/, "Linux"],
     ];
 
     let browserLabel = "";
@@ -616,18 +628,140 @@ function DashboardView() {
     }
 
     let osLabel = "";
-    for (const [pattern, label] of osMatchers) {
-      if (pattern.test(userAgent)) {
-        osLabel = label;
-        break;
-      }
+    let deviceTitle = "Unknown device";
+    if (/Windows NT 10\.0/.test(userAgent) || /Windows NT 11\.0/.test(userAgent)) {
+      osLabel = "Windows";
+      deviceTitle = "Windows PC";
+    } else if (/Windows NT 6\.3/.test(userAgent)) {
+      osLabel = "Windows";
+      deviceTitle = "Windows PC";
+    } else if (/Mac OS X [\d_]+/.test(userAgent)) {
+      osLabel = "macOS";
+      deviceTitle = "Mac device";
+    } else if (/iPhone/.test(userAgent)) {
+      osLabel = "iOS";
+      deviceTitle = "iPhone";
+    } else if (/iPad/.test(userAgent)) {
+      osLabel = "iPadOS";
+      deviceTitle = "iPad";
+    } else if (/iPod/.test(userAgent)) {
+      osLabel = "iOS";
+      deviceTitle = "iPod";
+    } else if (/Android/.test(userAgent) && /Mobile/i.test(userAgent)) {
+      osLabel = "Android";
+      deviceTitle = "Android phone";
+    } else if (/Android/.test(userAgent)) {
+      osLabel = "Android";
+      deviceTitle = "Android tablet";
+    } else if (/Linux/.test(userAgent)) {
+      osLabel = "Linux";
+      deviceTitle = "Linux device";
     }
 
-    if (browserLabel && osLabel) return `${browserLabel} on ${osLabel}`;
-    if (browserLabel) return browserLabel;
-    if (osLabel) return osLabel;
-    return userAgent.length > 48 ? `${userAgent.slice(0, 48)}...` : userAgent;
+    const detailParts = [browserLabel, osLabel].filter(Boolean);
+    return {
+      title: deviceTitle,
+      detail:
+        detailParts.join(" • ") ||
+        (userAgent.length > 64 ? `${userAgent.slice(0, 64)}...` : userAgent),
+    };
   }, []);
+
+  const renderSecurityRecentLoginList = useCallback(
+    (
+      items: SecurityRecentLoginItem[],
+      options?: {
+        limit?: number;
+        keyPrefix?: string;
+        className?: string;
+      },
+    ) => {
+      const visibleItems =
+        typeof options?.limit === "number"
+          ? items.slice(0, options.limit)
+          : items;
+
+      if (!visibleItems.length) {
+        return (
+          <div className="dashboard-inline-note">
+            No recent sign-in activity is available for this account yet.
+          </div>
+        );
+      }
+
+      return (
+        <div
+          className={
+            options?.className
+              ? `security-record-list ${options.className}`
+              : "security-record-list"
+          }
+        >
+          {visibleItems.map((login) => (
+            <article
+              className="security-record-card"
+              key={
+                options?.keyPrefix
+                  ? `${options.keyPrefix}-${login.id}`
+                  : login.id
+              }
+            >
+              {(() => {
+                const deviceSummary = parseUserAgentSummary(login.userAgent);
+                return (
+                  <>
+              <div className="security-record-head">
+                <div className="security-record-summary">
+                  <strong title={login.userAgent}>
+                    {login.deviceTitle || deviceSummary.title}
+                  </strong>
+                  <p>{login.location}</p>
+                  <p className="security-record-agent" title={login.userAgent}>
+                    {login.deviceDetail || deviceSummary.detail}
+                  </p>
+                </div>
+                <span
+                  className={`security-record-pill ${login.success ? "success" : "warn"}`}
+                >
+                  {login.success
+                    ? login.trustedIp
+                      ? "Trusted sign-in"
+                      : "Verified sign-in"
+                    : "Blocked"}
+                </span>
+              </div>
+              <dl className="security-record-meta">
+                <div>
+                  <dt>IP</dt>
+                  <dd>{login.ipAddress || "Unavailable"}</dd>
+                </div>
+                <div>
+                  <dt>Time</dt>
+                  <dd>{formatSecurityTimestamp(login.createdAt)}</dd>
+                </div>
+                <div>
+                  <dt>Risk</dt>
+                  <dd>
+                    {login.riskUnavailable
+                      ? "N/A"
+                      : `${Math.round(login.anomaly * 100)}%`}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Status</dt>
+                  <dd>{login.success ? "Successful" : "Blocked"}</dd>
+                </div>
+              </dl>
+                  </>
+                );
+              })()}
+            </article>
+          ))}
+        </div>
+      );
+    },
+    [formatSecurityTimestamp, parseUserAgentSummary],
+  );
 
   const parseAiMonitoringSummary = useCallback(
     (value: unknown): AiMonitoringSummary | null => {
@@ -679,6 +813,157 @@ function DashboardView() {
     [],
   );
 
+  const parseTransferSafetyAdvisory = useCallback(
+    (value: unknown): TransferSafetyAdvisory | null => {
+      if (!value || typeof value !== "object") return null;
+      const data = value as Record<string, unknown>;
+      const severity =
+        data.severity === "warning" ||
+        data.severity === "caution" ||
+        data.severity === "blocked"
+          ? data.severity
+          : null;
+      if (
+        (data.requestKey !== null && typeof data.requestKey !== "string") ||
+        !severity ||
+        typeof data.title !== "string" ||
+        typeof data.message !== "string" ||
+        typeof data.confirmationLabel !== "string" ||
+        typeof data.requiresAcknowledgement !== "boolean" ||
+        typeof data.transferRatio !== "number" ||
+        typeof data.remainingBalance !== "number" ||
+        typeof data.remainingBalanceRatio !== "number" ||
+        typeof data.amount !== "number" ||
+        typeof data.currency !== "string" ||
+        (data.blockedUntil !== undefined &&
+          data.blockedUntil !== null &&
+          typeof data.blockedUntil !== "string")
+      ) {
+        return null;
+      }
+
+      return {
+        requestKey: typeof data.requestKey === "string" ? data.requestKey : null,
+        severity,
+        title: data.title,
+        message: data.message,
+        confirmationLabel: data.confirmationLabel,
+        reasons: Array.isArray(data.reasons)
+          ? data.reasons.filter(
+              (item): item is string => typeof item === "string",
+            )
+          : [],
+        requiresAcknowledgement: data.requiresAcknowledgement,
+        transferRatio: data.transferRatio,
+        remainingBalance: data.remainingBalance,
+        remainingBalanceRatio: data.remainingBalanceRatio,
+        amount: data.amount,
+        currency: data.currency,
+        blockedUntil:
+          typeof data.blockedUntil === "string" ? data.blockedUntil : null,
+      };
+    },
+    [],
+  );
+
+  const formatTransferAdvisoryAmount = useCallback(
+    (amount: number, currency: string) =>
+      `${currency} ${amount.toLocaleString("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })}`,
+    [],
+  );
+
+  const renderTransferAdvisoryPanel = useCallback(
+    (
+      advisory: TransferSafetyAdvisory | null,
+      options?: { acknowledged?: boolean },
+    ) => {
+      if (!advisory) return null;
+      const acknowledged = Boolean(options?.acknowledged);
+      return (
+        <div className={`transfer-advisory-card ${advisory.severity}`}>
+          <div className="transfer-advisory-head">
+            <strong>{advisory.title}</strong>
+            <span className={`transfer-advisory-pill ${advisory.severity}`}>
+              {advisory.severity === "blocked"
+                ? "Blocked"
+                : advisory.severity === "warning"
+                  ? "Warning"
+                  : "Review"}
+            </span>
+          </div>
+          <p>{advisory.message}</p>
+          {advisory.blockedUntil ? (
+            <small className="transfer-advisory-note">
+              Temporary hold until{" "}
+              {new Date(advisory.blockedUntil).toLocaleString("en-US")}.
+            </small>
+          ) : null}
+          <dl className="transfer-advisory-metrics">
+            <div>
+              <dt>Transfer</dt>
+              <dd>
+                {formatTransferAdvisoryAmount(
+                  advisory.amount,
+                  advisory.currency,
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>Balance used</dt>
+              <dd>{Math.round(advisory.transferRatio * 100)}%</dd>
+            </div>
+            <div>
+              <dt>After transfer</dt>
+              <dd>
+                {formatTransferAdvisoryAmount(
+                  advisory.remainingBalance,
+                  advisory.currency,
+                )}
+              </dd>
+            </div>
+          </dl>
+          {advisory.reasons.length > 0 && (
+            <ul>
+              {advisory.reasons.slice(0, 4).map((reason) => (
+                <li key={reason}>{reason}</li>
+              ))}
+            </ul>
+          )}
+          {acknowledged && advisory.severity !== "blocked" ? (
+            <small className="transfer-advisory-note">
+              You reviewed this warning and chose to continue.
+            </small>
+          ) : null}
+        </div>
+      );
+    },
+    [formatTransferAdvisoryAmount],
+  );
+
+  const getVisibleTransferMonitoring = useCallback(
+    (monitoring: AiMonitoringSummary | null) => {
+      if (!monitoring) return null;
+      const riskLevel = monitoring.riskLevel.toLowerCase();
+      const filteredReasons = monitoring.reasons.filter(
+        (reason) => reason !== "AI monitoring unavailable",
+      );
+      if (riskLevel === "low" && filteredReasons.length === 0) {
+        return null;
+      }
+      return {
+        ...monitoring,
+        reasons: filteredReasons,
+      };
+    },
+    [],
+  );
+  const visibleTransferMonitoring = getVisibleTransferMonitoring(
+    transferMonitoring,
+  );
+
   const renderAiMonitoringPanel = useCallback(
     (monitoring: AiMonitoringSummary | null, title: string) => {
       if (!monitoring) return null;
@@ -699,6 +984,58 @@ function DashboardView() {
               : "This action is being evaluated by the anomaly model."}
           </p>
           {monitoring.reasons.length > 0 && (
+            <ul>
+              {monitoring.reasons.slice(0, 3).map((reason) => (
+                <li key={reason}>{reason}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      );
+    },
+    [],
+  );
+
+  const renderTransferTrustPanel = useCallback(
+    (
+      monitoring: AiMonitoringSummary | null,
+      options?: {
+        forceTone?: "low" | "medium" | "high";
+        compact?: boolean;
+      },
+    ) => {
+      if (!monitoring) return null;
+      const riskLevel = monitoring.riskLevel.toLowerCase();
+      const derivedTone =
+        riskLevel === "high" || riskLevel === "medium" ? riskLevel : "low";
+      const tone = options?.forceTone || derivedTone;
+      const trustLabel =
+        tone === "high"
+          ? "Low trust"
+          : tone === "medium"
+            ? "Moderate trust"
+            : "High trust";
+      const trustPercent = Math.max(
+        1,
+        Math.min(99, Math.round((1 - monitoring.score) * 100)),
+      );
+
+      return (
+        <div className={`transfer-ai-card ${tone}`} data-risk={tone}>
+          <div className="transfer-ai-head">
+            <strong>Transfer Trust Check</strong>
+            <span className={`transfer-ai-pill ${tone}`}>
+              {trustLabel} | {trustPercent}%
+            </span>
+          </div>
+          <p>
+            {tone === "low"
+              ? "This transfer looks normal. OTP was sent and you can continue."
+              : tone === "medium"
+                ? "This transfer is less typical than usual. Review the signals before entering OTP."
+                : "This transfer has strong risk signals. Review carefully before entering OTP."}
+          </p>
+          {!options?.compact && monitoring.reasons.length > 0 && (
             <ul>
               {monitoring.reasons.slice(0, 3).map((reason) => (
                 <li key={reason}>{reason}</li>
@@ -792,58 +1129,6 @@ function DashboardView() {
       }
     },
     [formatSecurityAlertTime, token],
-  );
-
-  const refreshAiOverview = useCallback(
-    async (options?: { silent?: boolean }) => {
-      if (!token) {
-        setAiOverview(null);
-        setAiOverviewBusy(false);
-        setAiOverviewError("");
-        return;
-      }
-
-      if (!options?.silent) {
-        setAiOverviewBusy(true);
-      }
-      setAiOverviewError("");
-
-      try {
-        const resp = await fetch(`${API_BASE}/ai/overview`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        const data = (await resp.json().catch(() => null)) as
-          | AiOverview
-          | { error?: string }
-          | null;
-
-        if (
-          !resp.ok ||
-          !data ||
-          !("status" in data) ||
-          !("stats" in data) ||
-          typeof data.status !== "object" ||
-          typeof data.stats !== "object"
-        ) {
-          throw new Error(
-            (data &&
-              "error" in data &&
-              typeof data.error === "string" &&
-              data.error) ||
-              "Cannot load AI overview",
-          );
-        }
-
-        setAiOverview(data as AiOverview);
-      } catch (err) {
-        setAiOverviewError(
-          err instanceof Error ? err.message : "Cannot load AI overview",
-        );
-      } finally {
-        setAiOverviewBusy(false);
-      }
-    },
-    [token],
   );
 
   const refreshWalletSnapshot = useCallback(
@@ -940,101 +1225,6 @@ function DashboardView() {
     [buildTransactionReceipt, token],
   );
 
-  const executeDeposit = async (amount: number) => {
-    if (!token) {
-      toast("Session expired. Please login again.", "error");
-      return false;
-    }
-    const resp = await fetch(`${API_BASE}/wallet/deposit`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ amount }),
-    });
-    if (!resp.ok) {
-      const err = (await resp.json().catch(() => null)) as {
-        error?: string;
-      } | null;
-      toast(err?.error || "Deposit failed", "error");
-      return false;
-    }
-    await refreshWalletSnapshot();
-    toast(`Deposited $${amount.toLocaleString("en-US")} successfully`);
-    return true;
-  };
-
-  const requestAiDepositPlan = async () => {
-    if (!token) {
-      toast("Session expired. Please login again.", "error");
-      return;
-    }
-    if (!depositGoal.trim()) {
-      toast("Enter a funding goal for the AI agent.", "error");
-      return;
-    }
-    setDepositAgentBusy(true);
-    try {
-      const resp = await fetch(`${API_BASE}/ai/deposit-agent`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          goal: depositGoal,
-          currentBalance: Number(wallet?.balance || 0),
-          currency: wallet?.currency || "USD",
-          monthlyIncome: Number(depositIncome || 0),
-          monthlyExpenses: Number(depositExpenses || 0),
-        }),
-      });
-      const data = (await resp.json().catch(() => null)) as {
-        error?: string;
-        recommendedAmount?: number;
-        reasoning?: string[];
-        riskLevel?: string;
-        nextAction?: string;
-        confidence?: number;
-      } | null;
-      if (!resp.ok || !data?.recommendedAmount) {
-        toast(data?.error || "AI agent is unavailable", "error");
-        return;
-      }
-      setDepositAgentPlan({
-        recommendedAmount: Number(data.recommendedAmount),
-        reasoning: Array.isArray(data.reasoning) ? data.reasoning : [],
-        riskLevel: data.riskLevel || "low",
-        nextAction: data.nextAction || "Deposit the suggested amount now.",
-        confidence: Number(data.confidence || 0.75),
-      });
-    } catch {
-      toast("Cannot reach AI agent right now.", "error");
-    } finally {
-      setDepositAgentBusy(false);
-    }
-  };
-
-  const resetCopilotSession = () => {
-    setCopilotMessages([
-      {
-        role: "assistant",
-        content:
-          "I can help with budget, spending, savings targets, and market context. Ask me what you want to improve.",
-      },
-    ]);
-    setCopilotInsight({
-      topic: "",
-      suggestedActions: [],
-      suggestedDepositAmount: null,
-      riskLevel: "low",
-      confidence: 0,
-      followUpQuestion: null,
-    });
-    setCopilotInput("");
-  };
-
   const sendCopilotMessage = async (promptOverride?: string) => {
     const content = (promptOverride ?? copilotInput).trim();
     if (!token) {
@@ -1053,6 +1243,11 @@ function DashboardView() {
     setCopilotInput("");
     setCopilotBusy(true);
 
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => {
+      controller.abort();
+    }, COPILOT_REQUEST_TIMEOUT_MS);
+
     try {
       const resp = await fetch(`${API_BASE}/ai/copilot-chat`, {
         method: "POST",
@@ -1060,6 +1255,7 @@ function DashboardView() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
+        signal: controller.signal,
         body: JSON.stringify({
           currency: wallet?.currency || "USD",
           currentBalance: Number(wallet?.balance || 0),
@@ -1109,10 +1305,18 @@ function DashboardView() {
         confidence: Number(data.confidence || 0.7),
         followUpQuestion: data.followUpQuestion || null,
       });
-    } catch {
-      toast("Cannot reach AI copilot right now.", "error");
+    } catch (error) {
+      const isTimeout =
+        error instanceof DOMException && error.name === "AbortError";
+      toast(
+        isTimeout
+          ? "AI copilot took too long to respond. Local 7B replies can take up to a minute."
+          : "Cannot reach AI copilot right now.",
+        "error",
+      );
       setCopilotMessages(nextMessages);
     } finally {
+      window.clearTimeout(timeout);
       setCopilotBusy(false);
     }
   };
@@ -1153,7 +1357,7 @@ function DashboardView() {
     return decoded?.data?.trim() || "";
   };
 
-  const stopTransferQrCameraScan = () => {
+  const stopTransferQrCameraScan = (hidePanel = false) => {
     if (transferQrScanTimerRef.current !== null) {
       window.clearInterval(transferQrScanTimerRef.current);
       transferQrScanTimerRef.current = null;
@@ -1171,6 +1375,9 @@ function DashboardView() {
       transferQrVideoRef.current.srcObject = null;
     }
     setTransferQrCameraOn(false);
+    if (hidePanel) {
+      setTransferQrCameraPanelOpen(false);
+    }
   };
 
   const loadTransferQrDevices = async () => {
@@ -1193,18 +1400,48 @@ function DashboardView() {
     }
   };
 
-  const handleTransferQrPayloadDetected = (payload: string) => {
-    setTransferQrRaw(payload);
+  const resolveTransferRecipient = async (accountNumber: string) => {
+    if (!token) {
+      toast("Session expired. Please login again.", "error");
+      return false;
+    }
+    try {
+      const resp = await fetch(
+        `${API_BASE}/wallet/resolve/${encodeURIComponent(accountNumber)}`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
+      const data = (await resp.json().catch(() => null)) as {
+        error?: string;
+        holderName?: string;
+        accountNumber?: string;
+      } | null;
+      if (!resp.ok || !data?.accountNumber) {
+        toast(data?.error || "Recipient account not found", "error");
+        return false;
+      }
+      setTransferAccount(data.accountNumber);
+      setTransferReceiverName(
+        data.holderName || `Account ${data.accountNumber.slice(-4)}`,
+      );
+      return true;
+    } catch {
+      toast("Cannot verify account with server", "error");
+      return false;
+    }
+  };
+  const handleTransferQrPayloadDetected = async (payload: string) => {
     const extracted = extractAccountFromQrPayload(payload);
     if (!/^\d{8,19}$/.test(extracted)) {
-      toast("Cannot detect a valid account number from QR payload.", "error");
+      toast("Cannot detect a valid account number from QR.", "error");
       return;
     }
-    setTransferAccount(extracted);
-    setTransferReceiverName(`QR Recipient •••• ${extracted.slice(-4)}`);
+    const resolved = await resolveTransferRecipient(extracted);
+    if (!resolved) return;
     toast("QR scanned successfully.");
+    setTransferStep(2);
   };
-
   const startTransferQrCameraScan = async (
     preferredFacingMode: "environment" | "user" = transferQrFacingMode,
   ) => {
@@ -1219,6 +1456,10 @@ function DashboardView() {
     ).BarcodeDetector;
 
     stopTransferQrCameraScan();
+    setTransferQrCameraPanelOpen(true);
+    await new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => resolve());
+    });
 
     const constraintsList: MediaStreamConstraints[] = [
       { video: true },
@@ -1410,8 +1651,8 @@ function DashboardView() {
           }
 
           if (!raw) return;
-          stopTransferQrCameraScan();
-          handleTransferQrPayloadDetected(raw);
+          stopTransferQrCameraScan(true);
+          await handleTransferQrPayloadDetected(raw);
         } catch {
           // keep scanning
         }
@@ -1475,7 +1716,7 @@ function DashboardView() {
         const results = await detector.detect(bitmap);
         const raw = results[0]?.rawValue?.trim();
         if (raw) {
-          handleTransferQrPayloadDetected(raw);
+          await handleTransferQrPayloadDetected(raw);
           return;
         }
       }
@@ -1607,7 +1848,7 @@ function DashboardView() {
           );
           return;
         }
-        handleTransferQrPayloadDetected(raw);
+        await handleTransferQrPayloadDetected(raw);
       } finally {
         URL.revokeObjectURL(objectUrl);
       }
@@ -1627,17 +1868,12 @@ function DashboardView() {
   }, [refreshSecurityAlerts]);
 
   useEffect(() => {
-    void refreshAiOverview({ silent: true });
-  }, [refreshAiOverview]);
-
-  useEffect(() => {
     if (!token) return;
 
     const refreshIfVisible = () => {
       if (document.visibilityState === "hidden") return;
       void refreshWalletSnapshot();
       void refreshSecurityAlerts({ silent: true });
-      void refreshAiOverview({ silent: true });
     };
 
     const interval = window.setInterval(refreshIfVisible, 5000);
@@ -1649,7 +1885,7 @@ function DashboardView() {
       window.removeEventListener("focus", refreshIfVisible);
       document.removeEventListener("visibilitychange", refreshIfVisible);
     };
-  }, [refreshAiOverview, refreshSecurityAlerts, refreshWalletSnapshot, token]);
+  }, [refreshSecurityAlerts, refreshWalletSnapshot, token]);
 
   const generateOtp = () => {
     const next = String(Math.floor(100000 + Math.random() * 900000));
@@ -1695,7 +1931,7 @@ function DashboardView() {
   };
 
   const resetTransferFlow = () => {
-    stopTransferQrCameraScan();
+    stopTransferQrCameraScan(true);
     setTransferStep(1);
     setTransferMethod("account");
     setTransferAccount("");
@@ -1703,7 +1939,6 @@ function DashboardView() {
     setTransferAmount("");
     setTransferContent(defaultTransferContent);
     setTransferQrFile("");
-    setTransferQrRaw("");
     setTransferQrCameraError("");
     setTransferQrFacingMode("environment");
     setTransferShowMyQr(false);
@@ -1713,7 +1948,10 @@ function DashboardView() {
     setTransferOtpDestination("");
     setTransferOtpExpiresAt("");
     setTransferOtpResendAt(0);
+    setTransferOtpBusy(false);
     setTransferMonitoring(null);
+    setTransferAdvisory(null);
+    setTransferAdvisoryAcknowledged(false);
     setTransferReceipt(null);
   };
 
@@ -1723,13 +1961,14 @@ function DashboardView() {
   };
 
   const closeTransferModal = () => {
+    void dismissTransferAdvisory();
     setTransferOpen(false);
     resetTransferFlow();
   };
 
   useEffect(() => {
     return () => {
-      stopTransferQrCameraScan();
+      stopTransferQrCameraScan(true);
     };
   }, []);
 
@@ -1747,110 +1986,157 @@ function DashboardView() {
     return () => window.clearInterval(timer);
   }, [transferOtpResendAt]);
 
-  const generateTransferOtp = async () => {
+  const generateTransferOtp = async (options?: {
+    advisoryAcknowledged?: boolean;
+  }) => {
     if (!token) {
       toast("Session expired. Please login again.", "error");
       return false;
     }
-    const amount = Number(transferAmount.replace(/,/g, "")) || 0;
-    const resp = await fetch(`${API_BASE}/transfer/otp/send`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        toAccount: transferAccount,
-        amount,
-        note: transferContent || defaultTransferContent,
-      }),
-    });
-    const data = (await resp.json().catch(() => null)) as {
-      error?: string;
-      challengeId?: string;
-      destination?: string;
-      expiresAt?: string;
-      retryAfterSeconds?: number;
-      anomaly?: unknown;
-    } | null;
-    if (!resp.ok || !data?.challengeId) {
-      toast(data?.error || "Failed to send OTP email", "error");
-      return false;
-    }
-    const monitoring = parseAiMonitoringSummary(data.anomaly);
-    setTransferMonitoring(monitoring);
-    setTransferOtpChallengeId(data.challengeId);
-    setTransferOtpDestination(data.destination || "");
-    setTransferOtpExpiresAt(data.expiresAt || "");
-    setTransferOtpResendAt(
-      Date.now() + Number(data.retryAfterSeconds || 60) * 1000,
-    );
-    setTransferOtpInput("");
-    setTransferOtpError("");
-    toast(
-      data.destination
-        ? `OTP sent to ${data.destination}`
-        : "OTP sent to your email",
-      "info",
-    );
-    if (monitoring && monitoring.riskLevel.toLowerCase() !== "low") {
+    setTransferOtpBusy(true);
+    try {
+      const amount = Number(transferAmount.replace(/,/g, "")) || 0;
+      const resp = await fetch(`${API_BASE}/transfer/otp/send`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          toAccount: transferAccount,
+          amount,
+          note: transferContent || defaultTransferContent,
+          advisoryAcknowledged:
+            options?.advisoryAcknowledged === true ||
+            transferAdvisoryAcknowledged,
+          advisoryRequestKey:
+            transferAdvisory?.requestKey || transferMonitoring?.requestKey || null,
+        }),
+      });
+      const data = (await resp.json().catch(() => null)) as {
+        error?: string;
+        challengeId?: string;
+        destination?: string;
+        expiresAt?: string;
+        retryAfterSeconds?: number;
+        anomaly?: unknown;
+        transferAdvisory?: unknown;
+      } | null;
+      const monitoring = parseAiMonitoringSummary(data?.anomaly);
+      const advisory = parseTransferSafetyAdvisory(data?.transferAdvisory);
+      const visibleMonitoring = getVisibleTransferMonitoring(monitoring);
+      if (monitoring) {
+        setTransferMonitoring(monitoring);
+      } else if (resp.ok || resp.status === 409) {
+        setTransferMonitoring(null);
+      }
+      if (advisory) {
+        setTransferAdvisory(advisory);
+      } else if (resp.ok) {
+        setTransferAdvisory(null);
+      }
+
+      if ((resp.status === 409 || resp.status === 423) && advisory) {
+        setTransferAdvisoryAcknowledged(false);
+        toast(
+          data?.error ||
+            (resp.status === 423
+              ? "This transfer is blocked for safety review."
+              : "Please review this transfer warning."),
+          resp.status === 423 ? "error" : "info",
+        );
+        return false;
+      }
+
+      if (!resp.ok || !data?.challengeId) {
+        toast(data?.error || "Failed to send OTP email", "error");
+        return false;
+      }
+      setTransferAdvisoryAcknowledged(
+        options?.advisoryAcknowledged === true ||
+          transferAdvisoryAcknowledged ||
+          Boolean(advisory),
+      );
+      setTransferOtpChallengeId(data.challengeId);
+      setTransferOtpDestination(data.destination || "");
+      setTransferOtpExpiresAt(data.expiresAt || "");
+      setTransferOtpResendAt(
+        Date.now() + Number(data.retryAfterSeconds || 60) * 1000,
+      );
+      setTransferOtpInput("");
+      setTransferOtpError("");
       toast(
-        `AI transfer monitoring flagged ${monitoring.riskLevel.toLowerCase()} risk (${Math.round(
-          monitoring.score * 100,
-        )}%).`,
+        data.destination
+          ? `OTP sent to ${data.destination}`
+          : "OTP sent to your email",
         "info",
       );
+      if (
+        visibleMonitoring &&
+        visibleMonitoring.riskLevel.toLowerCase() !== "low"
+      ) {
+        toast(
+          `AI transfer monitoring flagged ${visibleMonitoring.riskLevel.toLowerCase()} risk (${Math.round(
+            visibleMonitoring.score * 100,
+          )}%).`,
+          "info",
+        );
+      }
+      return true;
+    } finally {
+      setTransferOtpBusy(false);
     }
-    return true;
   };
-  const continueTransferRecipient = async () => {
-    if (!token) {
-      toast("Session expired. Please login again.", "error");
+  const dismissTransferAdvisory = useCallback(async () => {
+    if (
+      !token ||
+      !transferAdvisory ||
+      transferAdvisoryAcknowledged ||
+      (!transferAdvisory.requestKey && !transferMonitoring?.requestKey)
+    ) {
       return;
     }
 
+    try {
+      await fetch(`${API_BASE}/transfer/advisory/dismiss`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          requestKey:
+            transferAdvisory.requestKey || transferMonitoring?.requestKey || null,
+          advisory: transferAdvisory,
+          toAccount: transferAccount,
+          amount: Number(transferAmount.replace(/,/g, "")) || transferAdvisory.amount,
+        }),
+      });
+    } catch {
+      // Best-effort telemetry only.
+    }
+  }, [
+    token,
+    transferAdvisory,
+    transferAdvisoryAcknowledged,
+    transferMonitoring?.requestKey,
+    transferAccount,
+    transferAmount,
+  ]);
+  const continueTransferRecipient = async () => {
     if (transferMethod === "account") {
       if (!/^\d{8,19}$/.test(transferAccount)) {
         toast("Please enter a valid account number (8-19 digits).", "error");
         return;
       }
     } else if (!transferAccount) {
-      toast(
-        "Please scan QR by camera or extract account from QR payload first.",
-        "error",
-      );
+      toast("Please scan QR by camera or upload a QR image first.", "error");
       return;
     }
-
-    try {
-      const resp = await fetch(
-        `${API_BASE}/wallet/resolve/${encodeURIComponent(transferAccount)}`,
-        {
-          headers: { Authorization: `Bearer ${token}` },
-        },
-      );
-      const data = (await resp.json().catch(() => null)) as {
-        error?: string;
-        holderName?: string;
-        accountNumber?: string;
-      } | null;
-      if (!resp.ok || !data?.accountNumber) {
-        toast(data?.error || "Recipient account not found", "error");
-        return;
-      }
-
-      setTransferAccount(data.accountNumber);
-      setTransferReceiverName(
-        data.holderName || `Account ���� ${data.accountNumber.slice(-4)}`,
-      );
-    } catch {
-      toast("Cannot verify account with server", "error");
-      return;
-    }
-
+    const resolved = await resolveTransferRecipient(transferAccount);
+    if (!resolved) return;
     setTransferStep(2);
   };
-
   const continueTransferAmount = async () => {
     const amount = Number(transferAmount.replace(/,/g, ""));
     if (!transferAmount || Number.isNaN(amount) || amount <= 0) {
@@ -1870,7 +2156,9 @@ function DashboardView() {
     if (!transferContent.trim()) {
       setTransferContent(defaultTransferContent);
     }
-    const sent = await generateTransferOtp();
+    const sent = await generateTransferOtp({
+      advisoryAcknowledged: Boolean(transferAdvisory),
+    });
     if (sent) {
       setTransferStep(3);
     }
@@ -1932,7 +2220,9 @@ function DashboardView() {
         toAccount?: string;
       };
     } | null;
-    const confirmedMonitoring = parseAiMonitoringSummary(transferPayload?.anomaly);
+    const confirmedMonitoring = parseAiMonitoringSummary(
+      transferPayload?.anomaly,
+    );
     if (confirmedMonitoring) {
       setTransferMonitoring(confirmedMonitoring);
     }
@@ -2039,29 +2329,29 @@ function DashboardView() {
         <aside className="dashboard-actions-card">
           <h3>Quick Actions</h3>
           <div className="dashboard-actions-list">
-            {dashboardQuickActions.map((action) => (
-                <button
-                  type="button"
-                  className="dashboard-action-item"
-                  key={action.title}
-                  onClick={() => {
-                    if (action.id === "transfer") {
-                      openTransferModal();
-                    } else if (action.id === "deposit") {
-                      setDepositAgentOpen(true);
-                    } else if (action.id === "copilot") {
-                      setCopilotOpen(true);
-                    }
-                  }}
-                >
-                  <span className="dashboard-action-icon">{action.icon}</span>
-                  <span className="dashboard-action-text">
-                    <strong>{action.title}</strong>
-                    <small>{action.detail}</small>
-                  </span>
-                  <span className="dashboard-action-arrow">›</span>
-                </button>
-              ))}
+            {dashboardQuickActions
+              .filter((action) => action.id !== "deposit")
+              .map((action) => (
+              <button
+                type="button"
+                className="dashboard-action-item"
+                key={action.title}
+                onClick={() => {
+                  if (action.id === "transfer") {
+                    openTransferModal();
+                  } else if (action.id === "copilot") {
+                    setCopilotOpen(true);
+                  }
+                }}
+              >
+                <span className="dashboard-action-icon">{action.icon}</span>
+                <span className="dashboard-action-text">
+                  <strong>{action.title}</strong>
+                  <small>{action.detail}</small>
+                </span>
+                <span className="dashboard-action-arrow">›</span>
+              </button>
+            ))}
           </div>
           <button
             type="button"
@@ -2075,64 +2365,10 @@ function DashboardView() {
         </aside>
       </div>
 
-      <section className="dashboard-block ai-overview-block">
-        <div className="dashboard-block-head">
-          <h3>AI Runtime</h3>
-          <span className="dashboard-tag">
-            {aiOverview?.status.modelLoaded && aiOverview?.status.txModelLoaded
-              ? "ONLINE"
-              : "PARTIAL"}
-          </span>
-          <button
-            type="button"
-            className="dashboard-link"
-            onClick={() => void refreshAiOverview()}
-          >
-            {aiOverviewBusy ? "Refreshing..." : "Refresh AI"}
-          </button>
-        </div>
-        <div className="ai-runtime-grid">
-          <article className="ai-runtime-card">
-            <span>Login model</span>
-            <strong>
-              {aiOverview?.status.modelLoaded ? "Loaded" : "Unavailable"}
-            </strong>
-            <small>
-              {aiOverview?.status.modelVersion || "No active login model"}
-            </small>
-          </article>
-          <article className="ai-runtime-card">
-            <span>Transaction model</span>
-            <strong>
-              {aiOverview?.status.txModelLoaded ? "Loaded" : "Unavailable"}
-            </strong>
-            <small>
-              {aiOverview?.status.txModelVersion || "No active transaction model"}
-            </small>
-          </article>
-          <article className="ai-runtime-card">
-            <span>Combined risk window</span>
-            <strong>{aiOverview?.stats.windowHours || 24}h</strong>
-            <small>
-              High: {aiOverview?.stats.combinedRiskCounts.HIGH || 0} · Medium:{" "}
-              {aiOverview?.stats.combinedRiskCounts.MEDIUM || 0}
-            </small>
-          </article>
-          <article className="ai-runtime-card">
-            <span>Data backend</span>
-            <strong>
-              {aiOverview?.status.mongoConnected ? "Connected" : "Offline"}
-            </strong>
-            <small>{aiOverview?.status.authMode || "unknown auth mode"}</small>
-          </article>
-        </div>
-        {aiOverviewError && <div className="ai-runtime-error">{aiOverviewError}</div>}
-      </section>
-
       <section className="dashboard-block">
         <div className="dashboard-block-head">
           <h3>Security Alerts</h3>
-          <span className="dashboard-tag">VERIFIED</span>
+          <span className="dashboard-tag">{securityRecentLogins.length}</span>
           <button
             type="button"
             className="dashboard-link"
@@ -2144,47 +2380,11 @@ function DashboardView() {
             {securityAlertsBusy ? "Loading..." : "View Sign-In Activity"}
           </button>
         </div>
-        <div className="dashboard-alert-list">
-          {(securityAlerts.length
-            ? securityAlerts
-            : [
-                {
-                  id: "no-alerts-preview",
-                  title: "No Recent Alerts",
-                  location: "Current Account",
-                  detail:
-                    "No unusual sign-in activity was detected for this account in the current review window.",
-                  time: "Up to date",
-                  tone: "safe" as const,
-                },
-              ]
-          )
-            .slice(0, 3)
-            .map((alert) => (
-              <article
-                className={`dashboard-alert-item ${alert.tone}`}
-                key={alert.id}
-              >
-                <div className="dashboard-alert-icon">
-                  {alert.tone === "safe"
-                    ? "✓"
-                    : alert.tone === "info"
-                      ? "i"
-                      : "!"}
-                </div>
-                <div className="dashboard-alert-content">
-                  <div className="dashboard-alert-title-row">
-                    <strong>{alert.title}</strong>
-                    <span className="dashboard-alert-location">
-                      {alert.location}
-                    </span>
-                  </div>
-                  <p>{alert.detail}</p>
-                </div>
-                <div className="dashboard-alert-time">{alert.time}</div>
-              </article>
-            ))}
-        </div>
+        {renderSecurityRecentLoginList(securityRecentLogins, {
+          limit: 3,
+          keyPrefix: "preview",
+          className: "security-alerts-preview-list",
+        })}
         {securityAlertsError ? (
           <div className="dashboard-inline-note">{securityAlertsError}</div>
         ) : null}
@@ -2281,174 +2481,14 @@ function DashboardView() {
             <div className="security-activity-grid">
               <section className="security-activity-section">
                 <div className="security-activity-head">
-                  <h4>Recent Alerts</h4>
-                  <span className="dashboard-tag">{securityAlerts.length}</span>
-                </div>
-                <div className="dashboard-alert-list security-alert-list-modal">
-                  {(securityAlerts.length
-                    ? securityAlerts
-                    : [
-                        {
-                          id: "no-alerts-modal",
-                          title: "No Recent Alerts",
-                          location: "Current Account",
-                          detail:
-                            "No unusual sign-in activity was detected for this account in the current review window.",
-                          time: "Up to date",
-                          tone: "safe" as const,
-                        },
-                      ]
-                  ).map((alert) => (
-                    <article
-                      className={`dashboard-alert-item ${alert.tone}`}
-                      key={`modal-${alert.id}`}
-                    >
-                      <div className="dashboard-alert-icon">
-                        {alert.tone === "safe"
-                          ? "OK"
-                          : alert.tone === "info"
-                            ? "i"
-                            : "!"}
-                      </div>
-                      <div className="dashboard-alert-content">
-                        <div className="dashboard-alert-title-row">
-                          <strong>{alert.title}</strong>
-                          <span className="dashboard-alert-location">
-                            {alert.location}
-                          </span>
-                        </div>
-                        <p>{alert.detail}</p>
-                      </div>
-                      <div className="dashboard-alert-time">{alert.time}</div>
-                    </article>
-                  ))}
-                </div>
-              </section>
-
-              <section className="security-activity-section">
-                <div className="security-activity-head">
-                  <h4>Trusted Devices / Saved IPs</h4>
-                  <span className="dashboard-tag">
-                    {securityTrustedDevices.length}
-                  </span>
-                </div>
-                {securityTrustedDevices.length ? (
-                  <div className="security-record-list">
-                    {securityTrustedDevices.map((device) => (
-                      <article className="security-record-card" key={device.id}>
-                        <div className="security-record-head">
-                          <div className="security-record-summary">
-                            <strong title={device.userAgent}>
-                              {summarizeUserAgent(device.userAgent)}
-                            </strong>
-                            <p>{device.location}</p>
-                            <p
-                              className="security-record-agent"
-                              title={device.userAgent}
-                            >
-                              {device.userAgent}
-                            </p>
-                          </div>
-                          <span className="security-record-pill">
-                            {device.current ? "Current session" : "Trusted IP"}
-                          </span>
-                        </div>
-                        <dl className="security-record-meta">
-                          <div>
-                            <dt>Saved IP</dt>
-                            <dd>{device.ipAddress}</dd>
-                          </div>
-                          <div>
-                            <dt>Verified</dt>
-                            <dd>
-                              {formatSecurityTimestamp(device.lastVerifiedAt)}
-                            </dd>
-                          </div>
-                          <div>
-                            <dt>First seen</dt>
-                            <dd>
-                              {formatSecurityTimestamp(device.firstSeenAt)}
-                            </dd>
-                          </div>
-                          <div>
-                            <dt>Last used</dt>
-                            <dd>
-                              {formatSecurityTimestamp(device.lastSeenAt)}
-                            </dd>
-                          </div>
-                        </dl>
-                      </article>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="dashboard-inline-note">
-                    No trusted device or saved IP has been verified for this
-                    account yet.
-                  </div>
-                )}
-              </section>
-
-              <section className="security-activity-section">
-                <div className="security-activity-head">
                   <h4>Recent Sign-Ins</h4>
                   <span className="dashboard-tag">
                     {securityRecentLogins.length}
                   </span>
                 </div>
-                {securityRecentLogins.length ? (
-                  <div className="security-record-list">
-                    {securityRecentLogins.map((login) => (
-                      <article className="security-record-card" key={login.id}>
-                        <div className="security-record-head">
-                          <div className="security-record-summary">
-                            <strong title={login.userAgent}>
-                              {summarizeUserAgent(login.userAgent)}
-                            </strong>
-                            <p>{login.location}</p>
-                            <p
-                              className="security-record-agent"
-                              title={login.userAgent}
-                            >
-                              {login.userAgent}
-                            </p>
-                          </div>
-                          <span
-                            className={`security-record-pill ${login.success ? "success" : "warn"}`}
-                          >
-                            {login.success
-                              ? login.trustedIp
-                                ? "Trusted sign-in"
-                                : "Verified sign-in"
-                              : "Blocked"}
-                          </span>
-                        </div>
-                        <dl className="security-record-meta">
-                          <div>
-                            <dt>IP</dt>
-                            <dd>{login.ipAddress || "Unavailable"}</dd>
-                          </div>
-                          <div>
-                            <dt>Time</dt>
-                            <dd>{formatSecurityTimestamp(login.createdAt)}</dd>
-                          </div>
-                          <div>
-                            <dt>Risk</dt>
-                            <dd>{Math.round(login.anomaly * 100)}%</dd>
-                          </div>
-                          <div>
-                            <dt>Status</dt>
-                            <dd>{login.success ? "Successful" : "Blocked"}</dd>
-                          </div>
-                        </dl>
-                      </article>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="dashboard-inline-note">
-                    No recent sign-in activity is available for this account
-                    yet.
-                  </div>
-                )}
+                {renderSecurityRecentLoginList(securityRecentLogins, {
+                  keyPrefix: "modal",
+                })}
               </section>
             </div>
           </div>
@@ -2695,13 +2735,25 @@ function DashboardView() {
                 ✕
               </button>
             </div>
-            <div className="transfer-steps">
-              <span className={transferStep >= 1 ? "active" : ""}>
-                Recipient
-              </span>
-              <span className={transferStep >= 2 ? "active" : ""}>Amount</span>
-              <span className={transferStep >= 3 ? "active" : ""}>OTP</span>
-              <span className={transferStep >= 4 ? "active" : ""}>Done</span>
+            <div className="transfer-steps" aria-label="Transfer progress">
+              {["Recipient", "Amount", "OTP", "Done"].map((label, index) => {
+                const stepNumber = index + 1;
+                const state =
+                  transferStep > stepNumber
+                    ? "done"
+                    : transferStep === stepNumber
+                      ? "current"
+                      : "upcoming";
+                return (
+                  <div
+                    key={label}
+                    className={`transfer-step transfer-step-${state}`}
+                  >
+                    <span className="transfer-step-dot">{stepNumber}</span>
+                    <span className="transfer-step-label">{label}</span>
+                  </div>
+                );
+              })}
             </div>
 
             {transferStep === 1 && (
@@ -2712,7 +2764,7 @@ function DashboardView() {
                     className={transferMethod === "account" ? "active" : ""}
                     onClick={() => {
                       setTransferMethod("account");
-                      stopTransferQrCameraScan();
+                      stopTransferQrCameraScan(true);
                     }}
                   >
                     Account Number
@@ -2734,11 +2786,15 @@ function DashboardView() {
                       inputMode="numeric"
                       placeholder="Enter bank account number"
                       value={transferAccount}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        void dismissTransferAdvisory();
                         setTransferAccount(
                           e.target.value.replace(/\D/g, "").slice(0, 19),
-                        )
-                      }
+                        );
+                        setTransferMonitoring(null);
+                        setTransferAdvisory(null);
+                        setTransferAdvisoryAcknowledged(false);
+                      }}
                     />
                   </label>
                 ) : (
@@ -2762,7 +2818,10 @@ function DashboardView() {
                         <button
                           type="button"
                           className="pill"
-                          onClick={() => void startTransferQrCameraScan()}
+                          onClick={() => {
+                            setTransferShowMyQr(false);
+                            void startTransferQrCameraScan();
+                          }}
                         >
                           Scan QR by camera
                         </button>
@@ -2771,7 +2830,7 @@ function DashboardView() {
                           <button
                             type="button"
                             className="pill"
-                            onClick={stopTransferQrCameraScan}
+                            onClick={() => stopTransferQrCameraScan()}
                           >
                             Stop camera
                           </button>
@@ -2794,7 +2853,15 @@ function DashboardView() {
                       <button
                         type="button"
                         className="pill"
-                        onClick={() => setTransferShowMyQr((v) => !v)}
+                        onClick={() =>
+                          setTransferShowMyQr((v) => {
+                            const next = !v;
+                            if (next) {
+                              stopTransferQrCameraScan(true);
+                            }
+                            return next;
+                          })
+                        }
                       >
                         {transferShowMyQr ? "Hide my QR" : "Show my QR"}
                       </button>
@@ -2809,64 +2876,68 @@ function DashboardView() {
                         {transferQrCameraError}
                       </small>
                     )}
-                    <div className="transfer-qr-device-row">
-                      <label className="transfer-qr-device-label">
-                        Camera
-                        <select
-                          value={transferQrDeviceId}
-                          onChange={(e) =>
-                            setTransferQrDeviceId(e.target.value)
-                          }
-                          disabled={transferQrDevices.length === 0}
-                        >
-                          {transferQrDevices.length === 0 ? (
-                            <option value="">No camera found</option>
-                          ) : (
-                            transferQrDevices.map((cam, idx) => (
-                              <option
-                                key={cam.deviceId || String(idx)}
-                                value={cam.deviceId}
-                              >
-                                {cam.label || `Camera ${idx + 1}`}
-                              </option>
-                            ))
-                          )}
-                        </select>
-                      </label>
-                      <button
-                        type="button"
-                        className="pill"
-                        onClick={() => void loadTransferQrDevices()}
-                      >
-                        Reload cameras
-                      </button>
-                    </div>
-                    <div
-                      className={`transfer-qr-camera ${transferQrCameraOn ? "active" : ""}`}
-                    >
-                      <div className="transfer-qr-preview">
-                        <video
-                          ref={transferQrVideoRef}
-                          className="transfer-qr-video"
-                          autoPlay
-                          playsInline
-                          muted
-                        />
+                    {transferQrCameraPanelOpen && (
+                      <>
+                        <div className="transfer-qr-device-row">
+                          <label className="transfer-qr-device-label">
+                            Camera
+                            <select
+                              value={transferQrDeviceId}
+                              onChange={(e) =>
+                                setTransferQrDeviceId(e.target.value)
+                              }
+                              disabled={transferQrDevices.length === 0}
+                            >
+                              {transferQrDevices.length === 0 ? (
+                                <option value="">No camera found</option>
+                              ) : (
+                                transferQrDevices.map((cam, idx) => (
+                                  <option
+                                    key={cam.deviceId || String(idx)}
+                                    value={cam.deviceId}
+                                  >
+                                    {cam.label || `Camera ${idx + 1}`}
+                                  </option>
+                                ))
+                              )}
+                            </select>
+                          </label>
+                          <button
+                            type="button"
+                            className="pill"
+                            onClick={() => void loadTransferQrDevices()}
+                          >
+                            Reload cameras
+                          </button>
+                        </div>
                         <div
-                          className="transfer-qr-target"
-                          aria-hidden="true"
-                        />
-                      </div>
-                      <small className="muted">
-                        {transferQrCameraOn
-                          ? `Place the QR inside the square frame to auto-detect. Current camera: ${
-                              transferQrFacingMode === "environment"
-                                ? "Back"
-                                : "Front"
-                            }.`
-                          : "Camera preview will appear here after you start scanning."}
-                      </small>
-                    </div>
+                          className={`transfer-qr-camera ${transferQrCameraOn ? "active" : ""}`}
+                        >
+                          <div className="transfer-qr-preview">
+                            <video
+                              ref={transferQrVideoRef}
+                              className="transfer-qr-video"
+                              autoPlay
+                              playsInline
+                              muted
+                            />
+                            <div
+                              className="transfer-qr-target"
+                              aria-hidden="true"
+                            />
+                          </div>
+                          <small className="muted">
+                            {transferQrCameraOn
+                              ? `Place the QR inside the square frame to auto-detect. Current camera: ${
+                                  transferQrFacingMode === "environment"
+                                    ? "Back"
+                                    : "Front"
+                                }.`
+                              : "Camera preview will appear here after you start scanning."}
+                          </small>
+                        </div>
+                      </>
+                    )}
                     {transferShowMyQr && (
                       <div className="transfer-my-qr-card">
                         <span>My account QR</span>
@@ -2889,39 +2960,6 @@ function DashboardView() {
                             {ownQrPayload}
                           </small>
                         )}
-                      </div>
-                    )}
-                    <label className="form-group" style={{ marginTop: 10 }}>
-                      <span>QR payload</span>
-                      <input
-                        type="text"
-                        placeholder="EWALLET|ACC:971234567890|BANK:SECURE-WALLET"
-                        value={transferQrRaw}
-                        onChange={(e) => setTransferQrRaw(e.target.value)}
-                      />
-                    </label>
-                    <button
-                      type="button"
-                      className="pill"
-                      onClick={() => {
-                        const extracted =
-                          extractAccountFromQrPayload(transferQrRaw);
-                        if (!/^\d{8,19}$/.test(extracted)) {
-                          toast("Invalid QR payload.", "error");
-                          return;
-                        }
-                        setTransferAccount(extracted);
-                        setTransferReceiverName(
-                          `QR Recipient •••• ${extracted.slice(-4)}`,
-                        );
-                        toast("QR payload parsed successfully.");
-                      }}
-                    >
-                      Extract account from QR
-                    </button>
-                    {transferAccount && (
-                      <div className="transfer-qr-result">
-                        Extracted account: <strong>{transferAccount}</strong>
                       </div>
                     )}
                   </div>
@@ -2953,9 +2991,15 @@ function DashboardView() {
                     inputMode="decimal"
                     placeholder="Enter transfer amount"
                     value={transferAmount}
-                    onChange={(e) =>
-                      setTransferAmount(e.target.value.replace(/[^0-9.]/g, ""))
-                    }
+                    onChange={(e) => {
+                      void dismissTransferAdvisory();
+                      setTransferAmount(
+                        e.target.value.replace(/[^0-9.]/g, ""),
+                      );
+                      setTransferMonitoring(null);
+                      setTransferAdvisory(null);
+                      setTransferAdvisoryAcknowledged(false);
+                    }}
                   />
                   {isInsufficientBalance && (
                     <small className="transfer-input-error">
@@ -2975,18 +3019,30 @@ function DashboardView() {
                   <input
                     type="text"
                     value={transferContent}
-                    onChange={(e) => setTransferContent(e.target.value)}
+                    onChange={(e) => {
+                      void dismissTransferAdvisory();
+                      setTransferContent(e.target.value);
+                      setTransferMonitoring(null);
+                      setTransferAdvisory(null);
+                      setTransferAdvisoryAcknowledged(false);
+                    }}
                   />
                 </label>
-                {renderAiMonitoringPanel(
-                  transferMonitoring,
-                  "Transaction AI Monitoring",
-                )}
+                {isTransferPreOtpWarning &&
+                  renderTransferAdvisoryPanel(transferAdvisory, {
+                    acknowledged: transferAdvisoryAcknowledged,
+                  })}
                 <div className="transfer-actions">
                   <button
                     type="button"
                     className="pill"
-                    onClick={() => setTransferStep(1)}
+                    onClick={() => {
+                      void dismissTransferAdvisory();
+                      setTransferStep(1);
+                      setTransferMonitoring(null);
+                      setTransferAdvisory(null);
+                      setTransferAdvisoryAcknowledged(false);
+                    }}
                   >
                     Back
                   </button>
@@ -2994,9 +3050,13 @@ function DashboardView() {
                     type="button"
                     className="btn-primary"
                     onClick={continueTransferAmount}
-                    disabled={!canContinueTransferAmount}
+                    disabled={
+                      !canContinueTransferAmount ||
+                      transferOtpBusy ||
+                      isTransferHardBlocked
+                    }
                   >
-                    Continue to OTP
+                    {transferContinueLabel}
                   </button>
                 </div>
               </div>
@@ -3034,10 +3094,15 @@ function DashboardView() {
                     </small>
                   </div>
                 )}
-                {renderAiMonitoringPanel(
-                  transferMonitoring,
-                  "Transfer Risk Review",
-                )}
+                {isTransferPreOtpWarning &&
+                  renderTransferAdvisoryPanel(transferAdvisory, {
+                    acknowledged: transferAdvisoryAcknowledged,
+                  })}
+                {!isTransferPreOtpWarning &&
+                  renderTransferTrustPanel(transferMonitoring, {
+                    forceTone: "low",
+                    compact: true,
+                  })}
                 <label className="form-group">
                   <span>Enter OTP</span>
                   <input
@@ -3060,10 +3125,16 @@ function DashboardView() {
                   <button
                     type="button"
                     className="pill"
-                    disabled={transferOtpCooldownSeconds > 0}
-                    onClick={() => void generateTransferOtp()}
+                    disabled={transferOtpCooldownSeconds > 0 || transferOtpBusy}
+                    onClick={() =>
+                      void generateTransferOtp({
+                        advisoryAcknowledged: Boolean(transferAdvisory),
+                      })
+                    }
                   >
-                    {transferOtpCooldownSeconds > 0
+                    {transferOtpBusy
+                      ? "Sending..."
+                      : transferOtpCooldownSeconds > 0
                       ? `Resend in ${transferOtpCooldownSeconds}s`
                       : "Resend OTP"}
                   </button>
@@ -3085,10 +3156,21 @@ function DashboardView() {
                 {transferReceipt && (
                   <TransactionReceiptCard receipt={transferReceipt} />
                 )}
-                {renderAiMonitoringPanel(
-                  transferMonitoring,
-                  "Transaction Monitoring Result",
-                )}
+                {isTransferPreOtpWarning &&
+                  transferAdvisory &&
+                  renderTransferAdvisoryPanel(transferAdvisory, {
+                    acknowledged: transferAdvisoryAcknowledged,
+                  })}
+                {!isTransferPreOtpWarning &&
+                  renderTransferTrustPanel(transferMonitoring, {
+                    forceTone: "low",
+                  })}
+                {!isTransferPreOtpWarning &&
+                  !transferMonitoring &&
+                  renderAiMonitoringPanel(
+                    visibleTransferMonitoring,
+                    "Transaction Monitoring Result",
+                  )}
                 <div className="transfer-actions">
                   <button
                     type="button"
@@ -3155,16 +3237,17 @@ function DashboardView() {
           >
             <div className="ai-copilot-head">
               <div className="ai-copilot-head-copy">
-                <div className="ai-copilot-kicker">
-                  Live Financial Assistant
-                </div>
-                <h3>Ask Financial Copilot</h3>
+                <div className="ai-copilot-kicker">FPIPay Copilot</div>
+                <h3>Financial Assistant</h3>
                 <div className="ai-agent-copy">
-                  Ask about exchange rates, gold, stocks, Bitcoin, spending,
-                  savings targets, or transfer readiness.
+                  Wallet-aware chat for spending, savings, transfers, and live
+                  market context.
                 </div>
+              </div>
+              <div className="ai-copilot-head-actions">
                 <div className="ai-copilot-status">
-                  Live quotes for FX, gold, crypto, and selected stocks
+                  <span className="ai-copilot-status-dot" />
+                  {copilotBusy ? "Thinking" : "Ready"}
                 </div>
               </div>
               <button
@@ -3179,41 +3262,58 @@ function DashboardView() {
 
             <div className="ai-copilot-body">
               <div className="ai-copilot-thread-wrap">
-                <div className="ai-copilot-section-title">Conversation</div>
                 <div className="ai-copilot-thread" ref={copilotThreadRef}>
                   {copilotMessages.map((message, index) => (
                     <div
                       key={`${message.role}-${index}-${message.content.slice(0, 24)}`}
-                      className={`ai-copilot-bubble ai-copilot-bubble-${message.role}`}
+                      className={`ai-copilot-message-row ai-copilot-message-row-${message.role}`}
                     >
-                      <span>
-                        {message.role === "assistant" ? "Copilot" : "You"}
-                      </span>
-                      <p>{message.content}</p>
+                      {message.role === "assistant" ? (
+                        <div className="ai-copilot-avatar">AI</div>
+                      ) : null}
+                      <div
+                        className={`ai-copilot-message-card ai-copilot-message-card-${message.role}`}
+                      >
+                        <span className="ai-copilot-message-label">
+                          {message.role === "assistant"
+                            ? "FPIPay Copilot"
+                            : "You"}
+                        </span>
+                        <p>{message.content}</p>
+                      </div>
                     </div>
                   ))}
                   {copilotBusy && (
-                    <div className="ai-copilot-bubble ai-copilot-bubble-assistant">
-                      <span>Copilot</span>
-                      <p>
-                        Checking your wallet context and live market data...
-                      </p>
+                    <div className="ai-copilot-message-row ai-copilot-message-row-assistant">
+                      <div className="ai-copilot-avatar">AI</div>
+                      <div className="ai-copilot-message-card ai-copilot-message-card-assistant ai-copilot-bubble-thinking">
+                        <span className="ai-copilot-message-label">
+                          FPIPay Copilot
+                        </span>
+                        <div className="ai-copilot-typing" aria-hidden="true">
+                          <span />
+                          <span />
+                          <span />
+                        </div>
+                        <p>Thinking...</p>
+                      </div>
                     </div>
                   )}
                 </div>
               </div>
 
-              {copilotInsight && (
-                <div className="ai-copilot-insight">
+              {copilotHasInsight ? (
+                <div className="ai-copilot-insight ai-copilot-insight-live">
                   <div className="ai-copilot-insight-head">
                     <div>
-                      <div className="ai-copilot-kicker">Latest Insight</div>
-                      <strong>{copilotInsight!.topic}</strong>
+                      <strong>{copilotInsight.topic || "Wallet guidance"}</strong>
                     </div>
                     <div className="ai-copilot-insight-metrics">
-                      <span>Risk {copilotInsight!.riskLevel}</span>
+                      <span className={`ai-copilot-risk-pill ${copilotRiskTone}`}>
+                        {copilotInsight.riskLevel} risk
+                      </span>
                       <span>
-                        {Math.round(copilotInsight!.confidence * 100)}%
+                        {Math.round(copilotInsight.confidence * 100)}%
                         confidence
                       </span>
                     </div>
@@ -3222,31 +3322,38 @@ function DashboardView() {
                       {Math.round(copilotInsight.confidence * 100)}% confidence
                     </span>
                   </div>
-                  {copilotInsight!.suggestedDepositAmount ? (
+                  {copilotInsight.suggestedDepositAmount ? (
                     <div className="ai-copilot-deposit-tip">
                       Suggested deposit: $
-                      {copilotInsight!.suggestedDepositAmount!.toLocaleString(
+                      {copilotInsight.suggestedDepositAmount.toLocaleString(
                         "en-US",
                       )}
                     </div>
                   ) : null}
+                  {copilotInsight.followUpQuestion ? (
+                    <p className="ai-copilot-followup">
+                      {copilotInsight.followUpQuestion}
+                    </p>
+                  ) : null}
                   <div className="ai-copilot-actions">
-                    {copilotInsight!.suggestedActions.map((action) => (
+                    {copilotInsight.suggestedActions.map((action) => (
                       <p key={action}>{action}</p>
                     ))}
                   </div>
                 </div>
+              ) : (
+                <div className="ai-copilot-insight ai-copilot-insight-empty">
+                  <strong>Ask anything about your money</strong>
+                  <p>
+                    Try live quotes, spending review, cash-flow analysis, or a
+                    transfer safety check.
+                  </p>
+                </div>
               )}
 
               <div className="ai-copilot-prompt-block">
-                <div className="ai-copilot-section-title">Try Asking</div>
                 <div className="ai-copilot-prompts">
-                  {[
-                    "What is the USD/VND exchange rate today?",
-                    "What is the gold price today?",
-                    "How much is Bitcoin today?",
-                    "Review my cash flow this month",
-                  ].map((prompt) => (
+                  {copilotSuggestedPrompts.map((prompt) => (
                     <button
                       key={prompt}
                       type="button"
@@ -3261,12 +3368,11 @@ function DashboardView() {
               </div>
 
               <div className="ai-copilot-compose">
-                <div className="ai-copilot-section-title">Your Question</div>
                 <textarea
                   value={copilotInput}
                   onChange={(e) => setCopilotInput(e.target.value)}
-                  placeholder="Example: What is the USD/VND exchange rate today? Or: Should I build an emergency fund first?"
-                  rows={4}
+                  placeholder="Message FPIPay Copilot..."
+                  rows={3}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();
@@ -3275,24 +3381,16 @@ function DashboardView() {
                   }}
                 />
                 <div className="ai-copilot-compose-hint">
-                  Press Enter to send. Use Shift+Enter for a new line.
+                  Enter to send. Shift+Enter for a new line.
                 </div>
                 <div className="ai-copilot-compose-actions">
-                  <button
-                    type="button"
-                    className="pill ai-copilot-secondary"
-                    disabled={copilotBusy}
-                    onClick={resetCopilotSession}
-                  >
-                    New Chat
-                  </button>
                   <button
                     type="button"
                     className="btn-primary ai-copilot-primary"
                     disabled={copilotBusy || !copilotInput.trim()}
                     onClick={() => void sendCopilotMessage()}
                   >
-                    {copilotBusy ? "Thinking..." : "Ask Assistant"}
+                    {copilotBusy ? "Thinking..." : "Send Message"}
                   </button>
                 </div>
               </div>
@@ -3301,133 +3399,6 @@ function DashboardView() {
         </div>
       )}
 
-      {depositAgentOpen && (
-        <div
-          className="modal-overlay"
-          onClick={() => {
-            if (depositAgentBusy) return;
-            setDepositAgentOpen(false);
-          }}
-        >
-          <div
-            className="modal-card ai-agent-modal"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="transfer-head">
-              <h3>AI Deposit Agent</h3>
-              <button
-                type="button"
-                className="card-details-close"
-                onClick={() => setDepositAgentOpen(false)}
-              >
-                x
-              </button>
-            </div>
-            <div className="ai-agent-copy">
-              Describe why you want to top up this wallet and the agent will
-              suggest a practical amount.
-            </div>
-            <label className="form-group">
-              <span>Funding goal</span>
-              <input
-                type="text"
-                value={depositGoal}
-                onChange={(e) => setDepositGoal(e.target.value)}
-                placeholder="Example: build emergency fund for next 3 months"
-              />
-            </label>
-            <div className="ai-agent-grid">
-              <label className="form-group">
-                <span>Monthly income (optional)</span>
-                <input
-                  type="text"
-                  inputMode="decimal"
-                  value={depositIncome}
-                  onChange={(e) =>
-                    setDepositIncome(e.target.value.replace(/[^0-9.]/g, ""))
-                  }
-                  placeholder="2500"
-                />
-              </label>
-              <label className="form-group">
-                <span>Monthly expenses (optional)</span>
-                <input
-                  type="text"
-                  inputMode="decimal"
-                  value={depositExpenses}
-                  onChange={(e) =>
-                    setDepositExpenses(e.target.value.replace(/[^0-9.]/g, ""))
-                  }
-                  placeholder="1700"
-                />
-              </label>
-            </div>
-
-            {depositAgentPlan && (
-              <div className="ai-agent-plan">
-                <div className="ai-agent-plan-head">
-                  <div>
-                    <span>Recommended top-up</span>
-                    <strong>
-                      $
-                      {depositAgentPlan!.recommendedAmount.toLocaleString(
-                        "en-US",
-                      )}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>Confidence</span>
-                    <strong>
-                      {Math.round(depositAgentPlan!.confidence * 100)}%
-                    </strong>
-                  </div>
-                  <div>
-                    <span>Risk</span>
-                    <strong>{depositAgentPlan!.riskLevel}</strong>
-                  </div>
-                </div>
-                <div className="ai-agent-plan-body">
-                  {depositAgentPlan!.reasoning.map((item) => (
-                    <p key={item}>{item}</p>
-                  ))}
-                </div>
-                <div className="ai-agent-next">
-                  {depositAgentPlan!.nextAction}
-                </div>
-              </div>
-            )}
-
-            <div className="transfer-actions">
-              <button
-                type="button"
-                className="pill"
-                disabled={depositAgentBusy}
-                onClick={() => void requestAiDepositPlan()}
-              >
-                {depositAgentBusy ? "Thinking..." : "Ask AI Agent"}
-              </button>
-              <button
-                type="button"
-                className="btn-primary"
-                disabled={!depositAgentPlan || depositAgentBusy}
-                onClick={() =>
-                  void (async () => {
-                    if (!depositAgentPlan) return;
-                    const ok = await executeDeposit(
-                      depositAgentPlan.recommendedAmount,
-                    );
-                    if (ok) {
-                      setDepositAgentOpen(false);
-                    }
-                  })()
-                }
-              >
-                Apply Suggested Deposit
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </section>
   );
 }
@@ -6921,7 +6892,7 @@ type AuthShellProps = {
   onRequestLoginOtp: (
     email: string,
     password: string,
-    recaptchaToken: string,
+    captcha: SliderCaptchaValue,
   ) => Promise<LoginResult>;
   onVerifyLoginOtp: (
     challengeId: string,
@@ -6935,7 +6906,7 @@ type AuthShellProps = {
     address: string;
     dob: string;
     password: string;
-    recaptchaToken: string;
+    captcha: SliderCaptchaValue;
   }) => Promise<{
     challengeId: string;
     destination: string;
@@ -6948,7 +6919,7 @@ type AuthShellProps = {
   ) => Promise<AuthCompletionResult>;
   onRequestPasswordResetOtp: (
     email: string,
-    recaptchaToken: string,
+    captcha: SliderCaptchaValue,
   ) => Promise<{
     challengeId: string;
     destination: string;
@@ -7018,15 +6989,21 @@ function AuthShell({
     confirm: "",
     agree: false,
   });
-  const [signinRecaptchaToken, setSigninRecaptchaToken] = useState("");
-  const [signupRecaptchaToken, setSignupRecaptchaToken] = useState("");
+  const [signinCaptcha, setSigninCaptcha] = useState<SliderCaptchaValue | null>(
+    null,
+  );
+  const [signupCaptcha, setSignupCaptcha] = useState<SliderCaptchaValue | null>(
+    null,
+  );
   const [signupOtpInput, setSignupOtpInput] = useState("");
   const [signupOtpChallengeId, setSignupOtpChallengeId] = useState("");
   const [signupOtpDestination, setSignupOtpDestination] = useState("");
   const [signupOtpExpiresAt, setSignupOtpExpiresAt] = useState("");
   const [signupOtpResendAt, setSignupOtpResendAt] = useState(0);
   const [forgotEmail, setForgotEmail] = useState("");
-  const [forgotRecaptchaToken, setForgotRecaptchaToken] = useState("");
+  const [forgotCaptcha, setForgotCaptcha] = useState<SliderCaptchaValue | null>(
+    null,
+  );
   const [loginOtpInput, setLoginOtpInput] = useState("");
   const [loginOtpChallengeId, setLoginOtpChallengeId] = useState("");
   const [loginOtpDestination, setLoginOtpDestination] = useState("");
@@ -7040,9 +7017,9 @@ function AuthShell({
   const [forgotResendAt, setForgotResendAt] = useState(0);
   const [forgotNewPassword, setForgotNewPassword] = useState("");
   const [forgotConfirmPassword, setForgotConfirmPassword] = useState("");
-  const signinRecaptchaRef = useRef<ReCAPTCHA>(null);
-  const signupRecaptchaRef = useRef<ReCAPTCHA>(null);
-  const forgotRecaptchaRef = useRef<ReCAPTCHA>(null);
+  const [signinCaptchaResetKey, setSigninCaptchaResetKey] = useState(0);
+  const [signupCaptchaResetKey, setSignupCaptchaResetKey] = useState(0);
+  const [forgotCaptchaResetKey, setForgotCaptchaResetKey] = useState(0);
 
   useEffect(() => {
     if (
@@ -7074,6 +7051,21 @@ function AuthShell({
     0,
     Math.ceil((forgotResendAt - authClock) / 1000),
   );
+
+  const resetSigninCaptcha = () => {
+    setSigninCaptcha(null);
+    setSigninCaptchaResetKey((value) => value + 1);
+  };
+
+  const resetSignupCaptcha = () => {
+    setSignupCaptcha(null);
+    setSignupCaptchaResetKey((value) => value + 1);
+  };
+
+  const resetForgotCaptcha = () => {
+    setForgotCaptcha(null);
+    setForgotCaptchaResetKey((value) => value + 1);
+  };
 
   const sessionAlertIssuedAt = pendingSessionAlert?.issuedAt
     ? new Date(pendingSessionAlert.issuedAt).toLocaleString("en-US", {
@@ -7136,12 +7128,8 @@ function AuthShell({
       toast("Please enter email and password", "error");
       return;
     }
-    if (!RECAPTCHA_SITE_KEY) {
-      toast("reCAPTCHA site key is missing", "error");
-      return;
-    }
-    if (!signinRecaptchaToken) {
-      toast("Please complete reCAPTCHA", "error");
+    if (!signinCaptcha) {
+      toast("Please complete the slider captcha", "error");
       return;
     }
     clearLoginMonitoring();
@@ -7150,7 +7138,7 @@ function AuthShell({
       const data = await onRequestLoginOtp(
         signinForm.email,
         signinForm.password,
-        signinRecaptchaToken,
+        signinCaptcha,
       );
       if (data.status === "authenticated") {
         setLoginOtpChallengeId("");
@@ -7159,10 +7147,14 @@ function AuthShell({
         setLoginOtpAvailableAt("");
         setLoginOtpResendAt(0);
         setLoginOtpInput("");
+        resetSigninCaptcha();
         setMode(null);
         toast("Signed in successfully");
         if (data.monitoring && data.monitoring.riskLevel !== "low") {
-          toast("Additional security checks were applied to this sign-in.", "info");
+          toast(
+            "Additional security checks were applied to this sign-in.",
+            "info",
+          );
         }
         if (data.notice) {
           toast(data.notice, "info");
@@ -7176,16 +7168,14 @@ function AuthShell({
       setLoginOtpAvailableAt(data.availableAt || "");
       setLoginOtpResendAt(Date.now() + data.retryAfterSeconds * 1000);
       setLoginOtpInput("");
-      setSigninRecaptchaToken("");
-      signinRecaptchaRef.current?.reset();
+      resetSigninCaptcha();
       setMode("signinOtp");
       toast(
         data.notice || "A verification code has been sent to your email.",
         "info",
       );
     } catch (err) {
-      setSigninRecaptchaToken("");
-      signinRecaptchaRef.current?.reset();
+      resetSigninCaptcha();
       toast(err instanceof Error ? err.message : "Sign in failed", "error");
     } finally {
       setAuthBusy(false);
@@ -7225,12 +7215,8 @@ function AuthShell({
       toast("Please agree to terms & privacy", "error");
       return;
     }
-    if (!RECAPTCHA_SITE_KEY) {
-      toast("reCAPTCHA site key is missing", "error");
-      return;
-    }
-    if (!signupRecaptchaToken) {
-      toast("Please complete reCAPTCHA", "error");
+    if (!signupCaptcha) {
+      toast("Please complete the slider captcha", "error");
       return;
     }
     setAuthBusy(true);
@@ -7243,7 +7229,7 @@ function AuthShell({
         address,
         dob,
         password,
-        recaptchaToken: signupRecaptchaToken,
+        captcha: signupCaptcha,
       });
       setSignupOtpChallengeId(data.challengeId);
       setSignupOtpDestination(data.destination);
@@ -7251,12 +7237,10 @@ function AuthShell({
       setSignupOtpResendAt(Date.now() + data.retryAfterSeconds * 1000);
       setSignupOtpInput("");
       setMode("signupOtp");
-      setSignupRecaptchaToken("");
-      signupRecaptchaRef.current?.reset();
+      resetSignupCaptcha();
       toast("A verification code has been sent to your email.");
     } catch (err) {
-      setSignupRecaptchaToken("");
-      signupRecaptchaRef.current?.reset();
+      resetSignupCaptcha();
       toast(err instanceof Error ? err.message : "Sign up failed", "error");
     } finally {
       setAuthBusy(false);
@@ -7275,6 +7259,7 @@ function AuthShell({
         signupOtpChallengeId,
         signupOtpInput,
       );
+      resetSignupCaptcha();
       toast("Account created successfully");
       if (result.notice) {
         toast(result.notice, "info");
@@ -7296,20 +7281,13 @@ function AuthShell({
         toast("Please enter your email", "error");
         return;
       }
-      if (!RECAPTCHA_SITE_KEY) {
-        toast("reCAPTCHA site key is missing", "error");
-        return;
-      }
-      if (!forgotRecaptchaToken) {
-        toast("Please complete reCAPTCHA", "error");
+      if (!forgotCaptcha) {
+        toast("Please complete the slider captcha", "error");
         return;
       }
       setAuthBusy(true);
       try {
-        const data = await onRequestPasswordResetOtp(
-          forgotEmail,
-          forgotRecaptchaToken,
-        );
+        const data = await onRequestPasswordResetOtp(forgotEmail, forgotCaptcha);
         setForgotChallengeId(data.challengeId);
         setForgotDestination(data.destination);
         setForgotExpiresAt(data.expiresAt);
@@ -7317,13 +7295,11 @@ function AuthShell({
         setForgotOtpInput("");
         setForgotNewPassword("");
         setForgotConfirmPassword("");
-        setForgotRecaptchaToken("");
-        forgotRecaptchaRef.current?.reset();
+        resetForgotCaptcha();
         setMode("forgotOtp");
         toast("Password reset code sent to your email.");
       } catch (err) {
-        setForgotRecaptchaToken("");
-        forgotRecaptchaRef.current?.reset();
+        resetForgotCaptcha();
         toast(
           err instanceof Error ? err.message : "Failed to send reset code",
           "error",
@@ -7351,6 +7327,7 @@ function AuthShell({
     try {
       const result = await onVerifyLoginOtp(loginOtpChallengeId, loginOtpInput);
       setLoginOtpAvailableAt("");
+      resetSigninCaptcha();
       toast("Signed in successfully");
       if (result.notice) {
         toast(result.notice, "info");
@@ -7367,12 +7344,8 @@ function AuthShell({
 
   const resendLoginOtp = async () => {
     if (loginOtpCooldownSeconds > 0) return;
-    if (!RECAPTCHA_SITE_KEY) {
-      toast("reCAPTCHA site key is missing", "error");
-      return;
-    }
-    if (!signinRecaptchaToken) {
-      toast("Please complete reCAPTCHA before resending OTP", "error");
+    if (!signinCaptcha) {
+      toast("Complete the slider captcha before resending OTP", "error");
       return;
     }
     clearLoginMonitoring();
@@ -7381,7 +7354,7 @@ function AuthShell({
       const data = await onRequestLoginOtp(
         signinForm.email,
         signinForm.password,
-        signinRecaptchaToken,
+        signinCaptcha,
       );
       if (data.status === "authenticated") {
         setLoginOtpChallengeId("");
@@ -7390,10 +7363,14 @@ function AuthShell({
         setLoginOtpAvailableAt("");
         setLoginOtpResendAt(0);
         setLoginOtpInput("");
+        resetSigninCaptcha();
         setMode(null);
         toast("Signed in successfully");
         if (data.monitoring && data.monitoring.riskLevel !== "low") {
-          toast("Additional security checks were applied to this sign-in.", "info");
+          toast(
+            "Additional security checks were applied to this sign-in.",
+            "info",
+          );
         }
         if (data.notice) {
           toast(data.notice, "info");
@@ -7405,12 +7382,10 @@ function AuthShell({
       setLoginOtpExpiresAt(data.expiresAt);
       setLoginOtpAvailableAt(data.availableAt || "");
       setLoginOtpResendAt(Date.now() + data.retryAfterSeconds * 1000);
-      setSigninRecaptchaToken("");
-      signinRecaptchaRef.current?.reset();
+      resetSigninCaptcha();
       toast(data.notice || "A new verification code has been sent.", "info");
     } catch (err) {
-      setSigninRecaptchaToken("");
-      signinRecaptchaRef.current?.reset();
+      resetSigninCaptcha();
       toast(
         err instanceof Error ? err.message : "Failed to resend OTP",
         "error",
@@ -7422,12 +7397,8 @@ function AuthShell({
 
   const resendRegisterOtp = async () => {
     if (signupOtpCooldownSeconds > 0) return;
-    if (!RECAPTCHA_SITE_KEY) {
-      toast("reCAPTCHA site key is missing", "error");
-      return;
-    }
-    if (!signupRecaptchaToken) {
-      toast("Please complete reCAPTCHA before resending OTP", "error");
+    if (!signupCaptcha) {
+      toast("Complete the slider captcha before resending OTP", "error");
       return;
     }
     setAuthBusy(true);
@@ -7440,18 +7411,16 @@ function AuthShell({
         address: signupForm.address,
         dob: signupForm.dob,
         password: signupForm.password,
-        recaptchaToken: signupRecaptchaToken,
+        captcha: signupCaptcha,
       });
       setSignupOtpChallengeId(data.challengeId);
       setSignupOtpDestination(data.destination);
       setSignupOtpExpiresAt(data.expiresAt);
       setSignupOtpResendAt(Date.now() + data.retryAfterSeconds * 1000);
-      setSignupRecaptchaToken("");
-      signupRecaptchaRef.current?.reset();
+      resetSignupCaptcha();
       toast("A new verification code has been sent.");
     } catch (err) {
-      setSignupRecaptchaToken("");
-      signupRecaptchaRef.current?.reset();
+      resetSignupCaptcha();
       toast(
         err instanceof Error ? err.message : "Failed to resend OTP",
         "error",
@@ -7490,6 +7459,7 @@ function AuthShell({
       setForgotOtpInput("");
       setForgotNewPassword("");
       setForgotConfirmPassword("");
+      resetForgotCaptcha();
       setMode("signin");
     } catch (err) {
       toast(
@@ -7503,30 +7473,21 @@ function AuthShell({
 
   const resendForgotOtp = async () => {
     if (forgotOtpCooldownSeconds > 0) return;
-    if (!RECAPTCHA_SITE_KEY) {
-      toast("reCAPTCHA site key is missing", "error");
-      return;
-    }
-    if (!forgotRecaptchaToken) {
-      toast("Please complete reCAPTCHA before resending OTP", "error");
+    if (!forgotCaptcha) {
+      toast("Complete the slider captcha before resending OTP", "error");
       return;
     }
     setAuthBusy(true);
     try {
-      const data = await onRequestPasswordResetOtp(
-        forgotEmail,
-        forgotRecaptchaToken,
-      );
+      const data = await onRequestPasswordResetOtp(forgotEmail, forgotCaptcha);
       setForgotChallengeId(data.challengeId);
       setForgotDestination(data.destination);
       setForgotExpiresAt(data.expiresAt);
       setForgotResendAt(Date.now() + data.retryAfterSeconds * 1000);
-      setForgotRecaptchaToken("");
-      forgotRecaptchaRef.current?.reset();
+      resetForgotCaptcha();
       toast("A new reset code has been sent.");
     } catch (err) {
-      setForgotRecaptchaToken("");
-      forgotRecaptchaRef.current?.reset();
+      resetForgotCaptcha();
       toast(
         err instanceof Error ? err.message : "Failed to resend OTP",
         "error",
@@ -7746,25 +7707,17 @@ function AuthShell({
                   Forgot password
                 </a>
               </div>
-              {RECAPTCHA_SITE_KEY ? (
-                <div className="auth-recaptcha">
-                  <ReCAPTCHA
-                    ref={signinRecaptchaRef}
-                    sitekey={RECAPTCHA_SITE_KEY}
-                    onChange={(token) => setSigninRecaptchaToken(token || "")}
-                    theme="dark"
-                  />
-                </div>
-              ) : (
-                <p className="muted auth-recaptcha-missing">
-                  reCAPTCHA is not configured for this environment.
-                </p>
-              )}
+              <SliderCaptcha
+                apiBase={API_BASE}
+                resetKey={signinCaptchaResetKey}
+                disabled={authBusy}
+                onChange={setSigninCaptcha}
+              />
               {renderLoginMonitoring(lastLoginMonitoring)}
               <button
                 type="submit"
                 className="btn-primary auth-submit"
-                disabled={authBusy || !RECAPTCHA_SITE_KEY}
+                disabled={authBusy}
               >
                 {authBusy ? "Signing in..." : "Sign In"}
               </button>
@@ -7828,16 +7781,12 @@ function AuthShell({
                 </span>
               </label>
               {renderLoginMonitoring(lastLoginMonitoring)}
-              {RECAPTCHA_SITE_KEY ? (
-                <div className="auth-recaptcha">
-                  <ReCAPTCHA
-                    ref={signinRecaptchaRef}
-                    sitekey={RECAPTCHA_SITE_KEY}
-                    onChange={(token) => setSigninRecaptchaToken(token || "")}
-                    theme="dark"
-                  />
-                </div>
-              ) : null}
+              <SliderCaptcha
+                apiBase={API_BASE}
+                resetKey={signinCaptchaResetKey}
+                disabled={authBusy}
+                onChange={setSigninCaptcha}
+              />
               <div className="auth-otp-actions">
                 <button
                   type="button"
@@ -7998,24 +7947,16 @@ function AuthShell({
                 />{" "}
                 I agree to terms & privacy.
               </label>
-              {RECAPTCHA_SITE_KEY ? (
-                <div className="auth-recaptcha">
-                  <ReCAPTCHA
-                    ref={signupRecaptchaRef}
-                    sitekey={RECAPTCHA_SITE_KEY}
-                    onChange={(token) => setSignupRecaptchaToken(token || "")}
-                    theme="dark"
-                  />
-                </div>
-              ) : (
-                <p className="muted auth-recaptcha-missing">
-                  reCAPTCHA is not configured for this environment.
-                </p>
-              )}
+              <SliderCaptcha
+                apiBase={API_BASE}
+                resetKey={signupCaptchaResetKey}
+                disabled={authBusy}
+                onChange={setSignupCaptcha}
+              />
               <button
                 type="submit"
                 className="btn-primary auth-submit"
-                disabled={authBusy || !RECAPTCHA_SITE_KEY}
+                disabled={authBusy}
               >
                 {authBusy ? "Creating..." : "Create Account"}
               </button>
@@ -8077,6 +8018,12 @@ function AuthShell({
                     : "Check your inbox for the latest code."}
                 </span>
               </label>
+              <SliderCaptcha
+                apiBase={API_BASE}
+                resetKey={signupCaptchaResetKey}
+                disabled={authBusy}
+                onChange={setSignupCaptcha}
+              />
               <div className="auth-otp-actions">
                 <button
                   type="button"
@@ -8126,24 +8073,16 @@ function AuthShell({
                   required
                 />
               </label>
-              {RECAPTCHA_SITE_KEY ? (
-                <div className="auth-recaptcha">
-                  <ReCAPTCHA
-                    ref={forgotRecaptchaRef}
-                    sitekey={RECAPTCHA_SITE_KEY}
-                    onChange={(token) => setForgotRecaptchaToken(token || "")}
-                    theme="dark"
-                  />
-                </div>
-              ) : (
-                <p className="muted auth-recaptcha-missing">
-                  reCAPTCHA is not configured for this environment.
-                </p>
-              )}
+              <SliderCaptcha
+                apiBase={API_BASE}
+                resetKey={forgotCaptchaResetKey}
+                disabled={authBusy}
+                onChange={setForgotCaptcha}
+              />
               <button
                 type="submit"
                 className="btn-primary auth-submit"
-                disabled={authBusy || !RECAPTCHA_SITE_KEY}
+                disabled={authBusy}
               >
                 {authBusy ? "Sending..." : "Send Reset Code"}
               </button>
@@ -8193,16 +8132,12 @@ function AuthShell({
                     : "Check your inbox for the latest code."}
                 </span>
               </label>
-              {RECAPTCHA_SITE_KEY ? (
-                <div className="auth-recaptcha">
-                  <ReCAPTCHA
-                    ref={forgotRecaptchaRef}
-                    sitekey={RECAPTCHA_SITE_KEY}
-                    onChange={(token) => setForgotRecaptchaToken(token || "")}
-                    theme="dark"
-                  />
-                </div>
-              ) : null}
+              <SliderCaptcha
+                apiBase={API_BASE}
+                resetKey={forgotCaptchaResetKey}
+                disabled={authBusy}
+                onChange={setForgotCaptcha}
+              />
               <label className="auth-label">
                 New Password
                 <input

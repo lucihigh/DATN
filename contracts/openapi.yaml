@@ -81,7 +81,7 @@ paths:
                 $ref: "#/components/schemas/Wallet"
   /transfer:
     post:
-      summary: Transfer funds to another user
+      summary: Legacy direct transfer endpoint (disabled)
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
@@ -90,12 +90,14 @@ paths:
             schema:
               $ref: "#/components/schemas/TransferRequest"
       responses:
-        "200":
-          description: Transfer result
+        "410":
+          description: Direct transfers are disabled; use OTP-protected transfer flow
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/TransferResult"
+                type: object
+                properties:
+                  error: { type: string }
   /transactions:
     get:
       summary: List transactions
@@ -164,7 +166,29 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { $ref: "#/components/schemas/SecurityAlert" }
+                items: { $ref: "#/components/schemas/AdminAlert" }
+  /admin/alerts/{id}:
+    patch:
+      summary: Admin update alert review status
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminAlertReviewRequest"
+      responses:
+        "200":
+          description: Updated alert
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminAlert"
   /admin/audit-logs:
     get:
       summary: Admin list audit logs
@@ -304,6 +328,56 @@ components:
         type: { type: string }
         message: { type: string }
         createdAt: { type: string, format: date-time }
+    AdminAlertSignal:
+      type: object
+      properties:
+        label: { type: string }
+        value: { type: string }
+        tone: { type: string, enum: [neutral, warn, info] }
+    AdminAlert:
+      type: object
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [login, transaction] }
+        sourceAction: { type: string }
+        actor: { type: string }
+        userId: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        ipAddress: { type: string, nullable: true }
+        riskLevel: { type: string, enum: [low, medium, high] }
+        anomalyScore: { type: number, format: double }
+        reasons:
+          type: array
+          items: { type: string }
+        summary: { type: string }
+        explanation: { type: string }
+        keySignals:
+          type: array
+          items: { $ref: "#/components/schemas/AdminAlertSignal" }
+        adminStatus:
+          type: string
+          enum: [pending_review, confirmed_risk, false_positive, escalated]
+        adminNote: { type: string, nullable: true }
+        reviewedAt: { type: string, format: date-time, nullable: true }
+        reviewedBy: { type: string, nullable: true }
+        monitoringOnly: { type: boolean }
+        aiDecision: { type: string, nullable: true }
+        modelVersion: { type: string, nullable: true }
+        modelSource: { type: string, nullable: true }
+        eventId: { type: string, nullable: true }
+        transactionId: { type: string, nullable: true }
+        amount: { type: number, format: double, nullable: true }
+        currency: { type: string, nullable: true }
+        location: { type: string, nullable: true }
+        paymentMethod: { type: string, nullable: true }
+        merchantCategory: { type: string, nullable: true }
+    AdminAlertReviewRequest:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [pending_review, confirmed_risk, false_positive, escalated]
+        note: { type: string }
     AuditLog:
       type: object
       properties:

@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import UUID, uuid4
 
 import joblib
 import numpy as np
@@ -15,6 +16,15 @@ from fastapi.responses import HTMLResponse
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError, PyMongoError
 from pyod.models.iforest import IForest
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+    from psycopg.types.json import Jsonb
+except Exception:  # pragma: no cover - optional dependency at import time
+    psycopg = None
+    dict_row = None
+    Jsonb = None
 
 try:
     import jwt
@@ -30,6 +40,7 @@ from app.login_model import (
     TrainRequest,
     adjust_risk_level as login_adjust_risk_level,
     build_features as build_login_features,
+    build_training_feature_rows as build_login_training_feature_rows,
     build_reasons as build_login_reasons,
     normalize_login_event as normalize_login_event_payload,
     resolve_request_key as resolve_login_request_key,
@@ -182,12 +193,41 @@ def _resolve_tx_request_key(event: TransactionEvent, header_key: str | None) -> 
     return resolve_transaction_request_key(event, header_key)
 
 
-def _build_features(event: LoginEvent) -> np.ndarray:
-    return build_login_features(event)
+def _active_feature_names() -> list[str]:
+    names = getattr(app.state, "feature_names", None)
+    if isinstance(names, list) and names:
+        return [str(name) for name in names]
+    return list(FEATURE_NAMES)
+
+
+def _active_tx_feature_names() -> list[str]:
+    names = getattr(app.state, "tx_feature_names", None)
+    if isinstance(names, list) and names:
+        return [str(name) for name in names]
+    return list(TX_FEATURE_NAMES)
+
+
+def _build_features(event: LoginEvent, history_signals: dict[str, Any] | None = None) -> np.ndarray:
+    return build_login_features(event, history_signals=history_signals, feature_names=_active_feature_names())
 
 
 def _build_tx_features(event: TransactionEvent) -> np.ndarray:
-    return build_transaction_features(event)
+    return build_transaction_features(event, feature_names=_active_tx_feature_names())
+
+
+def _camel_case_feature_name(name: str) -> str:
+    parts = [part for part in str(name).split("_") if part]
+    if not parts:
+        return "unknownFeature"
+    return parts[0] + "".join(part[:1].upper() + part[1:] for part in parts[1:])
+
+
+def _feature_vector_to_dict(feature_names: list[str], features: np.ndarray) -> dict[str, float]:
+    limit = min(len(feature_names), len(features))
+    return {
+        _camel_case_feature_name(feature_names[index]): float(features[index])
+        for index in range(limit)
+    }
 
 
 def _state_ready() -> bool:
@@ -200,6 +240,229 @@ def _tx_state_ready() -> bool:
 
 def _mongo_ready() -> bool:
     return getattr(app.state, "mongo_db", None) is not None
+
+
+def _postgres_ready() -> bool:
+    return getattr(app.state, "postgres_conn", None) is not None
+
+
+def _storage_backend() -> str:
+    if _postgres_ready():
+        return "postgres"
+    if _mongo_ready():
+        return "mongo"
+    return "none"
+
+
+def _to_json_value(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+def _normalize_json_field(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _pg_jsonb(value: dict[str, Any]) -> Any:
+    normalized = json.loads(json.dumps(value, default=_to_json_value))
+    return Jsonb(normalized) if Jsonb is not None else normalized
+
+
+def _pg_fetchone(query: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
+    if not _postgres_ready():
+        return None
+    with app.state.postgres_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(query, params)
+        row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def _pg_fetchall(query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+    if not _postgres_ready():
+        return []
+    with app.state.postgres_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(query, params)
+        rows = cur.fetchall()
+    return [dict(row) for row in rows]
+
+
+def _pg_execute(query: str, params: tuple[Any, ...] = ()) -> None:
+    if not _postgres_ready():
+        raise RuntimeError("PostgreSQL not connected")
+    with app.state.postgres_conn.cursor() as cur:
+        cur.execute(query, params)
+
+
+def _build_login_score_details(
+    *,
+    event: LoginEvent,
+    features: np.ndarray,
+    anomaly_score: float,
+    raw_score: float,
+    risk_level_base: str,
+    risk_level_final: str,
+    reasons: list[str],
+    history_signals: dict[str, Any],
+    request_key: str,
+    login_event_id: str,
+) -> dict[str, Any]:
+    model_version = str(getattr(app.state, "model_version", None) or "unknown")
+    feature_names = _active_feature_names()
+    return {
+        "requestKey": request_key,
+        "requestId": event.request_id,
+        "loginEventId": login_event_id,
+        "userId": event.user_id,
+        "inputSnapshot": {
+            "timestamp": event.timestamp,
+            "ipAddress": event.ip,
+            "country": event.country,
+            "region": event.region,
+            "city": event.city,
+            "device": event.device,
+            "success": bool(event.success),
+            "failed10m": int(event.failed_10m),
+            "botScore": float(event.bot_score),
+        },
+        "features": _feature_vector_to_dict(feature_names, features),
+        "result": {
+            "anomalyScore": float(anomaly_score),
+            "rawScore": float(raw_score),
+            "riskLevel": risk_level_final,
+            "riskLevelBase": risk_level_base,
+            "riskLevelFinal": risk_level_final,
+            "reasons": reasons,
+            "monitoringOnly": True,
+            "action": AI_ACTION,
+            "requireOtpSms": bool(history_signals.get("require_otp_sms")),
+            "otpChannel": "sms" if history_signals.get("require_otp_sms") else None,
+            "otpReason": history_signals.get("otp_reason"),
+        },
+        "analysis": {
+            "ip": {
+                "value": event.ip,
+                "isNewIpForUser": bool(history_signals.get("is_new_ip")),
+                "isPrivateOrLoopback": bool(history_signals.get("private_ip")),
+            },
+            "device": {
+                "value": event.device,
+                "isNewDeviceForUser": bool(history_signals.get("is_new_device")),
+            },
+            "location": {
+                "country": event.country,
+                "region": event.region,
+                "city": event.city,
+                "isNewCountryForUser": bool(history_signals.get("is_new_country")),
+                "countryChangedRecently": bool(history_signals.get("country_changed_recently")),
+                "lastCountry": history_signals.get("last_country"),
+            },
+            "time": {
+                "hourOfDay": int(event.timestamp.hour),
+                "dayOfWeek": int(event.timestamp.weekday()),
+                "offHourForUser": bool(history_signals.get("off_hour_for_user")),
+                "lastLoginAt": history_signals.get("last_timestamp"),
+            },
+            "session": {
+                "hasSuccessHistory": bool(history_signals.get("has_success_history")),
+                "lastSuccessIp": history_signals.get("last_success_ip"),
+                "lastSuccessDevice": history_signals.get("last_success_device"),
+                "lastSuccessTimestamp": history_signals.get("last_success_timestamp"),
+                "differentIpFromLastSuccess": bool(history_signals.get("different_ip_from_last_success")),
+                "differentDeviceFromLastSuccess": bool(history_signals.get("different_device_from_last_success")),
+                "requireOtpSms": bool(history_signals.get("require_otp_sms")),
+            },
+            "frequency": {
+                "failed10mInput": int(event.failed_10m),
+                "recentAttempts10m": int(history_signals.get("recent_attempts_10m", 0)),
+                "recentAttempts1h": int(history_signals.get("recent_attempts_1h", 0)),
+                "recentFailed10mDb": int(history_signals.get("recent_failed_10m_db", 0)),
+            },
+        },
+        "model": {
+            "name": "pyod_iforest",
+            "version": model_version,
+            "source": app.state.model_source,
+            "trainedAt": getattr(app.state, "model_trained_at_dt", None),
+        },
+        "scoreStatus": "SUCCESS",
+        "error": None,
+        "scoredAt": _now_dt(),
+    }
+
+
+def _build_tx_score_details(
+    *,
+    event: TransactionEvent,
+    features: np.ndarray,
+    anomaly_score: float,
+    raw_score: float,
+    risk_level_base: str,
+    risk_level_final: str,
+    reasons: list[str],
+    request_key: str,
+    transaction_event_id: str,
+) -> dict[str, Any]:
+    model_version = str(getattr(app.state, "tx_model_version", None) or "unknown")
+    feature_names = _active_tx_feature_names()
+    return {
+        "requestKey": request_key,
+        "requestId": event.request_id,
+        "transactionEventId": transaction_event_id,
+        "transactionId": event.transaction_id,
+        "userId": event.user_id,
+        "inputSnapshot": {
+            "timestamp": event.timestamp,
+            "amount": float(event.amount),
+            "currency": event.currency,
+            "country": event.country,
+            "paymentMethod": event.payment_method,
+            "merchantCategory": event.merchant_category,
+            "device": event.device,
+            "channel": event.channel,
+            "failedTx24h": int(event.failed_tx_24h),
+            "velocity1h": int(event.velocity_1h),
+            "dailySpendAvg30d": float(event.daily_spend_avg_30d),
+            "todaySpendBefore": float(event.today_spend_before),
+            "projectedDailySpend": float(event.projected_daily_spend),
+            "balanceBefore": float(event.balance_before),
+            "remainingBalance": float(event.remaining_balance),
+        },
+        "features": _feature_vector_to_dict(feature_names, features),
+        "result": {
+            "anomalyScore": float(anomaly_score),
+            "rawScore": float(raw_score),
+            "riskLevel": risk_level_final,
+            "riskLevelBase": risk_level_base,
+            "riskLevelFinal": risk_level_final,
+            "reasons": reasons,
+            "monitoringOnly": True,
+            "action": AI_TX_ACTION,
+        },
+        "model": {
+            "name": "pyod_iforest",
+            "version": model_version,
+            "source": app.state.tx_model_source,
+            "trainedAt": getattr(app.state, "tx_model_trained_at_dt", None),
+        },
+        "scoreStatus": "SUCCESS",
+        "error": None,
+        "scoredAt": _now_dt(),
+    }
 
 
 def _score_to_level(score: float, thresholds: dict[str, float]) -> str:
@@ -254,6 +517,7 @@ def _set_model_state(
     model_version: str | None = None,
     model_path: str | None = None,
     metadata_path: str | None = None,
+    feature_names: list[str] | None = None,
 ) -> None:
     safe_std = np.asarray(feature_std, dtype=float).copy()
     safe_std[safe_std == 0] = 1.0
@@ -269,7 +533,7 @@ def _set_model_state(
     app.state.model_version = model_version or str(trained_at)
     app.state.model_path = model_path
     app.state.metadata_path = metadata_path
-    app.state.feature_names = FEATURE_NAMES
+    app.state.feature_names = list(feature_names or FEATURE_NAMES)
 
 
 def _set_tx_model_state(
@@ -287,6 +551,8 @@ def _set_tx_model_state(
     model_version: str | None = None,
     model_path: str | None = None,
     metadata_path: str | None = None,
+    feature_names: list[str] | None = None,
+    feedback_profile: dict[str, Any] | None = None,
 ) -> None:
     safe_std = np.asarray(feature_std, dtype=float).copy()
     safe_std[safe_std == 0] = 1.0
@@ -303,7 +569,8 @@ def _set_tx_model_state(
     app.state.tx_model_version = model_version or str(trained_at)
     app.state.tx_model_path = model_path
     app.state.tx_metadata_path = metadata_path
-    app.state.tx_feature_names = TX_FEATURE_NAMES
+    app.state.tx_feature_names = list(feature_names or TX_FEATURE_NAMES)
+    app.state.tx_feedback_profile = dict(feedback_profile or {})
 
 
 def _parse_iso_datetime(value: str | None) -> datetime | None:
@@ -332,6 +599,26 @@ def _safe_object_id(value: str | None) -> ObjectId | None:
         return None
 
 
+def _safe_uuid_str(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        return str(UUID(str(value)))
+    except Exception:
+        return None
+
+
+def _resolve_existing_postgres_user_id(value: str | None) -> str | None:
+    candidate = _safe_uuid_str(value)
+    if not candidate or not _postgres_ready():
+        return None
+    try:
+        row = _pg_fetchone('SELECT "id" FROM "User" WHERE "id" = %s LIMIT 1', (candidate,))
+        return candidate if row else None
+    except Exception:
+        return None
+
+
 def _is_private_or_loopback_ip(ip: str) -> bool:
     try:
         parsed = ipaddress.ip_address(ip)
@@ -341,6 +628,9 @@ def _is_private_or_loopback_ip(ip: str) -> bool:
 
 
 def _get_history_signals(event: LoginEvent) -> dict[str, Any]:
+    if _postgres_ready():
+        return _get_history_signals_from_postgres(event)
+
     event_ts = _as_utc(event.timestamp) or event.timestamp
     signals: dict[str, Any] = {
         "available": False,
@@ -491,7 +781,11 @@ def _adjust_risk_level(base_risk: str, event: LoginEvent, history_signals: dict[
 
 
 def _adjust_tx_risk_level(base_risk: str, event: TransactionEvent) -> str:
-    return transaction_adjust_risk_level(base_risk, event)
+    return transaction_adjust_risk_level(
+        base_risk,
+        event,
+        feedback_profile=getattr(app.state, "tx_feedback_profile", {}) or {},
+    )
 
 
 def _build_reasons(event: LoginEvent, features: np.ndarray, history_signals: dict[str, Any] | None = None) -> list[str]:
@@ -515,6 +809,7 @@ def _build_tx_reasons(event: TransactionEvent, features: np.ndarray) -> list[str
         countries=app.state.tx_countries,
         payment_methods=app.state.tx_payment_methods,
         merchant_categories=app.state.tx_merchant_categories,
+        feedback_profile=getattr(app.state, "tx_feedback_profile", {}) or {},
     )
 
 
@@ -582,6 +877,7 @@ def _try_load_persisted_model() -> None:
     try:
         model = joblib.load(model_path)
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        feature_names = [str(name) for name in metadata.get("feature_names", FEATURE_NAMES)]
         thresholds = {
             "p90": float(metadata["thresholds"]["p90"]),
             "p97": float(metadata["thresholds"]["p97"]),
@@ -609,6 +905,7 @@ def _try_load_persisted_model() -> None:
             ),
             model_path=str(model_path),
             metadata_path=str(metadata_path),
+            feature_names=feature_names,
         )
         app.state.model_trained_at_dt = _parse_iso_datetime(str(metadata.get("trained_at")))
         app.state.load_error = None
@@ -625,6 +922,7 @@ def _try_load_persisted_tx_model() -> None:
     try:
         model = joblib.load(model_path)
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        feature_names = [str(name) for name in metadata.get("feature_names", TX_FEATURE_NAMES)]
         thresholds = {
             "p90": float(metadata["thresholds"]["p90"]),
             "p97": float(metadata["thresholds"]["p97"]),
@@ -636,6 +934,7 @@ def _try_load_persisted_tx_model() -> None:
         countries = {str(country).lower() for country in metadata.get("countries", [])}
         payment_methods = {str(method).lower() for method in metadata.get("payment_methods", [])}
         merchant_categories = {str(category).lower() for category in metadata.get("merchant_categories", [])}
+        feedback_profile = metadata.get("feedback_profile", {})
         trained_at = str(metadata.get("trained_at") or _now_iso())
         _set_tx_model_state(
             model=model,
@@ -655,6 +954,8 @@ def _try_load_persisted_tx_model() -> None:
             ),
             model_path=str(model_path),
             metadata_path=str(metadata_path),
+            feature_names=feature_names,
+            feedback_profile=feedback_profile if isinstance(feedback_profile, dict) else {},
         )
         app.state.tx_model_trained_at_dt = _parse_iso_datetime(trained_at)
         app.state.tx_load_error = None
@@ -676,7 +977,7 @@ def _persist_login_model_artifacts(*, promote: bool = False) -> dict[str, Any]:
         "model_version": getattr(app.state, "model_version", "unknown"),
         "trained_at": app.state.trained_at,
         "contamination": DEFAULT_CONTAMINATION,
-        "feature_names": FEATURE_NAMES,
+        "feature_names": _active_feature_names(),
         "train_size": int(app.state.train_size or 0),
         "thresholds": {
             "p90": float(app.state.thresholds["p90"]),
@@ -732,7 +1033,7 @@ def _persist_tx_model_artifacts(*, promote: bool = False) -> dict[str, Any]:
         "model_version": getattr(app.state, "tx_model_version", "unknown"),
         "trained_at": app.state.tx_trained_at,
         "contamination": DEFAULT_CONTAMINATION,
-        "feature_names": TX_FEATURE_NAMES,
+        "feature_names": _active_tx_feature_names(),
         "train_size": int(app.state.tx_train_size or 0),
         "thresholds": {
             "p90": float(app.state.tx_thresholds["p90"]),
@@ -745,6 +1046,7 @@ def _persist_tx_model_artifacts(*, promote: bool = False) -> dict[str, Any]:
         "countries": sorted(app.state.tx_countries),
         "payment_methods": sorted(app.state.tx_payment_methods),
         "merchant_categories": sorted(app.state.tx_merchant_categories),
+        "feedback_profile": getattr(app.state, "tx_feedback_profile", {}) or {},
         "source": app.state.tx_model_source,
     }
 
@@ -814,6 +1116,29 @@ def _init_mongo() -> None:
         app.state.mongo_error = str(exc)
 
 
+def _init_postgres() -> None:
+    db_url = os.getenv("DATABASE_URL")
+    app.state.postgres_conn = None
+    app.state.postgres_error = None
+    app.state.postgres_db = db_url
+
+    if not db_url:
+        app.state.postgres_error = "Missing DATABASE_URL"
+        return
+
+    if psycopg is None:
+        app.state.postgres_error = "psycopg is not installed"
+        return
+
+    try:
+        conn = psycopg.connect(db_url, autocommit=True)
+        app.state.postgres_conn = conn
+        app.state.postgres_error = None
+    except Exception as exc:
+        app.state.postgres_conn = None
+        app.state.postgres_error = str(exc)
+
+
 def _ensure_mongo_indexes() -> None:
     if not _mongo_ready():
         return
@@ -871,6 +1196,483 @@ def _close_mongo() -> None:
     app.state.mongo_db = None
 
 
+def _close_postgres() -> None:
+    conn = getattr(app.state, "postgres_conn", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    app.state.postgres_conn = None
+
+
+def _get_history_signals_from_postgres(event: LoginEvent) -> dict[str, Any]:
+    event_ts = _as_utc(event.timestamp) or event.timestamp
+    signals: dict[str, Any] = {
+        "available": False,
+        "history_count": 0,
+        "has_success_history": False,
+        "is_new_ip": False,
+        "is_new_country": False,
+        "is_new_device": False,
+        "recent_attempts_10m": 0,
+        "recent_attempts_1h": 0,
+        "recent_failed_10m_db": 0,
+        "last_country": None,
+        "last_region": None,
+        "last_city": None,
+        "last_ip": None,
+        "last_timestamp": None,
+        "last_success_ip": None,
+        "last_success_device": None,
+        "last_success_timestamp": None,
+        "different_ip_from_last_success": False,
+        "different_device_from_last_success": False,
+        "require_otp_sms": False,
+        "otp_reason": None,
+        "country_changed_recently": False,
+        "off_hour_for_user": False,
+        "private_ip": _is_private_or_loopback_ip(event.ip),
+    }
+    if not _postgres_ready():
+        return signals
+
+    try:
+        history_rows = _pg_fetchall(
+            """
+            SELECT
+              "ipAddress",
+              "location",
+              "userAgent",
+              "success",
+              "createdAt",
+              "metadata"
+            FROM "LoginEvent"
+            WHERE "userId" = %s
+              AND "createdAt" < %s
+            ORDER BY "createdAt" DESC
+            LIMIT 300
+            """,
+            (event.user_id, event_ts),
+        )
+    except Exception:
+        return signals
+
+    if not history_rows:
+        return signals
+
+    signals["available"] = True
+    signals["history_count"] = len(history_rows)
+
+    seen_ips: set[str] = set()
+    seen_countries: set[str] = set()
+    seen_devices: set[str] = set()
+    successful_rows: list[dict[str, Any]] = []
+
+    for row in history_rows:
+        metadata = _normalize_json_field(row.get("metadata"))
+        ip_value = str(row.get("ipAddress") or "").strip()
+        country_value = str(metadata.get("country") or row.get("location") or "").strip().lower()
+        device_value = _normalize_device(str(metadata.get("device") or row.get("userAgent") or ""))
+        if ip_value:
+            seen_ips.add(ip_value)
+        if country_value:
+            seen_countries.add(country_value)
+        if device_value:
+            seen_devices.add(device_value)
+        if row.get("success"):
+            successful_rows.append({"row": row, "metadata": metadata})
+
+    signals["is_new_ip"] = event.ip not in seen_ips if seen_ips else False
+    signals["is_new_country"] = event.country.strip().lower() not in seen_countries if seen_countries else False
+    signals["is_new_device"] = _normalize_device(event.device) not in seen_devices if seen_devices else False
+
+    latest = history_rows[0]
+    latest_meta = _normalize_json_field(latest.get("metadata"))
+    signals["last_country"] = latest_meta.get("country") or latest.get("location")
+    signals["last_region"] = latest_meta.get("region")
+    signals["last_city"] = latest_meta.get("city")
+    signals["last_ip"] = latest.get("ipAddress")
+    signals["last_timestamp"] = latest.get("createdAt")
+
+    if successful_rows:
+        last_success = successful_rows[0]
+        row = last_success["row"]
+        metadata = last_success["metadata"]
+        last_success_ip = str(row.get("ipAddress") or "").strip() or None
+        last_success_device = _normalize_device(
+            str(metadata.get("device") or row.get("userAgent") or "")
+        )
+        signals["has_success_history"] = True
+        signals["last_success_ip"] = last_success_ip
+        signals["last_success_device"] = last_success_device or None
+        signals["last_success_timestamp"] = row.get("createdAt")
+        signals["different_ip_from_last_success"] = bool(last_success_ip and last_success_ip != event.ip)
+        signals["different_device_from_last_success"] = bool(
+            last_success_device and last_success_device != _normalize_device(event.device)
+        )
+        if signals["different_ip_from_last_success"] and signals["different_device_from_last_success"]:
+            signals["require_otp_sms"] = True
+            signals["otp_reason"] = "Different device and IP from the last successful login"
+
+    recent_country_cutoff = event_ts.timestamp() - 24 * 3600
+    ten_minutes_cutoff = event_ts.timestamp() - 10 * 60
+    one_hour_cutoff = event_ts.timestamp() - 3600
+    off_hours = {0, 1, 2, 3, 4, 5}
+
+    for row in history_rows:
+        created_at = _as_utc(row.get("createdAt"))
+        if created_at is None:
+            continue
+        created_ts = created_at.timestamp()
+        if created_ts >= ten_minutes_cutoff:
+            signals["recent_attempts_10m"] += 1
+            if not row.get("success"):
+                signals["recent_failed_10m_db"] += 1
+        if created_ts >= one_hour_cutoff:
+            signals["recent_attempts_1h"] += 1
+        if created_ts >= recent_country_cutoff:
+            metadata = _normalize_json_field(row.get("metadata"))
+            country_value = str(metadata.get("country") or row.get("location") or "").strip().upper()
+            if country_value and country_value != event.country:
+                signals["country_changed_recently"] = True
+                break
+
+    if event_ts.hour in off_hours and signals["history_count"] >= 5:
+        usual_hours = [
+            (_as_utc(row.get("createdAt")) or event_ts).hour
+            for row in history_rows[:50]
+            if row.get("createdAt") is not None
+        ]
+        off_hour_baseline = sum(1 for hour in usual_hours if hour in off_hours)
+        signals["off_hour_for_user"] = off_hour_baseline <= max(1, len(usual_hours) // 5)
+
+    return signals
+
+
+def _persist_score_to_postgres(
+    *,
+    event: LoginEvent,
+    features: np.ndarray,
+    anomaly_score: float,
+    raw_score: float,
+    risk_level_base: str,
+    risk_level_final: str,
+    reasons: list[str],
+    history_signals: dict[str, Any] | None = None,
+    request_key: str,
+) -> dict[str, Any]:
+    if not _postgres_ready():
+        return {"saved": False, "reason": "postgres_not_connected"}
+
+    history_signals = history_signals or {}
+    model_version = str(getattr(app.state, "model_version", None) or "unknown")
+    existing = _pg_fetchone(
+        """
+        SELECT "id", "metadata"
+        FROM "AuditLog"
+        WHERE "actor" = 'ai-service'
+          AND "action" = 'AI_LOGIN_SCORE'
+          AND COALESCE("metadata"->>'requestKey', '') = %s
+          AND COALESCE("metadata"->>'modelVersion', '') = %s
+        ORDER BY "createdAt" DESC
+        LIMIT 1
+        """,
+        (request_key, model_version),
+    )
+    if existing:
+        metadata = _normalize_json_field(existing.get("metadata"))
+        return {
+            "saved": True,
+            "reused": True,
+            "login_event_id": metadata.get("loginEventId"),
+            "ai_score_id": existing.get("id"),
+        }
+
+    login_event_id = event.login_event_id or f"ai-login-{request_key}"
+    now_dt = _now_dt()
+    login_metadata = {
+        "country": event.country,
+        "region": event.region,
+        "city": event.city,
+        "device": event.device,
+        "failed10m": int(event.failed_10m),
+        "botScore": float(event.bot_score),
+        "requestId": event.request_id,
+        "requestKey": request_key,
+    }
+    _pg_execute(
+        """
+        INSERT INTO "LoginEvent"
+          ("id", "userId", "email", "ipAddress", "userAgent", "success", "anomaly", "location", "createdAt", "metadata")
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT ("id") DO UPDATE
+        SET "anomaly" = EXCLUDED."anomaly",
+            "metadata" = EXCLUDED."metadata"
+        """,
+        (
+            login_event_id,
+            event.user_id,
+            event.email,
+            event.ip,
+            event.device,
+            bool(event.success),
+            float(anomaly_score),
+            event.country,
+            event.timestamp,
+            _pg_jsonb(login_metadata),
+        ),
+    )
+
+    details = _build_login_score_details(
+        event=event,
+        features=features,
+        anomaly_score=anomaly_score,
+        raw_score=raw_score,
+        risk_level_base=risk_level_base,
+        risk_level_final=risk_level_final,
+        reasons=reasons,
+        history_signals=history_signals,
+        request_key=request_key,
+        login_event_id=login_event_id,
+    )
+    metadata = {
+        "recordType": "ai_login_score",
+        "requestKey": request_key,
+        "modelVersion": model_version,
+        "modelSource": app.state.model_source,
+        "riskLevel": risk_level_final,
+        "monitoringOnly": True,
+        "loginEventId": login_event_id,
+    }
+    audit_id = str(uuid4())
+    _pg_execute(
+        """
+        INSERT INTO "AuditLog"
+          ("id", "userId", "actor", "action", "details", "ipAddress", "createdAt", "metadata")
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            audit_id,
+            event.user_id,
+            "ai-service",
+            "AI_LOGIN_SCORE",
+            _pg_jsonb(details),
+            event.ip,
+            now_dt,
+            _pg_jsonb(metadata),
+        ),
+    )
+    _metric_inc("mongo_write_success_total")
+    return {
+        "saved": True,
+        "reused": False,
+        "login_event_id": login_event_id,
+        "ai_score_id": audit_id,
+    }
+
+
+def _write_admin_alert_postgres(
+    *,
+    event: LoginEvent,
+    risk_level: str,
+    anomaly_score: float,
+    reasons: list[str],
+    login_event_id: str | None,
+) -> dict[str, Any]:
+    if not _postgres_ready():
+        return {"sent": False, "reason": "postgres_not_connected"}
+    if risk_level not in {"MEDIUM", "HIGH"}:
+        return {"sent": False, "reason": "risk_below_alert_threshold"}
+
+    details = {
+        "riskLevel": risk_level,
+        "anomalyScore": float(anomaly_score),
+        "reasons": reasons,
+        "loginEventId": login_event_id,
+        "userIdRaw": event.user_id,
+        "country": event.country,
+        "region": event.region,
+        "city": event.city,
+        "ipAddress": event.ip,
+        "modelVersion": getattr(app.state, "model_version", "unknown"),
+        "modelSource": app.state.model_source,
+        "monitoringOnly": True,
+        "adminStatus": "PENDING_REVIEW",
+        "aiDecision": AI_ACTION,
+    }
+    metadata = {
+        "recordType": "ai_login_alert",
+        "riskLevel": risk_level,
+        "monitoringOnly": True,
+        "loginEventId": login_event_id,
+    }
+    _pg_execute(
+        """
+        INSERT INTO "AuditLog"
+          ("id", "userId", "actor", "action", "details", "ipAddress", "createdAt", "metadata")
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            str(uuid4()),
+            event.user_id,
+            "ai-service",
+            "AI_LOGIN_ALERT",
+            _pg_jsonb(details),
+            event.ip,
+            _now_dt(),
+            _pg_jsonb(metadata),
+        ),
+    )
+    _metric_inc("admin_alerts_sent_total")
+    return {"sent": True}
+
+
+def _persist_tx_score_to_postgres(
+    *,
+    event: TransactionEvent,
+    features: np.ndarray,
+    anomaly_score: float,
+    raw_score: float,
+    risk_level_base: str,
+    risk_level_final: str,
+    reasons: list[str],
+    request_key: str,
+) -> dict[str, Any]:
+    if not _postgres_ready():
+        return {"saved": False, "reason": "postgres_not_connected"}
+
+    model_version = str(getattr(app.state, "tx_model_version", None) or "unknown")
+    existing = _pg_fetchone(
+        """
+        SELECT "id", "metadata"
+        FROM "AuditLog"
+        WHERE "actor" = 'ai-service'
+          AND "action" = 'AI_TRANSACTION_SCORE'
+          AND COALESCE("metadata"->>'requestKey', '') = %s
+          AND COALESCE("metadata"->>'modelVersion', '') = %s
+        ORDER BY "createdAt" DESC
+        LIMIT 1
+        """,
+        (request_key, model_version),
+    )
+    if existing:
+        metadata = _normalize_json_field(existing.get("metadata"))
+        return {
+            "saved": True,
+            "reused": True,
+            "transaction_event_id": metadata.get("transactionEventId"),
+            "ai_score_id": existing.get("id"),
+        }
+
+    transaction_event_id = event.transaction_event_id or event.transaction_id or f"ai-tx-{request_key}"
+    details = _build_tx_score_details(
+        event=event,
+        features=features,
+        anomaly_score=anomaly_score,
+        raw_score=raw_score,
+        risk_level_base=risk_level_base,
+        risk_level_final=risk_level_final,
+        reasons=reasons,
+        request_key=request_key,
+        transaction_event_id=transaction_event_id,
+    )
+    metadata = {
+        "recordType": "ai_transaction_score",
+        "requestKey": request_key,
+        "modelVersion": model_version,
+        "modelSource": app.state.tx_model_source,
+        "riskLevel": risk_level_final,
+        "monitoringOnly": True,
+        "transactionEventId": transaction_event_id,
+        "transactionId": event.transaction_id,
+    }
+    audit_id = str(uuid4())
+    _pg_execute(
+        """
+        INSERT INTO "AuditLog"
+          ("id", "userId", "actor", "action", "details", "ipAddress", "createdAt", "metadata")
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            audit_id,
+            event.user_id,
+            "ai-service",
+            "AI_TRANSACTION_SCORE",
+            _pg_jsonb(details),
+            None,
+            _now_dt(),
+            _pg_jsonb(metadata),
+        ),
+    )
+    _metric_inc("mongo_write_success_total")
+    return {
+        "saved": True,
+        "reused": False,
+        "transaction_event_id": transaction_event_id,
+        "ai_score_id": audit_id,
+    }
+
+
+def _write_transaction_alert_postgres(
+    *,
+    event: TransactionEvent,
+    risk_level: str,
+    anomaly_score: float,
+    reasons: list[str],
+    transaction_event_id: str | None,
+) -> dict[str, Any]:
+    if not _postgres_ready():
+        return {"sent": False, "reason": "postgres_not_connected"}
+    if risk_level not in {"MEDIUM", "HIGH"}:
+        return {"sent": False, "reason": "risk_below_alert_threshold"}
+
+    details = {
+        "riskLevel": risk_level,
+        "anomalyScore": float(anomaly_score),
+        "reasons": reasons,
+        "transactionEventId": transaction_event_id,
+        "transactionId": event.transaction_id,
+        "userIdRaw": event.user_id,
+        "country": event.country,
+        "currency": event.currency,
+        "amount": float(event.amount),
+        "paymentMethod": event.payment_method,
+        "merchantCategory": event.merchant_category,
+        "modelVersion": getattr(app.state, "tx_model_version", "unknown"),
+        "modelSource": app.state.tx_model_source,
+        "monitoringOnly": True,
+        "adminStatus": "PENDING_REVIEW",
+        "aiDecision": AI_TX_ACTION,
+    }
+    metadata = {
+        "recordType": "ai_transaction_alert",
+        "riskLevel": risk_level,
+        "monitoringOnly": True,
+        "transactionEventId": transaction_event_id,
+        "transactionId": event.transaction_id,
+    }
+    _pg_execute(
+        """
+        INSERT INTO "AuditLog"
+          ("id", "userId", "actor", "action", "details", "ipAddress", "createdAt", "metadata")
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            str(uuid4()),
+            event.user_id,
+            "ai-service",
+            "AI_TRANSACTION_ALERT",
+            _pg_jsonb(details),
+            None,
+            _now_dt(),
+            _pg_jsonb(metadata),
+        ),
+    )
+    _metric_inc("admin_alerts_sent_total")
+    return {"sent": True}
+
+
 def _write_admin_alert(
     *,
     event: LoginEvent,
@@ -879,8 +1681,16 @@ def _write_admin_alert(
     reasons: list[str],
     login_event_id: str | None,
 ) -> dict[str, Any]:
+    if _postgres_ready():
+        return _write_admin_alert_postgres(
+            event=event,
+            risk_level=risk_level,
+            anomaly_score=anomaly_score,
+            reasons=reasons,
+            login_event_id=login_event_id,
+        )
     if not _mongo_ready():
-        return {"sent": False, "reason": "mongo_not_connected"}
+        return {"sent": False, "reason": "storage_not_connected"}
     if risk_level not in {"MEDIUM", "HIGH"}:
         return {"sent": False, "reason": "risk_below_alert_threshold"}
 
@@ -930,8 +1740,20 @@ def _persist_score_to_mongo(
     history_signals: dict[str, Any] | None = None,
     request_key: str,
 ) -> dict[str, Any]:
+    if _postgres_ready():
+        return _persist_score_to_postgres(
+            event=event,
+            features=features,
+            anomaly_score=anomaly_score,
+            raw_score=raw_score,
+            risk_level_base=risk_level_base,
+            risk_level_final=risk_level_final,
+            reasons=reasons,
+            history_signals=history_signals,
+            request_key=request_key,
+        )
     if not _mongo_ready():
-        return {"saved": False, "reason": "mongo_not_connected"}
+        return {"saved": False, "reason": "storage_not_connected"}
 
     mongo_db = app.state.mongo_db
     now_dt = _now_dt()
@@ -991,13 +1813,7 @@ def _persist_score_to_mongo(
                 "failed10m": int(event.failed_10m),
                 "botScore": float(event.bot_score),
             },
-            "features": {
-                "hourOfDay": float(features[0]),
-                "dayOfWeek": float(features[1]),
-                "failed10m": float(features[2]),
-                "deviceLength": float(features[3]),
-                "botScore": float(features[4]),
-            },
+            "features": _feature_vector_to_dict(_active_feature_names(), features),
             "result": {
                 "anomalyScore": float(anomaly_score),
                 "rawScore": float(raw_score),
@@ -1030,8 +1846,8 @@ def _persist_score_to_mongo(
                     "lastCountry": history_signals.get("last_country"),
                 },
                 "time": {
-                    "hourOfDay": int(features[0]),
-                    "dayOfWeek": int(features[1]),
+                    "hourOfDay": int(event.timestamp.hour),
+                    "dayOfWeek": int(event.timestamp.weekday()),
                     "offHourForUser": bool(history_signals.get("off_hour_for_user")),
                     "lastLoginAt": history_signals.get("last_timestamp"),
                 },
@@ -1091,8 +1907,16 @@ def _write_transaction_alert(
     reasons: list[str],
     transaction_event_id: str | None,
 ) -> dict[str, Any]:
+    if _postgres_ready():
+        return _write_transaction_alert_postgres(
+            event=event,
+            risk_level=risk_level,
+            anomaly_score=anomaly_score,
+            reasons=reasons,
+            transaction_event_id=transaction_event_id,
+        )
     if not _mongo_ready():
-        return {"sent": False, "reason": "mongo_not_connected"}
+        return {"sent": False, "reason": "storage_not_connected"}
     if risk_level not in {"MEDIUM", "HIGH"}:
         return {"sent": False, "reason": "risk_below_alert_threshold"}
 
@@ -1143,8 +1967,19 @@ def _persist_tx_score_to_mongo(
     reasons: list[str],
     request_key: str,
 ) -> dict[str, Any]:
+    if _postgres_ready():
+        return _persist_tx_score_to_postgres(
+            event=event,
+            features=features,
+            anomaly_score=anomaly_score,
+            raw_score=raw_score,
+            risk_level_base=risk_level_base,
+            risk_level_final=risk_level_final,
+            reasons=reasons,
+            request_key=request_key,
+        )
     if not _mongo_ready():
-        return {"saved": False, "reason": "mongo_not_connected"}
+        return {"saved": False, "reason": "storage_not_connected"}
 
     mongo_db = app.state.mongo_db
     now_dt = _now_dt()
@@ -1203,14 +2038,7 @@ def _persist_tx_score_to_mongo(
                 "failedTx24h": int(event.failed_tx_24h),
                 "velocity1h": int(event.velocity_1h),
             },
-            "features": {
-                "hourOfDay": float(features[0]),
-                "dayOfWeek": float(features[1]),
-                "amountLog10": float(features[2]),
-                "failedTx24h": float(features[3]),
-                "velocity1h": float(features[4]),
-                "deviceLength": float(features[5]),
-            },
+            "features": _feature_vector_to_dict(_active_tx_feature_names(), features),
             "result": {
                 "anomalyScore": float(anomaly_score),
                 "rawScore": float(raw_score),
@@ -1269,7 +2097,7 @@ def _startup_app() -> None:
     app.state.model_version = "unknown"
     app.state.model_path = None
     app.state.metadata_path = None
-    app.state.feature_names = FEATURE_NAMES
+    app.state.feature_names = list(FEATURE_NAMES)
     app.state.load_error = None
     app.state.tx_model = None
     app.state.tx_thresholds = None
@@ -1285,19 +2113,25 @@ def _startup_app() -> None:
     app.state.tx_model_version = "unknown"
     app.state.tx_model_path = None
     app.state.tx_metadata_path = None
-    app.state.tx_feature_names = TX_FEATURE_NAMES
+    app.state.tx_feature_names = list(TX_FEATURE_NAMES)
+    app.state.tx_feedback_profile = {}
     app.state.tx_load_error = None
     app.state.mongo_client = None
     app.state.mongo_db = None
     app.state.mongo_db_name = os.getenv("MONGODB_DB")
     app.state.mongo_error = None
+    app.state.postgres_conn = None
+    app.state.postgres_db = os.getenv("DATABASE_URL")
+    app.state.postgres_error = None
     app.state.metrics = {key: 0.0 for key in METRICS_KEYS}
     _try_load_persisted_model()
     _try_load_persisted_tx_model()
+    _init_postgres()
     _init_mongo()
 
 
 def _shutdown_app() -> None:
+    _close_postgres()
     _close_mongo()
 
 
@@ -1332,6 +2166,9 @@ def health():
         "tx_model_loaded": _tx_state_ready(),
         "tx_model_source": app.state.tx_model_source,
         "tx_model_version": getattr(app.state, "tx_model_version", "unknown"),
+        "postgres_connected": _postgres_ready(),
+        "postgres_db": bool(getattr(app.state, "postgres_db", None)),
+        "storage_backend": _storage_backend(),
         "mongo_connected": _mongo_ready(),
         "mongo_db": getattr(app.state, "mongo_db_name", None),
     }
@@ -1347,7 +2184,7 @@ def status(_: None = Depends(_require_api_key)):
         "metadata_path": getattr(app.state, "metadata_path", None),
         "trained_at": app.state.trained_at,
         "train_size": app.state.train_size,
-        "features": FEATURE_NAMES,
+        "features": _active_feature_names(),
         "load_error": app.state.load_error,
         "tx_model_loaded": _tx_state_ready(),
         "tx_model_source": app.state.tx_model_source,
@@ -1356,8 +2193,13 @@ def status(_: None = Depends(_require_api_key)):
         "tx_metadata_path": getattr(app.state, "tx_metadata_path", None),
         "tx_trained_at": app.state.tx_trained_at,
         "tx_train_size": app.state.tx_train_size,
-        "tx_features": TX_FEATURE_NAMES,
+        "tx_features": _active_tx_feature_names(),
+        "tx_feedback_profile": getattr(app.state, "tx_feedback_profile", {}) or {},
         "tx_load_error": app.state.tx_load_error,
+        "postgres_connected": _postgres_ready(),
+        "postgres_db": bool(getattr(app.state, "postgres_db", None)),
+        "postgres_error": getattr(app.state, "postgres_error", None),
+        "storage_backend": _storage_backend(),
         "mongo_connected": _mongo_ready(),
         "mongo_db": getattr(app.state, "mongo_db_name", None),
         "mongo_error": getattr(app.state, "mongo_error", None),
@@ -1382,8 +2224,34 @@ def metrics(_: None = Depends(_require_api_key)):
 
 @app.get("/ai/admin/alerts")
 def admin_alerts(limit: int = 50, _: None = Depends(_require_api_key)):
+    if _postgres_ready():
+        capped = max(1, min(limit, 200))
+        rows = _pg_fetchall(
+            """
+            SELECT "id", "userId", "actor", "action", "details", "ipAddress", "createdAt"
+            FROM "AuditLog"
+            WHERE "action" IN ('AI_LOGIN_ALERT', 'AI_TRANSACTION_ALERT')
+            ORDER BY "createdAt" DESC
+            LIMIT %s
+            """,
+            (capped,),
+        )
+        alerts: list[dict[str, Any]] = []
+        for item in rows:
+            alerts.append(
+                {
+                    "_id": item.get("id"),
+                    "userId": item.get("userId"),
+                    "actor": item.get("actor"),
+                    "action": item.get("action"),
+                    "details": _normalize_json_field(item.get("details")),
+                    "ipAddress": item.get("ipAddress"),
+                    "createdAt": _to_json_value(item.get("createdAt")),
+                }
+            )
+        return {"alerts": alerts, "count": len(alerts)}
     if not _mongo_ready():
-        return {"alerts": [], "reason": "mongo_not_connected"}
+        return {"alerts": [], "reason": "storage_not_connected"}
     capped = max(1, min(limit, 200))
     db = app.state.mongo_db
     try:
@@ -1411,8 +2279,44 @@ def admin_alerts(limit: int = 50, _: None = Depends(_require_api_key)):
 
 @app.get("/ai/admin/stats")
 def admin_stats(hours: int = 24, _: None = Depends(_require_api_key)):
+    if _postgres_ready():
+        safe_hours = max(1, min(hours, 24 * 30))
+        cutoff = _now_dt().timestamp() - safe_hours * 3600
+        cutoff_dt = datetime.fromtimestamp(cutoff, tz=timezone.utc)
+        rows = _pg_fetchall(
+            """
+            SELECT
+              "action",
+              UPPER(COALESCE("metadata"->>'riskLevel', 'LOW')) AS "riskLevel",
+              COUNT(*)::int AS "count"
+            FROM "AuditLog"
+            WHERE "actor" = 'ai-service'
+              AND "action" IN ('AI_LOGIN_SCORE', 'AI_TRANSACTION_SCORE')
+              AND "createdAt" >= %s
+            GROUP BY "action", UPPER(COALESCE("metadata"->>'riskLevel', 'LOW'))
+            """,
+            (cutoff_dt,),
+        )
+        login_risk = {"LOW": 0, "MEDIUM": 0, "HIGH": 0}
+        tx_risk = {"LOW": 0, "MEDIUM": 0, "HIGH": 0}
+        for row in rows:
+            target = login_risk if row.get("action") == "AI_LOGIN_SCORE" else tx_risk
+            risk = str(row.get("riskLevel") or "LOW").upper()
+            if risk in target:
+                target[risk] = int(row.get("count") or 0)
+        combined_risk = {
+            "LOW": int(login_risk["LOW"] + tx_risk["LOW"]),
+            "MEDIUM": int(login_risk["MEDIUM"] + tx_risk["MEDIUM"]),
+            "HIGH": int(login_risk["HIGH"] + tx_risk["HIGH"]),
+        }
+        return {
+            "window_hours": safe_hours,
+            "risk_counts": login_risk,
+            "tx_risk_counts": tx_risk,
+            "combined_risk_counts": combined_risk,
+        }
     if not _mongo_ready():
-        return {"stats": {}, "reason": "mongo_not_connected"}
+        return {"stats": {}, "reason": "storage_not_connected"}
     safe_hours = max(1, min(hours, 24 * 30))
     cutoff = _now_dt().timestamp() - safe_hours * 3600
     cutoff_dt = datetime.fromtimestamp(cutoff, tz=timezone.utc)
@@ -1465,14 +2369,15 @@ def train(
     _: None = Depends(_require_api_key),
 ):
     normalized_events = [_normalize_login_event(event) for event in payload.events]
-    normal_events = [event for event in normalized_events if int(event.success) == 1]
+    training_rows = build_login_training_feature_rows(normalized_events, FEATURE_NAMES)
+    normal_events = [event for event, _, _ in training_rows if int(event.success) == 1]
     if len(normal_events) < 10:
         raise HTTPException(
             status_code=400,
             detail="At least 10 normal login events (success=1) are required for training.",
         )
 
-    feature_matrix = np.vstack([_build_features(event) for event in normal_events])
+    feature_matrix = np.vstack([features for event, features, _ in training_rows if int(event.success) == 1])
     model, thresholds, feature_mean, feature_std = _fit_iforest(feature_matrix)
     countries = {event.country.strip().lower() for event in normal_events}
     devices = {_normalize_device(event.device) for event in normal_events}
@@ -1490,6 +2395,7 @@ def train(
         model_version=model_version or f"runtime_iforest_{_now_dt().strftime('%Y%m%d_%H%M%S')}",
         model_path=None,
         metadata_path=None,
+        feature_names=FEATURE_NAMES,
     )
     app.state.model_trained_at_dt = _parse_iso_datetime(app.state.trained_at)
     artifact = _persist_login_model_artifacts(promote=promote) if persist else {"saved": False}
@@ -1499,7 +2405,7 @@ def train(
         "trained_at": app.state.trained_at,
         "model_version": app.state.model_version,
         "train_size": app.state.train_size,
-        "features": FEATURE_NAMES,
+        "features": _active_feature_names(),
         "model_source": app.state.model_source,
         "artifact": artifact,
     }
@@ -1523,8 +2429,8 @@ def score(
 
     event = _normalize_login_event(event)
     request_key = _resolve_request_key(event, x_idempotency_key)
-    features = _build_features(event)
     history_signals = _get_history_signals(event)
+    features = _build_features(event, history_signals)
     score_value = float(app.state.model.decision_function(features.reshape(1, -1))[0])
     anomaly_score = _scaled_score(
         score_value,
@@ -1535,24 +2441,33 @@ def score(
     risk_level = risk_level_base
     risk_level = _adjust_risk_level(risk_level, event, history_signals)
     reasons = _build_reasons(event, features, history_signals)
-    mongo_persist = _persist_score_to_mongo(
-        event=event,
-        features=features,
-        anomaly_score=anomaly_score,
-        raw_score=score_value,
-        risk_level_base=risk_level_base,
-        risk_level_final=risk_level,
-        reasons=reasons,
-        history_signals=history_signals,
-        request_key=request_key,
-    )
-    admin_alert = _write_admin_alert(
-        event=event,
-        risk_level=risk_level,
-        anomaly_score=anomaly_score,
-        reasons=reasons,
-        login_event_id=mongo_persist.get("login_event_id"),
-    )
+    try:
+        mongo_persist = _persist_score_to_mongo(
+            event=event,
+            features=features,
+            anomaly_score=anomaly_score,
+            raw_score=score_value,
+            risk_level_base=risk_level_base,
+            risk_level_final=risk_level,
+            reasons=reasons,
+            history_signals=history_signals,
+            request_key=request_key,
+        )
+    except Exception as exc:
+        _metric_inc("mongo_write_error_total")
+        mongo_persist = {"saved": False, "reason": f"persist_error:{exc}"}
+
+    try:
+        admin_alert = _write_admin_alert(
+            event=event,
+            risk_level=risk_level,
+            anomaly_score=anomaly_score,
+            reasons=reasons,
+            login_event_id=mongo_persist.get("login_event_id"),
+        )
+    except Exception as exc:
+        _metric_inc("admin_alerts_error_total")
+        admin_alert = {"sent": False, "reason": f"alert_error:{exc}"}
     if risk_level == "LOW":
         _metric_inc("risk_low_total")
     elif risk_level == "MEDIUM":
@@ -1623,7 +2538,7 @@ def train_transaction(
             detail="At least 10 transactions are required for transaction model training.",
         )
 
-    feature_matrix = np.vstack([_build_tx_features(event) for event in normalized_events])
+    feature_matrix = np.vstack([build_transaction_features(event, feature_names=TX_FEATURE_NAMES) for event in normalized_events])
     model, thresholds, feature_mean, feature_std = _fit_iforest(feature_matrix)
     countries = {event.country.strip().lower() for event in normalized_events if event.country}
     payment_methods = {event.payment_method for event in normalized_events if event.payment_method}
@@ -1643,6 +2558,7 @@ def train_transaction(
         model_version=model_version or f"runtime_tx_iforest_{_now_dt().strftime('%Y%m%d_%H%M%S')}",
         model_path=None,
         metadata_path=None,
+        feature_names=TX_FEATURE_NAMES,
     )
     app.state.tx_model_trained_at_dt = _parse_iso_datetime(app.state.tx_trained_at)
     artifact = _persist_tx_model_artifacts(promote=promote) if persist else {"saved": False}
@@ -1652,7 +2568,7 @@ def train_transaction(
         "trained_at": app.state.tx_trained_at,
         "model_version": app.state.tx_model_version,
         "train_size": app.state.tx_train_size,
-        "features": TX_FEATURE_NAMES,
+        "features": _active_tx_feature_names(),
         "model_source": app.state.tx_model_source,
         "artifact": artifact,
     }
@@ -1686,23 +2602,32 @@ def score_transaction(
     risk_level_base = _score_to_level(score_value, app.state.tx_thresholds)
     risk_level = _adjust_tx_risk_level(risk_level_base, event)
     reasons = _build_tx_reasons(event, features)
-    mongo_persist = _persist_tx_score_to_mongo(
-        event=event,
-        features=features,
-        anomaly_score=anomaly_score,
-        raw_score=score_value,
-        risk_level_base=risk_level_base,
-        risk_level_final=risk_level,
-        reasons=reasons,
-        request_key=request_key,
-    )
-    admin_alert = _write_transaction_alert(
-        event=event,
-        risk_level=risk_level,
-        anomaly_score=anomaly_score,
-        reasons=reasons,
-        transaction_event_id=mongo_persist.get("transaction_event_id"),
-    )
+    try:
+        mongo_persist = _persist_tx_score_to_mongo(
+            event=event,
+            features=features,
+            anomaly_score=anomaly_score,
+            raw_score=score_value,
+            risk_level_base=risk_level_base,
+            risk_level_final=risk_level,
+            reasons=reasons,
+            request_key=request_key,
+        )
+    except Exception as exc:
+        _metric_inc("mongo_write_error_total")
+        mongo_persist = {"saved": False, "reason": f"persist_error:{exc}"}
+
+    try:
+        admin_alert = _write_transaction_alert(
+            event=event,
+            risk_level=risk_level,
+            anomaly_score=anomaly_score,
+            reasons=reasons,
+            transaction_event_id=mongo_persist.get("transaction_event_id"),
+        )
+    except Exception as exc:
+        _metric_inc("admin_alerts_error_total")
+        admin_alert = {"sent": False, "reason": f"alert_error:{exc}"}
 
     if risk_level == "LOW":
         _metric_inc("tx_risk_low_total")
@@ -1735,6 +2660,8 @@ def score_transaction(
             "daily_spend_avg_30d": float(event.daily_spend_avg_30d),
             "today_spend_before": float(event.today_spend_before),
             "projected_daily_spend": float(event.projected_daily_spend),
+            "balance_before": float(event.balance_before),
+            "remaining_balance": float(event.remaining_balance),
         },
         "mongo_persist": mongo_persist,
         "admin_alert": admin_alert,

@@ -8,6 +8,8 @@
   },
   "scripts": {
     "dev": "pnpm -r --parallel --if-present dev",
+    "dev:api": "pnpm --filter @secure-wallet/api dev",
+    "dev:web": "pnpm --filter @secure-wallet/web dev -- --host localhost --port 5173",
     "lint": "pnpm -r --if-present lint",
     "format": "pnpm -r --if-present format",
     "typecheck": "pnpm -r --if-present typecheck",

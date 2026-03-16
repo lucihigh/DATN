@@ -181,7 +181,30 @@ export interface paths {
         /** @description Alerts */
         200: {
           content: {
-            "application/json": components["schemas"]["SecurityAlert"][];
+            "application/json": components["schemas"]["AdminAlert"][];
+          };
+        };
+      };
+    };
+  };
+  "/admin/alerts/{id}": {
+    /** Admin update alert review status */
+    patch: {
+      parameters: {
+        path: {
+          id: string;
+        };
+      };
+      requestBody: {
+        content: {
+          "application/json": components["schemas"]["AdminAlertReviewRequest"];
+        };
+      };
+      responses: {
+        /** @description Updated alert */
+        200: {
+          content: {
+            "application/json": components["schemas"]["AdminAlert"];
           };
         };
       };
@@ -322,6 +345,54 @@ export interface components {
       message?: string;
       /** Format: date-time */
       createdAt?: string;
+    };
+    AdminAlertSignal: {
+      label?: string;
+      value?: string;
+      /** @enum {string} */
+      tone?: "neutral" | "warn" | "info";
+    };
+    AdminAlert: {
+      id?: string;
+      /** @enum {string} */
+      type?: "login" | "transaction";
+      sourceAction?: string;
+      actor?: string;
+      userId?: string | null;
+      /** Format: date-time */
+      createdAt?: string;
+      ipAddress?: string | null;
+      /** @enum {string} */
+      riskLevel?: "low" | "medium" | "high";
+      /** Format: double */
+      anomalyScore?: number;
+      reasons?: string[];
+      summary?: string;
+      explanation?: string;
+      keySignals?: components["schemas"]["AdminAlertSignal"][];
+      /** @enum {string} */
+      adminStatus?: "pending_review" | "confirmed_risk" | "false_positive" | "escalated";
+      adminNote?: string | null;
+      /** Format: date-time */
+      reviewedAt?: string | null;
+      reviewedBy?: string | null;
+      monitoringOnly?: boolean;
+      aiDecision?: string | null;
+      modelVersion?: string | null;
+      modelSource?: string | null;
+      eventId?: string | null;
+      transactionId?: string | null;
+      /** Format: double */
+      amount?: number | null;
+      currency?: string | null;
+      location?: string | null;
+      paymentMethod?: string | null;
+      merchantCategory?: string | null;
+    };
+    AdminAlertReviewRequest: {
+      /** @enum {string} */
+      status?: "pending_review" | "confirmed_risk" | "false_positive" | "escalated";
+      note?: string;
     };
     AuditLog: {
       id?: string;

@@ -18,3 +18,8 @@ This repository is a pnpm-powered monorepo scaffold for the **FPIPay** project: 
 - infra - docker-compose, Postgres, service wiring
 - prisma - Prisma schema & migration entrypoint
 - contracts - OpenAPI contract (single source of truth)
+
+## Local Dev
+- `pnpm dev` now starts `web`, `api`, and `ai-service` together.
+- `apps/ai-service` uses `apps/ai-service/.venv` automatically when present, otherwise falls back to `py`/`python`.
+- If `AI_SERVICE_URL` points to `localhost` or `127.0.0.1`, `apps/api` also auto-starts the local AI runtime when needed.

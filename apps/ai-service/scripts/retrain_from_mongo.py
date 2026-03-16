@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,7 +10,11 @@ import numpy as np
 from pymongo import MongoClient
 from pyod.models.iforest import IForest
 
-FEATURE_NAMES = ["hour_of_day", "day_of_week", "failed_10m", "device_length", "bot_score"]
+AI_SERVICE_ROOT = Path(__file__).resolve().parents[1]
+if str(AI_SERVICE_ROOT) not in sys.path:
+    sys.path.insert(0, str(AI_SERVICE_ROOT))
+
+from app.login_model import FEATURE_NAMES, LoginEvent, build_training_feature_rows, normalize_login_event
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,7 +66,7 @@ def main() -> None:
         .limit(max(100, int(args.max_rows)))
     )
 
-    features: list[list[float]] = []
+    events: list[LoginEvent] = []
     countries: set[str] = set()
     devices: set[str] = set()
 
@@ -79,20 +84,28 @@ def main() -> None:
         country = normalize_country(doc.get("country"))
         countries.add(country.lower())
         devices.add(normalize_device(device))
-        features.append(
-            [
-                float(ts.hour),
-                float(ts.weekday()),
-                failed_10m,
-                float(len(device)),
-                bot_score,
-            ]
+        events.append(
+            normalize_login_event(
+                LoginEvent(
+                    user_id=str(doc.get("userId") or "unknown"),
+                    timestamp=ts,
+                    ip=str(doc.get("ipAddress") or "0.0.0.0"),
+                    country=country,
+                    device=device,
+                    success=1,
+                    failed_10m=failed_10m,
+                    bot_score=bot_score,
+                )
+            )
         )
 
-    if len(features) < 100:
-        raise RuntimeError(f"Not enough normal rows from Mongo for retrain: {len(features)}")
+    if len(events) < 100:
+        raise RuntimeError(f"Not enough normal rows from Mongo for retrain: {len(events)}")
 
-    X = np.asarray(features, dtype=np.float32)
+    X = np.asarray(
+        [feature_row.tolist() for _, feature_row, _ in build_training_feature_rows(events, FEATURE_NAMES)],
+        dtype=np.float32,
+    )
     model = IForest(contamination=args.contamination, random_state=42)
     model.fit(X)
     scores = model.decision_scores_
@@ -137,7 +150,7 @@ def main() -> None:
         active_path.write_text(json.dumps(active_cfg, ensure_ascii=True), encoding="utf-8")
         print(f"promoted={active_path}")
 
-    print(f"trained_rows={len(features)}")
+    print(f"trained_rows={len(events)}")
     print(f"model_version={model_version}")
     print(f"model_path={model_path}")
     print(f"metadata_path={metadata_path}")
