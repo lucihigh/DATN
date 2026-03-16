@@ -21,12 +21,31 @@ export const lockoutGuard = async (
 
   const policy = await getSecurityPolicy();
   const repo = createLoginEventRepository();
+  const userRepo = createUserRepository();
+  const user = await userRepo.findByEmail(email);
   const windowStart = new Date(Date.now() - policy.lockoutMinutes * 60 * 1000);
-  const recentFailures = await repo.countRecentFailures(email, windowStart);
+  const lockoutResetAtRaw =
+    user?.metadata &&
+    typeof user.metadata === "object" &&
+    typeof (user.metadata as Record<string, unknown>).lockoutResetAt ===
+      "string"
+      ? ((user.metadata as Record<string, unknown>).lockoutResetAt as string)
+      : "";
+  const lockoutResetAt = !lockoutResetAtRaw
+    ? null
+    : Number.isNaN(Date.parse(lockoutResetAtRaw))
+      ? null
+      : new Date(lockoutResetAtRaw);
+  const effectiveWindowStart =
+    lockoutResetAt && lockoutResetAt.getTime() > windowStart.getTime()
+      ? lockoutResetAt
+      : windowStart;
+  const recentFailures = await repo.countRecentFailures(
+    email,
+    effectiveWindowStart,
+  );
 
   if (recentFailures >= policy.maxLoginAttempts) {
-    const userRepo = createUserRepository();
-    const user = await userRepo.findByEmail(email);
     if (user?.id) {
       await userRepo.setStatus(user.id, "DISABLED");
     }

@@ -40,6 +40,42 @@ export type AuthCompletionResult = {
   security?: SessionSecurity;
 };
 
+export type SliderCaptchaProof = {
+  captchaToken: string;
+  captchaOffset: number;
+};
+
+type BrowserDeviceContext = {
+  browser?: string;
+  browserVersion?: string;
+  platform?: string;
+  platformVersion?: string;
+  deviceType?: string;
+  mobile?: boolean;
+  deviceTitle?: string;
+  deviceDetail?: string;
+};
+
+type NavigatorUADataBrand = {
+  brand: string;
+  version: string;
+};
+
+type NavigatorUAData = {
+  brands: NavigatorUADataBrand[];
+  mobile: boolean;
+  platform: string;
+  getHighEntropyValues?: (
+    hints: string[],
+  ) => Promise<Record<string, unknown> & { fullVersionList?: NavigatorUADataBrand[] }>;
+};
+
+declare global {
+  interface Navigator {
+    userAgentData?: NavigatorUAData;
+  }
+}
+
 export type SessionSecurity = {
   riskLevel: string;
   reviewReason?: string;
@@ -96,6 +132,9 @@ const API_BASE =
   "http://localhost:4000";
 const SESSION_EXPIRED_EVENT = "auth:session-expired";
 const SESSION_VERIFY_INTERVAL_MS = 10000;
+const PUBLIC_IP_CACHE_KEY = "fpipay_public_ip_cache";
+const PUBLIC_IP_CACHE_TTL_MS = 30 * 1000;
+const PUBLIC_IP_FETCH_TIMEOUT_MS = 5000;
 
 type SessionExpiredReason = "expired" | "replaced";
 
@@ -105,7 +144,7 @@ const AuthContext = createContext<{
   requestLoginOtp: (
     email: string,
     password: string,
-    recaptchaToken: string,
+    captcha: SliderCaptchaProof,
   ) => Promise<LoginResult>;
   verifyLoginOtp: (
     challengeId: string,
@@ -117,10 +156,10 @@ const AuthContext = createContext<{
     email: string;
     phone: string;
     address: string;
-    dob: string;
-    password: string;
-    recaptchaToken: string;
-  }) => Promise<{
+      dob: string;
+      password: string;
+      captcha: SliderCaptchaProof;
+    }) => Promise<{
     challengeId: string;
     destination: string;
     expiresAt: string;
@@ -132,7 +171,7 @@ const AuthContext = createContext<{
   ) => Promise<AuthCompletionResult>;
   requestPasswordResetOtp: (
     email: string,
-    recaptchaToken: string,
+    captcha: SliderCaptchaProof,
   ) => Promise<{
     challengeId: string;
     destination: string;
@@ -302,6 +341,264 @@ const parseLoginMonitoring = (value: unknown): LoginMonitoring | null => {
         : typeof data.request_key === "string"
           ? data.request_key
           : null,
+  };
+};
+
+const readCachedPublicIp = () => {
+  try {
+    const raw = sessionStorage.getItem(PUBLIC_IP_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as {
+      ip?: unknown;
+      fetchedAt?: unknown;
+    };
+    if (
+      typeof parsed.ip !== "string" ||
+      !parsed.ip.trim() ||
+      typeof parsed.fetchedAt !== "number" ||
+      !Number.isFinite(parsed.fetchedAt)
+    ) {
+      return null;
+    }
+    if (Date.now() - parsed.fetchedAt > PUBLIC_IP_CACHE_TTL_MS) {
+      return null;
+    }
+    return parsed.ip.trim();
+  } catch {
+    return null;
+  }
+};
+
+const cachePublicIp = (ip: string) => {
+  try {
+    sessionStorage.setItem(
+      PUBLIC_IP_CACHE_KEY,
+      JSON.stringify({
+        ip,
+        fetchedAt: Date.now(),
+      }),
+    );
+  } catch {
+    // ignore storage errors
+  }
+};
+
+type PublicIpProvider = {
+  url: string;
+  responseType: "json" | "text";
+  field?: string;
+};
+
+const PUBLIC_IP_PROVIDERS: PublicIpProvider[] = [
+  {
+    url: "https://api64.ipify.org?format=json",
+    responseType: "json",
+    field: "ip",
+  },
+  {
+    url: "https://api.ipify.org?format=json",
+    responseType: "json",
+    field: "ip",
+  },
+  {
+    url: "https://ipwho.is/",
+    responseType: "json",
+    field: "ip",
+  },
+  {
+    url: "https://api.myip.com",
+    responseType: "json",
+    field: "ip",
+  },
+];
+
+const normalizePublicIpCandidate = (value: unknown) => {
+  if (typeof value !== "string") return "";
+  return value.trim().replace(/\s+/g, "");
+};
+
+const fetchPublicIpFromProvider = async (provider: PublicIpProvider) => {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(
+    () => controller.abort(),
+    PUBLIC_IP_FETCH_TIMEOUT_MS,
+  );
+
+  try {
+    const resp = await fetch(provider.url, {
+      cache: "no-store",
+      headers:
+        provider.responseType === "json"
+          ? { Accept: "application/json" }
+          : undefined,
+      signal: controller.signal,
+    });
+
+    if (!resp.ok) return "";
+
+    if (provider.responseType === "text") {
+      return normalizePublicIpCandidate(await resp.text().catch(() => ""));
+    }
+
+    const data = (await resp.json().catch(() => null)) as
+      | Record<string, unknown>
+      | null;
+    return normalizePublicIpCandidate(
+      provider.field ? data?.[provider.field] : "",
+    );
+  } catch {
+    return "";
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+};
+
+const resolvePublicIpAddress = async () => {
+  const cachedIp = readCachedPublicIp();
+  if (cachedIp) return cachedIp;
+
+  for (const provider of PUBLIC_IP_PROVIDERS) {
+    const ip = await fetchPublicIpFromProvider(provider);
+    if (ip) {
+      cachePublicIp(ip);
+      return ip;
+    }
+  }
+
+  return "";
+};
+
+const buildApiHeaders = async (
+  headers?: Record<string, string>,
+) => {
+  const publicIp = await resolvePublicIpAddress();
+  return {
+    ...(headers ?? {}),
+    ...(publicIp ? { "x-demo-public-ip": publicIp } : {}),
+  };
+};
+
+const normalizeBrowserBrand = (value?: string) => {
+  const normalized = value?.trim().toLowerCase() || "";
+  if (!normalized) return "";
+  if (normalized.includes("edge")) return "Edge";
+  if (normalized.includes("chrome")) return "Chrome";
+  if (normalized.includes("firefox")) return "Firefox";
+  if (normalized.includes("safari")) return "Safari";
+  if (normalized.includes("opera")) return "Opera";
+  if (normalized.includes("chromium")) return "Chromium";
+  return value?.trim() || "";
+};
+
+const formatPlatformLabel = (platform?: string, platformVersion?: string) => {
+  const normalized = platform?.trim().toLowerCase() || "";
+  if (!normalized) return "";
+  if (normalized === "windows") {
+    const majorVersion = Number(platformVersion?.split(".")[0] || Number.NaN);
+    if (Number.isFinite(majorVersion)) {
+      return majorVersion >= 13 ? "Windows 11" : "Windows 10";
+    }
+    return "Windows";
+  }
+  if (normalized === "macos") return "macOS";
+  if (normalized === "ios") return "iOS";
+  if (normalized === "android") return "Android";
+  if (normalized === "linux") return "Linux";
+  return platform?.trim() || "";
+};
+
+const deriveDeviceTitle = (platform?: string, mobile?: boolean, userAgent?: string) => {
+  const normalized = platform?.trim().toLowerCase() || "";
+  if (normalized === "windows") return "Windows PC";
+  if (normalized === "macos") return "Mac device";
+  if (normalized === "ios" && /ipad/i.test(userAgent || "")) return "iPad";
+  if (normalized === "ios") return "iPhone";
+  if (normalized === "android") return mobile ? "Android phone" : "Android device";
+  if (normalized === "linux") return "Linux device";
+  if (/iphone/i.test(userAgent || "")) return "iPhone";
+  if (/ipad/i.test(userAgent || "")) return "iPad";
+  if (/android/i.test(userAgent || "")) return /mobile/i.test(userAgent || "")
+    ? "Android phone"
+    : "Android device";
+  if (/windows/i.test(userAgent || "")) return "Windows PC";
+  if (/mac os/i.test(userAgent || "")) return "Mac device";
+  if (/linux/i.test(userAgent || "")) return "Linux device";
+  return "Unknown device";
+};
+
+const collectBrowserDeviceContext = async (): Promise<BrowserDeviceContext | null> => {
+  if (typeof navigator === "undefined") return null;
+
+  const rawUserAgent = navigator.userAgent || "";
+  const uaData = navigator.userAgentData;
+  let browser = "";
+  let browserVersion = "";
+  let platform = "";
+  let platformVersion = "";
+  let mobile = false;
+
+  if (uaData) {
+    platform = uaData.platform || "";
+    mobile = Boolean(uaData.mobile);
+    const highEntropy = await uaData
+      .getHighEntropyValues?.([
+        "platformVersion",
+        "fullVersionList",
+      ])
+      .catch(() => null);
+    platformVersion =
+      highEntropy && typeof highEntropy.platformVersion === "string"
+        ? highEntropy.platformVersion
+        : "";
+    const fullVersionList = Array.isArray(highEntropy?.fullVersionList)
+      ? highEntropy.fullVersionList
+      : uaData.brands;
+    const preferredBrowser =
+      fullVersionList.find((item) =>
+        /Google Chrome|Microsoft Edge|Firefox|Safari|Opera|Chromium/i.test(
+          item.brand,
+        ),
+      ) || fullVersionList[0];
+    browser = normalizeBrowserBrand(preferredBrowser?.brand);
+    browserVersion = preferredBrowser?.version || "";
+  }
+
+  if (!browser) {
+    const browserMatchers: Array<[RegExp, string]> = [
+      [/Edg\/(\d+)/, "Edge"],
+      [/Chrome\/(\d+)/, "Chrome"],
+      [/Firefox\/(\d+)/, "Firefox"],
+      [/Version\/(\d+).+Safari\//, "Safari"],
+    ];
+    for (const [pattern, label] of browserMatchers) {
+      const match = rawUserAgent.match(pattern);
+      if (match) {
+        browser = label;
+        browserVersion = match[1] || "";
+        break;
+      }
+    }
+  }
+
+  if (!platform) {
+    if (/Windows/i.test(rawUserAgent)) platform = "Windows";
+    else if (/Mac OS X/i.test(rawUserAgent)) platform = "macOS";
+    else if (/iPhone|iPad|iPod/i.test(rawUserAgent)) platform = "iOS";
+    else if (/Android/i.test(rawUserAgent)) platform = "Android";
+    else if (/Linux/i.test(rawUserAgent)) platform = "Linux";
+  }
+
+  const platformLabel = formatPlatformLabel(platform, platformVersion);
+  const browserLabel = [browser, browserVersion].filter(Boolean).join(" ");
+  return {
+    browser: browser || undefined,
+    browserVersion: browserVersion || undefined,
+    platform: platform || undefined,
+    platformVersion: platformVersion || undefined,
+    deviceType: mobile ? "mobile" : "desktop",
+    mobile,
+    deviceTitle: deriveDeviceTitle(platform, mobile, rawUserAgent),
+    deviceDetail: [browserLabel, platformLabel].filter(Boolean).join(" | ") || undefined,
   };
 };
 
@@ -478,8 +775,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const verifyToken = async () => {
       try {
+        const headers = await buildApiHeaders({
+          Authorization: `Bearer ${token}`,
+        });
         const resp = await fetch(`${API_BASE}/auth/me`, {
-          headers: { Authorization: `Bearer ${token}` },
+          headers,
         });
         const data = (await resp.json().catch(() => null)) as {
           error?: string;
@@ -539,13 +839,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (
       email: string,
       password: string,
-      recaptchaToken: string,
+      captcha: SliderCaptchaProof,
     ): Promise<LoginResult> => {
       try {
+        const deviceContext = await collectBrowserDeviceContext();
+        const headers = await buildApiHeaders({
+          "Content-Type": "application/json",
+        });
         const resp = await fetch(`${API_BASE}/auth/login`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, password, recaptchaToken }),
+          headers,
+          body: JSON.stringify({
+            email,
+            password,
+            captchaToken: captcha.captchaToken,
+            captchaOffset: captcha.captchaOffset,
+            deviceContext,
+          }),
         });
         const data = (await resp.json().catch(() => null)) as {
           error?: unknown;
@@ -606,10 +916,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const verifyLoginOtp = useCallback(
     async (challengeId: string, otp: string): Promise<AuthCompletionResult> => {
       try {
+        const deviceContext = await collectBrowserDeviceContext();
+        const headers = await buildApiHeaders({
+          "Content-Type": "application/json",
+        });
         const resp = await fetch(`${API_BASE}/auth/login/verify`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ challengeId, otp }),
+          headers,
+          body: JSON.stringify({ challengeId, otp, deviceContext }),
         });
         const data = (await resp.json().catch(() => null)) as {
           error?: unknown;
@@ -642,12 +956,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const requestPasswordResetOtp = useCallback(
-    async (email: string, recaptchaToken: string) => {
+    async (email: string, captcha: SliderCaptchaProof) => {
       try {
+        const headers = await buildApiHeaders({
+          "Content-Type": "application/json",
+        });
         const resp = await fetch(`${API_BASE}/auth/password/otp/send`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, recaptchaToken }),
+          headers,
+          body: JSON.stringify({
+            email,
+            captchaToken: captcha.captchaToken,
+            captchaOffset: captcha.captchaOffset,
+          }),
         });
         const data = (await resp.json().catch(() => null)) as {
           error?: unknown;
@@ -689,9 +1010,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       newPassword: string;
     }) => {
       try {
+        const headers = await buildApiHeaders({
+          "Content-Type": "application/json",
+        });
         const resp = await fetch(`${API_BASE}/auth/password/reset`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers,
           body: JSON.stringify(payload),
         });
         if (!resp.ok) {
@@ -715,9 +1039,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       action: "confirm" | "secure_account",
     ): Promise<SessionAlertResponse> => {
       try {
+        const headers = await buildApiHeaders({
+          "Content-Type": "application/json",
+        });
         const resp = await fetch(`${API_BASE}/auth/session-alert/respond`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers,
           body: JSON.stringify({ alertToken, action }),
         });
         const data = (await resp.json().catch(() => null)) as
@@ -754,12 +1081,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       address: string;
       dob: string;
       password: string;
-      recaptchaToken: string;
+      captcha: SliderCaptchaProof;
     }) => {
       try {
+        const headers = await buildApiHeaders({
+          "Content-Type": "application/json",
+        });
         const resp = await fetch(`${API_BASE}/auth/register`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers,
           body: JSON.stringify({
             email: payload.email,
             password: payload.password,
@@ -769,7 +1099,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             phone: payload.phone.trim() || undefined,
             address: payload.address.trim() || undefined,
             dob: payload.dob.trim() || undefined,
-            recaptchaToken: payload.recaptchaToken,
+            captchaToken: payload.captcha.captchaToken,
+            captchaOffset: payload.captcha.captchaOffset,
           }),
         });
         const data = (await resp.json().catch(() => null)) as {
@@ -805,9 +1136,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const verifyRegisterOtp = useCallback(
     async (challengeId: string, otp: string): Promise<AuthCompletionResult> => {
       try {
+        const headers = await buildApiHeaders({
+          "Content-Type": "application/json",
+        });
         const resp = await fetch(`${API_BASE}/auth/register/verify`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers,
           body: JSON.stringify({ challengeId, otp }),
         });
         const data = (await resp.json().catch(() => null)) as {

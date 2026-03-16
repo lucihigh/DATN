@@ -1,6 +1,7 @@
 import argparse
 import csv
 import json
+import sys
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,7 +10,11 @@ import joblib
 import numpy as np
 from pyod.models.iforest import IForest
 
-FEATURE_NAMES = ["hour_of_day", "day_of_week", "failed_10m", "device_length", "bot_score"]
+AI_SERVICE_ROOT = Path(__file__).resolve().parents[1]
+if str(AI_SERVICE_ROOT) not in sys.path:
+    sys.path.insert(0, str(AI_SERVICE_ROOT))
+
+from app.login_model import FEATURE_NAMES, OFF_HOURS
 
 
 def parse_args() -> argparse.Namespace:
@@ -72,6 +77,10 @@ def stream_rba_rows(
     csv_path: Path, progress_prefix: str, progress_every: int, fill_array: np.ndarray | None = None
 ) -> dict:
     failed_windows: dict[str, deque[datetime]] = {}
+    recent_1h_by_user: dict[str, deque[datetime]] = {}
+    seen_countries_by_user: dict[str, set[str]] = {}
+    seen_devices_by_user: dict[str, set[str]] = {}
+    hour_history_by_user: dict[str, deque[int]] = {}
     rows_seen = 0
     parsed_rows = 0
     normal_rows = 0
@@ -101,11 +110,38 @@ def stream_rba_rows(
             user_failures = failed_windows.get(user_id)
             if user_failures is None:
                 user_failures = deque()
+            recent_1h = recent_1h_by_user.get(user_id)
+            if recent_1h is None:
+                recent_1h = deque()
+            seen_countries = seen_countries_by_user.get(user_id)
+            if seen_countries is None:
+                seen_countries = set()
+            seen_devices = seen_devices_by_user.get(user_id)
+            if seen_devices is None:
+                seen_devices = set()
+            hour_history = hour_history_by_user.get(user_id)
+            if hour_history is None:
+                hour_history = deque(maxlen=50)
 
             cutoff = timestamp - timedelta(minutes=10)
             while user_failures and user_failures[0] < cutoff:
                 user_failures.popleft()
             failed_10m = len(user_failures)
+
+            cutoff_1h = timestamp - timedelta(hours=1)
+            while recent_1h and recent_1h[0] < cutoff_1h:
+                recent_1h.popleft()
+            recent_attempts_1h = len(recent_1h)
+            country_norm = country.lower()
+            device_norm = device.lower()
+            is_new_country = 1.0 if seen_countries and country_norm not in seen_countries else 0.0
+            is_new_device = 1.0 if seen_devices and device_norm not in seen_devices else 0.0
+            off_hour_baseline = sum(1 for hour in hour_history if hour in OFF_HOURS)
+            off_hour_for_user = (
+                timestamp.hour in OFF_HOURS
+                and len(hour_history) >= 5
+                and off_hour_baseline <= max(1, len(hour_history) // 5)
+            )
 
             if login_successful:
                 normal_rows += 1
@@ -115,6 +151,11 @@ def stream_rba_rows(
                     fill_array[write_idx, 2] = failed_10m
                     fill_array[write_idx, 3] = len(device)
                     fill_array[write_idx, 4] = rba_bot_score_proxy(is_attack_ip, is_account_takeover)
+                    fill_array[write_idx, 5] = recent_attempts_1h
+                    fill_array[write_idx, 6] = is_new_country
+                    fill_array[write_idx, 7] = is_new_device
+                    fill_array[write_idx, 8] = 1.0 if off_hour_for_user else 0.0
+                    fill_array[write_idx, 9] = 0.0
                     write_idx += 1
                     countries.add(country.lower())
                     devices.add(device.lower())
@@ -126,6 +167,17 @@ def stream_rba_rows(
                 failed_rows += 1
                 user_failures.append(timestamp)
                 failed_windows[user_id] = user_failures
+
+            recent_1h.append(timestamp)
+            recent_1h_by_user[user_id] = recent_1h
+            if country_norm:
+                seen_countries.add(country_norm)
+            if device_norm:
+                seen_devices.add(device_norm)
+            seen_countries_by_user[user_id] = seen_countries
+            seen_devices_by_user[user_id] = seen_devices
+            hour_history.append(timestamp.hour)
+            hour_history_by_user[user_id] = hour_history
 
             if rows_seen % progress_every == 0:
                 message = (

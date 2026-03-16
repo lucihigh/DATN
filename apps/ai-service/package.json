@@ -1,0 +1,10 @@
+{
+  "name": "@secure-wallet/ai-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node ./dev.mjs",
+    "start": "node ./dev.mjs"
+  }
+}
