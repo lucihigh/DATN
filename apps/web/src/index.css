@@ -2342,6 +2342,66 @@ h3 {
   color: #f8fbff;
   max-width: min(70%, 340px);
 }
+.ai-copilot-message-content {
+  display: grid;
+  gap: 10px;
+}
+.ai-copilot-message-paragraph {
+  margin: 0;
+  line-height: 1.65;
+  color: inherit;
+}
+.ai-copilot-message-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+.ai-copilot-message-list li {
+  line-height: 1.55;
+}
+.ai-copilot-table-wrap {
+  overflow-x: auto;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+}
+.ai-copilot-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 360px;
+}
+.ai-copilot-table th,
+.ai-copilot-table td {
+  padding: 9px 12px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.ai-copilot-table th {
+  color: #f8fafc;
+  font-weight: 700;
+  background: rgba(15, 23, 42, 0.36);
+}
+.ai-copilot-table td {
+  color: #d4d4d8;
+}
+.ai-copilot-table tbody tr:last-child td {
+  border-bottom: none;
+}
+.ai-copilot-message-card-user .ai-copilot-table-wrap {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+.ai-copilot-message-card-user .ai-copilot-table th {
+  background: rgba(255, 255, 255, 0.16);
+  color: #ffffff;
+}
+.ai-copilot-message-card-user .ai-copilot-table td {
+  color: #eff6ff;
+}
 
 .ai-copilot-message-label {
   color: #9ca3af;
@@ -2779,6 +2839,10 @@ h3 {
   height: 110px;
   border-radius: 10px;
   border: 1px solid rgba(255, 255, 255, 0.18);
+}
+.transfer-my-qr-download {
+  padding: 8px 14px;
+  font-size: 13px;
 }
 .transfer-my-qr-payload {
   word-break: break-all;
