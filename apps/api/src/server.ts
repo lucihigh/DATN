@@ -1420,6 +1420,57 @@ const formatCopilotMoney = (currency: string, amount: number) =>
     maximumFractionDigits: 2,
   })}`;
 
+const formatCopilotSignedMoney = (currency: string, amount: number) =>
+  `${amount >= 0 ? "+" : "-"}${formatCopilotMoney(currency, Math.abs(amount))}`;
+
+const escapeCopilotMarkdownCell = (value: string | number) =>
+  String(value)
+    .replace(/\|/g, "\\|")
+    .replace(/\r?\n/g, " ");
+
+const buildCopilotMarkdownTable = (
+  headers: string[],
+  rows: Array<Array<string | number>>,
+) => {
+  const normalizedHeaders = headers.map(escapeCopilotMarkdownCell);
+  const separator = headers.map(() => "---");
+  const normalizedRows = rows.map((row) =>
+    row.map((cell) => escapeCopilotMarkdownCell(cell)),
+  );
+
+  return [
+    `| ${normalizedHeaders.join(" | ")} |`,
+    `| ${separator.join(" | ")} |`,
+    ...normalizedRows.map((row) => `| ${row.join(" | ")} |`),
+  ].join("\n");
+};
+
+const formatCopilotTransactionTimestamp = (
+  language: CopilotLanguage,
+  value: Date,
+  mode: "time" | "datetime" = "time",
+) =>
+  value.toLocaleString(language === "vi" ? "vi-VN" : "en-US", {
+    timeZone: APP_TIMEZONE,
+    year: mode === "datetime" ? "numeric" : undefined,
+    month: mode === "datetime" ? "2-digit" : undefined,
+    day: mode === "datetime" ? "2-digit" : undefined,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: language !== "vi",
+  });
+
+const formatCopilotCalendarDate = (
+  language: CopilotLanguage,
+  value: Date,
+) =>
+  value.toLocaleDateString(language === "vi" ? "vi-VN" : "en-US", {
+    timeZone: APP_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+
 const normalizeCopilotRiskLevel = (value: unknown) => {
   const normalized = String(value || "")
     .trim()
@@ -1551,6 +1602,8 @@ const buildCopilotSystemInstructions = (language: CopilotLanguage) =>
     "If the user asks for exact live market prices and no live quote is present, say that live quote support should be used.",
     "Return valid JSON only with these keys:",
     "reply, topic, suggestedActions, suggestedDepositAmount, riskLevel, confidence, followUpQuestion",
+    "The reply field may contain Markdown tables.",
+    "When presenting amounts, prices, rates, percentages, counts, dates, or other numeric comparisons, format the numeric section as a compact Markdown table.",
     "riskLevel must be one of: low, medium, high.",
     "confidence must be a number between 0 and 1.",
     "suggestedActions must be an array of short strings.",
@@ -2244,15 +2297,46 @@ const buildHeuristicCopilotResponse = (input: {
     netCashFlow > 0 ? roundMoney(clamp(netCashFlow * 0.35, 50, 5000)) : null;
 
   if (/deposit|top up|fund|emergency|save|nap tien|gui tien|tiet kiem|quy du phong|du phong/.test(latest)) {
+    const summaryTable = buildCopilotMarkdownTable(
+      language === "vi"
+        ? ["Chi so", "Gia tri"]
+        : ["Metric", "Value"],
+      [
+        [
+          language === "vi" ? "So du hien tai" : "Current balance",
+          formatCopilotMoney(input.currency, balance),
+        ],
+        [
+          language === "vi" ? "Thu nhap thang" : "Monthly income",
+          formatCopilotMoney(input.currency, income),
+        ],
+        [
+          language === "vi" ? "Chi phi thang" : "Monthly expenses",
+          formatCopilotMoney(input.currency, expenses),
+        ],
+        [
+          language === "vi" ? "Dong tien rong" : "Net cash flow",
+          formatCopilotSignedMoney(input.currency, netCashFlow),
+        ],
+        [
+          language === "vi" ? "Muc nap goi y" : "Suggested deposit",
+          suggestedDepositAmount !== null
+            ? formatCopilotMoney(input.currency, suggestedDepositAmount)
+            : language === "vi"
+              ? "Can them du lieu"
+              : "Need more data",
+        ],
+      ],
+    );
     return {
       reply:
         language === "vi"
           ? netCashFlow > 0
-            ? "Vi cua ban co kha nang hap thu mot khoan nap them co ke hoach ma khong gay ap luc lon len dong tien hang thang. Dua tren cac so lieu ban nhap, nap theo tung dot se an toan hon chuyen mot khoan lon ngay lap tuc."
-            : "Du lieu hien tai cho thay dong tien tu do dang han che, vi vay toi se uu tien giu thanh khoan va tranh nap them qua manh o luc nay."
+            ? `Vi cua ban co kha nang hap thu mot khoan nap them co ke hoach ma khong gay ap luc lon len dong tien hang thang. Dua tren cac so lieu ban nhap, nap theo tung dot se an toan hon chuyen mot khoan lon ngay lap tuc.\n\n${summaryTable}`
+            : `Du lieu hien tai cho thay dong tien tu do dang han che, vi vay toi se uu tien giu thanh khoan va tranh nap them qua manh o luc nay.\n\n${summaryTable}`
           : netCashFlow > 0
-            ? "Your wallet can likely absorb a planned top-up without stressing monthly cash flow. Based on the numbers you entered, a staged deposit is safer than moving a large amount at once."
-            : "Your current inputs show limited free cash flow, so I would avoid an aggressive top-up and preserve liquidity first.",
+            ? `Your wallet can likely absorb a planned top-up without stressing monthly cash flow. Based on the numbers you entered, a staged deposit is safer than moving a large amount at once.\n\n${summaryTable}`
+            : `Your current inputs show limited free cash flow, so I would avoid an aggressive top-up and preserve liquidity first.\n\n${summaryTable}`,
       topic: "deposit-planning",
       suggestedActions:
         language === "vi"
@@ -2282,11 +2366,38 @@ const buildHeuristicCopilotResponse = (input: {
   }
 
   if (/spend|expense|budget|cash flow|cashflow|chi tieu|chi phi|ngan sach|dong tien/.test(latest)) {
+    const summaryTable = buildCopilotMarkdownTable(
+      language === "vi"
+        ? ["Chi so", "Gia tri"]
+        : ["Metric", "Value"],
+      [
+        [
+          language === "vi" ? "Tong chi gan day" : "Recent debit total",
+          formatCopilotMoney(input.currency, recentSpend),
+        ],
+        [
+          language === "vi" ? "Thu nhap thang" : "Monthly income",
+          formatCopilotMoney(input.currency, income),
+        ],
+        [
+          language === "vi" ? "Chi phi thang" : "Monthly expenses",
+          formatCopilotMoney(input.currency, expenses),
+        ],
+        [
+          language === "vi" ? "Dong tien rong" : "Net cash flow",
+          formatCopilotSignedMoney(input.currency, netCashFlow),
+        ],
+        [
+          language === "vi" ? "So giao dich gan day" : "Recent transactions",
+          recentTransactions.length,
+        ],
+      ],
+    );
     return {
       reply:
         language === "vi"
-          ? `Tong chi tieu gan day uoc tinh khoang ${input.currency} ${roundMoney(recentSpend).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}. Dong tien rong hang thang uoc tinh cua ban la ${input.currency} ${roundMoney(netCashFlow).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`
-          : `Recent debit activity totals about ${input.currency} ${roundMoney(recentSpend).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}. Your estimated monthly net cash flow is ${input.currency} ${roundMoney(netCashFlow).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`,
+          ? `Toi da tong hop nhanh tinh hinh chi tieu va dong tien gan day cua ban nhu bang duoi day.\n\n${summaryTable}`
+          : `I summarized your recent spending and cash-flow picture in the table below.\n\n${summaryTable}`,
       topic: "budget-review",
       suggestedActions:
         language === "vi"
@@ -2391,6 +2502,24 @@ const isTodayTransactionReportIntent = (message: string) => {
   return asksForToday && asksForTransactions && asksForReport;
 };
 
+const isWeeklyTransactionReportIntent = (message: string) => {
+  const normalized = normalizeCopilotText(message);
+  const asksForWeek =
+    /\b(this week|weekly|last week|past week|past 7 days|last 7 days|7 day|7 days|tuan nay|tuan qua|7 ngay qua|7 ngay gan day)\b/.test(
+      normalized,
+    ) || /giao dich tuan|bao cao tuan|weekly transaction|week report/.test(normalized);
+  const asksForTransactions =
+    /\b(transaction|transactions|giao dich|dong tien|thu chi|money flow|cash flow)\b/.test(
+      normalized,
+    );
+  const asksForReport =
+    /\b(report|summary|summarize|list|bao cao|tong hop|liet ke|thong ke)\b/.test(
+      normalized,
+    ) || /giao dich tuan|weekly transaction|week transaction/.test(normalized);
+
+  return asksForWeek && asksForTransactions && asksForReport;
+};
+
 const formatCopilotTransactionLine = (input: {
   language: CopilotLanguage;
   currency: string;
@@ -2416,6 +2545,115 @@ const formatCopilotTransactionLine = (input: {
   return input.language === "vi"
     ? `- ${timeLabel} | ${input.direction === "credit" ? "Vao" : "Ra"} | ${signedAmount} | ${input.description} (${input.type})`
     : `- ${timeLabel} | ${input.direction === "credit" ? "Inflow" : "Outflow"} | ${signedAmount} | ${input.description} (${input.type})`;
+};
+
+const buildTransactionReportReply = (input: {
+  language: CopilotLanguage;
+  currency: string;
+  transactions: Array<{
+    amount: number;
+    createdAt: Date;
+    direction: "credit" | "debit";
+    type: string;
+    description: string;
+  }>;
+  periodLabel: string;
+  detailMode: "time" | "datetime";
+}) => {
+  const inflows = input.transactions.filter(
+    (transaction) => transaction.direction === "credit",
+  );
+  const outflows = input.transactions.filter(
+    (transaction) => transaction.direction === "debit",
+  );
+  const totalInflow = roundMoney(
+    inflows.reduce((sum, transaction) => sum + transaction.amount, 0),
+  );
+  const totalOutflow = roundMoney(
+    outflows.reduce((sum, transaction) => sum + transaction.amount, 0),
+  );
+  const netFlow = roundMoney(totalInflow - totalOutflow);
+
+  const summaryTable = buildCopilotMarkdownTable(
+    input.language === "vi"
+      ? ["Chi so", "Gia tri"]
+      : ["Metric", "Value"],
+    [
+      [
+        input.language === "vi" ? "Tong tien vao" : "Total inflow",
+        formatCopilotMoney(input.currency, totalInflow),
+      ],
+      [
+        input.language === "vi" ? "Tong tien ra" : "Total outflow",
+        formatCopilotMoney(input.currency, totalOutflow),
+      ],
+      [
+        input.language === "vi" ? "Dong tien rong" : "Net flow",
+        formatCopilotSignedMoney(input.currency, netFlow),
+      ],
+      [
+        input.language === "vi" ? "So giao dich" : "Transaction count",
+        input.transactions.length,
+      ],
+    ],
+  );
+
+  const detailRows = input.transactions.map((transaction) => [
+    formatCopilotTransactionTimestamp(
+      input.language,
+      transaction.createdAt,
+      input.detailMode,
+    ),
+    input.language === "vi"
+      ? transaction.direction === "credit"
+        ? "Vao"
+        : "Ra"
+      : transaction.direction === "credit"
+        ? "Inflow"
+        : "Outflow",
+    formatCopilotSignedMoney(
+      input.currency,
+      transaction.direction === "credit"
+        ? transaction.amount
+        : -transaction.amount,
+    ),
+    transaction.description,
+    transaction.type,
+  ]);
+
+  const detailsTable =
+    detailRows.length > 0
+      ? buildCopilotMarkdownTable(
+          input.language === "vi"
+            ? ["Thoi gian", "Huong", "So tien", "Noi dung", "Loai"]
+            : ["Time", "Direction", "Amount", "Description", "Type"],
+          detailRows,
+        )
+      : null;
+
+  if (!detailRows.length) {
+    return [
+      input.periodLabel,
+      "",
+      summaryTable,
+      "",
+      localizeCopilotText(
+        input.language,
+        "Khong co giao dich trong khoang thoi gian nay.",
+        "There were no transactions in this period.",
+      ),
+    ].join("\n");
+  }
+
+  return [
+    input.periodLabel,
+    "",
+    summaryTable,
+    "",
+    input.language === "vi" ? "Chi tiet giao dich:" : "Transaction details:",
+    "",
+    detailsTable,
+  ].join("\n");
 };
 
 const buildTodayTransactionReportResponse = async (input: {
@@ -2477,113 +2715,22 @@ const buildTodayTransactionReportResponse = async (input: {
       };
     });
 
-  if (!transactions.length) {
-    return {
-      reply: localizeCopilotText(
-        input.language,
-        `Hom nay chua co giao dich nao trong vi. Toi da kiem tra toan bo dong tien vao va ra tu 00:00 den hien tai (${APP_TIMEZONE}).`,
-        `There are no wallet transactions today yet. I checked the full inflow and outflow window from 00:00 until now (${APP_TIMEZONE}).`,
-      ),
-      topic: "today-transaction-report",
-      suggestedActions:
-        input.language === "vi"
-          ? [
-              "Thu lai sau khi co giao dich moi.",
-              "Neu can, toi co the tong hop rieng tien vao hoac tien ra trong ngay.",
-            ]
-          : [
-              "Ask again after a new transaction lands.",
-              "I can also break out only inflows or only outflows for today.",
-            ],
-      suggestedDepositAmount: null,
-      riskLevel: "low",
-      confidence: 0.99,
-      followUpQuestion: localizeCopilotText(
-        input.language,
-        "Ban co muon toi tong hop them giao dich tuan nay khong?",
-        "Do you want a summary for this week as well?",
-      ),
-    };
-  }
-
-  const inflows = transactions.filter((transaction) => transaction.direction === "credit");
-  const outflows = transactions.filter((transaction) => transaction.direction === "debit");
-  const totalInflow = roundMoney(
-    inflows.reduce((sum, transaction) => sum + transaction.amount, 0),
-  );
-  const totalOutflow = roundMoney(
-    outflows.reduce((sum, transaction) => sum + transaction.amount, 0),
-  );
-  const netFlow = roundMoney(totalInflow - totalOutflow);
-
-  const inflowLines =
-    inflows.length > 0
-      ? inflows
-          .map((transaction) =>
-            formatCopilotTransactionLine({
-              language: input.language,
-              currency: input.currency,
-              createdAt: transaction.createdAt,
-              amount: transaction.amount,
-              direction: transaction.direction,
-              description: transaction.description,
-              type: transaction.type,
-            }),
-          )
-          .join("\n")
-      : localizeCopilotText(input.language, "- Khong co dong tien vao hom nay.", "- No inflows today.");
-
-  const outflowLines =
-    outflows.length > 0
-      ? outflows
-          .map((transaction) =>
-            formatCopilotTransactionLine({
-              language: input.language,
-              currency: input.currency,
-              createdAt: transaction.createdAt,
-              amount: transaction.amount,
-              direction: transaction.direction,
-              description: transaction.description,
-              type: transaction.type,
-            }),
-          )
-          .join("\n")
-      : localizeCopilotText(input.language, "- Khong co dong tien ra hom nay.", "- No outflows today.");
-
   return {
-    reply:
-      input.language === "vi"
-        ? [
-            `Bao cao giao dich hom nay (${APP_TIMEZONE}, 00:00 den hien tai):`,
-            `Tong tien vao: ${formatCopilotMoney(input.currency, totalInflow)}`,
-            `Tong tien ra: ${formatCopilotMoney(input.currency, totalOutflow)}`,
-            `Dong tien rong: ${netFlow >= 0 ? "+" : "-"}${formatCopilotMoney(input.currency, Math.abs(netFlow))}`,
-            `So giao dich: ${transactions.length}`,
-            "",
-            "Dong tien vao:",
-            inflowLines,
-            "",
-            "Dong tien ra:",
-            outflowLines,
-          ].join("\n")
-        : [
-            `Today's transaction report (${APP_TIMEZONE}, 00:00 until now):`,
-            `Total inflow: ${formatCopilotMoney(input.currency, totalInflow)}`,
-            `Total outflow: ${formatCopilotMoney(input.currency, totalOutflow)}`,
-            `Net flow: ${netFlow >= 0 ? "+" : "-"}${formatCopilotMoney(input.currency, Math.abs(netFlow))}`,
-            `Transaction count: ${transactions.length}`,
-            "",
-            "Inflows:",
-            inflowLines,
-            "",
-            "Outflows:",
-            outflowLines,
-          ].join("\n"),
+    reply: buildTransactionReportReply({
+      language: input.language,
+      currency: input.currency,
+      transactions,
+      periodLabel:
+        input.language === "vi"
+          ? `Bao cao giao dich hom nay (${APP_TIMEZONE}, 00:00 den hien tai):`
+          : `Today's transaction report (${APP_TIMEZONE}, 00:00 until now):`,
+      detailMode: "time",
+    }),
     topic: "today-transaction-report",
     suggestedActions:
       input.language === "vi"
         ? [
-            "Hoi them bao cao giao dich tuan nay neu ban muon xem xu huong rong hon.",
+          "Hoi them bao cao giao dich tuan nay neu ban muon xem xu huong rong hon.",
             "Hoi rieng tong tien vao hoac tong tien ra neu ban muon rut gon bao cao.",
             "Yeu cau toi danh dau giao dich nao lon nhat trong ngay.",
           ]
@@ -2593,12 +2740,113 @@ const buildTodayTransactionReportResponse = async (input: {
             "Ask me to highlight the largest transaction of the day.",
           ],
     suggestedDepositAmount: null,
-    riskLevel: totalOutflow > totalInflow ? "medium" : "low",
+    riskLevel:
+      transactions
+        .filter((transaction) => transaction.direction === "debit")
+        .reduce((sum, transaction) => sum + transaction.amount, 0) >
+      transactions
+        .filter((transaction) => transaction.direction === "credit")
+        .reduce((sum, transaction) => sum + transaction.amount, 0)
+        ? "medium"
+        : "low",
     confidence: 0.99,
     followUpQuestion: localizeCopilotText(
       input.language,
       "Ban co muon toi tach them theo giao dich nap tien, nhan tien va chuyen tien khong?",
       "Do you want me to break this down further by deposit, received transfer, and sent transfer?",
+    ),
+  };
+};
+
+const buildWeeklyTransactionReportResponse = async (input: {
+  userId: string;
+  currency: string;
+  language: CopilotLanguage;
+}): Promise<CopilotResponsePayload> => {
+  const wallets = await prisma.wallet.findMany({
+    where: { userId: input.userId },
+    select: { id: true },
+  });
+  const walletIds = wallets.map((wallet) => wallet.id);
+  const endExclusive = new Date();
+  const startInclusive = new Date(endExclusive);
+  startInclusive.setHours(0, 0, 0, 0);
+  startInclusive.setDate(startInclusive.getDate() - 6);
+
+  const txns = await prisma.transaction.findMany({
+    where: {
+      ...(walletIds.length
+        ? { walletId: { in: walletIds } }
+        : { walletId: "__NO_WALLET__" }),
+      createdAt: {
+        gte: startInclusive,
+        lt: endExclusive,
+      },
+    },
+    orderBy: { createdAt: "asc" },
+    take: 1000,
+  });
+
+  const transactions = txns
+    .map((txn) => safelyDecryptTransaction(txn, "/ai/copilot-chat:weekly-report"))
+    .filter((txn): txn is NonNullable<typeof txn> => Boolean(txn))
+    .map((txn) => {
+      const metadata =
+        txn.metadata && typeof txn.metadata === "object"
+          ? (txn.metadata as Record<string, unknown>)
+          : null;
+      const direction: "credit" | "debit" =
+        txn.type === "DEPOSIT" || metadata?.entry === "CREDIT"
+          ? "credit"
+          : "debit";
+
+      return {
+        id: txn.id,
+        amount: Math.max(0, Number(txn.amount || 0)),
+        createdAt: txn.createdAt,
+        direction,
+        type: txn.type,
+        description:
+          txn.description?.trim() ||
+          (txn.type === "DEPOSIT"
+            ? "Wallet deposit"
+            : txn.type === "WITHDRAW"
+              ? "Wallet withdrawal"
+              : "Wallet transfer"),
+      };
+    });
+
+  return {
+    reply: buildTransactionReportReply({
+      language: input.language,
+      currency: input.currency,
+      transactions,
+      periodLabel:
+        input.language === "vi"
+          ? `Bao cao giao dich 7 ngay gan nhat (${formatCopilotCalendarDate(input.language, startInclusive)} - ${formatCopilotCalendarDate(input.language, endExclusive)}):`
+          : `Transaction report for the last 7 days (${formatCopilotCalendarDate(input.language, startInclusive)} - ${formatCopilotCalendarDate(input.language, endExclusive)}):`,
+      detailMode: "datetime",
+    }),
+    topic: "weekly-transaction-report",
+    suggestedActions:
+      input.language === "vi"
+        ? [
+            "Hoi them giao dich co gia tri lon nhat trong 7 ngay qua.",
+            "Yeu cau tach rieng dong tien vao hoac dong tien ra neu ban muon gon hon.",
+            "Hoi them so sanh hom nay voi 7 ngay gan nhat neu ban muon xem xu huong.",
+          ]
+        : [
+            "Ask for the largest transaction in the last 7 days.",
+            "Ask for inflows only or outflows only if you want a shorter report.",
+            "Ask for a today-vs-week comparison if you want a trend view.",
+          ],
+    suggestedDepositAmount: null,
+    riskLevel: "low",
+    confidence: 0.99,
+    followUpQuestion: localizeCopilotText(
+      input.language,
+      "Ban co muon toi tach them theo ngay hoac theo loai giao dich khong?",
+      "Do you want this split further by day or by transaction type?",
     ),
   };
 };
@@ -3800,6 +4048,15 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
     typeof body.currency === "string" && body.currency.trim()
       ? body.currency.trim().toUpperCase()
       : "USD";
+
+  if (req.user?.sub && isWeeklyTransactionReportIntent(latestUserMessage.content)) {
+    const weeklyReport = await buildWeeklyTransactionReportResponse({
+      userId: req.user.sub,
+      currency,
+      language,
+    });
+    return res.json(weeklyReport);
+  }
 
   if (req.user?.sub && isTodayTransactionReportIntent(latestUserMessage.content)) {
     const todayReport = await buildTodayTransactionReportResponse({

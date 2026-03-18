@@ -24,6 +24,63 @@ const SESSION_REPLACEMENT_ALERT_STORAGE_KEY =
 const NOTIFICATION_READ_STORAGE_PREFIX = "fpipay_notification_reads";
 const COPILOT_REQUEST_TIMEOUT_MS = 90000;
 
+const sanitizeDownloadFileName = (value?: string) => {
+  const cleaned = (value || "User")
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned || "User";
+};
+
+const loadImageFromBlob = (blob: Blob) =>
+  new Promise<HTMLImageElement>((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(blob);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error("image-load-failed"));
+    };
+    image.src = objectUrl;
+  });
+
+const drawCenteredWrappedText = (
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  centerX: number,
+  startY: number,
+  maxWidth: number,
+  lineHeight: number,
+) => {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let currentLine = "";
+
+  for (const word of words) {
+    const nextLine = currentLine ? `${currentLine} ${word}` : word;
+    if (ctx.measureText(nextLine).width <= maxWidth || !currentLine) {
+      currentLine = nextLine;
+    } else {
+      lines.push(currentLine);
+      currentLine = word;
+    }
+  }
+
+  if (currentLine) {
+    lines.push(currentLine);
+  }
+
+  const renderedLines = lines.length ? lines : ["User"];
+  renderedLines.forEach((line, index) => {
+    ctx.fillText(line, centerX, startY + index * lineHeight);
+  });
+
+  return startY + (renderedLines.length - 1) * lineHeight;
+};
+
 const NAV_ITEMS: {
   id: string;
   label: string;
@@ -211,6 +268,11 @@ type CopilotMessage = {
   content: string;
 };
 
+type CopilotContentBlock =
+  | { kind: "paragraph"; text: string }
+  | { kind: "list"; items: string[] }
+  | { kind: "table"; headers: string[]; rows: string[][] };
+
 type CopilotInsight = {
   topic: string;
   suggestedActions: string[];
@@ -252,6 +314,138 @@ function Ring({ value }: { value: number }) {
     </svg>
   );
 }
+
+const parseCopilotTableRow = (line: string) =>
+  line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim().replace(/\\\|/g, "|"));
+
+const isCopilotTableSeparator = (line: string) => {
+  const cells = parseCopilotTableRow(line);
+  return (
+    cells.length > 0 &&
+    cells.every((cell) => /^:?-{3,}:?$/.test(cell))
+  );
+};
+
+const isCopilotListLine = (line: string) =>
+  /^\s*(?:[-*]\s+|\d+\.\s+)/.test(line);
+
+const parseCopilotMessageBlocks = (content: string): CopilotContentBlock[] => {
+  const lines = content.replace(/\r/g, "").split("\n");
+  const blocks: CopilotContentBlock[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const rawLine = lines[index];
+    const line = rawLine.trim();
+    if (!line) {
+      index += 1;
+      continue;
+    }
+
+    if (
+      line.startsWith("|") &&
+      index + 1 < lines.length &&
+      isCopilotTableSeparator(lines[index + 1])
+    ) {
+      const headers = parseCopilotTableRow(lines[index]);
+      index += 2;
+      const rows: string[][] = [];
+      while (index < lines.length && lines[index].trim().startsWith("|")) {
+        rows.push(parseCopilotTableRow(lines[index]));
+        index += 1;
+      }
+      blocks.push({ kind: "table", headers, rows });
+      continue;
+    }
+
+    if (isCopilotListLine(rawLine)) {
+      const items: string[] = [];
+      while (index < lines.length && isCopilotListLine(lines[index])) {
+        items.push(lines[index].replace(/^\s*(?:[-*]\s+|\d+\.\s+)/, "").trim());
+        index += 1;
+      }
+      blocks.push({ kind: "list", items });
+      continue;
+    }
+
+    const paragraphLines: string[] = [];
+    while (index < lines.length) {
+      const nextLine = lines[index].trim();
+      if (!nextLine) break;
+      if (
+        nextLine.startsWith("|") &&
+        index + 1 < lines.length &&
+        isCopilotTableSeparator(lines[index + 1])
+      ) {
+        break;
+      }
+      if (isCopilotListLine(lines[index])) break;
+      paragraphLines.push(nextLine);
+      index += 1;
+    }
+    blocks.push({ kind: "paragraph", text: paragraphLines.join(" ") });
+  }
+
+  return blocks;
+};
+
+const renderCopilotMessageContent = (content: string) => {
+  const blocks = parseCopilotMessageBlocks(content);
+
+  return (
+    <div className="ai-copilot-message-content">
+      {blocks.map((block, index) => {
+        if (block.kind === "table") {
+          return (
+            <div key={`table-${index}`} className="ai-copilot-table-wrap">
+              <table className="ai-copilot-table">
+                <thead>
+                  <tr>
+                    {block.headers.map((header, headerIndex) => (
+                      <th key={`h-${headerIndex}`}>{header}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {block.rows.map((row, rowIndex) => (
+                    <tr key={`r-${rowIndex}`}>
+                      {block.headers.map((_, cellIndex) => (
+                        <td key={`c-${rowIndex}-${cellIndex}`}>
+                          {row[cellIndex] || ""}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        }
+
+        if (block.kind === "list") {
+          return (
+            <ul key={`list-${index}`} className="ai-copilot-message-list">
+              {block.items.map((item, itemIndex) => (
+                <li key={`item-${itemIndex}`}>{item}</li>
+              ))}
+            </ul>
+          );
+        }
+
+        return (
+          <p key={`p-${index}`} className="ai-copilot-message-paragraph">
+            {block.text}
+          </p>
+        );
+      })}
+    </div>
+  );
+};
 
 function DonutChart({
   percent,
@@ -383,6 +577,7 @@ function DashboardView() {
   );
   const [transferQrDeviceId, setTransferQrDeviceId] = useState("");
   const [transferShowMyQr, setTransferShowMyQr] = useState(false);
+  const [transferQrDownloadBusy, setTransferQrDownloadBusy] = useState(false);
   const [transferOtpInput, setTransferOtpInput] = useState("");
   const [transferOtpError, setTransferOtpError] = useState("");
   const [transferOtpChallengeId, setTransferOtpChallengeId] = useState("");
@@ -493,6 +688,8 @@ function DashboardView() {
     (ownQrPayload
       ? `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(ownQrPayload)}`
       : "");
+  const ownQrDisplayName = user?.name?.trim() || "User";
+  const ownQrDownloadName = `${sanitizeDownloadFileName(ownQrDisplayName)}.png`;
   const transferOtpCooldownSeconds = Math.max(
     0,
     Math.ceil((transferOtpResendAt - transferOtpClock) / 1000),
@@ -1224,6 +1421,99 @@ function DashboardView() {
     },
     [buildTransactionReceipt, token],
   );
+
+  const handleDownloadOwnQr = useCallback(async () => {
+    if (!ownQrImageUrl || !wallet?.accountNumber) {
+      toast("Wallet QR is not available yet.", "error");
+      return;
+    }
+
+    setTransferQrDownloadBusy(true);
+    try {
+      const resp = await fetch(ownQrImageUrl);
+      if (!resp.ok) {
+        throw new Error(`download-failed-${resp.status}`);
+      }
+
+      const qrBlob = await resp.blob();
+      const qrImage = await loadImageFromBlob(qrBlob);
+      const canvas = document.createElement("canvas");
+      canvas.width = 1080;
+      canvas.height = 1400;
+      const ctx = canvas.getContext("2d");
+
+      if (!ctx) {
+        throw new Error("canvas-context-unavailable");
+      }
+
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.fillStyle = "#0f172a";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      ctx.font = '700 66px "DM Sans", "Segoe UI", sans-serif';
+      const nameBottomY = drawCenteredWrappedText(
+        ctx,
+        ownQrDisplayName,
+        canvas.width / 2,
+        96,
+        canvas.width - 160,
+        80,
+      );
+
+      ctx.fillStyle = "#475569";
+      ctx.font = '500 28px "DM Sans", "Segoe UI", sans-serif';
+      ctx.fillText("Account Number", canvas.width / 2, nameBottomY + 54);
+
+      ctx.fillStyle = "#0f172a";
+      ctx.font = '600 44px "DM Sans", "Segoe UI", sans-serif';
+      ctx.fillText(wallet.accountNumber, canvas.width / 2, nameBottomY + 98);
+
+      const qrCardX = 170;
+      const qrCardY = nameBottomY + 220;
+      const qrCardSize = 740;
+      ctx.fillStyle = "#f8fafc";
+      ctx.fillRect(qrCardX, qrCardY, qrCardSize, qrCardSize);
+      ctx.strokeStyle = "#dbe4f0";
+      ctx.lineWidth = 4;
+      ctx.strokeRect(qrCardX, qrCardY, qrCardSize, qrCardSize);
+
+      const qrSize = 620;
+      const qrX = (canvas.width - qrSize) / 2;
+      const qrY = qrCardY + (qrCardSize - qrSize) / 2;
+      ctx.drawImage(qrImage, qrX, qrY, qrSize, qrSize);
+
+      const composedBlob = await new Promise<Blob>((resolve, reject) => {
+        canvas.toBlob((blob) => {
+          if (blob) {
+            resolve(blob);
+            return;
+          }
+          reject(new Error("canvas-export-failed"));
+        }, "image/png");
+      });
+
+      const objectUrl = URL.createObjectURL(composedBlob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = ownQrDownloadName;
+      link.click();
+      URL.revokeObjectURL(objectUrl);
+      toast("QR image downloaded successfully.");
+    } catch (err) {
+      console.error("Failed to download wallet QR", err);
+      toast("Failed to download QR image.", "error");
+    } finally {
+      setTransferQrDownloadBusy(false);
+    }
+  }, [
+    ownQrDisplayName,
+    ownQrDownloadName,
+    ownQrImageUrl,
+    toast,
+    wallet?.accountNumber,
+  ]);
 
   const sendCopilotMessage = async (promptOverride?: string) => {
     const content = (promptOverride ?? copilotInput).trim();
@@ -2955,6 +3245,18 @@ function DashboardView() {
                         {wallet?.accountNumber && (
                           <strong>Account: {wallet.accountNumber}</strong>
                         )}
+                        {ownQrImageUrl && (
+                          <button
+                            type="button"
+                            className="btn-primary transfer-my-qr-download"
+                            onClick={handleDownloadOwnQr}
+                            disabled={transferQrDownloadBusy}
+                          >
+                            {transferQrDownloadBusy
+                              ? "Downloading..."
+                              : "Download QR"}
+                          </button>
+                        )}
                         {ownQrPayload && (
                           <small className="muted transfer-my-qr-payload">
                             {ownQrPayload}
@@ -3279,7 +3581,7 @@ function DashboardView() {
                             ? "FPIPay Copilot"
                             : "You"}
                         </span>
-                        <p>{message.content}</p>
+                        {renderCopilotMessageContent(message.content)}
                       </div>
                     </div>
                   ))}
