@@ -782,6 +782,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           headers,
         });
         const data = (await resp.json().catch(() => null)) as {
+          id?: string;
+          email?: string;
+          role?: "USER" | "ADMIN";
+          fullName?: string;
+          avatar?: string;
           error?: string;
           code?: string;
           sessionAlert?: SessionReplacementAlert;
@@ -794,6 +799,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           }
         } else if (!cancelled) {
           setSessionSecurity(parseSessionSecurity(data?.security));
+          setUser((prev) => {
+            const email = data?.email?.trim() || prev?.email || "";
+            const fullName = data?.fullName?.trim() || "";
+            const nextName =
+              fullName || prev?.name || (email ? toDisplayName(email) : "User");
+
+            if (!email && !prev) return prev;
+
+            return {
+              id: data?.id || prev?.id || "",
+              role: data?.role || prev?.role || "USER",
+              email,
+              name: nextName,
+              avatar: data?.avatar || prev?.avatar || DEFAULT_AVATAR,
+            };
+          });
         }
       } catch {
         // ignore temporary network errors here
