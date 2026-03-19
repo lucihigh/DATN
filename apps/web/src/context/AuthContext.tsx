@@ -45,6 +45,26 @@ export type SliderCaptchaProof = {
   captchaOffset: number;
 };
 
+export type FaceIdEnrollmentProof = {
+  challengeToken: string;
+  descriptor: string;
+  livenessScore: number;
+  motionScore: number;
+  faceCoverage: number;
+  sampleCount: number;
+  completedSteps: ("center" | "move_left" | "move_right" | "move_closer")[];
+  stepCaptures: Array<{
+    step: "center" | "move_left" | "move_right" | "move_closer";
+    image: string;
+    centerX: number;
+    centerY: number;
+    coverage: number;
+    motion: number;
+    aligned?: boolean;
+  }>;
+  previewImage?: string;
+};
+
 type BrowserDeviceContext = {
   browser?: string;
   browserVersion?: string;
@@ -151,6 +171,7 @@ const AuthContext = createContext<{
   verifyLoginOtp: (
     challengeId: string,
     otp: string,
+    captcha: SliderCaptchaProof,
   ) => Promise<AuthCompletionResult>;
   requestRegisterOtp: (payload: {
     fullName: string;
@@ -161,6 +182,7 @@ const AuthContext = createContext<{
     dob: string;
     password: string;
     captcha: SliderCaptchaProof;
+    faceEnrollment: FaceIdEnrollmentProof;
   }) => Promise<{
     challengeId: string;
     destination: string;
@@ -942,7 +964,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const verifyLoginOtp = useCallback(
-    async (challengeId: string, otp: string): Promise<AuthCompletionResult> => {
+    async (
+      challengeId: string,
+      otp: string,
+      captcha: SliderCaptchaProof,
+    ): Promise<AuthCompletionResult> => {
       try {
         const deviceContext = await collectBrowserDeviceContext();
         const headers = await buildApiHeaders({
@@ -951,7 +977,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const resp = await fetch(`${API_BASE}/auth/login/verify`, {
           method: "POST",
           headers,
-          body: JSON.stringify({ challengeId, otp, deviceContext }),
+          body: JSON.stringify({
+            challengeId,
+            otp,
+            captchaToken: captcha.captchaToken,
+            captchaOffset: captcha.captchaOffset,
+            deviceContext,
+          }),
         });
         const data = (await resp.json().catch(() => null)) as {
           error?: unknown;
@@ -1110,6 +1142,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       dob: string;
       password: string;
       captcha: SliderCaptchaProof;
+      faceEnrollment: FaceIdEnrollmentProof;
     }) => {
       try {
         const headers = await buildApiHeaders({
@@ -1129,6 +1162,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             dob: payload.dob.trim() || undefined,
             captchaToken: payload.captcha.captchaToken,
             captchaOffset: payload.captcha.captchaOffset,
+            faceIdEnrollment: payload.faceEnrollment,
           }),
         });
         const data = (await resp.json().catch(() => null)) as {

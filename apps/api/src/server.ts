@@ -45,6 +45,7 @@ import {
   sendLoginRiskAlertEmail,
   sendPasswordResetOtpEmail,
   sendRegisterOtpEmail,
+  sendTransferRiskAlertEmail,
   sendTransferOtpEmail,
 } from "./services/email";
 import {
@@ -188,6 +189,33 @@ const CAPTCHA_SECRET_KEY =
   process.env.CAPTCHA_SECRET_KEY ||
   process.env.JWT_SECRET ||
   "dev-insecure-captcha-secret";
+const FACE_ID_CHALLENGE_TTL_MS =
+  Number(process.env.FACE_ID_CHALLENGE_TTL_SECONDS || "300") * 1000;
+const FACE_ID_SECRET_KEY = process.env.FACE_ID_SECRET_KEY || CAPTCHA_SECRET_KEY;
+const FACE_ID_MIN_LIVENESS_SCORE = Number(
+  process.env.FACE_ID_MIN_LIVENESS_SCORE || "0.84",
+);
+const FACE_ID_MIN_MOTION_SCORE = Number(
+  process.env.FACE_ID_MIN_MOTION_SCORE || "0.38",
+);
+const FACE_ID_MIN_FACE_COVERAGE = Number(
+  process.env.FACE_ID_MIN_FACE_COVERAGE || "0.14",
+);
+const FACE_ID_MIN_SAMPLE_COUNT = Number(
+  process.env.FACE_ID_MIN_SAMPLE_COUNT || "24",
+);
+const TRANSFER_FACE_ID_THRESHOLD = Number(
+  process.env.TRANSFER_FACE_ID_THRESHOLD || "10000",
+);
+const CUMULATIVE_TRANSFER_FACE_ID_WINDOW_MINUTES = Number(
+  process.env.CUMULATIVE_TRANSFER_FACE_ID_WINDOW_MINUTES || "10",
+);
+const CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES = Number(
+  process.env.CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES || "5",
+);
+const CONTINUOUS_LARGE_TRANSFER_BLOCK_COUNT = Number(
+  process.env.CONTINUOUS_LARGE_TRANSFER_BLOCK_COUNT || "1",
+);
 const MEDIUM_RISK_TRANSFER_LIMIT = Number(
   process.env.MEDIUM_RISK_TRANSFER_LIMIT || "500",
 );
@@ -258,6 +286,27 @@ type TransferRecipientProfile = {
   completedTransfers: number;
   totalSent: number;
   lastTransferAt: string | null;
+};
+
+type TransferBehaviorProfile = {
+  recentReviewCount30d: number;
+  recentBlockedCount30d: number;
+  recentPendingOtpCount7d: number;
+  averageCompletedOutflow90d: number;
+  maxCompletedOutflow90d: number;
+  similarFlaggedAmountCount90d: number;
+  sameRecipientFlaggedCount90d: number;
+};
+
+type TransferStepUpPolicy = {
+  faceIdRequired: boolean;
+  faceIdReason: string | null;
+  rollingOutflowAmount: number;
+  recentLargeCompletedCount: number;
+  shouldBlockContinuousLargeTransfer: boolean;
+  blockReason: string | null;
+  blockedUntil: string | null;
+  retryAfterSeconds: number | null;
 };
 
 type TransferSafetyHold = {
@@ -340,6 +389,65 @@ type SliderCaptchaPayload = {
   targetOffsetPx: number;
   maxOffsetPx: number;
   tolerancePx: number;
+};
+
+type FaceIdStep = "center" | "move_left" | "move_right" | "move_closer";
+
+type FaceIdChallengePayload = {
+  kind: "faceid_v1";
+  nonce: string;
+  issuedAt: number;
+  expiresAt: number;
+  steps: FaceIdStep[];
+  minLivenessScore: number;
+  minMotionScore: number;
+  minFaceCoverage: number;
+  minSampleCount: number;
+};
+
+type FaceIdEnrollmentSubmission = {
+  challengeToken: string;
+  descriptor: string;
+  livenessScore: number;
+  motionScore: number;
+  faceCoverage: number;
+  sampleCount: number;
+  completedSteps: FaceIdStep[];
+  stepCaptures: Array<{
+    step: FaceIdStep;
+    image: string;
+    centerX: number;
+    centerY: number;
+    coverage: number;
+    motion: number;
+    aligned?: boolean;
+  }>;
+  previewImage?: string;
+};
+
+type FaceIdAntiSpoofResult = {
+  passed: boolean;
+  spoofScore: number;
+  confidence: number;
+  riskLevel: "low" | "medium" | "high";
+  reasons: string[];
+  modelSource?: string | null;
+  modelVersion?: string | null;
+};
+
+type FaceIdLoginPayload = {
+  kind: "faceid_login_v1";
+  userId: string;
+  email: string;
+  currentIp: string;
+  currentUserAgent?: string;
+  issuedAt: number;
+  expiresAt: number;
+  score: number;
+  aiResult: AnomalyResponse;
+  wasTrustedIp: boolean;
+  previousTrustedIp?: string | null;
+  deviceContext?: ClientDeviceContext;
 };
 
 const DEFAULT_AI_RESPONSE: AnomalyResponse = {
@@ -1062,10 +1170,247 @@ const buildStoredAiMonitoring = (input: AnomalyResponse) => ({
   scoredAt: new Date().toISOString(),
 });
 
+type FundsFlowLifecycle =
+  | "PENDING_OTP"
+  | "REVIEW_REQUIRED"
+  | "BLOCKED"
+  | "OTP_VERIFIED"
+  | "COMPLETED";
+
+type FundsFlowDirection = "INFLOW" | "OUTFLOW";
+
+type FundsFlowChannel = "WALLET_TRANSFER" | "WALLET_DEPOSIT" | "ADMIN_TOPUP";
+
+type FundsFlowDatasetRow = {
+  id: string;
+  createdAt: string;
+  actor: string;
+  userId: string | null;
+  ipAddress: string | null;
+  channel: FundsFlowChannel;
+  lifecycle: FundsFlowLifecycle;
+  direction: FundsFlowDirection;
+  amount: number;
+  currency: string;
+  fromAccount: string | null;
+  toAccount: string | null;
+  fromUserId: string | null;
+  toUserId: string | null;
+  transactionId: string | null;
+  reconciliationId: string | null;
+  requestKey: string | null;
+  note: string | null;
+  sourceLabel: string | null;
+  recipientKnown: boolean | null;
+  riskLevel: string | null;
+  riskScore: number | null;
+  balanceBefore: number | null;
+  balanceAfter: number | null;
+};
+
+const FUNDS_FLOW_DATASET_LIMIT_MAX = 5000;
+
+const logFundsFlowEvent = async (input: {
+  actor?: string;
+  userId?: string;
+  ipAddress?: string;
+  channel: FundsFlowChannel;
+  lifecycle: FundsFlowLifecycle;
+  direction: FundsFlowDirection;
+  amount: number;
+  currency: string;
+  fromAccount?: string | null;
+  toAccount?: string | null;
+  fromUserId?: string | null;
+  toUserId?: string | null;
+  transactionId?: string | null;
+  reconciliationId?: string | null;
+  requestKey?: string | null;
+  note?: string | null;
+  sourceLabel?: string | null;
+  recipientKnown?: boolean | null;
+  riskLevel?: string | null;
+  riskScore?: number | null;
+  transferAdvisory?: TransferSafetyAdvisory | null;
+  aiMonitoring?: AnomalyResponse | null;
+  balanceBefore?: number | null;
+  balanceAfter?: number | null;
+}) => {
+  await logAuditEvent({
+    actor: input.actor,
+    userId: input.userId,
+    ipAddress: input.ipAddress,
+    action: "FUNDS_FLOW_EVENT",
+    details: {
+      channel: input.channel,
+      lifecycle: input.lifecycle,
+      direction: input.direction,
+      amount: roundMoney(input.amount),
+      currency: input.currency,
+      fromAccount: input.fromAccount || null,
+      toAccount: input.toAccount || null,
+      sourceLabel: input.sourceLabel || null,
+    },
+    metadata: {
+      category: "funds_flow_training",
+      channel: input.channel,
+      lifecycle: input.lifecycle,
+      direction: input.direction,
+      amount: roundMoney(input.amount),
+      currency: input.currency,
+      fromAccount: input.fromAccount || null,
+      toAccount: input.toAccount || null,
+      fromUserId: input.fromUserId || null,
+      toUserId: input.toUserId || null,
+      transactionId: input.transactionId || null,
+      reconciliationId: input.reconciliationId || null,
+      requestKey: input.requestKey || null,
+      note: input.note || null,
+      sourceLabel: input.sourceLabel || null,
+      recipientKnown: input.recipientKnown ?? null,
+      riskLevel: input.riskLevel || null,
+      riskScore:
+        typeof input.riskScore === "number"
+          ? clamp(input.riskScore, 0, 1)
+          : null,
+      balanceBefore:
+        typeof input.balanceBefore === "number"
+          ? roundMoney(input.balanceBefore)
+          : null,
+      balanceAfter:
+        typeof input.balanceAfter === "number"
+          ? roundMoney(input.balanceAfter)
+          : null,
+      transferAdvisory: input.transferAdvisory || undefined,
+      aiMonitoring: input.aiMonitoring
+        ? buildStoredAiMonitoring(input.aiMonitoring)
+        : undefined,
+      observedAt: new Date().toISOString(),
+    },
+  });
+};
+
+const parseFundsFlowListFilter = (value: unknown) =>
+  typeof value === "string"
+    ? value
+        .split(",")
+        .map((item) => item.trim().toUpperCase())
+        .filter(Boolean)
+    : [];
+
+const formatCsvValue = (value: unknown) => {
+  if (value === null || value === undefined) return "";
+  const text =
+    typeof value === "string"
+      ? value
+      : typeof value === "number" || typeof value === "boolean"
+        ? String(value)
+        : JSON.stringify(value);
+  const escaped = text.replace(/"/g, '""');
+  return /[",\n]/.test(escaped) ? `"${escaped}"` : escaped;
+};
+
+const toFundsFlowDatasetRow = (log: {
+  id: string;
+  actor: string;
+  userId: string | null;
+  ipAddress: string | null;
+  createdAt: Date;
+  metadata: unknown;
+}): FundsFlowDatasetRow | null => {
+  const metadata = normalizeMetadataRecord(log.metadata);
+  const channel = metadata.channel;
+  const lifecycle = metadata.lifecycle;
+  const direction = metadata.direction;
+  const amount = typeof metadata.amount === "number" ? metadata.amount : null;
+  const currency =
+    typeof metadata.currency === "string" ? metadata.currency : null;
+
+  if (
+    (channel !== "WALLET_TRANSFER" &&
+      channel !== "WALLET_DEPOSIT" &&
+      channel !== "ADMIN_TOPUP") ||
+    (lifecycle !== "PENDING_OTP" &&
+      lifecycle !== "REVIEW_REQUIRED" &&
+      lifecycle !== "BLOCKED" &&
+      lifecycle !== "OTP_VERIFIED" &&
+      lifecycle !== "COMPLETED") ||
+    (direction !== "INFLOW" && direction !== "OUTFLOW") ||
+    amount === null ||
+    currency === null
+  ) {
+    return null;
+  }
+
+  return {
+    id: log.id,
+    createdAt: log.createdAt.toISOString(),
+    actor: log.actor,
+    userId: log.userId,
+    ipAddress: log.ipAddress,
+    channel,
+    lifecycle,
+    direction,
+    amount: roundMoney(amount),
+    currency,
+    fromAccount:
+      typeof metadata.fromAccount === "string" ? metadata.fromAccount : null,
+    toAccount:
+      typeof metadata.toAccount === "string" ? metadata.toAccount : null,
+    fromUserId:
+      typeof metadata.fromUserId === "string" ? metadata.fromUserId : null,
+    toUserId: typeof metadata.toUserId === "string" ? metadata.toUserId : null,
+    transactionId:
+      typeof metadata.transactionId === "string"
+        ? metadata.transactionId
+        : null,
+    reconciliationId:
+      typeof metadata.reconciliationId === "string"
+        ? metadata.reconciliationId
+        : null,
+    requestKey:
+      typeof metadata.requestKey === "string" ? metadata.requestKey : null,
+    note: typeof metadata.note === "string" ? metadata.note : null,
+    sourceLabel:
+      typeof metadata.sourceLabel === "string" ? metadata.sourceLabel : null,
+    recipientKnown:
+      typeof metadata.recipientKnown === "boolean"
+        ? metadata.recipientKnown
+        : null,
+    riskLevel:
+      typeof metadata.riskLevel === "string" ? metadata.riskLevel : null,
+    riskScore:
+      typeof metadata.riskScore === "number"
+        ? clamp(metadata.riskScore, 0, 1)
+        : null,
+    balanceBefore:
+      typeof metadata.balanceBefore === "number"
+        ? roundMoney(metadata.balanceBefore)
+        : null,
+    balanceAfter:
+      typeof metadata.balanceAfter === "number"
+        ? roundMoney(metadata.balanceAfter)
+        : null,
+  };
+};
+
 const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value));
 
 const roundMoney = (value: number) => Math.round(value * 100) / 100;
+
+const formatRetryWait = (seconds: number) => {
+  const safeSeconds = Math.max(1, Math.ceil(seconds));
+  const minutes = Math.floor(safeSeconds / 60);
+  const remainingSeconds = safeSeconds % 60;
+  if (minutes <= 0) {
+    return `${remainingSeconds} giay`;
+  }
+  if (remainingSeconds === 0) {
+    return `${minutes} phut`;
+  }
+  return `${minutes} phut ${remainingSeconds} giay`;
+};
 
 const formatMoneyAmount = (currency: string, amount: number) =>
   `${currency} ${roundMoney(Math.max(0, amount)).toLocaleString("en-US", {
@@ -1114,6 +1459,15 @@ const getSuspiciousTransferNoteReasons = (note: string) => {
   return suspiciousTransferNotePatterns
     .filter((entry) => entry.pattern.test(normalizedNote))
     .map((entry) => entry.reason);
+};
+
+const isGenericTransferNote = (note: string) => {
+  const normalizedNote = note.trim().toLowerCase();
+  if (!normalizedNote) return true;
+  if (normalizedNote.length < 10) return true;
+  return /^(transfer|payment|banking|send money|test|gift|invoice|payment for services|wallet transfer)$/i.test(
+    normalizedNote,
+  );
 };
 
 const getTransferSafetyHold = (
@@ -1210,6 +1564,8 @@ const buildTransferSafetyAdvisory = (input: {
   aiResult: AnomalyResponse;
   spendProfile: TransferSpendProfile;
   recipientProfile: TransferRecipientProfile;
+  behaviorProfile: TransferBehaviorProfile;
+  recipientAccount: string;
   note: string;
   requestKey?: string | null;
 }) => {
@@ -1221,11 +1577,34 @@ const buildTransferSafetyAdvisory = (input: {
   const transferRatio = amount / senderBalance;
   const remainingBalanceRatio =
     senderBalance > 0 ? remainingBalance / senderBalance : 0;
+  const qualifiesForRedWarning = amount >= TRANSFER_FACE_ID_THRESHOLD;
   const hasMaterialDrainAmount = amount >= BALANCE_DRAIN_ADVISORY_MIN_AMOUNT;
   const hasWarningDrainAmount = amount >= BALANCE_DRAIN_WARNING_MIN_AMOUNT;
   const noteRiskReasons = getSuspiciousTransferNoteReasons(input.note);
-  const reasons = new Set<string>();
+  const noteIsGeneric = isGenericTransferNote(input.note);
+  const reasons: string[] = [];
+  const addReason = (reason: string) => {
+    if (
+      !reasons.some((entry) => entry.toLowerCase() === reason.toLowerCase())
+    ) {
+      reasons.push(reason);
+    }
+  };
   let severity: TransferSafetyAdvisory["severity"] = "caution";
+  const recipientAverage =
+    input.recipientProfile.completedTransfers > 0
+      ? input.recipientProfile.totalSent /
+        input.recipientProfile.completedTransfers
+      : 0;
+  const amountVsRecipientAverage =
+    recipientAverage > 0 ? amount / recipientAverage : null;
+  const amountVsUserAverage =
+    input.behaviorProfile.averageCompletedOutflow90d > 0
+      ? amount / input.behaviorProfile.averageCompletedOutflow90d
+      : null;
+  const recipientLabel = input.recipientAccount
+    ? `account ending ${input.recipientAccount.slice(-4)}`
+    : "this recipient";
   const hasStrongWarningSignal =
     amount >= HIGH_TRANSFER_ADVISORY_AMOUNT ||
     (hasWarningDrainAmount && transferRatio >= BALANCE_DRAIN_WARNING_RATIO) ||
@@ -1236,11 +1615,15 @@ const buildTransferSafetyAdvisory = (input: {
       amount >= Math.max(500, LARGE_TRANSFER_ADVISORY_AMOUNT * 0.5));
 
   if (hasMaterialDrainAmount && transferRatio >= BALANCE_DRAIN_ADVISORY_RATIO) {
-    reasons.add(
+    addReason(
       `This transfer uses ${Math.round(transferRatio * 100)}% of your available wallet balance.`,
     );
   }
-  if (hasWarningDrainAmount && transferRatio >= BALANCE_DRAIN_WARNING_RATIO) {
+  if (
+    qualifiesForRedWarning &&
+    hasWarningDrainAmount &&
+    transferRatio >= BALANCE_DRAIN_WARNING_RATIO
+  ) {
     severity = "warning";
   }
 
@@ -1248,37 +1631,117 @@ const buildTransferSafetyAdvisory = (input: {
     hasMaterialDrainAmount &&
     remainingBalance <= LOW_REMAINING_BALANCE_ADVISORY
   ) {
-    reasons.add(
+    addReason(
       `You would keep only ${formatMoneyAmount(input.currency, remainingBalance)} after this transfer.`,
     );
   }
 
   if (amount >= LARGE_TRANSFER_ADVISORY_AMOUNT) {
-    reasons.add(
+    addReason(
       `This is a high-value transfer for a consumer wallet (${formatMoneyAmount(input.currency, amount)}).`,
     );
   }
-  if (amount >= HIGH_TRANSFER_ADVISORY_AMOUNT) {
+  if (qualifiesForRedWarning) {
     severity = "warning";
   }
 
   if (!input.recipientProfile.isKnownRecipient) {
-    reasons.add(
-      "This recipient is new compared with your recent completed transfers.",
+    addReason(
+      `${recipientLabel} has not appeared in your completed transfer history yet.`,
     );
-    if (amount >= HIGH_TRANSFER_ADVISORY_AMOUNT) {
+    if (qualifiesForRedWarning) {
       severity = "warning";
     }
   }
 
+  if (
+    amountVsRecipientAverage !== null &&
+    input.recipientProfile.completedTransfers >= 2 &&
+    amountVsRecipientAverage >= 3
+  ) {
+    addReason(
+      `This amount is ${amountVsRecipientAverage.toFixed(1)}x larger than your usual completed transfer to ${recipientLabel}.`,
+    );
+    if (qualifiesForRedWarning) {
+      severity = "warning";
+    }
+  }
+
+  if (
+    amountVsUserAverage !== null &&
+    input.behaviorProfile.averageCompletedOutflow90d > 0 &&
+    amountVsUserAverage >= 4
+  ) {
+    addReason(
+      `This amount is ${amountVsUserAverage.toFixed(1)}x above your average completed outgoing transfer in the last 90 days.`,
+    );
+  }
+
+  if (
+    input.behaviorProfile.maxCompletedOutflow90d > 0 &&
+    amount > input.behaviorProfile.maxCompletedOutflow90d
+  ) {
+    addReason(
+      `This exceeds your largest completed outgoing transfer in the last 90 days (${formatMoneyAmount(
+        input.currency,
+        input.behaviorProfile.maxCompletedOutflow90d,
+      )}).`,
+    );
+  }
+
+  if (input.behaviorProfile.similarFlaggedAmountCount90d > 0) {
+    addReason(
+      `You had ${input.behaviorProfile.similarFlaggedAmountCount90d} recent transfer attempt${
+        input.behaviorProfile.similarFlaggedAmountCount90d === 1 ? "" : "s"
+      } near this amount that were reviewed or blocked before completion.`,
+    );
+    if (qualifiesForRedWarning) {
+      severity = "warning";
+    }
+  }
+
+  if (input.behaviorProfile.sameRecipientFlaggedCount90d > 0) {
+    addReason(
+      `${recipientLabel} was already involved in ${input.behaviorProfile.sameRecipientFlaggedCount90d} reviewed or blocked transfer attempt${
+        input.behaviorProfile.sameRecipientFlaggedCount90d === 1 ? "" : "s"
+      } recently.`,
+    );
+    if (qualifiesForRedWarning) {
+      severity = "warning";
+    }
+  }
+
+  if (
+    input.behaviorProfile.recentReviewCount30d +
+      input.behaviorProfile.recentBlockedCount30d >=
+    3
+  ) {
+    addReason(
+      `Recent outbound transfer behavior has triggered ${input.behaviorProfile.recentReviewCount30d + input.behaviorProfile.recentBlockedCount30d} AI reviews or blocks in the last 30 days.`,
+    );
+  }
+
+  if (input.behaviorProfile.recentPendingOtpCount7d >= 4) {
+    addReason(
+      `You started ${input.behaviorProfile.recentPendingOtpCount7d} outbound transfer verification flows in the last 7 days, which is faster than your usual pace.`,
+    );
+  }
+
   for (const noteReason of noteRiskReasons) {
-    reasons.add(noteReason);
+    addReason(noteReason);
   }
   if (
     noteRiskReasons.length > 0 &&
     amount >= Math.max(500, LARGE_TRANSFER_ADVISORY_AMOUNT * 0.5)
   ) {
-    severity = "warning";
+    if (qualifiesForRedWarning) {
+      severity = "warning";
+    }
+  }
+  if (noteIsGeneric && amount >= LARGE_TRANSFER_ADVISORY_AMOUNT) {
+    addReason(
+      `The transfer note is too generic for a payment of ${formatMoneyAmount(input.currency, amount)}.`,
+    );
   }
 
   if (
@@ -1286,7 +1749,7 @@ const buildTransferSafetyAdvisory = (input: {
     input.spendProfile.spendSurgeRatio !== null &&
     input.spendProfile.spendSurgeRatio >= 4
   ) {
-    reasons.add(
+    addReason(
       `Today's projected transfer spend is ${input.spendProfile.spendSurgeRatio.toFixed(
         1,
       )}x above your recent daily average.`,
@@ -1297,24 +1760,33 @@ const buildTransferSafetyAdvisory = (input: {
     input.spendProfile.spendSurgeRatio !== null &&
     input.spendProfile.spendSurgeRatio >= 8
   ) {
-    severity = "warning";
+    if (qualifiesForRedWarning) {
+      severity = "warning";
+    }
   }
 
   if (input.aiResult.riskLevel === "medium") {
-    reasons.add(
-      "Our fraud monitor sees behavior that is less typical than your recent transfers.",
+    addReason(
+      "AI sees this transfer as less typical than your recent completed behavior.",
     );
   }
   if (input.aiResult.riskLevel === "high") {
-    if (hasStrongWarningSignal) {
+    if (qualifiesForRedWarning && hasStrongWarningSignal) {
       severity = "warning";
     }
-    reasons.add(
-      "Our fraud monitor found multiple signals that often appear in scam-driven transfers.",
+    addReason(
+      "AI found multiple scam-like signals around this recipient, amount, and transfer pattern.",
     );
   }
 
-  const advisoryReasons = [...reasons];
+  for (const aiReason of input.aiResult.reasons) {
+    const cleaned = aiReason.replace(/\s+/g, " ").trim();
+    if (!cleaned || /no clear anomaly/i.test(cleaned)) continue;
+    addReason(cleaned);
+    if (reasons.length >= 6) break;
+  }
+
+  const advisoryReasons = reasons;
   if (!advisoryReasons.length) return null;
 
   const hasBlockSizedAmount = amount > TRANSFER_SCAM_BLOCK_MIN_AMOUNT;
@@ -1337,12 +1809,43 @@ const buildTransferSafetyAdvisory = (input: {
         blockedUntil,
       ).toLocaleString(
         "en-US",
-      )}. Our AI monitor sees a high-risk pattern: a new recipient combined with scam-like behavior signals.`,
+      )}. AI sees a high-risk combination here: ${advisoryReasons
+        .slice(0, 2)
+        .join(" ")}`,
     });
   }
 
-  const messageLead =
-    hasMaterialDrainAmount && transferRatio >= BALANCE_DRAIN_ADVISORY_RATIO
+  let title =
+    severity === "warning"
+      ? "High-risk transfer needs confirmation"
+      : "AI review: light transfer check";
+  if (
+    !input.recipientProfile.isKnownRecipient &&
+    amountVsUserAverage !== null
+  ) {
+    title = `First transfer to ${recipientLabel} is ${amountVsUserAverage.toFixed(1)}x above your recent norm`;
+  } else if (
+    amountVsRecipientAverage !== null &&
+    input.recipientProfile.completedTransfers >= 2 &&
+    amountVsRecipientAverage >= 3
+  ) {
+    title = `This payment is much larger than your past transfers to ${recipientLabel}`;
+  } else if (input.behaviorProfile.similarFlaggedAmountCount90d > 0) {
+    title =
+      "This amount resembles recently reviewed or blocked transfer attempts";
+  } else if (
+    hasMaterialDrainAmount &&
+    transferRatio >= BALANCE_DRAIN_ADVISORY_RATIO
+  ) {
+    title = "This transfer would drain most of your wallet balance";
+  } else if (noteIsGeneric && amount >= LARGE_TRANSFER_ADVISORY_AMOUNT) {
+    title =
+      "Generic payment note on a large transfer needs stronger verification";
+  }
+
+  const messageLead = !input.recipientProfile.isKnownRecipient
+    ? `You are about to send ${formatMoneyAmount(input.currency, amount)} to ${recipientLabel} for the first time.`
+    : hasMaterialDrainAmount && transferRatio >= BALANCE_DRAIN_ADVISORY_RATIO
       ? `You are about to transfer ${Math.round(
           transferRatio * 100,
         )}% of your balance and keep ${formatMoneyAmount(
@@ -1352,27 +1855,30 @@ const buildTransferSafetyAdvisory = (input: {
       : `You are about to send ${formatMoneyAmount(
           input.currency,
           amount,
-        )} from your wallet.`;
+        )} to ${recipientLabel}.`;
 
   const messageTail =
     severity === "warning"
-      ? "If anyone pressured you to act quickly, stop and confirm the recipient through a trusted channel before continuing."
-      : "Pause for a moment and make sure you know the recipient and why this transfer is needed.";
+      ? `AI wants you to verify this payment because ${advisoryReasons
+          .slice(0, 2)
+          .join(" ")}`
+      : `AI recorded only light advisory signals for this transfer: ${advisoryReasons
+          .slice(0, 1)
+          .join(" ")}`;
+
+  const requiresAcknowledgement = severity === "warning";
 
   return {
     requestKey: input.requestKey || null,
     severity,
-    title:
-      severity === "warning"
-        ? "High-risk transfer needs confirmation"
-        : "Review this transfer before continuing",
+    title,
     message: `${messageLead} ${messageTail}`,
     confirmationLabel:
       severity === "warning"
         ? "I reviewed the warning, continue to OTP"
-        : "I understand, continue to OTP",
+        : "Continue to OTP",
     reasons: advisoryReasons,
-    requiresAcknowledgement: true,
+    requiresAcknowledgement,
     transferRatio,
     remainingBalance,
     remainingBalanceRatio,
@@ -2939,25 +3445,25 @@ const buildAuthPayload = (
   };
 };
 
-const encodeSliderCaptchaToken = (payload: SliderCaptchaPayload) => {
+const encodeSignedPayload = (payload: unknown, secret: string) => {
   const encodedPayload = Buffer.from(JSON.stringify(payload)).toString(
     "base64url",
   );
   const signature = crypto
-    .createHmac("sha256", CAPTCHA_SECRET_KEY)
+    .createHmac("sha256", secret)
     .update(encodedPayload)
     .digest("base64url");
   return `${encodedPayload}.${signature}`;
 };
 
-const decodeSliderCaptchaToken = (captchaToken: string) => {
-  const [encodedPayload, signature] = captchaToken.split(".");
+const decodeSignedPayload = <T>(token: string, secret: string) => {
+  const [encodedPayload, signature] = token.split(".");
   if (!encodedPayload || !signature) {
-    throw new Error("INVALID_CAPTCHA");
+    throw new Error("INVALID_SIGNED_PAYLOAD");
   }
 
   const expectedSignature = crypto
-    .createHmac("sha256", CAPTCHA_SECRET_KEY)
+    .createHmac("sha256", secret)
     .update(encodedPayload)
     .digest("base64url");
 
@@ -2968,14 +3474,24 @@ const decodeSliderCaptchaToken = (captchaToken: string) => {
       Buffer.from(expectedSignature),
     )
   ) {
-    throw new Error("INVALID_CAPTCHA");
+    throw new Error("INVALID_SIGNED_PAYLOAD");
   }
 
+  return JSON.parse(
+    Buffer.from(encodedPayload, "base64url").toString("utf8"),
+  ) as T;
+};
+
+const encodeSliderCaptchaToken = (payload: SliderCaptchaPayload) =>
+  encodeSignedPayload(payload, CAPTCHA_SECRET_KEY);
+
+const decodeSliderCaptchaToken = (captchaToken: string) => {
   let parsed: Partial<SliderCaptchaPayload>;
   try {
-    parsed = JSON.parse(
-      Buffer.from(encodedPayload, "base64url").toString("utf8"),
-    ) as Partial<SliderCaptchaPayload>;
+    parsed = decodeSignedPayload<Partial<SliderCaptchaPayload>>(
+      captchaToken,
+      CAPTCHA_SECRET_KEY,
+    );
   } catch {
     throw new Error("INVALID_CAPTCHA");
   }
@@ -2996,6 +3512,379 @@ const decodeSliderCaptchaToken = (captchaToken: string) => {
   }
 
   return parsed as SliderCaptchaPayload;
+};
+
+const FACE_ID_STEP_LABELS: Record<FaceIdStep, string> = {
+  center: "Center your face",
+  move_left: "Move your face to the left",
+  move_right: "Move your face to the right",
+  move_closer: "Move closer to the camera",
+};
+
+const buildFaceIdChallenge = () => {
+  const steps: FaceIdStep[] = ["center", "move_closer"];
+  const issuedAt = Date.now();
+  const payload: FaceIdChallengePayload = {
+    kind: "faceid_v1",
+    nonce: crypto.randomUUID(),
+    issuedAt,
+    expiresAt: issuedAt + FACE_ID_CHALLENGE_TTL_MS,
+    steps,
+    minLivenessScore: FACE_ID_MIN_LIVENESS_SCORE,
+    minMotionScore: FACE_ID_MIN_MOTION_SCORE,
+    minFaceCoverage: FACE_ID_MIN_FACE_COVERAGE,
+    minSampleCount: FACE_ID_MIN_SAMPLE_COUNT,
+  };
+
+  return {
+    challengeToken: encodeSignedPayload(payload, FACE_ID_SECRET_KEY),
+    steps: steps.map((step) => ({
+      id: step,
+      label: FACE_ID_STEP_LABELS[step],
+    })),
+    expiresAt: new Date(payload.expiresAt).toISOString(),
+  };
+};
+
+const decodeFaceIdChallengeToken = (challengeToken: string) => {
+  let payload: Partial<FaceIdChallengePayload>;
+  try {
+    payload = decodeSignedPayload<Partial<FaceIdChallengePayload>>(
+      challengeToken,
+      FACE_ID_SECRET_KEY,
+    );
+  } catch {
+    throw new Error("INVALID_FACE_ID");
+  }
+
+  if (
+    payload.kind !== "faceid_v1" ||
+    typeof payload.nonce !== "string" ||
+    typeof payload.issuedAt !== "number" ||
+    typeof payload.expiresAt !== "number" ||
+    !Array.isArray(payload.steps) ||
+    payload.steps.some(
+      (step) =>
+        step !== "center" &&
+        step !== "move_left" &&
+        step !== "move_right" &&
+        step !== "move_closer",
+    )
+  ) {
+    throw new Error("INVALID_FACE_ID");
+  }
+
+  if (payload.expiresAt <= Date.now()) {
+    throw new Error("FACE_ID_EXPIRED");
+  }
+
+  return payload as FaceIdChallengePayload;
+};
+
+const decodeFaceDescriptor = (descriptor: string) => {
+  try {
+    const raw = Buffer.from(descriptor, "base64");
+    if (!raw.length || raw.length > 2048) {
+      throw new Error("INVALID_FACE_ID_DESCRIPTOR");
+    }
+    return raw;
+  } catch {
+    throw new Error("INVALID_FACE_ID_DESCRIPTOR");
+  }
+};
+
+const compareFaceDescriptors = (left: string, right: string) => {
+  const a = decodeFaceDescriptor(left);
+  const b = decodeFaceDescriptor(right);
+  if (a.length !== b.length) return 0;
+
+  let dot = 0;
+  let magA = 0;
+  let magB = 0;
+  for (let index = 0; index < a.length; index += 1) {
+    const av = a[index] / 255;
+    const bv = b[index] / 255;
+    dot += av * bv;
+    magA += av * av;
+    magB += bv * bv;
+  }
+
+  if (!magA || !magB) return 0;
+  return dot / Math.sqrt(magA * magB);
+};
+
+const assessFaceIdAntiSpoof = async (
+  submission: FaceIdEnrollmentSubmission,
+): Promise<FaceIdAntiSpoofResult> => {
+  const response = await fetch(`${AI_URL}/ai/face/liveness`, {
+    method: "POST",
+    headers: buildAiServiceHeaders(),
+    body: JSON.stringify({
+      previewImage: submission.previewImage,
+      stepCaptures: submission.stepCaptures,
+      livenessScore: submission.livenessScore,
+      motionScore: submission.motionScore,
+      faceCoverage: submission.faceCoverage,
+      sampleCount: submission.sampleCount,
+      completedSteps: submission.completedSteps,
+    }),
+  }).catch(() => null);
+
+  if (!response) {
+    throw new Error("FACE_ID_ANTI_SPOOF_UNAVAILABLE");
+  }
+
+  const payload = (await response.json().catch(() => null)) as Record<
+    string,
+    unknown
+  > | null;
+
+  if (!response.ok || !payload) {
+    throw new Error("FACE_ID_ANTI_SPOOF_UNAVAILABLE");
+  }
+
+  const passed = payload.passed === true;
+  const spoofScore =
+    typeof payload.spoofScore === "number"
+      ? clamp(payload.spoofScore, 0, 1)
+      : 1;
+  const confidence =
+    typeof payload.confidence === "number"
+      ? clamp(payload.confidence, 0, 1)
+      : 0;
+  const riskLevel =
+    payload.riskLevel === "low" ||
+    payload.riskLevel === "medium" ||
+    payload.riskLevel === "high"
+      ? payload.riskLevel
+      : "high";
+  const reasons = Array.isArray(payload.reasons)
+    ? payload.reasons.filter(
+        (reason): reason is string =>
+          typeof reason === "string" && reason.trim().length > 0,
+      )
+    : [];
+
+  return {
+    passed,
+    spoofScore,
+    confidence,
+    riskLevel,
+    reasons,
+    modelSource:
+      typeof payload.modelSource === "string" ? payload.modelSource : null,
+    modelVersion:
+      typeof payload.modelVersion === "string" ? payload.modelVersion : null,
+  };
+};
+
+const readFaceIdEnrollment = (
+  body: unknown,
+): FaceIdEnrollmentSubmission | null => {
+  const payload =
+    body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+  const source =
+    payload.faceIdEnrollment && typeof payload.faceIdEnrollment === "object"
+      ? (payload.faceIdEnrollment as Record<string, unknown>)
+      : payload;
+
+  const challengeToken =
+    typeof source.challengeToken === "string"
+      ? source.challengeToken.trim()
+      : "";
+  if (!challengeToken) return null;
+
+  return {
+    challengeToken,
+    descriptor:
+      typeof source.descriptor === "string" ? source.descriptor.trim() : "",
+    livenessScore:
+      typeof source.livenessScore === "number"
+        ? source.livenessScore
+        : Number(source.livenessScore),
+    motionScore:
+      typeof source.motionScore === "number"
+        ? source.motionScore
+        : Number(source.motionScore),
+    faceCoverage:
+      typeof source.faceCoverage === "number"
+        ? source.faceCoverage
+        : Number(source.faceCoverage),
+    sampleCount:
+      typeof source.sampleCount === "number"
+        ? Math.round(source.sampleCount)
+        : Number(source.sampleCount),
+    completedSteps: Array.isArray(source.completedSteps)
+      ? source.completedSteps.filter(
+          (step): step is FaceIdStep =>
+            step === "center" ||
+            step === "move_left" ||
+            step === "move_right" ||
+            step === "move_closer",
+        )
+      : [],
+    stepCaptures: Array.isArray(source.stepCaptures)
+      ? source.stepCaptures.flatMap((capture) => {
+          const record =
+            capture && typeof capture === "object"
+              ? (capture as Record<string, unknown>)
+              : null;
+          if (!record) return [];
+          const step = record.step;
+          const image = record.image;
+          const centerX =
+            typeof record.centerX === "number"
+              ? record.centerX
+              : Number(record.centerX);
+          const centerY =
+            typeof record.centerY === "number"
+              ? record.centerY
+              : Number(record.centerY);
+          const coverage =
+            typeof record.coverage === "number"
+              ? record.coverage
+              : Number(record.coverage);
+          const motion =
+            typeof record.motion === "number"
+              ? record.motion
+              : Number(record.motion);
+          const aligned =
+            typeof record.aligned === "boolean" ? record.aligned : undefined;
+
+          if (
+            (step !== "center" &&
+              step !== "move_left" &&
+              step !== "move_right" &&
+              step !== "move_closer") ||
+            typeof image !== "string"
+          ) {
+            return [];
+          }
+
+          return [
+            {
+              step,
+              image,
+              centerX,
+              centerY,
+              coverage,
+              motion,
+              aligned,
+            },
+          ];
+        })
+      : [],
+    previewImage:
+      typeof source.previewImage === "string" ? source.previewImage : undefined,
+  };
+};
+
+const verifyFaceIdSubmission = (
+  submission: FaceIdEnrollmentSubmission,
+  storedDescriptor?: string,
+) => {
+  const challenge = decodeFaceIdChallengeToken(submission.challengeToken);
+  if (
+    challenge.steps.length < 2 ||
+    !challenge.steps.includes("center") ||
+    !challenge.steps.includes("move_closer")
+  ) {
+    throw new Error("FACE_ID_STEP_MISMATCH");
+  }
+  if (
+    submission.completedSteps.length !== challenge.steps.length ||
+    submission.completedSteps.some(
+      (step, index) => step !== challenge.steps[index],
+    )
+  ) {
+    throw new Error("FACE_ID_STEP_MISMATCH");
+  }
+  if (
+    !submission.previewImage ||
+    !submission.previewImage.startsWith("data:image/")
+  ) {
+    throw new Error("FACE_ID_LOW_LIVENESS");
+  }
+  if (submission.stepCaptures.length < challenge.steps.length) {
+    throw new Error("FACE_ID_STEP_EVIDENCE_MISSING");
+  }
+  if (submission.livenessScore < challenge.minLivenessScore) {
+    throw new Error("FACE_ID_LOW_LIVENESS");
+  }
+  if (submission.motionScore < challenge.minMotionScore) {
+    throw new Error("FACE_ID_LOW_MOTION");
+  }
+  if (submission.faceCoverage < challenge.minFaceCoverage) {
+    throw new Error("FACE_ID_FACE_TOO_SMALL");
+  }
+  if (submission.sampleCount < challenge.minSampleCount) {
+    throw new Error("FACE_ID_TOO_FEW_SAMPLES");
+  }
+
+  decodeFaceDescriptor(submission.descriptor);
+
+  const similarity = storedDescriptor
+    ? compareFaceDescriptors(storedDescriptor, submission.descriptor)
+    : 1;
+
+  if (storedDescriptor && similarity < 0.94) {
+    throw new Error("FACE_ID_MISMATCH");
+  }
+
+  return { challenge, similarity };
+};
+
+const verifyFaceIdSubmissionStrict = async (
+  submission: FaceIdEnrollmentSubmission,
+  storedDescriptor?: string,
+) => {
+  const verified = verifyFaceIdSubmission(submission, storedDescriptor);
+  const antiSpoof = await assessFaceIdAntiSpoof(submission);
+  if (!antiSpoof.passed) {
+    throw new Error("FACE_ID_ANTI_SPOOF_FAILED");
+  }
+  return { ...verified, antiSpoof };
+};
+
+const getInternalFaceIdMetadata = (metadata: unknown) => {
+  if (!metadata || typeof metadata !== "object") return null;
+  const value = (metadata as Record<string, unknown>).faceId;
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : null;
+};
+
+const buildPublicUserMetadata = (metadata: unknown) => {
+  const source =
+    metadata && typeof metadata === "object"
+      ? { ...(metadata as Record<string, unknown>) }
+      : {};
+  delete source.faceId;
+  const faceId = getInternalFaceIdMetadata(metadata);
+  source.faceIdEnabled =
+    faceId && typeof faceId.enabled === "boolean" ? faceId.enabled : false;
+  source.faceIdEnrolledAt =
+    faceId && typeof faceId.enrolledAt === "string" ? faceId.enrolledAt : null;
+  source.faceIdVerifiedAt =
+    faceId && typeof faceId.lastVerifiedAt === "string"
+      ? faceId.lastVerifiedAt
+      : null;
+  return source;
+};
+
+const buildFaceEnrollmentRequiredNotice = (
+  userDoc: UserEntity,
+  baseNotice?: string,
+) => {
+  const faceId = getInternalFaceIdMetadata(userDoc.metadata);
+  const hasFaceEnrollment = faceId && faceId.enabled === true;
+  if (hasFaceEnrollment) {
+    return baseNotice;
+  }
+
+  const reminder =
+    "Security update: add your live FaceID scan after sign-in to keep this account protected.";
+  return baseNotice ? `${baseNotice} ${reminder}` : reminder;
 };
 
 const buildSliderCaptchaChallenge = () => {
@@ -3283,6 +4172,222 @@ const getTransferRecipientProfile = async (input: {
     totalSent: roundMoney(totalSent),
     lastTransferAt,
   };
+};
+
+const getTransferBehaviorProfile = async (input: {
+  userId: string;
+  toAccount: string;
+  amount: number;
+}): Promise<TransferBehaviorProfile> => {
+  const since90d = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+  const since30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const similarAmountTolerance = Math.max(250, input.amount * 0.2);
+
+  const rows = await prisma.auditLog.findMany({
+    where: {
+      userId: input.userId,
+      action: "FUNDS_FLOW_EVENT",
+      createdAt: { gte: since90d },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 400,
+    select: {
+      id: true,
+      actor: true,
+      userId: true,
+      ipAddress: true,
+      createdAt: true,
+      metadata: true,
+    },
+  });
+
+  let recentReviewCount30d = 0;
+  let recentBlockedCount30d = 0;
+  let recentPendingOtpCount7d = 0;
+  let completedOutflowSum90d = 0;
+  let completedOutflowCount90d = 0;
+  let maxCompletedOutflow90d = 0;
+  let similarFlaggedAmountCount90d = 0;
+  let sameRecipientFlaggedCount90d = 0;
+
+  for (const row of rows) {
+    const event = toFundsFlowDatasetRow(row);
+    if (
+      !event ||
+      event.channel !== "WALLET_TRANSFER" ||
+      event.direction !== "OUTFLOW"
+    ) {
+      continue;
+    }
+
+    const createdAtMs = new Date(event.createdAt).getTime();
+    const amountDelta = Math.abs(event.amount - input.amount);
+    const sameRecipient =
+      Boolean(input.toAccount) &&
+      Boolean(event.toAccount) &&
+      event.toAccount === input.toAccount;
+
+    if (event.lifecycle === "COMPLETED") {
+      completedOutflowSum90d += event.amount;
+      completedOutflowCount90d += 1;
+      if (event.amount > maxCompletedOutflow90d) {
+        maxCompletedOutflow90d = event.amount;
+      }
+    }
+
+    if (
+      createdAtMs >= since30d.getTime() &&
+      event.lifecycle === "REVIEW_REQUIRED"
+    ) {
+      recentReviewCount30d += 1;
+    }
+    if (createdAtMs >= since30d.getTime() && event.lifecycle === "BLOCKED") {
+      recentBlockedCount30d += 1;
+    }
+    if (createdAtMs >= since7d.getTime() && event.lifecycle === "PENDING_OTP") {
+      recentPendingOtpCount7d += 1;
+    }
+
+    if (
+      (event.lifecycle === "REVIEW_REQUIRED" ||
+        event.lifecycle === "BLOCKED") &&
+      amountDelta <= similarAmountTolerance
+    ) {
+      similarFlaggedAmountCount90d += 1;
+    }
+    if (
+      sameRecipient &&
+      (event.lifecycle === "REVIEW_REQUIRED" || event.lifecycle === "BLOCKED")
+    ) {
+      sameRecipientFlaggedCount90d += 1;
+    }
+  }
+
+  return {
+    recentReviewCount30d,
+    recentBlockedCount30d,
+    recentPendingOtpCount7d,
+    averageCompletedOutflow90d:
+      completedOutflowCount90d > 0
+        ? roundMoney(completedOutflowSum90d / completedOutflowCount90d)
+        : 0,
+    maxCompletedOutflow90d: roundMoney(maxCompletedOutflow90d),
+    similarFlaggedAmountCount90d,
+    sameRecipientFlaggedCount90d,
+  };
+};
+
+const evaluateTransferStepUpPolicy = async (input: {
+  userId: string;
+  amount: number;
+  currency: string;
+}) => {
+  const now = Date.now();
+  const fundsFlowWindowMinutes = Math.max(
+    CUMULATIVE_TRANSFER_FACE_ID_WINDOW_MINUTES,
+    CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES,
+  );
+  const since = new Date(now - fundsFlowWindowMinutes * 60 * 1000);
+  const rows = await prisma.auditLog.findMany({
+    where: {
+      action: "FUNDS_FLOW_EVENT",
+      userId: input.userId,
+      createdAt: { gte: since },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  let completedOutflowWindow = 0;
+  let recentLargeCompletedCount = 0;
+  let latestLargeCompletedAt: Date | null = null;
+  const largeTransferSince = new Date(
+    now - CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES * 60 * 1000,
+  ).getTime();
+
+  for (const row of rows) {
+    const event = toFundsFlowDatasetRow(row);
+    if (!event) continue;
+    if (
+      event.channel !== "WALLET_TRANSFER" ||
+      event.lifecycle !== "COMPLETED" ||
+      event.direction !== "OUTFLOW" ||
+      event.currency !== input.currency
+    ) {
+      continue;
+    }
+
+    const txAmount = Number(event.amount || 0);
+    completedOutflowWindow += txAmount;
+    if (
+      txAmount > TRANSFER_FACE_ID_THRESHOLD &&
+      row.createdAt.getTime() >= largeTransferSince
+    ) {
+      recentLargeCompletedCount += 1;
+      if (
+        !latestLargeCompletedAt ||
+        row.createdAt.getTime() > latestLargeCompletedAt.getTime()
+      ) {
+        latestLargeCompletedAt = row.createdAt;
+      }
+    }
+  }
+
+  completedOutflowWindow = roundMoney(completedOutflowWindow);
+  const projectedOutflowWindow = roundMoney(
+    completedOutflowWindow + input.amount,
+  );
+
+  let faceIdRequired = input.amount > TRANSFER_FACE_ID_THRESHOLD;
+  let faceIdReason: string | null =
+    input.amount > TRANSFER_FACE_ID_THRESHOLD
+      ? `Single transfers above ${formatMoneyAmount(
+          input.currency,
+          TRANSFER_FACE_ID_THRESHOLD,
+        )} require FaceID verification.`
+      : null;
+
+  if (!faceIdRequired && projectedOutflowWindow >= TRANSFER_FACE_ID_THRESHOLD) {
+    faceIdRequired = true;
+    faceIdReason = `Your total outgoing transfers in the last ${CUMULATIVE_TRANSFER_FACE_ID_WINDOW_MINUTES} minutes would reach ${formatMoneyAmount(
+      input.currency,
+      projectedOutflowWindow,
+    )}, so FaceID verification is required.`;
+  }
+
+  const shouldBlockContinuousLargeTransfer =
+    input.amount > TRANSFER_FACE_ID_THRESHOLD &&
+    recentLargeCompletedCount >= CONTINUOUS_LARGE_TRANSFER_BLOCK_COUNT;
+  const blockedUntilDate =
+    shouldBlockContinuousLargeTransfer && latestLargeCompletedAt
+      ? new Date(
+          latestLargeCompletedAt.getTime() +
+            CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES * 60 * 1000,
+        )
+      : null;
+  const retryAfterSeconds = blockedUntilDate
+    ? Math.max(1, Math.ceil((blockedUntilDate.getTime() - Date.now()) / 1000))
+    : null;
+  const blockReason = shouldBlockContinuousLargeTransfer
+    ? `Another transfer above ${formatMoneyAmount(
+        input.currency,
+        TRANSFER_FACE_ID_THRESHOLD,
+      )} was completed less than ${CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES} minutes ago. Please wait ${formatRetryWait(
+        retryAfterSeconds ??
+          CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES * 60,
+      )} before sending another high-value transfer.`
+    : null;
+
+  return {
+    faceIdRequired,
+    faceIdReason,
+    rollingOutflowAmount: projectedOutflowWindow,
+    recentLargeCompletedCount,
+    shouldBlockContinuousLargeTransfer,
+    blockReason,
+    blockedUntil: blockedUntilDate?.toISOString() || null,
+    retryAfterSeconds,
+  } satisfies TransferStepUpPolicy;
 };
 
 const lockUserAccount = async (
@@ -4252,15 +5357,26 @@ app.get("/auth/captcha/slider", (_req, res) => {
   return res.json(buildSliderCaptchaChallenge());
 });
 
+app.get("/auth/face/challenge", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  return res.json(buildFaceIdChallenge());
+});
+
 app.post("/auth/register", async (req, res) => {
   type RegisterReq = components["schemas"]["RegisterRequest"];
   const { captchaToken, captchaOffset } = readSliderCaptchaSubmission(req.body);
+  const faceEnrollment = readFaceIdEnrollment(req.body);
   const parsed = registerSchema.safeParse(req.body as RegisterReq);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
   if (!captchaToken || !Number.isFinite(captchaOffset)) {
     return res.status(400).json({ error: "Complete the slider captcha first" });
+  }
+  if (!faceEnrollment) {
+    return res.status(400).json({
+      error: "Complete FaceID enrollment before creating the account",
+    });
   }
 
   const userRepository = createUserRepository();
@@ -4277,6 +5393,8 @@ app.post("/auth/register", async (req, res) => {
         .json({ error: "Slider captcha verification failed" });
     }
 
+    const verifiedFace = await verifyFaceIdSubmissionStrict(faceEnrollment);
+
     const existingUser = await userRepository.findByEmail(email);
     if (existingUser && existingUser.status !== "PENDING") {
       return res.status(409).json({ error: "Email already registered" });
@@ -4288,9 +5406,36 @@ app.post("/auth/register", async (req, res) => {
       phone: parsed.data.phone?.trim(),
       address: parsed.data.address?.trim(),
       dob: parsed.data.dob?.trim(),
-      metadata: parsed.data.userName
-        ? { userName: parsed.data.userName.trim() }
-        : undefined,
+      metadata: {
+        ...(parsed.data.userName
+          ? { userName: parsed.data.userName.trim() }
+          : {}),
+        faceId: {
+          enabled: true,
+          enrolledAt: new Date().toISOString(),
+          challengeNonce: verifiedFace.challenge.nonce,
+          challengeSteps: verifiedFace.challenge.steps,
+          descriptor: faceEnrollment.descriptor,
+          descriptorHash: crypto
+            .createHash("sha256")
+            .update(faceEnrollment.descriptor)
+            .digest("hex"),
+          livenessScore: faceEnrollment.livenessScore,
+          motionScore: faceEnrollment.motionScore,
+          faceCoverage: faceEnrollment.faceCoverage,
+          sampleCount: faceEnrollment.sampleCount,
+          previewImage: faceEnrollment.previewImage,
+          antiSpoof: {
+            spoofScore: verifiedFace.antiSpoof.spoofScore,
+            confidence: verifiedFace.antiSpoof.confidence,
+            riskLevel: verifiedFace.antiSpoof.riskLevel,
+            reasons: verifiedFace.antiSpoof.reasons,
+            modelSource: verifiedFace.antiSpoof.modelSource,
+            modelVersion: verifiedFace.antiSpoof.modelVersion,
+          },
+          lastVerifiedAt: new Date().toISOString(),
+        },
+      },
     };
     const pendingUser = existingUser
       ? await (async () => {
@@ -4359,6 +5504,67 @@ app.post("/auth/register", async (req, res) => {
     }
     if (err instanceof Error && err.message === "INVALID_CAPTCHA") {
       return res.status(400).json({ error: "Invalid slider captcha payload" });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_EXPIRED") {
+      return res
+        .status(400)
+        .json({ error: "FaceID challenge expired. Scan again." });
+    }
+    if (err instanceof Error && err.message === "INVALID_FACE_ID") {
+      return res
+        .status(400)
+        .json({ error: "Invalid FaceID challenge payload" });
+    }
+    if (err instanceof Error && err.message === "INVALID_FACE_ID_DESCRIPTOR") {
+      return res.status(400).json({ error: "Invalid FaceID biometric sample" });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_STEP_MISMATCH") {
+      return res
+        .status(400)
+        .json({ error: "FaceID challenge was not completed correctly" });
+    }
+    if (
+      err instanceof Error &&
+      err.message === "FACE_ID_STEP_EVIDENCE_MISSING"
+    ) {
+      return res.status(400).json({
+        error:
+          "FaceID live challenge evidence was incomplete. Please scan again.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_LOW_LIVENESS") {
+      return res
+        .status(403)
+        .json({ error: "FaceID liveness check failed. Real face required." });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_LOW_MOTION") {
+      return res.status(403).json({
+        error: "FaceID motion challenge failed. Please move naturally.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_FACE_TOO_SMALL") {
+      return res
+        .status(400)
+        .json({ error: "Move closer to the camera for FaceID enrollment." });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_TOO_FEW_SAMPLES") {
+      return res
+        .status(400)
+        .json({ error: "FaceID capture was too short. Please scan again." });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_ANTI_SPOOF_FAILED") {
+      return res.status(403).json({
+        error: "FaceID anti-spoof check failed. A real live face is required.",
+      });
+    }
+    if (
+      err instanceof Error &&
+      err.message === "FACE_ID_ANTI_SPOOF_UNAVAILABLE"
+    ) {
+      return res.status(503).json({
+        error:
+          "FaceID security service is temporarily unavailable. Please try again.",
+      });
     }
     console.error("Failed to register user", err);
     return res.status(500).json({ error: "Internal error" });
@@ -4845,6 +6051,8 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
       });
     }
 
+    notice = buildFaceEnrollmentRequiredNotice(userDoc, notice);
+
     return res.json({
       ...buildAuthPayload(userDoc, sessionResult.sessionId, {
         notice,
@@ -4880,17 +6088,31 @@ app.post("/auth/login/verify", async (req, res) => {
     challengeId?: unknown;
     otp?: unknown;
   };
+  const { captchaToken, captchaOffset } = readSliderCaptchaSubmission(req.body);
   const challengeId =
     typeof body.challengeId === "string" ? body.challengeId.trim() : "";
   const otp = typeof body.otp === "string" ? body.otp.replace(/\D/g, "") : "";
   if (!challengeId || !/^\d{6}$/.test(otp)) {
     return res.status(400).json({ error: "Invalid login OTP payload" });
   }
+  if (!captchaToken || !Number.isFinite(captchaOffset)) {
+    return res.status(400).json({ error: "Complete the slider captcha first" });
+  }
 
   let challengeUserId = "";
   let challengePurpose = "";
   let challengeEmail = "";
   try {
+    const captchaVerified = verifySliderCaptchaSubmission(
+      captchaToken,
+      captchaOffset,
+    );
+    if (!captchaVerified) {
+      return res
+        .status(403)
+        .json({ error: "Slider captcha verification failed" });
+    }
+
     const challenge = await prisma.otpChallenge.findUnique({
       where: { id: challengeId },
     });
@@ -4974,6 +6196,7 @@ app.post("/auth/login/verify", async (req, res) => {
             ? `IP ${verifiedIp} is now trusted. Previous trusted IP: ${previousTrustedIp}.`
             : `IP ${verifiedIp} is now trusted for future sign-ins.`
           : undefined;
+    const loginNotice = buildFaceEnrollmentRequiredNotice(userDoc, notice);
 
     await logAuditEvent({
       actor: userDoc.email,
@@ -5004,11 +6227,19 @@ app.post("/auth/login/verify", async (req, res) => {
 
     return res.json(
       buildAuthPayload(userDoc, sessionResult.sessionId, {
-        notice,
+        notice: loginNotice,
         security: sessionSecurity,
       }),
     );
   } catch (err) {
+    if (err instanceof Error && err.message === "CAPTCHA_EXPIRED") {
+      return res
+        .status(400)
+        .json({ error: "Slider captcha expired. Please drag again." });
+    }
+    if (err instanceof Error && err.message === "INVALID_CAPTCHA") {
+      return res.status(400).json({ error: "Invalid slider captcha payload" });
+    }
     if (err instanceof Error && err.message === "OTP_CHALLENGE_NOT_FOUND") {
       return res.status(404).json({ error: "OTP challenge not found" });
     }
@@ -5379,6 +6610,158 @@ app.post("/auth/change-password", requireAuth, async (req, res) => {
   return res.status(204).send();
 });
 
+app.post("/auth/face/enroll", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const faceEnrollment = readFaceIdEnrollment(req.body);
+  if (!faceEnrollment) {
+    return res.status(400).json({ error: "FaceID enrollment is required" });
+  }
+
+  try {
+    const userRepository = createUserRepository();
+    const userDoc = await userRepository.findValidatedById(userId);
+    if (!userDoc) return res.status(404).json({ error: "User not found" });
+    if (userDoc.status !== "ACTIVE") {
+      return res.status(423).json({ error: "Account is not active" });
+    }
+
+    const verifiedFace = await verifyFaceIdSubmissionStrict(faceEnrollment);
+    const existingFaceId = getInternalFaceIdMetadata(userDoc.metadata);
+    const nowIso = new Date().toISOString();
+    const nextMetadata = {
+      ...(userDoc.metadata ?? {}),
+      faceId: {
+        ...(existingFaceId ?? {}),
+        enabled: true,
+        enrolledAt:
+          typeof existingFaceId?.enrolledAt === "string"
+            ? existingFaceId.enrolledAt
+            : nowIso,
+        updatedAt: nowIso,
+        challengeNonce: verifiedFace.challenge.nonce,
+        challengeSteps: verifiedFace.challenge.steps,
+        descriptor: faceEnrollment.descriptor,
+        descriptorHash: crypto
+          .createHash("sha256")
+          .update(faceEnrollment.descriptor)
+          .digest("hex"),
+        livenessScore: faceEnrollment.livenessScore,
+        motionScore: faceEnrollment.motionScore,
+        faceCoverage: faceEnrollment.faceCoverage,
+        sampleCount: faceEnrollment.sampleCount,
+        previewImage: faceEnrollment.previewImage,
+        antiSpoof: {
+          spoofScore: verifiedFace.antiSpoof.spoofScore,
+          confidence: verifiedFace.antiSpoof.confidence,
+          riskLevel: verifiedFace.antiSpoof.riskLevel,
+          reasons: verifiedFace.antiSpoof.reasons,
+          modelSource: verifiedFace.antiSpoof.modelSource,
+          modelVersion: verifiedFace.antiSpoof.modelVersion,
+        },
+        lastVerifiedAt: nowIso,
+      },
+    };
+
+    const updatedUser = await userRepository.updateMetadata(
+      userDoc.id,
+      nextMetadata,
+    );
+
+    await logAuditEvent({
+      actor: req.user?.email,
+      userId: userDoc.id,
+      action:
+        existingFaceId && existingFaceId.enabled === true
+          ? "FACE_ID_UPDATED"
+          : "FACE_ID_ENROLLED",
+      details: {
+        sampleCount: faceEnrollment.sampleCount,
+        motionScore: faceEnrollment.motionScore,
+        livenessScore: faceEnrollment.livenessScore,
+      },
+      ipAddress: getRequestIp(req),
+    });
+
+    return res.json({
+      status: "ok",
+      message:
+        existingFaceId && existingFaceId.enabled === true
+          ? "FaceID updated successfully."
+          : "FaceID enrolled successfully.",
+      metadata: buildPublicUserMetadata(updatedUser.metadata),
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === "FACE_ID_EXPIRED") {
+      return res.status(400).json({
+        error: "FaceID challenge expired. Start a new live scan.",
+      });
+    }
+    if (err instanceof Error && err.message === "INVALID_FACE_ID") {
+      return res
+        .status(400)
+        .json({ error: "Invalid FaceID challenge payload" });
+    }
+    if (err instanceof Error && err.message === "INVALID_FACE_ID_DESCRIPTOR") {
+      return res.status(400).json({ error: "Invalid FaceID biometric sample" });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_STEP_MISMATCH") {
+      return res.status(400).json({
+        error: "FaceID challenge steps were not completed in order",
+      });
+    }
+    if (
+      err instanceof Error &&
+      err.message === "FACE_ID_STEP_EVIDENCE_MISSING"
+    ) {
+      return res.status(400).json({
+        error:
+          "FaceID live challenge evidence was incomplete. Please scan again.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_LOW_LIVENESS") {
+      return res.status(400).json({
+        error:
+          "Live face check failed. Photos or static captures are not accepted.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_LOW_MOTION") {
+      return res.status(400).json({
+        error:
+          "Face movement was too limited. Follow the live challenge again.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_FACE_TOO_SMALL") {
+      return res.status(400).json({
+        error: "Move closer to the camera so your face fills the scan area.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_TOO_FEW_SAMPLES") {
+      return res.status(400).json({
+        error: "Face sample was too short. Hold steady and try again.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_ANTI_SPOOF_FAILED") {
+      return res.status(403).json({
+        error:
+          "Server anti-spoof checks rejected this scan. Please use a real live face.",
+      });
+    }
+    if (
+      err instanceof Error &&
+      err.message === "FACE_ID_ANTI_SPOOF_UNAVAILABLE"
+    ) {
+      return res.status(503).json({
+        error:
+          "FaceID anti-spoof service is temporarily unavailable. Please try again.",
+      });
+    }
+    console.error("Failed to enroll FaceID", err);
+    return res.status(500).json({ error: "Failed to enroll FaceID" });
+  }
+});
+
 app.get("/auth/me", requireAuth, async (req, res) => {
   const userId = req.user?.sub;
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
@@ -5403,7 +6786,7 @@ app.get("/auth/me", requireAuth, async (req, res) => {
       address: typeof userDoc.address === "string" ? userDoc.address : "",
       dob: typeof userDoc.dob === "string" ? userDoc.dob : "",
       avatar: typeof metadata.avatar === "string" ? metadata.avatar : undefined,
-      metadata,
+      metadata: buildPublicUserMetadata(metadata),
       security:
         authSecurityState.activeSession?.security ??
         buildSessionSecurityState("low"),
@@ -5445,6 +6828,7 @@ app.patch("/auth/me", requireAuth, async (req, res) => {
     ...metadata,
     ...(avatar ? { avatar } : {}),
   };
+  delete (safeMetadata as Record<string, unknown>).faceId;
 
   try {
     const userRepository = createUserRepository();
@@ -5478,10 +6862,7 @@ app.patch("/auth/me", requireAuth, async (req, res) => {
         typeof (updated.metadata as Record<string, unknown>).avatar === "string"
           ? ((updated.metadata as Record<string, unknown>).avatar as string)
           : undefined,
-      metadata:
-        updated.metadata && typeof updated.metadata === "object"
-          ? (updated.metadata as Record<string, unknown>)
-          : {},
+      metadata: buildPublicUserMetadata(updated.metadata),
     });
   } catch (err) {
     console.error("Failed to update profile", err);
@@ -5813,7 +7194,7 @@ app.post("/wallet/deposit", requireAuth, async (req, res) => {
     const userDoc = await userRepository.findValidatedById(userId);
     if (!userDoc) return res.status(404).json({ error: "User not found" });
 
-    const updatedWallet = await prisma.$transaction(async (tx) => {
+    const depositResult = await prisma.$transaction(async (tx) => {
       const wallet = await tx.wallet.findFirst({ where: { userId } });
       const nextWallet =
         wallet ??
@@ -5833,24 +7214,34 @@ app.post("/wallet/deposit", requireAuth, async (req, res) => {
       });
 
       const transactionId = generateEncryptedTransactionId();
-      await tx.transaction.create({
-        data: {
-          id: transactionId,
-          ...buildEncryptedTransactionCreateData(transactionId, {
-            walletId: updated.id,
-            sensitive: {
-              amount,
-              type: "DEPOSIT",
-              status: "COMPLETED",
-              description: "Wallet deposit",
-              fromUserId: userId,
-              toUserId: userId,
-            },
-          }),
-        },
-      });
+      const transaction = decryptStoredTransaction(
+        await tx.transaction.create({
+          data: {
+            id: transactionId,
+            ...buildEncryptedTransactionCreateData(transactionId, {
+              walletId: updated.id,
+              sensitive: {
+                amount,
+                type: "DEPOSIT",
+                status: "COMPLETED",
+                description: "Wallet deposit",
+                fromUserId: userId,
+                toUserId: userId,
+                metadata: {
+                  entry: "CREDIT",
+                  source: "SELF_DEPOSIT",
+                },
+              },
+            }),
+          },
+        }),
+      );
 
-      return updated;
+      return {
+        updated,
+        previousBalance: Number(nextWallet.balance),
+        transaction,
+      };
     });
 
     notifyBalanceChange({
@@ -5858,17 +7249,36 @@ app.post("/wallet/deposit", requireAuth, async (req, res) => {
       recipientName: getRecipientName(userDoc),
       direction: "credit",
       amount,
-      balance: Number(updatedWallet.balance),
-      currency: updatedWallet.currency,
+      balance: Number(depositResult.updated.balance),
+      currency: depositResult.updated.currency,
       transactionType: "DEPOSIT",
       description: "Wallet deposit",
       occurredAt: new Date().toISOString(),
     });
 
+    await logFundsFlowEvent({
+      actor: req.user?.email,
+      userId,
+      ipAddress: getRequestIp(req),
+      channel: "WALLET_DEPOSIT",
+      lifecycle: "COMPLETED",
+      direction: "INFLOW",
+      amount,
+      currency: depositResult.updated.currency,
+      fromAccount: null,
+      toAccount: null,
+      fromUserId: userId,
+      toUserId: userId,
+      transactionId: depositResult.transaction.id,
+      sourceLabel: "SELF_DEPOSIT",
+      balanceBefore: depositResult.previousBalance,
+      balanceAfter: Number(depositResult.updated.balance),
+    });
+
     return res.json({
-      id: updatedWallet.id,
-      balance: Number(updatedWallet.balance),
-      currency: updatedWallet.currency,
+      id: depositResult.updated.id,
+      balance: Number(depositResult.updated.balance),
+      currency: depositResult.updated.currency,
     });
   } catch (err) {
     console.error("Failed to deposit", err);
@@ -5896,6 +7306,19 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       sessionSecurity: req.sessionSecurity,
     })
   ) {
+    await logFundsFlowEvent({
+      actor: req.user?.email,
+      userId: senderUserId,
+      ipAddress: getRequestIp(req),
+      channel: "WALLET_TRANSFER",
+      lifecycle: "BLOCKED",
+      direction: "OUTFLOW",
+      amount,
+      currency: "USD",
+      toAccount:
+        typeof body.toAccount === "string" ? body.toAccount.trim() : null,
+      sourceLabel: "SESSION_SECURITY_LIMIT",
+    });
     return res.status(403).json({
       error: `Large transfers above $${Number(
         req.sessionSecurity?.maxTransferAmount || MEDIUM_RISK_TRANSFER_LIMIT,
@@ -5914,6 +7337,103 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
     const userRepository = createUserRepository();
     const user = await userRepository.findValidatedById(senderUserId);
     if (!user) return res.status(404).json({ error: "User not found" });
+    const storedFaceId = getInternalFaceIdMetadata(user.metadata);
+    const hasTransferFaceId =
+      storedFaceId?.enabled === true &&
+      typeof storedFaceId.descriptor === "string" &&
+      storedFaceId.descriptor.length > 0;
+    const transferStepUpPolicy = await evaluateTransferStepUpPolicy({
+      userId: senderUserId,
+      amount: context.amount,
+      currency: context.senderWallet.currency,
+    });
+    if (transferStepUpPolicy.shouldBlockContinuousLargeTransfer) {
+      await logFundsFlowEvent({
+        actor: req.user?.email,
+        userId: senderUserId,
+        ipAddress: getRequestIp(req),
+        channel: "WALLET_TRANSFER",
+        lifecycle: "BLOCKED",
+        direction: "OUTFLOW",
+        amount: context.amount,
+        currency: context.senderWallet.currency,
+        fromAccount: context.senderAccountNumber,
+        toAccount: context.receiverAccountNumber,
+        fromUserId: senderUserId,
+        toUserId: context.resolvedReceiverUserId,
+        balanceBefore: Number(context.senderWallet.balance),
+        balanceAfter: Math.max(
+          0,
+          Number(context.senderWallet.balance) - context.amount,
+        ),
+        sourceLabel: "CONTINUOUS_LARGE_TRANSFER_BLOCK",
+      });
+      await sendTransferRiskAlertEmail({
+        to: user.email,
+        recipientName: user.fullName || user.email.split("@")[0] || "User",
+        amount: context.amount,
+        currency: context.senderWallet.currency,
+        toAccount: context.receiverAccountNumber,
+        reason:
+          transferStepUpPolicy.blockReason ||
+          "Repeated large outgoing transfers were detected.",
+        totalOutflowWindow: transferStepUpPolicy.rollingOutflowAmount,
+        windowLabel: `${CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES} minutes`,
+        actionRequired: "blocked",
+      });
+      return res.status(423).json({
+        error:
+          transferStepUpPolicy.blockReason ||
+          "Repeated high-value transfers are temporarily blocked.",
+        blockedUntil: transferStepUpPolicy.blockedUntil,
+        retryAfterSeconds: transferStepUpPolicy.retryAfterSeconds,
+      });
+    }
+    if (transferStepUpPolicy.faceIdRequired && !hasTransferFaceId) {
+      await logFundsFlowEvent({
+        actor: req.user?.email,
+        userId: senderUserId,
+        ipAddress: getRequestIp(req),
+        channel: "WALLET_TRANSFER",
+        lifecycle: "BLOCKED",
+        direction: "OUTFLOW",
+        amount: context.amount,
+        currency: context.senderWallet.currency,
+        fromAccount: context.senderAccountNumber,
+        toAccount: context.receiverAccountNumber,
+        fromUserId: senderUserId,
+        toUserId: context.resolvedReceiverUserId,
+        balanceBefore: Number(context.senderWallet.balance),
+        balanceAfter: Math.max(
+          0,
+          Number(context.senderWallet.balance) - context.amount,
+        ),
+        sourceLabel: "FACE_ID_REQUIRED",
+      });
+      await sendTransferRiskAlertEmail({
+        to: user.email,
+        recipientName: user.fullName || user.email.split("@")[0] || "User",
+        amount: context.amount,
+        currency: context.senderWallet.currency,
+        toAccount: context.receiverAccountNumber,
+        reason:
+          transferStepUpPolicy.faceIdReason ||
+          `Transfers above ${formatMoneyAmount(
+            context.senderWallet.currency,
+            TRANSFER_FACE_ID_THRESHOLD,
+          )} require FaceID verification.`,
+        totalOutflowWindow: transferStepUpPolicy.rollingOutflowAmount,
+        windowLabel: `${CUMULATIVE_TRANSFER_FACE_ID_WINDOW_MINUTES} minutes`,
+        actionRequired: "faceid",
+      });
+      return res.status(403).json({
+        error:
+          transferStepUpPolicy.faceIdReason ||
+          `Transfers above $${TRANSFER_FACE_ID_THRESHOLD.toLocaleString(
+            "en-US",
+          )} require FaceID enrollment on this account.`,
+      });
+    }
 
     const existingSafetyHold = getTransferSafetyHold(user.metadata);
     const hasMatchingSafetyHold = Boolean(
@@ -5934,17 +7454,27 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       }
     }
 
-    const [failedTx24h, velocity1h, spendProfile, recipientProfile] =
-      await Promise.all([
-        countRecentFailedTransfers(senderUserId, 24),
-        countRecentTransferVelocity(senderUserId, 1),
-        getTransferSpendProfile(senderUserId, context.amount),
-        getTransferRecipientProfile({
-          userId: senderUserId,
-          toUserId: context.resolvedReceiverUserId,
-          toAccount: context.receiverAccountNumber,
-        }),
-      ]);
+    const [
+      failedTx24h,
+      velocity1h,
+      spendProfile,
+      recipientProfile,
+      behaviorProfile,
+    ] = await Promise.all([
+      countRecentFailedTransfers(senderUserId, 24),
+      countRecentTransferVelocity(senderUserId, 1),
+      getTransferSpendProfile(senderUserId, context.amount),
+      getTransferRecipientProfile({
+        userId: senderUserId,
+        toUserId: context.resolvedReceiverUserId,
+        toAccount: context.receiverAccountNumber,
+      }),
+      getTransferBehaviorProfile({
+        userId: senderUserId,
+        toAccount: context.receiverAccountNumber,
+        amount: context.amount,
+      }),
+    ]);
 
     let aiResult = DEFAULT_AI_RESPONSE;
     try {
@@ -5999,6 +7529,8 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       aiResult,
       spendProfile,
       recipientProfile,
+      behaviorProfile,
+      recipientAccount: context.receiverAccountNumber,
       note: context.note,
       requestKey: aiResult.requestKey,
     });
@@ -6082,6 +7614,34 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
         ipAddress: getRequestIp(req),
       });
 
+      await logFundsFlowEvent({
+        actor: req.user?.email,
+        userId: senderUserId,
+        ipAddress: getRequestIp(req),
+        channel: "WALLET_TRANSFER",
+        lifecycle: "BLOCKED",
+        direction: "OUTFLOW",
+        amount: context.amount,
+        currency: context.senderWallet.currency,
+        fromAccount: context.senderAccountNumber,
+        toAccount: context.receiverAccountNumber,
+        fromUserId: senderUserId,
+        toUserId: context.resolvedReceiverUserId,
+        requestKey: transferAdvisory.requestKey || aiResult.requestKey || null,
+        note: context.note,
+        recipientKnown: recipientProfile.isKnownRecipient,
+        riskLevel: aiResult.riskLevel,
+        riskScore: aiResult.score,
+        transferAdvisory,
+        aiMonitoring: aiResult,
+        balanceBefore: Number(context.senderWallet.balance),
+        balanceAfter: Math.max(
+          0,
+          Number(context.senderWallet.balance) - context.amount,
+        ),
+        sourceLabel: "SCAM_PATTERN_BLOCK",
+      });
+
       return res.status(423).json({
         error:
           "This transfer has been temporarily blocked because it matches a high-risk scam pattern.",
@@ -6113,6 +7673,34 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
           aiMonitoring: buildStoredAiMonitoring(aiResult),
         },
         ipAddress: getRequestIp(req),
+      });
+
+      await logFundsFlowEvent({
+        actor: req.user?.email,
+        userId: senderUserId,
+        ipAddress: getRequestIp(req),
+        channel: "WALLET_TRANSFER",
+        lifecycle: "REVIEW_REQUIRED",
+        direction: "OUTFLOW",
+        amount: context.amount,
+        currency: context.senderWallet.currency,
+        fromAccount: context.senderAccountNumber,
+        toAccount: context.receiverAccountNumber,
+        fromUserId: senderUserId,
+        toUserId: context.resolvedReceiverUserId,
+        requestKey: transferAdvisory.requestKey || aiResult.requestKey || null,
+        note: context.note,
+        recipientKnown: recipientProfile.isKnownRecipient,
+        riskLevel: aiResult.riskLevel,
+        riskScore: aiResult.score,
+        transferAdvisory,
+        aiMonitoring: aiResult,
+        balanceBefore: Number(context.senderWallet.balance),
+        balanceAfter: Math.max(
+          0,
+          Number(context.senderWallet.balance) - context.amount,
+        ),
+        sourceLabel: "AI_WARNING_REVIEW",
       });
 
       return res.status(409).json({
@@ -6163,10 +7751,14 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
         toAccount: context.receiverAccountNumber,
         amount: context.amount,
         note: context.note,
+        currency: context.senderWallet.currency,
         txAiResult: aiResult,
         txSpendProfile: spendProfile,
         txRecipientProfile: recipientProfile,
         transferAdvisory,
+        faceIdRequired: transferStepUpPolicy.faceIdRequired,
+        faceIdReason: transferStepUpPolicy.faceIdReason,
+        rollingOutflowAmount: transferStepUpPolicy.rollingOutflowAmount,
       },
     });
 
@@ -6178,6 +7770,25 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       amount: context.amount,
       toAccount: context.receiverAccountNumber,
     });
+
+    if (
+      transferStepUpPolicy.faceIdRequired &&
+      context.amount <= TRANSFER_FACE_ID_THRESHOLD
+    ) {
+      await sendTransferRiskAlertEmail({
+        to: user.email,
+        recipientName: user.fullName || user.email.split("@")[0] || "User",
+        amount: context.amount,
+        currency: context.senderWallet.currency,
+        toAccount: context.receiverAccountNumber,
+        reason:
+          transferStepUpPolicy.faceIdReason ||
+          `Your total outgoing transfers in the last ${CUMULATIVE_TRANSFER_FACE_ID_WINDOW_MINUTES} minutes require FaceID verification.`,
+        totalOutflowWindow: transferStepUpPolicy.rollingOutflowAmount,
+        windowLabel: `${CUMULATIVE_TRANSFER_FACE_ID_WINDOW_MINUTES} minutes`,
+        actionRequired: "faceid",
+      });
+    }
 
     await logAuditEvent({
       actor: req.user?.email,
@@ -6201,6 +7812,34 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       ipAddress: getRequestIp(req),
     });
 
+    await logFundsFlowEvent({
+      actor: req.user?.email,
+      userId: senderUserId,
+      ipAddress: getRequestIp(req),
+      channel: "WALLET_TRANSFER",
+      lifecycle: "PENDING_OTP",
+      direction: "OUTFLOW",
+      amount: context.amount,
+      currency: context.senderWallet.currency,
+      fromAccount: context.senderAccountNumber,
+      toAccount: context.receiverAccountNumber,
+      fromUserId: senderUserId,
+      toUserId: context.resolvedReceiverUserId,
+      requestKey: transferAdvisory?.requestKey || aiResult.requestKey || null,
+      note: context.note,
+      recipientKnown: recipientProfile.isKnownRecipient,
+      riskLevel: aiResult.riskLevel,
+      riskScore: aiResult.score,
+      transferAdvisory: transferAdvisory || null,
+      aiMonitoring: aiResult,
+      balanceBefore: Number(context.senderWallet.balance),
+      balanceAfter: Math.max(
+        0,
+        Number(context.senderWallet.balance) - context.amount,
+      ),
+      sourceLabel: "OTP_SENT",
+    });
+
     return res.json({
       status: "ok",
       challengeId: otpChallenge.challengeId,
@@ -6209,6 +7848,9 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       retryAfterSeconds: otpChallenge.retryAfterSeconds,
       anomaly: aiResult,
       transferAdvisory,
+      faceIdRequired: transferStepUpPolicy.faceIdRequired,
+      faceIdReason: transferStepUpPolicy.faceIdReason,
+      rollingOutflowAmount: transferStepUpPolicy.rollingOutflowAmount,
     });
   } catch (err) {
     if (err instanceof Error && err.message === "OTP_COOLDOWN_ACTIVE") {
@@ -6289,7 +7931,7 @@ app.post("/transfer/advisory/dismiss", requireAuth, async (req, res) => {
   return res.json({ status: "ok" });
 });
 
-app.post("/transfer/confirm", requireAuth, async (req, res) => {
+app.post("/transfer/otp/verify", requireAuth, async (req, res) => {
   const senderUserId = req.user?.sub;
   if (!senderUserId) return res.status(401).json({ error: "Unauthorized" });
 
@@ -6297,6 +7939,151 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
     challengeId?: unknown;
     otp?: unknown;
   };
+  const challengeId =
+    typeof body.challengeId === "string" ? body.challengeId.trim() : "";
+  const otp = typeof body.otp === "string" ? body.otp.replace(/\D/g, "") : "";
+  if (!challengeId || !/^\d{6}$/.test(otp)) {
+    return res.status(400).json({ error: "Invalid transfer OTP payload" });
+  }
+
+  try {
+    const { challenge, metadata } = await verifyEmailOtpChallenge({
+      userId: senderUserId,
+      purpose: "TRANSFER",
+      challengeId,
+      otp,
+    });
+
+    const amount = toPositiveAmount(metadata.amount);
+    const currency =
+      typeof metadata.currency === "string" && metadata.currency.trim()
+        ? metadata.currency.trim()
+        : "USD";
+    const toAccount =
+      typeof metadata.toAccount === "string" ? metadata.toAccount : "";
+    const toUserId =
+      typeof metadata.toUserId === "string" ? metadata.toUserId : "";
+    const transferAiResult = normalizeAiResponse(
+      metadata.txAiResult as Record<string, unknown> | undefined,
+    );
+    const transferAdvisory = normalizeTransferSafetyAdvisory(
+      metadata.transferAdvisory,
+    );
+
+    if (!amount || (!toAccount && !toUserId)) {
+      return res
+        .status(400)
+        .json({ error: "Stored OTP transfer payload is invalid" });
+    }
+    const faceIdRequired =
+      metadata.faceIdRequired === true || amount > TRANSFER_FACE_ID_THRESHOLD;
+    const faceIdReason =
+      typeof metadata.faceIdReason === "string" ? metadata.faceIdReason : null;
+    const rollingOutflowAmount =
+      typeof metadata.rollingOutflowAmount === "number"
+        ? metadata.rollingOutflowAmount
+        : null;
+
+    await logAuditEvent({
+      actor: req.user?.email,
+      userId: senderUserId,
+      action: "TRANSFER_OTP_PREVERIFIED",
+      details: {
+        challengeId: challenge.id,
+        amount,
+        toAccount: toAccount || null,
+        txRiskLevel: transferAiResult.riskLevel,
+        txScore: transferAiResult.score,
+        transferAdvisorySeverity: transferAdvisory?.severity || null,
+      },
+      metadata: {
+        requestKey:
+          transferAiResult.requestKey || transferAdvisory?.requestKey || null,
+        transferAdvisory: transferAdvisory || undefined,
+        aiMonitoring: buildStoredAiMonitoring(transferAiResult),
+      },
+      ipAddress: getRequestIp(req),
+    });
+
+    await logFundsFlowEvent({
+      actor: req.user?.email,
+      userId: senderUserId,
+      ipAddress: getRequestIp(req),
+      channel: "WALLET_TRANSFER",
+      lifecycle: "OTP_VERIFIED",
+      direction: "OUTFLOW",
+      amount,
+      currency,
+      toAccount: toAccount || null,
+      fromUserId: senderUserId,
+      toUserId: toUserId || null,
+      requestKey:
+        transferAiResult.requestKey || transferAdvisory?.requestKey || null,
+      note: typeof metadata.note === "string" ? metadata.note : null,
+      riskLevel: transferAiResult.riskLevel,
+      riskScore: transferAiResult.score,
+      transferAdvisory: transferAdvisory || null,
+      aiMonitoring: transferAiResult,
+      sourceLabel: "OTP_PREVERIFIED",
+    });
+
+    return res.json({
+      status: "ok",
+      faceIdRequired,
+      faceIdReason,
+      rollingOutflowAmount,
+      challengeId: challenge.id,
+      expiresAt: challenge.expiresAt.toISOString(),
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === "OTP_CHALLENGE_NOT_FOUND") {
+      return res.status(404).json({ error: "OTP challenge not found" });
+    }
+    if (err instanceof Error && err.message === "OTP_CHALLENGE_ALREADY_USED") {
+      return res.status(400).json({ error: "OTP challenge already used" });
+    }
+    if (err instanceof Error && err.message === "OTP_EXPIRED") {
+      return res.status(400).json({ error: "OTP has expired" });
+    }
+    if (err instanceof Error && err.message === "OTP_TOO_MANY_ATTEMPTS") {
+      return res.status(429).json({
+        error: "Too many invalid OTP attempts",
+        remainingAttempts:
+          "remainingAttempts" in err
+            ? ((err as { remainingAttempts?: number }).remainingAttempts ?? 0)
+            : 0,
+      });
+    }
+    if (err instanceof Error && err.message === "OTP_INCORRECT") {
+      const remainingAttempts =
+        "remainingAttempts" in err
+          ? ((err as { remainingAttempts?: number }).remainingAttempts ?? null)
+          : null;
+      return res.status(400).json({
+        error:
+          remainingAttempts === null
+            ? "Incorrect OTP"
+            : `Incorrect OTP. ${remainingAttempts} attempt${
+                remainingAttempts === 1 ? "" : "s"
+              } remaining.`,
+        remainingAttempts,
+      });
+    }
+    console.error("Failed to verify transfer OTP", err);
+    return res.status(500).json({ error: "Failed to verify transfer OTP" });
+  }
+});
+
+app.post("/transfer/confirm", requireAuth, async (req, res) => {
+  const senderUserId = req.user?.sub;
+  if (!senderUserId) return res.status(401).json({ error: "Unauthorized" });
+
+  const body = req.body as {
+    challengeId?: unknown;
+    otp?: unknown;
+    faceIdEnrollment?: unknown;
+  };
+  const transferFaceEnrollment = readFaceIdEnrollment(req.body);
   const challengeId =
     typeof body.challengeId === "string" ? body.challengeId.trim() : "";
   const otp = typeof body.otp === "string" ? body.otp.replace(/\D/g, "") : "";
@@ -6336,6 +8123,39 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
       return res
         .status(400)
         .json({ error: "Stored OTP transfer payload is invalid" });
+    }
+    const faceIdRequired =
+      metadata.faceIdRequired === true || amount > TRANSFER_FACE_ID_THRESHOLD;
+    const faceIdReason =
+      typeof metadata.faceIdReason === "string" ? metadata.faceIdReason : null;
+    if (faceIdRequired) {
+      const storedFaceId = getInternalFaceIdMetadata(senderUser.metadata);
+      const storedDescriptor =
+        storedFaceId && typeof storedFaceId.descriptor === "string"
+          ? storedFaceId.descriptor
+          : "";
+      if (storedFaceId?.enabled !== true || !storedDescriptor) {
+        return res.status(403).json({
+          error:
+            faceIdReason ||
+            `Transfers above $${TRANSFER_FACE_ID_THRESHOLD.toLocaleString(
+              "en-US",
+            )} require FaceID enrollment on this account.`,
+        });
+      }
+      if (!transferFaceEnrollment) {
+        return res.status(400).json({
+          error:
+            faceIdReason ||
+            `Complete FaceID verification for transfers above $${TRANSFER_FACE_ID_THRESHOLD.toLocaleString(
+              "en-US",
+            )}.`,
+        });
+      }
+      await verifyFaceIdSubmissionStrict(
+        transferFaceEnrollment,
+        storedDescriptor,
+      );
     }
 
     const context = await resolveTransferContext({
@@ -6384,6 +8204,68 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
         aiMonitoring: buildStoredAiMonitoring(transferAiResult),
       },
       ipAddress: getRequestIp(req),
+    });
+
+    await logFundsFlowEvent({
+      actor: req.user?.email,
+      userId: senderUserId,
+      ipAddress: getRequestIp(req),
+      channel: "WALLET_TRANSFER",
+      lifecycle: "COMPLETED",
+      direction: "OUTFLOW",
+      amount: context.amount,
+      currency: transferResult.currency,
+      fromAccount: context.senderAccountNumber,
+      toAccount: context.receiverAccountNumber,
+      fromUserId: senderUserId,
+      toUserId: context.resolvedReceiverUserId,
+      transactionId: transferResult.transaction.id,
+      reconciliationId: transferResult.reconciliationId,
+      requestKey:
+        transferAiResult.requestKey || transferAdvisory?.requestKey || null,
+      note: context.note,
+      riskLevel: transferAiResult.riskLevel,
+      riskScore: transferAiResult.score,
+      transferAdvisory: transferAdvisory || null,
+      aiMonitoring: transferAiResult,
+      balanceBefore: transferResult.senderBalance + context.amount,
+      balanceAfter: transferResult.senderBalance,
+      sourceLabel: "TRANSFER_CONFIRMED",
+    });
+
+    await logFundsFlowEvent({
+      actor: req.user?.email,
+      userId: context.resolvedReceiverUserId,
+      ipAddress: getRequestIp(req),
+      channel: "WALLET_TRANSFER",
+      lifecycle: "COMPLETED",
+      direction: "INFLOW",
+      amount: context.amount,
+      currency: transferResult.currency,
+      fromAccount: context.senderAccountNumber,
+      toAccount: context.receiverAccountNumber,
+      fromUserId: senderUserId,
+      toUserId: context.resolvedReceiverUserId,
+      transactionId: transferResult.transaction.id,
+      reconciliationId: transferResult.reconciliationId,
+      requestKey:
+        transferAiResult.requestKey || transferAdvisory?.requestKey || null,
+      note: context.note,
+      riskLevel: transferAiResult.riskLevel,
+      riskScore: transferAiResult.score,
+      transferAdvisory: transferAdvisory
+        ? {
+            ...transferAdvisory,
+            severity:
+              transferAdvisory.severity === "blocked"
+                ? "warning"
+                : transferAdvisory.severity,
+          }
+        : null,
+      aiMonitoring: transferAiResult,
+      balanceBefore: transferResult.receiverBalance - context.amount,
+      balanceAfter: transferResult.receiverBalance,
+      sourceLabel: "TRANSFER_RECEIVED",
     });
 
     notifyBalanceChange({
@@ -6457,6 +8339,73 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
     }
     if (err instanceof Error && err.message === "RECIPIENT_LOCKED") {
       return res.status(423).json({ error: "Recipient account is locked" });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_EXPIRED") {
+      return res
+        .status(400)
+        .json({ error: "FaceID challenge expired. Scan again." });
+    }
+    if (err instanceof Error && err.message === "INVALID_FACE_ID") {
+      return res
+        .status(400)
+        .json({ error: "Invalid FaceID challenge payload" });
+    }
+    if (err instanceof Error && err.message === "INVALID_FACE_ID_DESCRIPTOR") {
+      return res.status(400).json({ error: "Invalid FaceID biometric sample" });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_STEP_MISMATCH") {
+      return res.status(400).json({
+        error: "FaceID verification was not completed correctly.",
+      });
+    }
+    if (
+      err instanceof Error &&
+      err.message === "FACE_ID_STEP_EVIDENCE_MISSING"
+    ) {
+      return res.status(400).json({
+        error:
+          "FaceID live challenge evidence was incomplete. Please scan again.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_LOW_LIVENESS") {
+      return res.status(400).json({
+        error: "FaceID liveness check failed. Real face required.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_LOW_MOTION") {
+      return res.status(400).json({
+        error: "FaceID motion challenge failed. Please scan again.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_FACE_TOO_SMALL") {
+      return res.status(400).json({
+        error: "Move closer to the camera for FaceID verification.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_TOO_FEW_SAMPLES") {
+      return res.status(400).json({
+        error: "FaceID capture was too short. Please scan again.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_MISMATCH") {
+      return res.status(403).json({
+        error: "FaceID does not match this account.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_ANTI_SPOOF_FAILED") {
+      return res.status(403).json({
+        error:
+          "Server anti-spoof checks rejected this FaceID scan. Please use a real live face.",
+      });
+    }
+    if (
+      err instanceof Error &&
+      err.message === "FACE_ID_ANTI_SPOOF_UNAVAILABLE"
+    ) {
+      return res.status(503).json({
+        error:
+          "FaceID anti-spoof service is temporarily unavailable. Please try again.",
+      });
     }
     console.error("Failed to confirm transfer with OTP", err);
     return res.status(500).json({ error: "Failed to confirm transfer" });
@@ -6810,6 +8759,23 @@ app.post(
         ipAddress: getRequestIp(req),
       });
 
+      await logFundsFlowEvent({
+        actor: req.user?.email ?? "admin",
+        userId: targetUserId,
+        ipAddress: getRequestIp(req),
+        channel: "ADMIN_TOPUP",
+        lifecycle: "COMPLETED",
+        direction: "INFLOW",
+        amount,
+        currency: updated.nextWallet.currency,
+        fromUserId: adminUserId,
+        toUserId: targetUser.id,
+        transactionId: updated.transaction.id,
+        sourceLabel: "ADMIN_TOPUP",
+        balanceBefore: Number(updated.nextWallet.balance) - amount,
+        balanceAfter: Number(updated.nextWallet.balance),
+      });
+
       notifyBalanceChange({
         to: targetUser.email,
         recipientName: getRecipientName(targetUser),
@@ -7048,6 +9014,192 @@ app.get(
       createdAt: log.createdAt,
     }));
     res.json(normalized);
+  },
+);
+
+app.get(
+  "/admin/funds-flow-dataset",
+  requireAuth,
+  requireRole(["ADMIN"]),
+  async (req, res) => {
+    const limit = Math.min(
+      parseInt(String(req.query.limit ?? "1000"), 10) || 1000,
+      FUNDS_FLOW_DATASET_LIMIT_MAX,
+    );
+    const format =
+      String(req.query.format ?? "json").toLowerCase() === "csv"
+        ? "csv"
+        : "json";
+    const lifecycleFilter = new Set(
+      parseFundsFlowListFilter(req.query.lifecycle),
+    );
+    const directionFilter = new Set(
+      parseFundsFlowListFilter(req.query.direction),
+    );
+    const channelFilter = new Set(parseFundsFlowListFilter(req.query.channel));
+    const userId =
+      typeof req.query.userId === "string" && req.query.userId.trim().length > 0
+        ? req.query.userId.trim()
+        : null;
+    const from =
+      typeof req.query.from === "string" &&
+      !Number.isNaN(Date.parse(req.query.from))
+        ? new Date(req.query.from)
+        : null;
+    const to =
+      typeof req.query.to === "string" &&
+      !Number.isNaN(Date.parse(req.query.to))
+        ? new Date(req.query.to)
+        : null;
+
+    const logs = await prisma.auditLog.findMany({
+      where: {
+        action: "FUNDS_FLOW_EVENT",
+        ...(userId ? { userId } : {}),
+        ...(from || to
+          ? {
+              createdAt: {
+                ...(from ? { gte: from } : {}),
+                ...(to ? { lte: to } : {}),
+              },
+            }
+          : {}),
+      },
+      orderBy: { createdAt: "desc" },
+      take: FUNDS_FLOW_DATASET_LIMIT_MAX,
+      select: {
+        id: true,
+        actor: true,
+        userId: true,
+        ipAddress: true,
+        createdAt: true,
+        metadata: true,
+      },
+    });
+
+    const rows = logs
+      .map(toFundsFlowDatasetRow)
+      .filter((row): row is FundsFlowDatasetRow => Boolean(row))
+      .filter(
+        (row) =>
+          (lifecycleFilter.size === 0 || lifecycleFilter.has(row.lifecycle)) &&
+          (directionFilter.size === 0 || directionFilter.has(row.direction)) &&
+          (channelFilter.size === 0 || channelFilter.has(row.channel)),
+      )
+      .slice(0, limit);
+
+    const summary = rows.reduce(
+      (acc, row) => {
+        acc.byLifecycle[row.lifecycle] =
+          (acc.byLifecycle[row.lifecycle] || 0) + 1;
+        acc.byDirection[row.direction] =
+          (acc.byDirection[row.direction] || 0) + 1;
+        acc.byChannel[row.channel] = (acc.byChannel[row.channel] || 0) + 1;
+        if (row.direction === "INFLOW") {
+          acc.totalInflow += row.amount;
+        } else {
+          acc.totalOutflow += row.amount;
+        }
+        return acc;
+      },
+      {
+        byLifecycle: {} as Record<string, number>,
+        byDirection: {} as Record<string, number>,
+        byChannel: {} as Record<string, number>,
+        totalInflow: 0,
+        totalOutflow: 0,
+      },
+    );
+
+    await logAuditEvent({
+      actor: req.user?.email ?? "admin",
+      userId: req.user?.sub,
+      action: "ADMIN_EXPORT_FUNDS_FLOW_DATASET",
+      ipAddress: getRequestIp(req),
+      details: {
+        format,
+        limit,
+        count: rows.length,
+      },
+      metadata: {
+        format,
+        limit,
+        count: rows.length,
+        filters: {
+          lifecycle: Array.from(lifecycleFilter),
+          direction: Array.from(directionFilter),
+          channel: Array.from(channelFilter),
+          userId,
+          from: from?.toISOString() ?? null,
+          to: to?.toISOString() ?? null,
+        },
+      },
+    });
+
+    if (format === "csv") {
+      const columns: Array<keyof FundsFlowDatasetRow> = [
+        "id",
+        "createdAt",
+        "actor",
+        "userId",
+        "ipAddress",
+        "channel",
+        "lifecycle",
+        "direction",
+        "amount",
+        "currency",
+        "fromAccount",
+        "toAccount",
+        "fromUserId",
+        "toUserId",
+        "transactionId",
+        "reconciliationId",
+        "requestKey",
+        "note",
+        "sourceLabel",
+        "recipientKnown",
+        "riskLevel",
+        "riskScore",
+        "balanceBefore",
+        "balanceAfter",
+      ];
+      const csv = [
+        columns.join(","),
+        ...rows.map((row) =>
+          columns.map((column) => formatCsvValue(row[column])).join(","),
+        ),
+      ].join("\n");
+
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename=\"funds-flow-dataset-${new Date()
+          .toISOString()
+          .slice(0, 19)
+          .replace(/[:T]/g, "-")}.csv\"`,
+      );
+      return res.send(csv);
+    }
+
+    return res.json({
+      generatedAt: new Date().toISOString(),
+      count: rows.length,
+      filters: {
+        limit,
+        lifecycle: Array.from(lifecycleFilter),
+        direction: Array.from(directionFilter),
+        channel: Array.from(channelFilter),
+        userId,
+        from: from?.toISOString() ?? null,
+        to: to?.toISOString() ?? null,
+      },
+      summary: {
+        ...summary,
+        totalInflow: roundMoney(summary.totalInflow),
+        totalOutflow: roundMoney(summary.totalOutflow),
+      },
+      rows,
+    });
   },
 );
 
