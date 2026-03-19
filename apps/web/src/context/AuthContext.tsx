@@ -67,7 +67,9 @@ type NavigatorUAData = {
   platform: string;
   getHighEntropyValues?: (
     hints: string[],
-  ) => Promise<Record<string, unknown> & { fullVersionList?: NavigatorUADataBrand[] }>;
+  ) => Promise<
+    Record<string, unknown> & { fullVersionList?: NavigatorUADataBrand[] }
+  >;
 };
 
 declare global {
@@ -156,10 +158,10 @@ const AuthContext = createContext<{
     email: string;
     phone: string;
     address: string;
-      dob: string;
-      password: string;
-      captcha: SliderCaptchaProof;
-    }) => Promise<{
+    dob: string;
+    password: string;
+    captcha: SliderCaptchaProof;
+  }) => Promise<{
     challengeId: string;
     destination: string;
     expiresAt: string;
@@ -293,9 +295,8 @@ const parseLoginMonitoring = (value: unknown): LoginMonitoring | null => {
   if (!value || typeof value !== "object") return null;
   const data = value as Record<string, unknown>;
   const scoreRaw = data.score ?? data.anomaly_score;
-  const score = typeof scoreRaw === "number" && Number.isFinite(scoreRaw)
-    ? scoreRaw
-    : 0;
+  const score =
+    typeof scoreRaw === "number" && Number.isFinite(scoreRaw) ? scoreRaw : 0;
 
   return {
     score,
@@ -440,9 +441,10 @@ const fetchPublicIpFromProvider = async (provider: PublicIpProvider) => {
       return normalizePublicIpCandidate(await resp.text().catch(() => ""));
     }
 
-    const data = (await resp.json().catch(() => null)) as
-      | Record<string, unknown>
-      | null;
+    const data = (await resp.json().catch(() => null)) as Record<
+      string,
+      unknown
+    > | null;
     return normalizePublicIpCandidate(
       provider.field ? data?.[provider.field] : "",
     );
@@ -468,9 +470,7 @@ const resolvePublicIpAddress = async () => {
   return "";
 };
 
-const buildApiHeaders = async (
-  headers?: Record<string, string>,
-) => {
+const buildApiHeaders = async (headers?: Record<string, string>) => {
   const publicIp = await resolvePublicIpAddress();
   return {
     ...(headers ?? {}),
@@ -507,100 +507,103 @@ const formatPlatformLabel = (platform?: string, platformVersion?: string) => {
   return platform?.trim() || "";
 };
 
-const deriveDeviceTitle = (platform?: string, mobile?: boolean, userAgent?: string) => {
+const deriveDeviceTitle = (
+  platform?: string,
+  mobile?: boolean,
+  userAgent?: string,
+) => {
   const normalized = platform?.trim().toLowerCase() || "";
   if (normalized === "windows") return "Windows PC";
   if (normalized === "macos") return "Mac device";
   if (normalized === "ios" && /ipad/i.test(userAgent || "")) return "iPad";
   if (normalized === "ios") return "iPhone";
-  if (normalized === "android") return mobile ? "Android phone" : "Android device";
+  if (normalized === "android")
+    return mobile ? "Android phone" : "Android device";
   if (normalized === "linux") return "Linux device";
   if (/iphone/i.test(userAgent || "")) return "iPhone";
   if (/ipad/i.test(userAgent || "")) return "iPad";
-  if (/android/i.test(userAgent || "")) return /mobile/i.test(userAgent || "")
-    ? "Android phone"
-    : "Android device";
+  if (/android/i.test(userAgent || ""))
+    return /mobile/i.test(userAgent || "") ? "Android phone" : "Android device";
   if (/windows/i.test(userAgent || "")) return "Windows PC";
   if (/mac os/i.test(userAgent || "")) return "Mac device";
   if (/linux/i.test(userAgent || "")) return "Linux device";
   return "Unknown device";
 };
 
-const collectBrowserDeviceContext = async (): Promise<BrowserDeviceContext | null> => {
-  if (typeof navigator === "undefined") return null;
+const collectBrowserDeviceContext =
+  async (): Promise<BrowserDeviceContext | null> => {
+    if (typeof navigator === "undefined") return null;
 
-  const rawUserAgent = navigator.userAgent || "";
-  const uaData = navigator.userAgentData;
-  let browser = "";
-  let browserVersion = "";
-  let platform = "";
-  let platformVersion = "";
-  let mobile = false;
+    const rawUserAgent = navigator.userAgent || "";
+    const uaData = navigator.userAgentData;
+    let browser = "";
+    let browserVersion = "";
+    let platform = "";
+    let platformVersion = "";
+    let mobile = false;
 
-  if (uaData) {
-    platform = uaData.platform || "";
-    mobile = Boolean(uaData.mobile);
-    const highEntropy = await uaData
-      .getHighEntropyValues?.([
-        "platformVersion",
-        "fullVersionList",
-      ])
-      .catch(() => null);
-    platformVersion =
-      highEntropy && typeof highEntropy.platformVersion === "string"
-        ? highEntropy.platformVersion
-        : "";
-    const fullVersionList = Array.isArray(highEntropy?.fullVersionList)
-      ? highEntropy.fullVersionList
-      : uaData.brands;
-    const preferredBrowser =
-      fullVersionList.find((item) =>
-        /Google Chrome|Microsoft Edge|Firefox|Safari|Opera|Chromium/i.test(
-          item.brand,
-        ),
-      ) || fullVersionList[0];
-    browser = normalizeBrowserBrand(preferredBrowser?.brand);
-    browserVersion = preferredBrowser?.version || "";
-  }
+    if (uaData) {
+      platform = uaData.platform || "";
+      mobile = Boolean(uaData.mobile);
+      const highEntropy = await uaData
+        .getHighEntropyValues?.(["platformVersion", "fullVersionList"])
+        .catch(() => null);
+      platformVersion =
+        highEntropy && typeof highEntropy.platformVersion === "string"
+          ? highEntropy.platformVersion
+          : "";
+      const fullVersionList = Array.isArray(highEntropy?.fullVersionList)
+        ? highEntropy.fullVersionList
+        : uaData.brands;
+      const preferredBrowser =
+        fullVersionList.find((item) =>
+          /Google Chrome|Microsoft Edge|Firefox|Safari|Opera|Chromium/i.test(
+            item.brand,
+          ),
+        ) || fullVersionList[0];
+      browser = normalizeBrowserBrand(preferredBrowser?.brand);
+      browserVersion = preferredBrowser?.version || "";
+    }
 
-  if (!browser) {
-    const browserMatchers: Array<[RegExp, string]> = [
-      [/Edg\/(\d+)/, "Edge"],
-      [/Chrome\/(\d+)/, "Chrome"],
-      [/Firefox\/(\d+)/, "Firefox"],
-      [/Version\/(\d+).+Safari\//, "Safari"],
-    ];
-    for (const [pattern, label] of browserMatchers) {
-      const match = rawUserAgent.match(pattern);
-      if (match) {
-        browser = label;
-        browserVersion = match[1] || "";
-        break;
+    if (!browser) {
+      const browserMatchers: Array<[RegExp, string]> = [
+        [/Edg\/(\d+)/, "Edge"],
+        [/Chrome\/(\d+)/, "Chrome"],
+        [/Firefox\/(\d+)/, "Firefox"],
+        [/Version\/(\d+).+Safari\//, "Safari"],
+      ];
+      for (const [pattern, label] of browserMatchers) {
+        const match = rawUserAgent.match(pattern);
+        if (match) {
+          browser = label;
+          browserVersion = match[1] || "";
+          break;
+        }
       }
     }
-  }
 
-  if (!platform) {
-    if (/Windows/i.test(rawUserAgent)) platform = "Windows";
-    else if (/Mac OS X/i.test(rawUserAgent)) platform = "macOS";
-    else if (/iPhone|iPad|iPod/i.test(rawUserAgent)) platform = "iOS";
-    else if (/Android/i.test(rawUserAgent)) platform = "Android";
-    else if (/Linux/i.test(rawUserAgent)) platform = "Linux";
-  }
+    if (!platform) {
+      if (/Windows/i.test(rawUserAgent)) platform = "Windows";
+      else if (/Mac OS X/i.test(rawUserAgent)) platform = "macOS";
+      else if (/iPhone|iPad|iPod/i.test(rawUserAgent)) platform = "iOS";
+      else if (/Android/i.test(rawUserAgent)) platform = "Android";
+      else if (/Linux/i.test(rawUserAgent)) platform = "Linux";
+    }
 
-  const platformLabel = formatPlatformLabel(platform, platformVersion);
-  const browserLabel = [browser, browserVersion].filter(Boolean).join(" ");
-  return {
-    browser: browser || undefined,
-    browserVersion: browserVersion || undefined,
-    platform: platform || undefined,
-    platformVersion: platformVersion || undefined,
-    deviceType: mobile ? "mobile" : "desktop",
-    mobile,
-    deviceTitle: deriveDeviceTitle(platform, mobile, rawUserAgent),
-    deviceDetail: [browserLabel, platformLabel].filter(Boolean).join(" | ") || undefined,
+    const platformLabel = formatPlatformLabel(platform, platformVersion);
+    const browserLabel = [browser, browserVersion].filter(Boolean).join(" ");
+    return {
+      browser: browser || undefined,
+      browserVersion: browserVersion || undefined,
+      platform: platform || undefined,
+      platformVersion: platformVersion || undefined,
+      deviceType: mobile ? "mobile" : "desktop",
+      mobile,
+      deviceTitle: deriveDeviceTitle(platform, mobile, rawUserAgent),
+      deviceDetail:
+        [browserLabel, platformLabel].filter(Boolean).join(" | ") || undefined,
+    };
   };
-};
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const expireSession = useCallback(
@@ -681,14 +684,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return null;
     }
   });
-  const [sessionSecurity, setSessionSecurity] = useState<SessionSecurity>(() => {
-    try {
-      const raw = sessionStorage.getItem(SESSION_SECURITY_STORAGE_KEY);
-      return parseSessionSecurity(raw ? JSON.parse(raw) : null);
-    } catch {
-      return parseSessionSecurity(null);
-    }
-  });
+  const [sessionSecurity, setSessionSecurity] = useState<SessionSecurity>(
+    () => {
+      try {
+        const raw = sessionStorage.getItem(SESSION_SECURITY_STORAGE_KEY);
+        return parseSessionSecurity(raw ? JSON.parse(raw) : null);
+      } catch {
+        return parseSessionSecurity(null);
+      }
+    },
+  );
   const [lastLoginMonitoring, setLastLoginMonitoring] =
     useState<LoginMonitoring | null>(null);
 
@@ -840,7 +845,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setToken(data.token);
       setTokenExpiresAt(decodeJwtExpiresAt(data.token));
       setSessionSecurity(
-        data.security ? parseSessionSecurity(data.security) : parseSessionSecurity(null),
+        data.security
+          ? parseSessionSecurity(data.security)
+          : parseSessionSecurity(null),
       );
       setUser((prev) => ({
         id: data.user.id,

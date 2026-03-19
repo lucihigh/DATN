@@ -217,7 +217,7 @@ export const sendLoginRiskAlertEmail = async (input: {
         `${input.ipAddress ? `IP: ${input.ipAddress}. ` : ""}` +
         `${input.userAgent ? `Device: ${input.userAgent}. ` : ""}` +
         "Large transfers may be temporarily limited for this session while we continue monitoring.",
-    }).replace(">ALERT<", '>NOTICE<'),
+    }).replace(">ALERT<", ">NOTICE<"),
     debug: {
       ipAddress: input.ipAddress,
       userAgent: input.userAgent,
