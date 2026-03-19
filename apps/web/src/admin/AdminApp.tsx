@@ -1432,7 +1432,10 @@ function AdminApp() {
   const filteredAlerts = useMemo(() => {
     const query = alertSearch.trim().toLowerCase();
     const list = alerts.filter((alert) => {
-      if (alertStatusFilter !== "all" && alert.adminStatus !== alertStatusFilter)
+      if (
+        alertStatusFilter !== "all" &&
+        alert.adminStatus !== alertStatusFilter
+      )
         return false;
       if (alertRiskFilter !== "all" && alert.riskLevel !== alertRiskFilter)
         return false;
@@ -1449,7 +1452,9 @@ function AdminApp() {
         alert.transactionId,
         alert.eventId,
         ...(alert.reasons || []),
-        ...(alert.keySignals || []).map((signal) => `${signal.label} ${signal.value}`),
+        ...(alert.keySignals || []).map(
+          (signal) => `${signal.label} ${signal.value}`,
+        ),
       ]
         .filter(Boolean)
         .join(" ")
@@ -2015,8 +2020,8 @@ function AdminApp() {
             <div>
               <strong>Loading admin data</strong>
               <p>
-                Fetching users, AI alerts, transactions, and audit logs from
-                the API.
+                Fetching users, AI alerts, transactions, and audit logs from the
+                API.
               </p>
             </div>
           </div>
@@ -2193,8 +2198,8 @@ function AdminApp() {
               <div>
                 <h2>AI Alert Review</h2>
                 <p>
-                  Review why the model flagged each case, then confirm,
-                  dismiss, or escalate it.
+                  Review why the model flagged each case, then confirm, dismiss,
+                  or escalate it.
                 </p>
               </div>
               <div className="alerts-filters">
@@ -2268,7 +2273,9 @@ function AdminApp() {
                         <div className="alerts-top">
                           <div className="alerts-summary">
                             <div className="alerts-meta-line">
-                              <span className={`alerts-badge ${alert.riskLevel}`}>
+                              <span
+                                className={`alerts-badge ${alert.riskLevel}`}
+                              >
                                 {formatRiskLabel(alert.riskLevel)}
                               </span>
                               <span
@@ -2310,7 +2317,9 @@ function AdminApp() {
                           </button>
                         </div>
 
-                        <p className="alerts-explanation">{alert.explanation}</p>
+                        <p className="alerts-explanation">
+                          {alert.explanation}
+                        </p>
 
                         <div className="alerts-reasons">
                           {alert.reasons.length ? (
@@ -2320,7 +2329,9 @@ function AdminApp() {
                               </span>
                             ))
                           ) : (
-                            <span className="alerts-reason">No explicit reason</span>
+                            <span className="alerts-reason">
+                              No explicit reason
+                            </span>
                           )}
                         </div>
 
@@ -2400,7 +2411,9 @@ function AdminApp() {
                           <div className="alerts-extra">
                             <div>
                               <strong>AI action</strong>
-                              <span>{alert.aiDecision || "Monitoring only"}</span>
+                              <span>
+                                {alert.aiDecision || "Monitoring only"}
+                              </span>
                             </div>
                             <div>
                               <strong>Model</strong>

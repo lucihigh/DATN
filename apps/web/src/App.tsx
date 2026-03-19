@@ -23,6 +23,106 @@ const SESSION_REPLACEMENT_ALERT_STORAGE_KEY =
   "fpipay_session_replacement_alert";
 const NOTIFICATION_READ_STORAGE_PREFIX = "fpipay_notification_reads";
 const COPILOT_REQUEST_TIMEOUT_MS = 90000;
+const PROFESSIONAL_PASSWORD_MIN_LENGTH = 12;
+
+type PasswordStrengthCheck = {
+  id: "length" | "uppercase" | "lowercase" | "number" | "special" | "no_spaces";
+  label: string;
+  met: boolean;
+};
+
+const getPasswordStrength = (password: string) => {
+  const value = password || "";
+  const checks: PasswordStrengthCheck[] = [
+    {
+      id: "length",
+      label: `At least ${PROFESSIONAL_PASSWORD_MIN_LENGTH} characters`,
+      met: value.length >= PROFESSIONAL_PASSWORD_MIN_LENGTH,
+    },
+    {
+      id: "uppercase",
+      label: "At least 1 uppercase letter",
+      met: /[A-Z]/.test(value),
+    },
+    {
+      id: "lowercase",
+      label: "At least 1 lowercase letter",
+      met: /[a-z]/.test(value),
+    },
+    {
+      id: "number",
+      label: "At least 1 number",
+      met: /\d/.test(value),
+    },
+    {
+      id: "special",
+      label: "At least 1 special character",
+      met: /[^A-Za-z0-9\s]/.test(value),
+    },
+    {
+      id: "no_spaces",
+      label: "No spaces",
+      met: !/\s/.test(value),
+    },
+  ];
+  const passedChecks = checks.filter((check) => check.met).length;
+  const meetsPolicy = checks.every((check) => check.met);
+
+  if (!value) {
+    return {
+      checks,
+      passedChecks,
+      totalChecks: checks.length,
+      meetsPolicy: false,
+      level: "empty" as const,
+      label: "No password yet",
+      message: "Use a strong password to protect your account.",
+    };
+  }
+  if (meetsPolicy) {
+    return {
+      checks,
+      passedChecks,
+      totalChecks: checks.length,
+      meetsPolicy: true,
+      level: "strong" as const,
+      label: "Strong",
+      message: "Professional password standard met.",
+    };
+  }
+  if (passedChecks >= 5) {
+    return {
+      checks,
+      passedChecks,
+      totalChecks: checks.length,
+      meetsPolicy: false,
+      level: "good" as const,
+      label: "Good",
+      message: "Almost there. Add the missing requirement to meet the policy.",
+    };
+  }
+  if (passedChecks >= 3) {
+    return {
+      checks,
+      passedChecks,
+      totalChecks: checks.length,
+      meetsPolicy: false,
+      level: "fair" as const,
+      label: "Fair",
+      message: "Improve this password before using it for a real account.",
+    };
+  }
+
+  return {
+    checks,
+    passedChecks,
+    totalChecks: checks.length,
+    meetsPolicy: false,
+    level: "weak" as const,
+    label: "Weak",
+    message: "This password is too easy to guess.",
+  };
+};
 
 const sanitizeDownloadFileName = (value?: string) => {
   const cleaned = (value || "User")
@@ -257,6 +357,7 @@ type ActivityNotification = {
   type: ActivityNotificationType;
   title: string;
   message: string;
+  meta?: string;
   createdAt: string;
   timeLabel: string;
   amountText?: string;
@@ -280,6 +381,86 @@ type CopilotInsight = {
   riskLevel: string;
   confidence: number;
   followUpQuestion?: string | null;
+};
+
+const IPV4_ADDRESS_PATTERN = /\b(?:\d{1,3}\.){3}\d{1,3}\b/;
+
+const normalizeNotificationCopy = (value?: string) =>
+  (value || "").replace(/\s+/g, " ").trim();
+
+const truncateNotificationCopy = (value: string, maxLength: number) =>
+  value.length <= maxLength
+    ? value
+    : `${value.slice(0, maxLength - 3).trimEnd()}...`;
+
+const summarizeUserAgent = (value?: string) => {
+  const userAgent = normalizeNotificationCopy(value);
+  if (!userAgent) return "";
+
+  const browser = userAgent.match(/Edg\/(\d+)/)?.[1]
+    ? `Edge ${userAgent.match(/Edg\/(\d+)/)?.[1]}`
+    : userAgent.match(/Chrome\/(\d+)/)?.[1]
+      ? `Chrome ${userAgent.match(/Chrome\/(\d+)/)?.[1]}`
+      : userAgent.match(/Firefox\/(\d+)/)?.[1]
+        ? `Firefox ${userAgent.match(/Firefox\/(\d+)/)?.[1]}`
+        : userAgent.match(/Version\/(\d+).+Safari\//)?.[1]
+          ? `Safari ${userAgent.match(/Version\/(\d+).+Safari\//)?.[1]}`
+          : "";
+
+  const os = /Windows NT 10\.0/i.test(userAgent)
+    ? "Windows 10"
+    : /Windows/i.test(userAgent)
+      ? "Windows"
+      : /Android/i.test(userAgent)
+        ? "Android"
+        : /\biPhone\b|\biPad\b|\biOS\b/i.test(userAgent)
+          ? "iOS"
+          : /Mac OS X/i.test(userAgent)
+            ? "macOS"
+            : /Linux/i.test(userAgent)
+              ? "Linux"
+              : "";
+
+  if (browser && os) return `${browser} on ${os}`;
+  if (browser || os) return browser || os;
+  return truncateNotificationCopy(userAgent, 48);
+};
+
+const formatSecurityNotification = (alert: SecurityOverviewAlert) => {
+  const detail = normalizeNotificationCopy(alert.detail);
+  const location = normalizeNotificationCopy(alert.location);
+  const deviceMatch = detail.match(/^Device:\s*(.+?)\.\s*(.+)$/i);
+  const device = summarizeUserAgent(deviceMatch?.[1]);
+  const detailBody = normalizeNotificationCopy(deviceMatch?.[2] || detail);
+  const ipAddress =
+    detailBody.match(IPV4_ADDRESS_PATTERN)?.[0] ||
+    detail.match(IPV4_ADDRESS_PATTERN)?.[0] ||
+    "";
+
+  let message = detailBody || "Security activity was recorded on this account.";
+  if (/saved for future sign-ins|now trusted/i.test(detailBody)) {
+    message = "Trusted for future sign-ins.";
+  } else if (
+    /matched the saved IP|matched the saved device/i.test(detailBody)
+  ) {
+    message = "Matched a trusted device and IP.";
+  }
+
+  message = truncateNotificationCopy(normalizeNotificationCopy(message), 84);
+
+  const meta = [device, ipAddress, location].filter(
+    (part, index, items) =>
+      part &&
+      items.findIndex(
+        (candidate) => candidate.toLowerCase() === part.toLowerCase(),
+      ) === index,
+  );
+
+  return {
+    title: alert.title || "Security activity detected",
+    message,
+    meta: meta.length ? meta.join(" • ") : undefined,
+  };
 };
 
 type AiMonitoringSummary = {
@@ -325,10 +506,7 @@ const parseCopilotTableRow = (line: string) =>
 
 const isCopilotTableSeparator = (line: string) => {
   const cells = parseCopilotTableRow(line);
-  return (
-    cells.length > 0 &&
-    cells.every((cell) => /^:?-{3,}:?$/.test(cell))
-  );
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
 };
 
 const isCopilotListLine = (line: string) =>
@@ -668,13 +846,12 @@ function DashboardView() {
   const isTransferPreOtpWarning =
     transferAdvisory?.severity === "warning" ||
     transferAdvisory?.severity === "blocked";
-  const transferContinueLabel =
-    transferOtpBusy
-      ? isTransferPreOtpWarning && !transferAdvisoryAcknowledged
-        ? "Reviewing transfer..."
-        : "Sending OTP..."
-      : isTransferHardBlocked
-        ? "Blocked for safety review"
+  const transferContinueLabel = transferOtpBusy
+    ? isTransferPreOtpWarning && !transferAdvisoryAcknowledged
+      ? "Reviewing transfer..."
+      : "Sending OTP..."
+    : isTransferHardBlocked
+      ? "Blocked for safety review"
       : isTransferPreOtpWarning && !transferAdvisoryAcknowledged
         ? transferAdvisory.confirmationLabel
         : "Continue to OTP";
@@ -704,9 +881,9 @@ function DashboardView() {
   ];
   const copilotHasInsight = Boolean(
     copilotInsight.topic ||
-      copilotInsight.suggestedActions.length ||
-      copilotInsight.suggestedDepositAmount ||
-      copilotInsight.followUpQuestion,
+    copilotInsight.suggestedActions.length ||
+    copilotInsight.suggestedDepositAmount ||
+    copilotInsight.followUpQuestion,
   );
   const copilotRiskTone =
     copilotInsight.riskLevel === "high" || copilotInsight.riskLevel === "medium"
@@ -826,7 +1003,10 @@ function DashboardView() {
 
     let osLabel = "";
     let deviceTitle = "Unknown device";
-    if (/Windows NT 10\.0/.test(userAgent) || /Windows NT 11\.0/.test(userAgent)) {
+    if (
+      /Windows NT 10\.0/.test(userAgent) ||
+      /Windows NT 11\.0/.test(userAgent)
+    ) {
       osLabel = "Windows";
       deviceTitle = "Windows PC";
     } else if (/Windows NT 6\.3/.test(userAgent)) {
@@ -907,48 +1087,51 @@ function DashboardView() {
                 const deviceSummary = parseUserAgentSummary(login.userAgent);
                 return (
                   <>
-              <div className="security-record-head">
-                <div className="security-record-summary">
-                  <strong title={login.userAgent}>
-                    {login.deviceTitle || deviceSummary.title}
-                  </strong>
-                  <p>{login.location}</p>
-                  <p className="security-record-agent" title={login.userAgent}>
-                    {login.deviceDetail || deviceSummary.detail}
-                  </p>
-                </div>
-                <span
-                  className={`security-record-pill ${login.success ? "success" : "warn"}`}
-                >
-                  {login.success
-                    ? login.trustedIp
-                      ? "Trusted sign-in"
-                      : "Verified sign-in"
-                    : "Blocked"}
-                </span>
-              </div>
-              <dl className="security-record-meta">
-                <div>
-                  <dt>IP</dt>
-                  <dd>{login.ipAddress || "Unavailable"}</dd>
-                </div>
-                <div>
-                  <dt>Time</dt>
-                  <dd>{formatSecurityTimestamp(login.createdAt)}</dd>
-                </div>
-                <div>
-                  <dt>Risk</dt>
-                  <dd>
-                    {login.riskUnavailable
-                      ? "N/A"
-                      : `${Math.round(login.anomaly * 100)}%`}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Status</dt>
-                  <dd>{login.success ? "Successful" : "Blocked"}</dd>
-                </div>
-              </dl>
+                    <div className="security-record-head">
+                      <div className="security-record-summary">
+                        <strong title={login.userAgent}>
+                          {login.deviceTitle || deviceSummary.title}
+                        </strong>
+                        <p>{login.location}</p>
+                        <p
+                          className="security-record-agent"
+                          title={login.userAgent}
+                        >
+                          {login.deviceDetail || deviceSummary.detail}
+                        </p>
+                      </div>
+                      <span
+                        className={`security-record-pill ${login.success ? "success" : "warn"}`}
+                      >
+                        {login.success
+                          ? login.trustedIp
+                            ? "Trusted sign-in"
+                            : "Verified sign-in"
+                          : "Blocked"}
+                      </span>
+                    </div>
+                    <dl className="security-record-meta">
+                      <div>
+                        <dt>IP</dt>
+                        <dd>{login.ipAddress || "Unavailable"}</dd>
+                      </div>
+                      <div>
+                        <dt>Time</dt>
+                        <dd>{formatSecurityTimestamp(login.createdAt)}</dd>
+                      </div>
+                      <div>
+                        <dt>Risk</dt>
+                        <dd>
+                          {login.riskUnavailable
+                            ? "N/A"
+                            : `${Math.round(login.anomaly * 100)}%`}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Status</dt>
+                        <dd>{login.success ? "Successful" : "Blocked"}</dd>
+                      </div>
+                    </dl>
                   </>
                 );
               })()}
@@ -1040,7 +1223,8 @@ function DashboardView() {
       }
 
       return {
-        requestKey: typeof data.requestKey === "string" ? data.requestKey : null,
+        requestKey:
+          typeof data.requestKey === "string" ? data.requestKey : null,
         severity,
         title: data.title,
         message: data.message,
@@ -1157,9 +1341,8 @@ function DashboardView() {
     },
     [],
   );
-  const visibleTransferMonitoring = getVisibleTransferMonitoring(
-    transferMonitoring,
-  );
+  const visibleTransferMonitoring =
+    getVisibleTransferMonitoring(transferMonitoring);
 
   const renderAiMonitoringPanel = useCallback(
     (monitoring: AiMonitoringSummary | null, title: string) => {
@@ -2300,7 +2483,9 @@ function DashboardView() {
             options?.advisoryAcknowledged === true ||
             transferAdvisoryAcknowledged,
           advisoryRequestKey:
-            transferAdvisory?.requestKey || transferMonitoring?.requestKey || null,
+            transferAdvisory?.requestKey ||
+            transferMonitoring?.requestKey ||
+            null,
         }),
       });
       const data = (await resp.json().catch(() => null)) as {
@@ -2396,10 +2581,13 @@ function DashboardView() {
         },
         body: JSON.stringify({
           requestKey:
-            transferAdvisory.requestKey || transferMonitoring?.requestKey || null,
+            transferAdvisory.requestKey ||
+            transferMonitoring?.requestKey ||
+            null,
           advisory: transferAdvisory,
           toAccount: transferAccount,
-          amount: Number(transferAmount.replace(/,/g, "")) || transferAdvisory.amount,
+          amount:
+            Number(transferAmount.replace(/,/g, "")) || transferAdvisory.amount,
         }),
       });
     } catch {
@@ -2622,26 +2810,26 @@ function DashboardView() {
             {dashboardQuickActions
               .filter((action) => action.id !== "deposit")
               .map((action) => (
-              <button
-                type="button"
-                className="dashboard-action-item"
-                key={action.title}
-                onClick={() => {
-                  if (action.id === "transfer") {
-                    openTransferModal();
-                  } else if (action.id === "copilot") {
-                    setCopilotOpen(true);
-                  }
-                }}
-              >
-                <span className="dashboard-action-icon">{action.icon}</span>
-                <span className="dashboard-action-text">
-                  <strong>{action.title}</strong>
-                  <small>{action.detail}</small>
-                </span>
-                <span className="dashboard-action-arrow">›</span>
-              </button>
-            ))}
+                <button
+                  type="button"
+                  className="dashboard-action-item"
+                  key={action.title}
+                  onClick={() => {
+                    if (action.id === "transfer") {
+                      openTransferModal();
+                    } else if (action.id === "copilot") {
+                      setCopilotOpen(true);
+                    }
+                  }}
+                >
+                  <span className="dashboard-action-icon">{action.icon}</span>
+                  <span className="dashboard-action-text">
+                    <strong>{action.title}</strong>
+                    <small>{action.detail}</small>
+                  </span>
+                  <span className="dashboard-action-arrow">›</span>
+                </button>
+              ))}
           </div>
           <button
             type="button"
@@ -3295,9 +3483,7 @@ function DashboardView() {
                     value={transferAmount}
                     onChange={(e) => {
                       void dismissTransferAdvisory();
-                      setTransferAmount(
-                        e.target.value.replace(/[^0-9.]/g, ""),
-                      );
+                      setTransferAmount(e.target.value.replace(/[^0-9.]/g, ""));
                       setTransferMonitoring(null);
                       setTransferAdvisory(null);
                       setTransferAdvisoryAcknowledged(false);
@@ -3437,8 +3623,8 @@ function DashboardView() {
                     {transferOtpBusy
                       ? "Sending..."
                       : transferOtpCooldownSeconds > 0
-                      ? `Resend in ${transferOtpCooldownSeconds}s`
-                      : "Resend OTP"}
+                        ? `Resend in ${transferOtpCooldownSeconds}s`
+                        : "Resend OTP"}
                   </button>
                   <button
                     type="button"
@@ -3608,10 +3794,14 @@ function DashboardView() {
                 <div className="ai-copilot-insight ai-copilot-insight-live">
                   <div className="ai-copilot-insight-head">
                     <div>
-                      <strong>{copilotInsight.topic || "Wallet guidance"}</strong>
+                      <strong>
+                        {copilotInsight.topic || "Wallet guidance"}
+                      </strong>
                     </div>
                     <div className="ai-copilot-insight-metrics">
-                      <span className={`ai-copilot-risk-pill ${copilotRiskTone}`}>
+                      <span
+                        className={`ai-copilot-risk-pill ${copilotRiskTone}`}
+                      >
                         {copilotInsight.riskLevel} risk
                       </span>
                       <span>
@@ -3700,7 +3890,6 @@ function DashboardView() {
           </div>
         </div>
       )}
-
     </section>
   );
 }
@@ -6358,14 +6547,21 @@ function NotificationsView({
                 </div>
                 <span className="notification-time">{n.timeLabel}</span>
               </div>
-              <strong>{n.title}</strong>
+              <strong className="notification-title">{n.title}</strong>
               <div className="notification-message">{n.message}</div>
+              {n.meta && (
+                <div className="notification-meta" title={n.meta}>
+                  {n.meta}
+                </div>
+              )}
             </div>
-            <div
-              className={`notification-amount ${n.amountTone ? `notification-amount-${n.amountTone}` : ""}`}
-            >
-              {n.amountText || "--"}
-            </div>
+            {n.amountText && (
+              <div
+                className={`notification-amount ${n.amountTone ? `notification-amount-${n.amountTone}` : ""}`}
+              >
+                {n.amountText}
+              </div>
+            )}
             <button
               type="button"
               className="pill tiny"
@@ -6773,18 +6969,20 @@ function App() {
             (await securityResp.json()) as SecurityOverviewResponse;
           hasSuccess = true;
           nextNotifications = nextNotifications.concat(
-            overview.alerts.slice(0, 10).map((alert, index) => ({
-              id: `security:${alert.id || index}`,
-              type: "security" as const,
-              title: alert.title || "Security activity detected",
-              message:
-                `${alert.detail || "Security activity was recorded on this account."}` +
-                `${alert.location ? ` (${alert.location})` : ""}`,
-              createdAt: alert.occurredAt || new Date().toISOString(),
-              timeLabel: formatNotificationTime(
-                alert.occurredAt || new Date().toISOString(),
-              ),
-            })),
+            overview.alerts.slice(0, 10).map((alert, index) => {
+              const formattedAlert = formatSecurityNotification(alert);
+              return {
+                id: `security:${alert.id || index}`,
+                type: "security" as const,
+                title: formattedAlert.title,
+                message: formattedAlert.message,
+                meta: formattedAlert.meta,
+                createdAt: alert.occurredAt || new Date().toISOString(),
+                timeLabel: formatNotificationTime(
+                  alert.occurredAt || new Date().toISOString(),
+                ),
+              };
+            }),
           );
         }
 
@@ -7040,8 +7238,17 @@ function App() {
                           {notification.timeLabel}
                         </span>
                       </div>
-                      <strong>{notification.title}</strong>
-                      <div>{notification.message}</div>
+                      <strong className="notif-title">
+                        {notification.title}
+                      </strong>
+                      <div className="notif-message">
+                        {notification.message}
+                      </div>
+                      {notification.meta && (
+                        <div className="notif-meta" title={notification.meta}>
+                          {notification.meta}
+                        </div>
+                      )}
                       {notification.amountText && (
                         <span
                           className={`notif-amount notif-amount-${notification.amountTone || "positive"}`}
@@ -7322,6 +7529,8 @@ function AuthShell({
   const [signinCaptchaResetKey, setSigninCaptchaResetKey] = useState(0);
   const [signupCaptchaResetKey, setSignupCaptchaResetKey] = useState(0);
   const [forgotCaptchaResetKey, setForgotCaptchaResetKey] = useState(0);
+  const signupPasswordStrength = getPasswordStrength(signupForm.password);
+  const forgotPasswordStrength = getPasswordStrength(forgotNewPassword);
 
   useEffect(() => {
     if (
@@ -7424,6 +7633,43 @@ function AuthShell({
     );
   };
 
+  const renderPasswordStrength = (
+    strength: ReturnType<typeof getPasswordStrength>,
+  ) => {
+    const fillWidth =
+      strength.totalChecks > 0
+        ? `${Math.max(8, (strength.passedChecks / strength.totalChecks) * 100)}%`
+        : "8%";
+
+    return (
+      <div
+        className={`auth-password-strength auth-password-strength-${strength.level}`}
+        aria-live="polite"
+      >
+        <div className="auth-password-strength-head">
+          <span>Password security</span>
+          <strong>{strength.label}</strong>
+        </div>
+        <div className="auth-password-strength-bar" aria-hidden="true">
+          <span style={{ width: fillWidth }} />
+        </div>
+        <p className="auth-password-strength-message">{strength.message}</p>
+        <div className="auth-password-checks">
+          {strength.checks.map((check) => (
+            <span
+              key={check.id}
+              className={
+                check.met ? "auth-password-check is-met" : "auth-password-check"
+              }
+            >
+              {check.met ? "Met" : "Need"}: {check.label}
+            </span>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!signinForm.email || !signinForm.password) {
@@ -7513,6 +7759,13 @@ function AuthShell({
       toast("Password confirmation does not match", "error");
       return;
     }
+    if (!signupPasswordStrength.meetsPolicy) {
+      toast(
+        "Password must be at least 12 characters and include uppercase, lowercase, number, and special character.",
+        "error",
+      );
+      return;
+    }
     if (!agree) {
       toast("Please agree to terms & privacy", "error");
       return;
@@ -7589,7 +7842,10 @@ function AuthShell({
       }
       setAuthBusy(true);
       try {
-        const data = await onRequestPasswordResetOtp(forgotEmail, forgotCaptcha);
+        const data = await onRequestPasswordResetOtp(
+          forgotEmail,
+          forgotCaptcha,
+        );
         setForgotChallengeId(data.challengeId);
         setForgotDestination(data.destination);
         setForgotExpiresAt(data.expiresAt);
@@ -7738,8 +7994,15 @@ function AuthShell({
       toast("Please enter the 6-digit reset code", "error");
       return;
     }
-    if (forgotNewPassword.length < 8) {
-      toast("New password must be at least 8 characters", "error");
+    if (forgotNewPassword.length < 12) {
+      toast("New password must be at least 12 characters", "error");
+      return;
+    }
+    if (!forgotPasswordStrength.meetsPolicy) {
+      toast(
+        "New password must include uppercase, lowercase, number, and special character.",
+        "error",
+      );
       return;
     }
     if (forgotNewPassword !== forgotConfirmPassword) {
@@ -8205,6 +8468,12 @@ function AuthShell({
                   <div className="password-wrap">
                     <input
                       type={showPassword ? "text" : "password"}
+                      className={
+                        signupForm.password &&
+                        !signupPasswordStrength.meetsPolicy
+                          ? "input-invalid"
+                          : undefined
+                      }
                       value={signupForm.password}
                       onChange={(e) =>
                         setSignupForm({
@@ -8213,6 +8482,8 @@ function AuthShell({
                         })
                       }
                       placeholder="Enter your password"
+                      autoComplete="new-password"
+                      minLength={12}
                       required
                     />
                     <button
@@ -8224,6 +8495,7 @@ function AuthShell({
                       {showPassword ? "🙈" : "👁"}
                     </button>
                   </div>
+                  {renderPasswordStrength(signupPasswordStrength)}
                 </label>
                 <label className="auth-label">
                   Confirm Password
@@ -8234,6 +8506,7 @@ function AuthShell({
                       setSignupForm({ ...signupForm, confirm: e.target.value })
                     }
                     placeholder="Confirm your password"
+                    autoComplete="new-password"
                     required
                   />
                 </label>
@@ -8447,8 +8720,11 @@ function AuthShell({
                   value={forgotNewPassword}
                   onChange={(e) => setForgotNewPassword(e.target.value)}
                   placeholder="Enter new password"
+                  autoComplete="new-password"
+                  minLength={12}
                   required
                 />
+                {renderPasswordStrength(forgotPasswordStrength)}
               </label>
               <label className="auth-label">
                 Confirm New Password
@@ -8536,4 +8812,3 @@ function AuthShell({
     </div>
   );
 }
-

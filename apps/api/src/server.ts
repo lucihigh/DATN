@@ -12,7 +12,12 @@ import morgan from "morgan";
 import OpenAI from "openai";
 import type { Wallet } from "@prisma/client";
 
-import { loginSchema, registerSchema } from "@secure-wallet/shared";
+import {
+  PROFESSIONAL_PASSWORD_MIN_LENGTH,
+  loginSchema,
+  meetsProfessionalPasswordPolicy,
+  registerSchema,
+} from "@secure-wallet/shared";
 import type { components } from "@secure-wallet/shared/api-client/types";
 
 import { prisma } from "./db/prisma";
@@ -102,8 +107,10 @@ app.use(lockoutGuard);
 const PORT = process.env.PORT_API || 4000;
 const AI_URL = process.env.AI_SERVICE_URL || "http://localhost:8000";
 const AI_API_KEY = process.env.AI_API_KEY || "local-dev-key";
-const OLLAMA_URL =
-  (process.env.OLLAMA_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
+const OLLAMA_URL = (process.env.OLLAMA_URL || "http://127.0.0.1:11434").replace(
+  /\/$/,
+  "",
+);
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "";
 const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || "15000");
 const OLLAMA_FALLBACK_MODEL = process.env.OLLAMA_FALLBACK_MODEL || "";
@@ -112,8 +119,7 @@ const OLLAMA_FALLBACK_TIMEOUT_MS = Number(
 );
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
-const OPENAI_REASONING_EFFORT =
-  process.env.OPENAI_REASONING_EFFORT || "low";
+const OPENAI_REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || "low";
 const APP_TIMEZONE = process.env.APP_TIMEZONE || "Asia/Ho_Chi_Minh";
 const ADMIN_EMAIL = "ledanhdat56@gmail.com";
 const ADMIN_PASSWORD = "Ledanhdat2005@";
@@ -176,9 +182,7 @@ const CAPTCHA_TRACK_WIDTH_PX = Number(
 const CAPTCHA_PIECE_WIDTH_PX = Number(
   process.env.CAPTCHA_PIECE_WIDTH_PX || "82",
 );
-const CAPTCHA_TOLERANCE_PX = Number(
-  process.env.CAPTCHA_TOLERANCE_PX || "12",
-);
+const CAPTCHA_TOLERANCE_PX = Number(process.env.CAPTCHA_TOLERANCE_PX || "12");
 const CAPTCHA_TTL_MS = Number(process.env.CAPTCHA_TTL_SECONDS || "180") * 1000;
 const CAPTCHA_SECRET_KEY =
   process.env.CAPTCHA_SECRET_KEY ||
@@ -191,7 +195,9 @@ const HIGH_RISK_LOGIN_BLOCK_MINUTES = Number(
   process.env.HIGH_RISK_LOGIN_BLOCK_MINUTES || "10",
 );
 const AUTO_START_LOCAL_AI_SERVICE = !["0", "false", "no"].includes(
-  String(process.env.AUTO_START_LOCAL_AI_SERVICE || "1").trim().toLowerCase(),
+  String(process.env.AUTO_START_LOCAL_AI_SERVICE || "1")
+    .trim()
+    .toLowerCase(),
 );
 
 const normalizeEmail = (email: string) => email.trim().toLowerCase();
@@ -531,7 +537,12 @@ const buildAdminAlertSignals = (
     {
       label: "Risk level",
       value: toTitleCase(riskLevel),
-      tone: riskLevel === "high" ? "warn" : riskLevel === "medium" ? "info" : "neutral",
+      tone:
+        riskLevel === "high"
+          ? "warn"
+          : riskLevel === "medium"
+            ? "info"
+            : "neutral",
     },
   ];
 
@@ -540,7 +551,8 @@ const buildAdminAlertSignals = (
     signals.push({
       label: "Anomaly score",
       value: `${Math.round(anomalyScore * 100)}%`,
-      tone: anomalyScore >= 0.9 ? "warn" : anomalyScore >= 0.7 ? "info" : "neutral",
+      tone:
+        anomalyScore >= 0.9 ? "warn" : anomalyScore >= 0.7 ? "info" : "neutral",
     });
   }
 
@@ -615,8 +627,7 @@ const buildAdminAlertResponse = (log: {
 }): AdminAlertResponse => {
   const detail = normalizeRecord(log.details);
   const metadata = normalizeRecord(log.metadata);
-  const type =
-    log.action === "AI_TRANSACTION_ALERT" ? "transaction" : "login";
+  const type = log.action === "AI_TRANSACTION_ALERT" ? "transaction" : "login";
   const reasons = toStringList(detail.reasons);
   const riskLevel = normalizeRiskLevel(
     detail.riskLevel ?? metadata.riskLevel ?? "low",
@@ -634,7 +645,8 @@ const buildAdminAlertResponse = (log: {
   const country = asStringOrNull(detail.country);
   const region = asStringOrNull(detail.region);
   const city = asStringOrNull(detail.city);
-  const location = [city, region, country].filter(Boolean).join(", ") || country;
+  const location =
+    [city, region, country].filter(Boolean).join(", ") || country;
 
   return {
     id: log.id,
@@ -662,7 +674,8 @@ const buildAdminAlertResponse = (log: {
       asStringOrNull(detail.modelVersion) ??
       asStringOrNull(metadata.modelVersion),
     modelSource:
-      asStringOrNull(detail.modelSource) ?? asStringOrNull(metadata.modelSource),
+      asStringOrNull(detail.modelSource) ??
+      asStringOrNull(metadata.modelSource),
     eventId:
       asStringOrNull(detail.loginEventId) ??
       asStringOrNull(detail.transactionEventId) ??
@@ -727,7 +740,8 @@ const countryDisplayNames =
 const readRequestHeaderString = (value: unknown) => {
   if (Array.isArray(value)) {
     const firstString = value.find(
-      (item): item is string => typeof item === "string" && item.trim().length > 0,
+      (item): item is string =>
+        typeof item === "string" && item.trim().length > 0,
     );
     return firstString?.trim();
   }
@@ -866,7 +880,8 @@ const buildUserAgentDeviceSummary = (
 
   return {
     title: "Unknown device",
-    detail: browserLabel || (agent.length > 64 ? `${agent.slice(0, 64)}...` : agent),
+    detail:
+      browserLabel || (agent.length > 64 ? `${agent.slice(0, 64)}...` : agent),
   };
 };
 
@@ -914,7 +929,8 @@ const getRequestLocation = (req: Request) => {
 
   const locationParts = [city, region, country].filter(
     (part, index, parts): part is string =>
-      Boolean(part) && parts.findIndex((candidate) => candidate === part) === index,
+      Boolean(part) &&
+      parts.findIndex((candidate) => candidate === part) === index,
   );
   if (locationParts.length) {
     return locationParts.join(", ");
@@ -1069,22 +1085,26 @@ const suspiciousTransferNotePatterns: Array<{
   {
     pattern:
       /\b(urgent|immediately|right now|act now|safe account|security team|unlock|verify|verification fee|release funds|refund|customs|tax|penalty)\b/i,
-    reason: "Transfer note contains urgency or account-verification wording often used in scams.",
+    reason:
+      "Transfer note contains urgency or account-verification wording often used in scams.",
   },
   {
     pattern:
       /\b(invest|investment|profit|guaranteed return|crypto signal|forex|broker|loan fee|commission)\b/i,
-    reason: "Transfer note references high-pressure investing or fee collection language.",
+    reason:
+      "Transfer note references high-pressure investing or fee collection language.",
   },
   {
     pattern:
       /\b(khan cap|gap|chuyen ngay|tai khoan an toan|tai khoan bao mat|xac minh|phi mo khoa|hoan tien|hai quan|thue|phat)\b/i,
-    reason: "Transfer note contains urgent or account-verification terms commonly seen in scams.",
+    reason:
+      "Transfer note contains urgent or account-verification terms commonly seen in scams.",
   },
   {
     pattern:
       /\b(dau tu|loi nhuan|bao lai|tin hieu|san forex|phi vay|hoa hong)\b/i,
-    reason: "Transfer note references investment or fee-collection language often used in fraud.",
+    reason:
+      "Transfer note references investment or fee-collection language often used in fraud.",
   },
 ];
 
@@ -1096,7 +1116,9 @@ const getSuspiciousTransferNoteReasons = (note: string) => {
     .map((entry) => entry.reason);
 };
 
-const getTransferSafetyHold = (metadata: unknown): TransferSafetyHold | null => {
+const getTransferSafetyHold = (
+  metadata: unknown,
+): TransferSafetyHold | null => {
   const root = normalizeMetadataRecord(metadata);
   const hold = normalizeMetadataRecord(root.transferSafetyHold);
   if (
@@ -1141,7 +1163,7 @@ const matchesTransferSafetyHold = (
 ) =>
   Boolean(
     (hold.toAccount && input.toAccount && hold.toAccount === input.toAccount) ||
-      (hold.toUserId && input.toUserId && hold.toUserId === input.toUserId),
+    (hold.toUserId && input.toUserId && hold.toUserId === input.toUserId),
   );
 
 const buildBlockedTransferAdvisory = (input: {
@@ -1163,7 +1185,9 @@ const buildBlockedTransferAdvisory = (input: {
     title: input.title || "Transfer temporarily blocked for safety review",
     message:
       input.message ||
-      `This transfer is paused until ${new Date(input.blockedUntil).toLocaleString(
+      `This transfer is paused until ${new Date(
+        input.blockedUntil,
+      ).toLocaleString(
         "en-US",
       )} so you have time to verify the recipient through a trusted channel.`,
     confirmationLabel: "Blocked for safety review",
@@ -1204,8 +1228,7 @@ const buildTransferSafetyAdvisory = (input: {
   let severity: TransferSafetyAdvisory["severity"] = "caution";
   const hasStrongWarningSignal =
     amount >= HIGH_TRANSFER_ADVISORY_AMOUNT ||
-    (hasWarningDrainAmount &&
-      transferRatio >= BALANCE_DRAIN_WARNING_RATIO) ||
+    (hasWarningDrainAmount && transferRatio >= BALANCE_DRAIN_WARNING_RATIO) ||
     (input.spendProfile.dailySpendAvg30d > 0 &&
       input.spendProfile.spendSurgeRatio !== null &&
       input.spendProfile.spendSurgeRatio >= 8) ||
@@ -1217,10 +1240,7 @@ const buildTransferSafetyAdvisory = (input: {
       `This transfer uses ${Math.round(transferRatio * 100)}% of your available wallet balance.`,
     );
   }
-  if (
-    hasWarningDrainAmount &&
-    transferRatio >= BALANCE_DRAIN_WARNING_RATIO
-  ) {
+  if (hasWarningDrainAmount && transferRatio >= BALANCE_DRAIN_WARNING_RATIO) {
     severity = "warning";
   }
 
@@ -1424,9 +1444,7 @@ const formatCopilotSignedMoney = (currency: string, amount: number) =>
   `${amount >= 0 ? "+" : "-"}${formatCopilotMoney(currency, Math.abs(amount))}`;
 
 const escapeCopilotMarkdownCell = (value: string | number) =>
-  String(value)
-    .replace(/\|/g, "\\|")
-    .replace(/\r?\n/g, " ");
+  String(value).replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 
 const buildCopilotMarkdownTable = (
   headers: string[],
@@ -1460,10 +1478,7 @@ const formatCopilotTransactionTimestamp = (
     hour12: language !== "vi",
   });
 
-const formatCopilotCalendarDate = (
-  language: CopilotLanguage,
-  value: Date,
-) =>
+const formatCopilotCalendarDate = (language: CopilotLanguage, value: Date) =>
   value.toLocaleDateString(language === "vi" ? "vi-VN" : "en-US", {
     timeZone: APP_TIMEZONE,
     year: "numeric",
@@ -1497,7 +1512,8 @@ const parseOpenAiCopilotPayload = (
 
     const suggestedActions = Array.isArray(parsed.suggestedActions)
       ? parsed.suggestedActions.filter(
-          (item): item is string => typeof item === "string" && item.trim().length > 0,
+          (item): item is string =>
+            typeof item === "string" && item.trim().length > 0,
         )
       : [];
 
@@ -1660,9 +1676,10 @@ const callOllamaCopilotWithModel = async (
       };
     }
 
-    const payload = (await response.json().catch(() => null)) as
-      | Record<string, unknown>
-      | null;
+    const payload = (await response.json().catch(() => null)) as Record<
+      string,
+      unknown
+    > | null;
     const responseText =
       payload && typeof payload.response === "string"
         ? payload.response.trim()
@@ -1754,7 +1771,9 @@ const callOpenAiCopilot = async (input: {
   try {
     const response = await openaiClient.responses.create({
       model: OPENAI_MODEL,
-      reasoning: { effort: OPENAI_REASONING_EFFORT as "low" | "medium" | "high" },
+      reasoning: {
+        effort: OPENAI_REASONING_EFFORT as "low" | "medium" | "high",
+      },
       instructions: buildCopilotSystemInstructions(input.language),
       input: buildOpenAiCopilotInput(input),
     });
@@ -1776,7 +1795,8 @@ const callOpenAiCopilot = async (input: {
       return {
         status: "error",
         code: "invalid_response_format",
-        message: "OpenAI returned a response that did not match the expected format.",
+        message:
+          "OpenAI returned a response that did not match the expected format.",
       };
     }
 
@@ -1784,7 +1804,10 @@ const callOpenAiCopilot = async (input: {
   } catch (err) {
     console.warn("OpenAI copilot request failed", err);
     const errorCode =
-      err && typeof err === "object" && "code" in err && typeof err.code === "string"
+      err &&
+      typeof err === "object" &&
+      "code" in err &&
+      typeof err.code === "string"
         ? err.code
         : "unknown_error";
     const errorMessage =
@@ -1821,7 +1844,7 @@ const COPILOT_COMPANY_ALIASES: Record<string, MarketIntent> = {
   mwg: { assetClass: "stock", symbol: "MWG.VN", label: "Mobile World" },
 };
 const COPILOT_INDEX_ALIASES: Record<string, MarketIntent> = {
-  "sp500": { assetClass: "index", symbol: "^GSPC", label: "S&P 500" },
+  sp500: { assetClass: "index", symbol: "^GSPC", label: "S&P 500" },
   "s&p500": { assetClass: "index", symbol: "^GSPC", label: "S&P 500" },
   "s&p 500": { assetClass: "index", symbol: "^GSPC", label: "S&P 500" },
   nasdaq: { assetClass: "index", symbol: "^IXIC", label: "NASDAQ Composite" },
@@ -1887,11 +1910,11 @@ const isLikelyMarketQuestion = (normalizedMessage: string) =>
     normalizedMessage,
   );
 
-const extractFxIntent = (
-  normalizedMessage: string,
-): MarketIntent | null => {
+const extractFxIntent = (normalizedMessage: string): MarketIntent | null => {
   const compactMessage = normalizedMessage.replace(/\s+/g, "");
-  const slashPair = normalizedMessage.match(/\b([a-z]{3})\s*[/-]\s*([a-z]{3})\b/);
+  const slashPair = normalizedMessage.match(
+    /\b([a-z]{3})\s*[/-]\s*([a-z]{3})\b/,
+  );
   const compactPair = compactMessage.match(/\b([a-z]{3})([a-z]{3})\b/);
   const pair = slashPair || compactPair;
   if (!pair) return null;
@@ -1935,8 +1958,9 @@ const extractTickerIntent = (
   }
 
   const explicitTicker =
-    originalMessage.match(/\b(?:ticker|symbol|ma)\s*[:\-]?\s*([A-Za-z^][A-Za-z0-9.=^-]{0,9})\b/i)?.[1] ||
-    originalMessage.match(/\b([A-Z]{1,5}(?:\.[A-Z]{1,3})?)\b/)?.[1];
+    originalMessage.match(
+      /\b(?:ticker|symbol|ma)\s*[:\-]?\s*([A-Za-z^][A-Za-z0-9.=^-]{0,9})\b/i,
+    )?.[1] || originalMessage.match(/\b([A-Z]{1,5}(?:\.[A-Z]{1,3})?)\b/)?.[1];
 
   if (!explicitTicker) return null;
   const symbol = explicitTicker.toUpperCase();
@@ -1949,10 +1973,9 @@ const extractTickerIntent = (
   }
 
   return {
-    assetClass:
-      /index|nasdaq|dow|s&p|vnindex|vn-index/.test(normalizedMessage)
-        ? "index"
-        : "stock",
+    assetClass: /index|nasdaq|dow|s&p|vnindex|vn-index/.test(normalizedMessage)
+      ? "index"
+      : "stock",
     symbol,
     label: symbol,
   };
@@ -1996,8 +2019,7 @@ const detectMarketIntent = (message: string): MarketIntent | null => {
 };
 
 const formatMarketPrice = (value: number) => {
-  const decimals =
-    value >= 1000 ? 2 : value >= 100 ? 2 : value >= 1 ? 4 : 6;
+  const decimals = value >= 1000 ? 2 : value >= 100 ? 2 : value >= 1 ? 4 : 6;
   return value.toLocaleString("en-US", {
     minimumFractionDigits: 0,
     maximumFractionDigits: decimals,
@@ -2053,7 +2075,8 @@ const fetchMarketQuote = async (
     const meta = normalizeRecord(result.meta);
     const timestamps = Array.isArray(result.timestamp)
       ? result.timestamp.filter(
-          (item): item is number => typeof item === "number" && Number.isFinite(item),
+          (item): item is number =>
+            typeof item === "number" && Number.isFinite(item),
         )
       : [];
     const indicators = normalizeRecord(result.indicators);
@@ -2062,7 +2085,8 @@ const fetchMarketQuote = async (
       : {};
     const closes = Array.isArray(quoteGroup.close)
       ? quoteGroup.close.filter(
-          (item): item is number => typeof item === "number" && Number.isFinite(item),
+          (item): item is number =>
+            typeof item === "number" && Number.isFinite(item),
         )
       : [];
     const price =
@@ -2079,8 +2103,7 @@ const fetchMarketQuote = async (
         timestamps.length ? timestamps[timestamps.length - 1] : null,
       ) ??
       null;
-    const currency =
-      asStringOrNull(meta.currency) ?? intent.quoteHint ?? "USD";
+    const currency = asStringOrNull(meta.currency) ?? intent.quoteHint ?? "USD";
 
     if (price === null || marketTime === null) return null;
 
@@ -2296,11 +2319,13 @@ const buildHeuristicCopilotResponse = (input: {
   const suggestedDepositAmount =
     netCashFlow > 0 ? roundMoney(clamp(netCashFlow * 0.35, 50, 5000)) : null;
 
-  if (/deposit|top up|fund|emergency|save|nap tien|gui tien|tiet kiem|quy du phong|du phong/.test(latest)) {
+  if (
+    /deposit|top up|fund|emergency|save|nap tien|gui tien|tiet kiem|quy du phong|du phong/.test(
+      latest,
+    )
+  ) {
     const summaryTable = buildCopilotMarkdownTable(
-      language === "vi"
-        ? ["Chi so", "Gia tri"]
-        : ["Metric", "Value"],
+      language === "vi" ? ["Chi so", "Gia tri"] : ["Metric", "Value"],
       [
         [
           language === "vi" ? "So du hien tai" : "Current balance",
@@ -2365,11 +2390,13 @@ const buildHeuristicCopilotResponse = (input: {
     };
   }
 
-  if (/spend|expense|budget|cash flow|cashflow|chi tieu|chi phi|ngan sach|dong tien/.test(latest)) {
+  if (
+    /spend|expense|budget|cash flow|cashflow|chi tieu|chi phi|ngan sach|dong tien/.test(
+      latest,
+    )
+  ) {
     const summaryTable = buildCopilotMarkdownTable(
-      language === "vi"
-        ? ["Chi so", "Gia tri"]
-        : ["Metric", "Value"],
+      language === "vi" ? ["Chi so", "Gia tri"] : ["Metric", "Value"],
       [
         [
           language === "vi" ? "Tong chi gan day" : "Recent debit total",
@@ -2426,7 +2453,11 @@ const buildHeuristicCopilotResponse = (input: {
     };
   }
 
-  if (/bitcoin|btc|gold|stock|usd|vnd|exchange|vang|co phieu|chung khoan|ti gia|ty gia/.test(latest)) {
+  if (
+    /bitcoin|btc|gold|stock|usd|vnd|exchange|vang|co phieu|chung khoan|ti gia|ty gia/.test(
+      latest,
+    )
+  ) {
     return {
       reply: localizeCopilotText(
         language,
@@ -2497,7 +2528,8 @@ const isTodayTransactionReportIntent = (message: string) => {
   const asksForReport =
     /\b(report|summary|summarize|list|bao cao|tong hop|liet ke|thong ke)\b/.test(
       normalized,
-    ) || /giao dich hom nay|transactions today|today transaction/.test(normalized);
+    ) ||
+    /giao dich hom nay|transactions today|today transaction/.test(normalized);
 
   return asksForToday && asksForTransactions && asksForReport;
 };
@@ -2507,7 +2539,10 @@ const isWeeklyTransactionReportIntent = (message: string) => {
   const asksForWeek =
     /\b(this week|weekly|last week|past week|past 7 days|last 7 days|7 day|7 days|tuan nay|tuan qua|7 ngay qua|7 ngay gan day)\b/.test(
       normalized,
-    ) || /giao dich tuan|bao cao tuan|weekly transaction|week report/.test(normalized);
+    ) ||
+    /giao dich tuan|bao cao tuan|weekly transaction|week report/.test(
+      normalized,
+    );
   const asksForTransactions =
     /\b(transaction|transactions|giao dich|dong tien|thu chi|money flow|cash flow)\b/.test(
       normalized,
@@ -2575,9 +2610,7 @@ const buildTransactionReportReply = (input: {
   const netFlow = roundMoney(totalInflow - totalOutflow);
 
   const summaryTable = buildCopilotMarkdownTable(
-    input.language === "vi"
-      ? ["Chi so", "Gia tri"]
-      : ["Metric", "Value"],
+    input.language === "vi" ? ["Chi so", "Gia tri"] : ["Metric", "Value"],
     [
       [
         input.language === "vi" ? "Tong tien vao" : "Total inflow",
@@ -2687,7 +2720,9 @@ const buildTodayTransactionReportResponse = async (input: {
   });
 
   const transactions = txns
-    .map((txn) => safelyDecryptTransaction(txn, "/ai/copilot-chat:today-report"))
+    .map((txn) =>
+      safelyDecryptTransaction(txn, "/ai/copilot-chat:today-report"),
+    )
     .filter((txn): txn is NonNullable<typeof txn> => Boolean(txn))
     .map((txn) => {
       const metadata =
@@ -2730,7 +2765,7 @@ const buildTodayTransactionReportResponse = async (input: {
     suggestedActions:
       input.language === "vi"
         ? [
-          "Hoi them bao cao giao dich tuan nay neu ban muon xem xu huong rong hon.",
+            "Hoi them bao cao giao dich tuan nay neu ban muon xem xu huong rong hon.",
             "Hoi rieng tong tien vao hoac tong tien ra neu ban muon rut gon bao cao.",
             "Yeu cau toi danh dau giao dich nao lon nhat trong ngay.",
           ]
@@ -2788,7 +2823,9 @@ const buildWeeklyTransactionReportResponse = async (input: {
   });
 
   const transactions = txns
-    .map((txn) => safelyDecryptTransaction(txn, "/ai/copilot-chat:weekly-report"))
+    .map((txn) =>
+      safelyDecryptTransaction(txn, "/ai/copilot-chat:weekly-report"),
+    )
     .filter((txn): txn is NonNullable<typeof txn> => Boolean(txn))
     .map((txn) => {
       const metadata =
@@ -2970,10 +3007,7 @@ const buildSliderCaptchaChallenge = () => {
   const maxOffsetPx = stageWidthPx - pieceWidthPx;
   const tolerancePx = Math.max(6, CAPTCHA_TOLERANCE_PX);
   const minOffsetPx = Math.max(28, Math.round(maxOffsetPx * 0.18));
-  const maxTargetPx = Math.max(
-    minOffsetPx + tolerancePx * 2,
-    maxOffsetPx - 28,
-  );
+  const maxTargetPx = Math.max(minOffsetPx + tolerancePx * 2, maxOffsetPx - 28);
   const targetOffsetPx = crypto.randomInt(minOffsetPx, maxTargetPx + 1);
   const issuedAt = Date.now();
   const payload: SliderCaptchaPayload = {
@@ -3028,7 +3062,9 @@ const verifySliderCaptchaSubmission = (
     throw new Error("INVALID_CAPTCHA");
   }
 
-  return Math.abs(captchaOffset - payload.targetOffsetPx) <= payload.tolerancePx;
+  return (
+    Math.abs(captchaOffset - payload.targetOffsetPx) <= payload.tolerancePx
+  );
 };
 
 const getRecipientName = (input: {
@@ -3423,7 +3459,9 @@ const isFallbackMonitoringLoginEvent = (event: LoginEventEntity) => {
   const modelSource =
     typeof aiResult.modelSource === "string" ? aiResult.modelSource : "";
   const reasons = Array.isArray(aiResult.reasons)
-    ? aiResult.reasons.filter((reason): reason is string => typeof reason === "string")
+    ? aiResult.reasons.filter(
+        (reason): reason is string => typeof reason === "string",
+      )
     : [];
 
   return (
@@ -3666,21 +3704,21 @@ const executeTransfer = async (input: {
             counterpartyWalletId: senderWallet.id,
             fromUserId: input.senderUserId,
             toUserId: input.resolvedReceiverUserId,
-              metadata: {
-                entry: "CREDIT",
-                reconciliationId,
-                fromAccount: input.senderAccountNumber,
-                toAccount: input.receiverAccountNumber,
-                transferAdvisory: input.transferAdvisory
-                  ? {
-                      ...input.transferAdvisory,
-                      perspective: "receiver_credit",
-                    }
-                  : undefined,
-                aiMonitoring: input.aiMonitoring
-                  ? {
-                      ...buildStoredAiMonitoring(input.aiMonitoring),
-                      perspective: "receiver_credit",
+            metadata: {
+              entry: "CREDIT",
+              reconciliationId,
+              fromAccount: input.senderAccountNumber,
+              toAccount: input.receiverAccountNumber,
+              transferAdvisory: input.transferAdvisory
+                ? {
+                    ...input.transferAdvisory,
+                    perspective: "receiver_credit",
+                  }
+                : undefined,
+              aiMonitoring: input.aiMonitoring
+                ? {
+                    ...buildStoredAiMonitoring(input.aiMonitoring),
+                    perspective: "receiver_credit",
                   }
                 : undefined,
             },
@@ -3791,9 +3829,9 @@ const probeAiServiceHealth = async () => {
     });
     clearTimeout(timeout);
     if (!response.ok) return false;
-    const data = (await response.json().catch(() => null)) as
-      | { service?: unknown }
-      | null;
+    const data = (await response.json().catch(() => null)) as {
+      service?: unknown;
+    } | null;
     return data?.service === "ai";
   } catch {
     return false;
@@ -4049,7 +4087,10 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
       ? body.currency.trim().toUpperCase()
       : "USD";
 
-  if (req.user?.sub && isWeeklyTransactionReportIntent(latestUserMessage.content)) {
+  if (
+    req.user?.sub &&
+    isWeeklyTransactionReportIntent(latestUserMessage.content)
+  ) {
     const weeklyReport = await buildWeeklyTransactionReportResponse({
       userId: req.user.sub,
       currency,
@@ -4058,7 +4099,10 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
     return res.json(weeklyReport);
   }
 
-  if (req.user?.sub && isTodayTransactionReportIntent(latestUserMessage.content)) {
+  if (
+    req.user?.sub &&
+    isTodayTransactionReportIntent(latestUserMessage.content)
+  ) {
     const todayReport = await buildTodayTransactionReportResponse({
       userId: req.user.sub,
       currency,
@@ -4534,7 +4578,9 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
         metadata: {
           aiResult,
           reason: "ACCOUNT_DISABLED",
-          ...(clientDeviceContext ? { deviceContext: clientDeviceContext } : {}),
+          ...(clientDeviceContext
+            ? { deviceContext: clientDeviceContext }
+            : {}),
         },
       });
       await logAuditEvent({
@@ -4568,7 +4614,9 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
         metadata: {
           aiResult,
           reason: "LOCKOUT_THRESHOLD",
-          ...(clientDeviceContext ? { deviceContext: clientDeviceContext } : {}),
+          ...(clientDeviceContext
+            ? { deviceContext: clientDeviceContext }
+            : {}),
         },
       });
       return res
@@ -4991,14 +5039,14 @@ app.post("/auth/login/verify", async (req, res) => {
             : "Account locked after too many incorrect OTP attempts.",
         remainingAttempts:
           "remainingAttempts" in err
-            ? (err as { remainingAttempts?: number }).remainingAttempts ?? 0
+            ? ((err as { remainingAttempts?: number }).remainingAttempts ?? 0)
             : 0,
       });
     }
     if (err instanceof Error && err.message === "OTP_INCORRECT") {
       const remainingAttempts =
         "remainingAttempts" in err
-          ? (err as { remainingAttempts?: number }).remainingAttempts ?? null
+          ? ((err as { remainingAttempts?: number }).remainingAttempts ?? null)
           : null;
       return res.status(400).json({
         error:
@@ -5109,15 +5157,19 @@ app.post("/auth/password/reset", async (req, res) => {
     typeof body.challengeId === "string" ? body.challengeId.trim() : "";
   const otp = typeof body.otp === "string" ? body.otp.replace(/\D/g, "") : "";
   const newPassword =
-    typeof body.newPassword === "string" ? body.newPassword.trim() : "";
+    typeof body.newPassword === "string" ? body.newPassword : "";
 
   if (
     !email ||
     !challengeId ||
     !/^\d{6}$/.test(otp) ||
-    newPassword.length < 8
+    newPassword.length < PROFESSIONAL_PASSWORD_MIN_LENGTH ||
+    !meetsProfessionalPasswordPolicy(newPassword)
   ) {
-    return res.status(400).json({ error: "Invalid password reset payload" });
+    return res.status(400).json({
+      error:
+        "Password must be at least 12 characters and include uppercase, lowercase, number, and special character.",
+    });
   }
 
   try {
@@ -5296,6 +5348,15 @@ app.post("/auth/change-password", requireAuth, async (req, res) => {
   };
   if (!currentPassword || !newPassword) {
     return res.status(400).json({ error: "Missing password fields" });
+  }
+  if (
+    newPassword.length < PROFESSIONAL_PASSWORD_MIN_LENGTH ||
+    !meetsProfessionalPasswordPolicy(newPassword)
+  ) {
+    return res.status(400).json({
+      error:
+        "New password must be at least 12 characters and include uppercase, lowercase, number, and special character.",
+    });
   }
 
   const userRepository = createUserRepository();
@@ -5857,10 +5918,10 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
     const existingSafetyHold = getTransferSafetyHold(user.metadata);
     const hasMatchingSafetyHold = Boolean(
       existingSafetyHold &&
-        matchesTransferSafetyHold(existingSafetyHold, {
-          toAccount: context.receiverAccountNumber,
-          toUserId: context.resolvedReceiverUserId,
-        }),
+      matchesTransferSafetyHold(existingSafetyHold, {
+        toAccount: context.receiverAccountNumber,
+        toUserId: context.resolvedReceiverUserId,
+      }),
     );
     if (existingSafetyHold) {
       const isExpired =
@@ -5875,15 +5936,15 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
 
     const [failedTx24h, velocity1h, spendProfile, recipientProfile] =
       await Promise.all([
-      countRecentFailedTransfers(senderUserId, 24),
-      countRecentTransferVelocity(senderUserId, 1),
-      getTransferSpendProfile(senderUserId, context.amount),
-      getTransferRecipientProfile({
-        userId: senderUserId,
-        toUserId: context.resolvedReceiverUserId,
-        toAccount: context.receiverAccountNumber,
-      }),
-    ]);
+        countRecentFailedTransfers(senderUserId, 24),
+        countRecentTransferVelocity(senderUserId, 1),
+        getTransferSpendProfile(senderUserId, context.amount),
+        getTransferRecipientProfile({
+          userId: senderUserId,
+          toUserId: context.resolvedReceiverUserId,
+          toAccount: context.receiverAccountNumber,
+        }),
+      ]);
 
     let aiResult = DEFAULT_AI_RESPONSE;
     try {
@@ -5991,7 +6052,9 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
           "This transfer matched a high-risk scam pattern.",
         blockedUntil:
           transferAdvisory.blockedUntil ||
-          new Date(Date.now() + TRANSFER_SCAM_HOLD_MINUTES * 60 * 1000).toISOString(),
+          new Date(
+            Date.now() + TRANSFER_SCAM_HOLD_MINUTES * 60 * 1000,
+          ).toISOString(),
         createdAt: new Date().toISOString(),
       };
       await userRepository.updateMetadata(
@@ -6031,7 +6094,6 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       transferAdvisory?.severity === "warning" &&
       body.advisoryAcknowledged !== true
     ) {
-
       await logAuditEvent({
         actor: req.user?.email,
         userId: senderUserId,
@@ -6315,7 +6377,8 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
         transferAdvisorySeverity: transferAdvisory?.severity || null,
       },
       metadata: {
-        requestKey: transferAiResult.requestKey || transferAdvisory?.requestKey || null,
+        requestKey:
+          transferAiResult.requestKey || transferAdvisory?.requestKey || null,
         spendProfile: transferSpendProfile,
         transferAdvisory: transferAdvisory || undefined,
         aiMonitoring: buildStoredAiMonitoring(transferAiResult),
@@ -6479,7 +6542,9 @@ app.get("/security/overview", requireAuth, async (req, res) => {
       authSecurityState.trustedIps.map((entry) => [entry.ipAddress, entry]),
     );
 
-    const userFacingEvents = events.filter((event) => !isSyntheticAiLoginEvent(event));
+    const userFacingEvents = events.filter(
+      (event) => !isSyntheticAiLoginEvent(event),
+    );
     const visibleEvents = userFacingEvents.length ? userFacingEvents : events;
 
     const alerts = visibleEvents.slice(0, 12).map((event) => {
@@ -6530,9 +6595,7 @@ app.get("/security/overview", requireAuth, async (req, res) => {
         effectiveUserAgent,
         storedDeviceContext,
       );
-      const trustedIp = effectiveIp
-        ? trustedByIp.get(effectiveIp)
-        : undefined;
+      const trustedIp = effectiveIp ? trustedByIp.get(effectiveIp) : undefined;
       return {
         id: event.id,
         location: effectiveLocation,
@@ -6627,7 +6690,9 @@ app.patch(
     try {
       const userRepository = createUserRepository();
       const policy = await getSecurityPolicy();
-      const existingUser = await userRepository.findValidatedById(req.params.id);
+      const existingUser = await userRepository.findValidatedById(
+        req.params.id,
+      );
       const lockoutWindowStart = new Date(
         Date.now() - policy.lockoutMinutes * 60 * 1000,
       );
@@ -6636,11 +6701,7 @@ app.patch(
         statusNormalized as UserStatus,
       );
       let updated = await userRepository.findValidatedById(req.params.id);
-      if (
-        updated &&
-        existingUser &&
-        statusNormalized === "ACTIVE"
-      ) {
+      if (updated && existingUser && statusNormalized === "ACTIVE") {
         await prisma.loginEvent.deleteMany({
           where: {
             email: existingUser.email,
@@ -6894,13 +6955,17 @@ app.patch(
     }
 
     const status = normalizeAdminAlertStatus(req.body?.status);
-    const note =
-      typeof req.body?.note === "string" ? req.body.note.trim() : "";
+    const note = typeof req.body?.note === "string" ? req.body.note.trim() : "";
 
     const existing = await prisma.auditLog.findUnique({
       where: { id: alertId },
     });
-    if (!existing || !AI_ALERT_ACTIONS.includes(existing.action as (typeof AI_ALERT_ACTIONS)[number])) {
+    if (
+      !existing ||
+      !AI_ALERT_ACTIONS.includes(
+        existing.action as (typeof AI_ALERT_ACTIONS)[number],
+      )
+    ) {
       return res.status(404).json({ error: "Alert not found" });
     }
 
