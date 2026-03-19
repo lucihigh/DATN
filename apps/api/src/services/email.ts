@@ -47,31 +47,31 @@ const renderOtpEmailHtml = (input: {
   summaryValue: string;
   securityNote: string;
 }) => `
-  <div style="margin:0;padding:32px 16px;background:#071120;font-family:Segoe UI,Arial,sans-serif;color:#dbeafe">
+  <div style="margin:0;padding:24px 12px;background:#f3f4f6;font-family:Arial,Helvetica,sans-serif;color:#111827">
     <div style="display:none;opacity:0;visibility:hidden;overflow:hidden;height:0;width:0">${input.preheader}</div>
-    <div style="max-width:620px;margin:0 auto;background:#0c1730;border:1px solid #1d3a66;border-radius:24px;overflow:hidden;box-shadow:0 18px 48px rgba(0,0,0,0.35)">
-      <div style="padding:28px 32px;background:radial-gradient(circle at top right,#1f8ef1 0%,#10264d 40%,#09162e 100%)">
-        <div style="display:inline-block;padding:8px 12px;border-radius:999px;background:rgba(14,165,233,0.18);color:#7dd3fc;font-size:12px;font-weight:700;letter-spacing:1px;text-transform:uppercase">FPIPay</div>
-        <h1 style="margin:16px 0 10px;color:#f8fafc;font-size:30px;line-height:1.2">${input.title}</h1>
-        <p style="margin:0;color:#bfd4ff;font-size:15px;line-height:1.65">${input.subtitle}</p>
+    <div style="max-width:560px;margin:0 auto;background:#ffffff;border:1px solid #d1d5db">
+      <div style="padding:20px 24px;border-bottom:1px solid #e5e7eb">
+        <div style="font-size:18px;font-weight:700;color:#111827">FPIPay</div>
+        <div style="margin-top:6px;font-size:20px;font-weight:700;color:#111827">${input.title}</div>
+        <p style="margin:10px 0 0;font-size:14px;line-height:1.6;color:#374151">${input.subtitle}</p>
       </div>
-      <div style="padding:32px">
-        <p style="margin:0 0 14px;font-size:15px;color:#bfd4ff">Hello ${input.recipientName},</p>
-        <p style="margin:0 0 18px;font-size:15px;color:#bfd4ff;line-height:1.7">
-          Use the one-time password below to continue. This code can be used once and will expire automatically.
+      <div style="padding:24px">
+        <p style="margin:0 0 12px;font-size:14px;color:#111827">Hello ${input.recipientName},</p>
+        <p style="margin:0 0 16px;font-size:14px;line-height:1.7;color:#374151">
+          Use the verification code below to continue. This code can only be used once.
         </p>
-        <div style="margin:0 0 20px;padding:22px;border-radius:18px;background:linear-gradient(90deg,#22d3ee,#22c55e,#f59e0b);text-align:center">
-          <div style="font-size:12px;font-weight:700;letter-spacing:1.6px;color:#0f172a;text-transform:uppercase">One-time password</div>
-          <div style="margin-top:10px;font-size:34px;font-weight:800;letter-spacing:10px;color:#04101f">${input.otpCode}</div>
+        <div style="margin:0 0 16px;padding:16px;border:1px solid #d1d5db;background:#f9fafb;text-align:center">
+          <div style="font-size:12px;font-weight:700;letter-spacing:1px;color:#6b7280;text-transform:uppercase">Verification code</div>
+          <div style="margin-top:8px;font-size:32px;font-weight:700;letter-spacing:8px;color:#111827">${input.otpCode}</div>
         </div>
-        <div style="padding:18px;border-radius:16px;background:#0a1327;border:1px solid #1d345a;margin-bottom:18px">
-          <div style="font-size:12px;font-weight:700;letter-spacing:1px;color:#7dd3fc;text-transform:uppercase;margin-bottom:8px">${input.summaryLabel}</div>
-          <div style="font-size:16px;font-weight:700;color:#f8fafc">${input.summaryValue}</div>
-          <div style="margin-top:10px;font-size:13px;color:#93a9d2">Expires in ${input.expiresInMinutes} minutes</div>
+        <div style="margin-bottom:16px;border:1px solid #e5e7eb;background:#ffffff">
+          <div style="padding:10px 14px;border-bottom:1px solid #e5e7eb;font-size:12px;font-weight:700;color:#6b7280;text-transform:uppercase">${input.summaryLabel}</div>
+          <div style="padding:12px 14px;font-size:14px;color:#111827">${input.summaryValue}</div>
+          <div style="padding:0 14px 12px;font-size:13px;color:#6b7280">Expires in ${input.expiresInMinutes} minutes</div>
         </div>
-        <p style="margin:0 0 12px;font-size:14px;color:#bfd4ff;line-height:1.65">${input.securityNote}</p>
-        <p style="margin:0;font-size:12px;color:#6b86b3;line-height:1.6">
-          For your security, never share this code with anyone. FPIPay staff will never ask for your OTP.
+        <p style="margin:0 0 10px;font-size:13px;line-height:1.7;color:#374151">${input.securityNote}</p>
+        <p style="margin:0;font-size:12px;line-height:1.6;color:#6b7280">
+          Do not share this code with anyone. FPIPay staff will never ask for your OTP.
         </p>
       </div>
     </div>
@@ -161,6 +161,90 @@ export const sendTransferOtpEmail = async (input: {
     },
   });
 
+export const sendTransferRiskAlertEmail = async (input: {
+  to: string;
+  recipientName: string;
+  amount: number;
+  currency: string;
+  toAccount: string;
+  reason: string;
+  totalOutflowWindow: number;
+  windowLabel: string;
+  actionRequired: "faceid" | "blocked";
+}) => {
+  const amountLabel = formatMoney(input.currency, input.amount);
+  const totalWindowLabel = formatMoney(
+    input.currency,
+    input.totalOutflowWindow,
+  );
+  const actionLabel =
+    input.actionRequired === "blocked"
+      ? "Transfer blocked for security review"
+      : "Additional biometric verification required";
+
+  return sendEmail({
+    to: input.to,
+    subject:
+      input.actionRequired === "blocked"
+        ? "FPIPay security alert: transfer temporarily blocked"
+        : "FPIPay security alert: FaceID verification required",
+    text:
+      `Hello ${input.recipientName},\n\n` +
+      `${actionLabel}\n\n` +
+      `Transfer amount: ${amountLabel}\n` +
+      `Recipient account: ${input.toAccount}\n` +
+      `Reason: ${input.reason}\n` +
+      `Total outgoing in the last ${input.windowLabel}: ${totalWindowLabel}\n\n` +
+      `${
+        input.actionRequired === "blocked"
+          ? "This transfer cannot continue until the security waiting period ends."
+          : "Please complete FaceID verification in FPIPay before the transfer can continue."
+      }\n\n` +
+      `If you do not recognize this activity, secure your account immediately.`,
+    html: `
+      <div style="margin:0;padding:24px 12px;background:#f3f4f6;font-family:Arial,Helvetica,sans-serif;color:#111827">
+        <div style="max-width:620px;margin:0 auto;background:#ffffff;border:1px solid #d1d5db">
+          <div style="padding:18px 24px;border-bottom:3px solid #b91c1c">
+            <div style="font-size:18px;font-weight:700;color:#111827">FPIPay Security Alert</div>
+            <div style="margin-top:8px;font-size:24px;font-weight:700;color:#991b1b">${actionLabel}</div>
+          </div>
+          <div style="padding:24px">
+            <p style="margin:0 0 14px;font-size:14px;color:#111827">Hello ${input.recipientName},</p>
+            <p style="margin:0 0 16px;font-size:14px;line-height:1.7;color:#374151">
+              FPIPay applied a security control to a transfer attempt because the activity matched a monitored risk condition.
+            </p>
+            <table role="presentation" style="width:100%;border-collapse:collapse;border:1px solid #d1d5db;margin:0 0 16px">
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;width:42%;font-size:13px;color:#6b7280">Transfer amount</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;font-weight:700;color:#111827">${amountLabel}</td></tr>
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:13px;color:#6b7280">Recipient account</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827">${input.toAccount}</td></tr>
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:13px;color:#6b7280">Detected reason</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827">${input.reason}</td></tr>
+              <tr><td style="padding:10px 12px;background:#f9fafb;font-size:13px;color:#6b7280">Recent outgoing total</td><td style="padding:10px 12px;font-size:14px;color:#111827">${totalWindowLabel} in the last ${input.windowLabel}</td></tr>
+            </table>
+            <p style="margin:0;font-size:13px;line-height:1.7;color:#374151">
+              ${
+                input.actionRequired === "blocked"
+                  ? "This transfer remains blocked until the current security waiting period ends."
+                  : "Please complete FaceID verification in FPIPay before the transfer can continue."
+              }
+            </p>
+            <p style="margin:12px 0 0;font-size:13px;line-height:1.7;color:#374151">
+              If you do not recognize this activity, review recent sign-ins, reset your password, and contact support immediately.
+            </p>
+          </div>
+        </div>
+      </div>
+    `,
+    debug: {
+      amount: input.amount,
+      currency: input.currency,
+      toAccount: input.toAccount,
+      reason: input.reason,
+      totalOutflowWindow: input.totalOutflowWindow,
+      windowLabel: input.windowLabel,
+      actionRequired: input.actionRequired,
+    },
+  });
+};
+
 export const sendLoginOtpEmail = async (input: {
   to: string;
   recipientName: string;
@@ -196,28 +280,38 @@ export const sendLoginRiskAlertEmail = async (input: {
 }) =>
   sendEmail({
     to: input.to,
-    subject: "FPIPay sign-in alert",
+    subject: "FPIPay security alert: unusual sign-in detected",
     text:
-      `We noticed a sign-in from a new or unusual device.\n` +
-      `${input.ipAddress ? `IP: ${input.ipAddress}\n` : ""}` +
-      `${input.userAgent ? `Device: ${input.userAgent}\n` : ""}` +
+      `Hello ${input.recipientName},\n\n` +
+      `We detected a sign-in that requires additional attention.\n` +
       `${input.reason ? `Reason: ${input.reason}\n` : ""}` +
-      "If this was you, no action is required. Large transfers may be temporarily limited for this session.",
-    html: renderOtpEmailHtml({
-      preheader: "We noticed a new or unusual sign-in to your FPIPay account.",
-      title: "New device sign-in alert",
-      subtitle:
-        "Your account was accessed from a device or network that needs additional monitoring.",
-      recipientName: input.recipientName,
-      otpCode: "ALERT",
-      expiresInMinutes: 15,
-      summaryLabel: "Security review",
-      summaryValue: input.reason || "New or unusual device detected",
-      securityNote:
-        `${input.ipAddress ? `IP: ${input.ipAddress}. ` : ""}` +
-        `${input.userAgent ? `Device: ${input.userAgent}. ` : ""}` +
-        "Large transfers may be temporarily limited for this session while we continue monitoring.",
-    }).replace(">ALERT<", ">NOTICE<"),
+      `${input.ipAddress ? `IP address: ${input.ipAddress}\n` : ""}` +
+      `${input.userAgent ? `Device: ${input.userAgent}\n` : ""}` +
+      `\nIf this activity was not initiated by you, secure your account immediately.`,
+    html: `
+      <div style="margin:0;padding:24px 12px;background:#f3f4f6;font-family:Arial,Helvetica,sans-serif;color:#111827">
+        <div style="max-width:620px;margin:0 auto;background:#ffffff;border:1px solid #d1d5db">
+          <div style="padding:18px 24px;border-bottom:3px solid #b91c1c">
+            <div style="font-size:18px;font-weight:700;color:#111827">FPIPay Security Alert</div>
+            <div style="margin-top:8px;font-size:24px;font-weight:700;color:#991b1b">Unusual sign-in detected</div>
+          </div>
+          <div style="padding:24px">
+            <p style="margin:0 0 14px;font-size:14px;color:#111827">Hello ${input.recipientName},</p>
+            <p style="margin:0 0 16px;font-size:14px;line-height:1.7;color:#374151">
+              We detected a sign-in that requires additional monitoring.
+            </p>
+            <table role="presentation" style="width:100%;border-collapse:collapse;border:1px solid #d1d5db;margin:0 0 16px">
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;width:42%;font-size:13px;color:#6b7280">Reason</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827">${input.reason || "New or unusual sign-in pattern detected"}</td></tr>
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:13px;color:#6b7280">IP address</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827">${input.ipAddress || "Unavailable"}</td></tr>
+              <tr><td style="padding:10px 12px;background:#f9fafb;font-size:13px;color:#6b7280">Device</td><td style="padding:10px 12px;font-size:14px;color:#111827">${input.userAgent || "Unavailable"}</td></tr>
+            </table>
+            <p style="margin:0;font-size:13px;line-height:1.7;color:#374151">
+              If this was not you, reset your password immediately and review recent account activity.
+            </p>
+          </div>
+        </div>
+      </div>
+    `,
     debug: {
       ipAddress: input.ipAddress,
       userAgent: input.userAgent,
@@ -235,15 +329,20 @@ export const sendRegisterOtpEmail = async (input: {
     to: input.to,
     subject: "FPIPay Verify Code",
     text: `Your FPIPay registration OTP is ${input.otpCode}. It expires in ${input.expiresInMinutes} minutes.`,
-    html: `
-      <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111">
-        <p>Hello ${input.recipientName},</p>
-        <p>Your FPIPay verification code is:</p>
-        <p style="font-size:28px;font-weight:700;letter-spacing:6px;margin:12px 0">${input.otpCode}</p>
-        <p>This code expires in ${input.expiresInMinutes} minutes.</p>
-        <p>If you did not request this, please ignore this email.</p>
-      </div>
-    `,
+    html: renderOtpEmailHtml({
+      preheader:
+        "Use this verification code to complete your FPIPay registration.",
+      title: "Registration verification code",
+      subtitle:
+        "We received a request to create or complete an FPIPay account.",
+      recipientName: input.recipientName,
+      otpCode: input.otpCode,
+      expiresInMinutes: input.expiresInMinutes,
+      summaryLabel: "Request type",
+      summaryValue: "Account registration",
+      securityNote:
+        "If you did not request this code, you can ignore this email.",
+    }),
     debug: { otpCode: input.otpCode },
   });
 
@@ -311,42 +410,31 @@ export const sendBalanceChangeEmail = async (input: {
       `Time: ${input.occurredAt}.\n\n` +
       `If you do not recognize this activity, secure your account immediately.`,
     html: `
-      <div style="margin:0;padding:32px 16px;background:#071120;font-family:Segoe UI,Arial,sans-serif;color:#dbeafe">
-        <div style="max-width:620px;margin:0 auto;background:#0c1730;border:1px solid #1d3a66;border-radius:24px;overflow:hidden;box-shadow:0 18px 48px rgba(0,0,0,0.35)">
-          <div style="padding:28px 32px;background:radial-gradient(circle at top right,#1f8ef1 0%,#10264d 40%,#09162e 100%)">
-            <div style="display:inline-block;padding:8px 12px;border-radius:999px;background:rgba(14,165,233,0.18);color:#7dd3fc;font-size:12px;font-weight:700;letter-spacing:1px;text-transform:uppercase">FPIPay</div>
-            <h1 style="margin:16px 0 10px;color:#f8fafc;font-size:30px;line-height:1.2">Balance change alert</h1>
-            <p style="margin:0;color:#bfd4ff;font-size:15px;line-height:1.65">
-              A ${transactionTypeLabel.toLowerCase()} has ${isCredit ? "increased" : "reduced"} your available balance.
-            </p>
+      <div style="margin:0;padding:24px 12px;background:#f5f5f5;font-family:Arial,Helvetica,sans-serif;color:#111827">
+        <div style="max-width:640px;margin:0 auto;background:#ffffff;border:1px solid #d1d5db">
+          <div style="padding:18px 24px;border-bottom:1px solid #d1d5db">
+            <div style="font-size:18px;font-weight:700;color:#111827">BALANCE CHANGE NOTIFICATION</div>
+            <div style="margin-top:4px;font-size:13px;color:#6b7280">FPIPay Electronic Wallet Notice</div>
           </div>
-          <div style="padding:32px">
-            <p style="margin:0 0 14px;font-size:15px;color:#bfd4ff">Hello ${input.recipientName},</p>
-            <div style="margin:0 0 20px;padding:22px;border-radius:18px;background:${isCredit ? "linear-gradient(90deg,#22d3ee,#22c55e)" : "linear-gradient(90deg,#fb7185,#f59e0b)"};text-align:center">
-              <div style="font-size:12px;font-weight:700;letter-spacing:1.6px;color:#0f172a;text-transform:uppercase">Balance movement</div>
-              <div style="margin-top:10px;font-size:34px;font-weight:800;color:#04101f">${isCredit ? "+" : "-"}${amountLabel}</div>
-            </div>
-            <div style="display:grid;gap:12px">
-              <div style="padding:18px;border-radius:16px;background:#0a1327;border:1px solid #1d345a">
-                <div style="font-size:12px;font-weight:700;letter-spacing:1px;color:#7dd3fc;text-transform:uppercase;margin-bottom:8px">Available balance</div>
-                <div style="font-size:24px;font-weight:800;color:#f8fafc">${balanceLabel}</div>
-              </div>
-              <div style="padding:18px;border-radius:16px;background:#0a1327;border:1px solid #1d345a">
-                <div style="font-size:12px;font-weight:700;letter-spacing:1px;color:#7dd3fc;text-transform:uppercase;margin-bottom:8px">Transaction details</div>
-                <div style="font-size:14px;color:#dbeafe;line-height:1.8">
-                  <div>Type: ${transactionTypeLabel}</div>
-                  <div>Description: ${input.description}</div>
-                  ${
-                    input.counterpartyLabel
-                      ? `<div>Counterparty: ${input.counterpartyLabel}</div>`
-                      : ""
-                  }
-                  <div>Time: ${input.occurredAt}</div>
-                </div>
-              </div>
-            </div>
-            <p style="margin:18px 0 0;font-size:13px;color:#93a9d2;line-height:1.7">
-              If you do not recognize this activity, sign in immediately, change your password, and review recent sign-in activity.
+          <div style="padding:24px">
+            <p style="margin:0 0 14px;font-size:14px;color:#111827">Dear ${input.recipientName},</p>
+            <p style="margin:0 0 16px;font-size:14px;line-height:1.7;color:#374151">
+              Our system recorded a successful transaction and updated your account balance as follows:
+            </p>
+            <table role="presentation" style="width:100%;border-collapse:collapse;border:1px solid #d1d5db">
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;width:38%;font-size:13px;color:#6b7280">Transaction Type</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827">${transactionTypeLabel}</td></tr>
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:13px;color:#6b7280">Balance Change</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;font-weight:700;color:#111827">${isCredit ? "+" : "-"}${amountLabel}</td></tr>
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:13px;color:#6b7280">Available Balance</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;font-weight:700;color:#111827">${balanceLabel}</td></tr>
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:13px;color:#6b7280">Description</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827">${input.description}</td></tr>
+              ${
+                input.counterpartyLabel
+                  ? `<tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:13px;color:#6b7280">Counterparty</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827">${input.counterpartyLabel}</td></tr>`
+                  : ""
+              }
+              <tr><td style="padding:10px 12px;background:#f9fafb;font-size:13px;color:#6b7280">Time</td><td style="padding:10px 12px;font-size:14px;color:#111827">${input.occurredAt}</td></tr>
+            </table>
+            <p style="margin:16px 0 0;font-size:12px;line-height:1.7;color:#6b7280">
+              Please review this activity and contact support immediately if you do not recognize this transaction.
             </p>
           </div>
         </div>

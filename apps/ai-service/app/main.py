@@ -45,6 +45,7 @@ from app.login_model import (
     normalize_login_event as normalize_login_event_payload,
     resolve_request_key as resolve_login_request_key,
 )
+from app.face_liveness_model import FaceLivenessRequest, analyze_face_liveness
 from app.transaction_model import (
     TX_FEATURE_NAMES,
     TrainTransactionRequest,
@@ -2665,6 +2666,25 @@ def score_transaction(
         },
         "mongo_persist": mongo_persist,
         "admin_alert": admin_alert,
+    }
+
+
+@app.post("/ai/face/liveness")
+def score_face_liveness(
+    payload: FaceLivenessRequest,
+    _: None = Depends(_require_api_key),
+):
+    try:
+        result = analyze_face_liveness(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid face payload: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Face anti-spoof analysis failed: {exc}") from exc
+
+    return {
+        **result,
+        "modelSource": "server-face-antispoof-v1",
+        "modelVersion": "face_antispoof_v1",
     }
 
 
