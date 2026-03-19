@@ -129,6 +129,39 @@ export const professionalPasswordSchema = z
     });
   });
 
+export const faceIdStepSchema = z.enum([
+  "center",
+  "move_left",
+  "move_right",
+  "move_closer",
+]);
+
+export const faceIdStepCaptureSchema = z.object({
+  step: faceIdStepSchema,
+  image: z.string().startsWith("data:image/jpeg;base64,").max(800_000),
+  centerX: z.number().min(0).max(1),
+  centerY: z.number().min(0).max(1),
+  coverage: z.number().min(0).max(1),
+  motion: z.number().min(0).max(1),
+  aligned: z.boolean().optional(),
+});
+
+export const faceIdEnrollmentSchema = z.object({
+  challengeToken: z.string().min(24).max(2048),
+  descriptor: z.string().min(64).max(4096),
+  livenessScore: z.number().min(0).max(1),
+  motionScore: z.number().min(0).max(1),
+  faceCoverage: z.number().min(0).max(1),
+  sampleCount: z.number().int().min(2).max(240),
+  completedSteps: z.array(faceIdStepSchema).min(2).max(4),
+  stepCaptures: z.array(faceIdStepCaptureSchema).min(2).max(4),
+  previewImage: z
+    .string()
+    .startsWith("data:image/jpeg;base64,")
+    .max(2_000_000)
+    .optional(),
+});
+
 export const registerSchema = z.object({
   email: z.string().email(),
   password: professionalPasswordSchema,
@@ -137,6 +170,7 @@ export const registerSchema = z.object({
   phone: z.string().min(6).max(30).optional(),
   address: z.string().min(2).max(255).optional(),
   dob: z.string().min(4).max(20).optional(),
+  faceIdEnrollment: faceIdEnrollmentSchema,
   role: z.enum(["USER", "ADMIN"]).default("USER"),
 });
 
