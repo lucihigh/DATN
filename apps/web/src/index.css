@@ -427,7 +427,7 @@ body.theme-light .user-menu-dropdown {
 .notif-row {
   width: 100%;
   display: grid;
-  gap: 8px;
+  gap: 6px;
   padding: 12px 14px;
   border-radius: 12px;
   border: 1px solid rgba(56, 189, 248, 0.14);
@@ -450,6 +450,32 @@ body.theme-light .user-menu-dropdown {
 .notif-time {
   color: var(--muted);
   font-size: 12px;
+}
+.notif-title,
+.notification-title {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.3;
+  font-weight: 700;
+}
+.notif-message,
+.notification-message {
+  line-height: 1.45;
+}
+.notif-message {
+  font-size: 13px;
+  color: var(--text);
+}
+.notif-meta,
+.notification-meta {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.notif-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .notif-amount {
   font-weight: 800;
@@ -513,7 +539,7 @@ body.theme-light .user-menu-dropdown {
 .notification-main {
   min-width: 0;
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 .notification-topline {
   display: flex;
@@ -523,12 +549,14 @@ body.theme-light .user-menu-dropdown {
   flex-wrap: wrap;
 }
 .notification-message {
-  color: var(--muted);
-  line-height: 1.5;
+  color: var(--text);
 }
 .notification-time {
   color: var(--muted);
   font-size: 12px;
+}
+.notification-meta {
+  overflow-wrap: anywhere;
 }
 .notification-amount {
   min-width: 120px;
@@ -3874,6 +3902,94 @@ body.theme-light .auth-form-shell {
   color: var(--muted);
   cursor: pointer;
 }
+.input-invalid {
+  border-color: rgba(255, 107, 107, 0.8) !important;
+  box-shadow: 0 0 0 1px rgba(255, 107, 107, 0.18);
+}
+.auth-password-strength {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(18, 27, 55, 0.72);
+  display: grid;
+  gap: 8px;
+}
+.auth-password-strength-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.auth-password-strength-head strong {
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+.auth-password-strength-bar {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.auth-password-strength-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #6b7280;
+  transition: width 180ms ease, background 180ms ease;
+}
+.auth-password-strength-message {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.auth-password-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.auth-password-check {
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--muted);
+}
+.auth-password-check.is-met {
+  background: rgba(33, 186, 123, 0.14);
+  color: #b7f7d6;
+}
+.auth-password-strength-empty .auth-password-strength-bar span,
+.auth-password-strength-weak .auth-password-strength-bar span {
+  background: #ef4444;
+}
+.auth-password-strength-fair .auth-password-strength-bar span {
+  background: #f59e0b;
+}
+.auth-password-strength-good .auth-password-strength-bar span {
+  background: #38bdf8;
+}
+.auth-password-strength-strong .auth-password-strength-bar span {
+  background: #22c55e;
+}
+.auth-password-strength-empty .auth-password-strength-head strong,
+.auth-password-strength-weak .auth-password-strength-head strong {
+  color: #fca5a5;
+}
+.auth-password-strength-fair .auth-password-strength-head strong {
+  color: #fcd34d;
+}
+.auth-password-strength-good .auth-password-strength-head strong {
+  color: #7dd3fc;
+}
+.auth-password-strength-strong .auth-password-strength-head strong {
+  color: #86efac;
+}
 .auth-row {
   display: flex;
   justify-content: space-between;
@@ -6471,6 +6587,14 @@ th {
   background: #ffffff;
   border: 1px solid #dfe3ea;
   color: #0f172a;
+}
+.theme-light .auth-password-strength {
+  background: #f8fafc;
+  border-color: #dfe3ea;
+}
+.theme-light .auth-password-check {
+  background: #eef2f7;
+  color: #475569;
 }
 .theme-light .form-group label {
   color: #0f172a;

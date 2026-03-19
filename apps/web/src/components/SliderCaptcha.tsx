@@ -41,7 +41,10 @@ const CAPTCHA_SOURCE_LINES: Array<{ text: string; color: string }> = [
     text: "import org.springframework.beans.factory.annotation.Autowired;",
     color: "#f4b4ff",
   },
-  { text: "import org.springframework.web.bind.annotation.*;", color: "#f4b4ff" },
+  {
+    text: "import org.springframework.web.bind.annotation.*;",
+    color: "#f4b4ff",
+  },
   { text: "", color: "#e5e7eb" },
   { text: "@RestController", color: "#d8b4fe" },
   { text: "public class CaptchaController {", color: "#f8fafc" },
@@ -163,9 +166,9 @@ export function SliderCaptcha({
       const resp = await fetch(`${apiBase}/auth/captcha/slider`, {
         cache: "no-store",
       });
-      const data = (await resp.json().catch(() => null)) as
-        | SliderCaptchaChallenge
-        | null;
+      const data = (await resp
+        .json()
+        .catch(() => null)) as SliderCaptchaChallenge | null;
       if (
         !resp.ok ||
         !data ||
@@ -338,7 +341,10 @@ export function SliderCaptcha({
 
       {isOpen ? (
         <div className="slider-captcha-modal" role="dialog" aria-modal="true">
-          <div className="slider-captcha-backdrop-layer" onClick={handleClose} />
+          <div
+            className="slider-captcha-backdrop-layer"
+            onClick={handleClose}
+          />
           <div className="slider-captcha-panel" style={panelStyle}>
             <button
               type="button"
@@ -360,7 +366,10 @@ export function SliderCaptcha({
                 className="slider-captcha-source-image"
                 draggable={false}
               />
-              <div className="slider-captcha-target-piece" style={targetStyle} />
+              <div
+                className="slider-captcha-target-piece"
+                style={targetStyle}
+              />
               <div
                 className="slider-captcha-floating-piece"
                 style={pieceStyle}
@@ -376,7 +385,10 @@ export function SliderCaptcha({
               </div>
             </div>
 
-            <div className="slider-captcha-slider-shell" style={{ width: `${stageWidth}px` }}>
+            <div
+              className="slider-captcha-slider-shell"
+              style={{ width: `${stageWidth}px` }}
+            >
               <div
                 className="slider-captcha-slider-progress"
                 style={sliderProgressStyle}
