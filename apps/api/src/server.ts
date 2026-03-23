@@ -204,6 +204,13 @@ const FACE_ID_MIN_FACE_COVERAGE = Number(
 const FACE_ID_MIN_SAMPLE_COUNT = Number(
   process.env.FACE_ID_MIN_SAMPLE_COUNT || "24",
 );
+const FACE_ID_LEGACY_MATCH_THRESHOLD = Number(
+  process.env.FACE_ID_LEGACY_MATCH_THRESHOLD || "0.91",
+);
+const FACE_ID_V2_MATCH_THRESHOLD = Number(
+  process.env.FACE_ID_V2_MATCH_THRESHOLD || "0.88",
+);
+const FACE_ID_DESCRIPTOR_V2_PREFIX = "faceid_v2:";
 const TRANSFER_FACE_ID_THRESHOLD = Number(
   process.env.TRANSFER_FACE_ID_THRESHOLD || "10000",
 );
@@ -1474,12 +1481,12 @@ const formatRetryWait = (seconds: number) => {
   const minutes = Math.floor(safeSeconds / 60);
   const remainingSeconds = safeSeconds % 60;
   if (minutes <= 0) {
-    return `${remainingSeconds} giay`;
+    return `${remainingSeconds} second${remainingSeconds === 1 ? "" : "s"}`;
   }
   if (remainingSeconds === 0) {
-    return `${minutes} phut`;
+    return `${minutes} minute${minutes === 1 ? "" : "s"}`;
   }
-  return `${minutes} phut ${remainingSeconds} giay`;
+  return `${minutes} minute${minutes === 1 ? "" : "s"} ${remainingSeconds} second${remainingSeconds === 1 ? "" : "s"}`;
 };
 
 const formatMoneyAmount = (currency: string, amount: number) =>
@@ -3651,10 +3658,17 @@ const decodeFaceIdChallengeToken = (challengeToken: string) => {
   return payload as FaceIdChallengePayload;
 };
 
-const decodeFaceDescriptor = (descriptor: string) => {
+type ParsedFaceDescriptor = {
+  version: "legacy" | "v2";
+  legacy?: Buffer;
+  aligned?: Buffer;
+  geometry?: Buffer;
+};
+
+const decodeFaceDescriptorBytes = (value: string, maxLength = 4096) => {
   try {
-    const raw = Buffer.from(descriptor, "base64");
-    if (!raw.length || raw.length > 2048) {
+    const raw = Buffer.from(value, "base64");
+    if (!raw.length || raw.length > maxLength) {
       throw new Error("INVALID_FACE_ID_DESCRIPTOR");
     }
     return raw;
@@ -3663,9 +3677,50 @@ const decodeFaceDescriptor = (descriptor: string) => {
   }
 };
 
-const compareFaceDescriptors = (left: string, right: string) => {
-  const a = decodeFaceDescriptor(left);
-  const b = decodeFaceDescriptor(right);
+const parseFaceDescriptor = (descriptor: string): ParsedFaceDescriptor => {
+  if (!descriptor.startsWith(FACE_ID_DESCRIPTOR_V2_PREFIX)) {
+    return {
+      version: "legacy",
+      legacy: decodeFaceDescriptorBytes(descriptor, 2048),
+    };
+  }
+
+  try {
+    const payload = JSON.parse(
+      Buffer.from(
+        descriptor.slice(FACE_ID_DESCRIPTOR_V2_PREFIX.length),
+        "base64",
+      ).toString("utf8"),
+    ) as Record<string, unknown>;
+    const legacy =
+      typeof payload.legacy === "string"
+        ? decodeFaceDescriptorBytes(payload.legacy, 2048)
+        : undefined;
+    const aligned =
+      typeof payload.aligned === "string"
+        ? decodeFaceDescriptorBytes(payload.aligned, 4096)
+        : undefined;
+    const geometry =
+      typeof payload.geometry === "string"
+        ? decodeFaceDescriptorBytes(payload.geometry, 512)
+        : undefined;
+
+    if (!legacy && !aligned && !geometry) {
+      throw new Error("INVALID_FACE_ID_DESCRIPTOR");
+    }
+
+    return {
+      version: "v2",
+      legacy,
+      aligned,
+      geometry,
+    };
+  } catch {
+    throw new Error("INVALID_FACE_ID_DESCRIPTOR");
+  }
+};
+
+const compareDescriptorBuffers = (a: Buffer, b: Buffer) => {
   if (a.length !== b.length) return 0;
 
   let dot = 0;
@@ -3681,6 +3736,54 @@ const compareFaceDescriptors = (left: string, right: string) => {
 
   if (!magA || !magB) return 0;
   return dot / Math.sqrt(magA * magB);
+};
+
+const compareFaceDescriptors = (left: string, right: string) => {
+  const a = parseFaceDescriptor(left);
+  const b = parseFaceDescriptor(right);
+  const scores: Array<{ score: number; weight: number }> = [];
+
+  if (a.aligned && b.aligned) {
+    scores.push({
+      score: compareDescriptorBuffers(a.aligned, b.aligned),
+      weight: 0.52,
+    });
+  }
+  if (a.geometry && b.geometry) {
+    scores.push({
+      score: compareDescriptorBuffers(a.geometry, b.geometry),
+      weight: 0.2,
+    });
+  }
+  if (a.legacy && b.legacy) {
+    scores.push({
+      score: compareDescriptorBuffers(a.legacy, b.legacy),
+      weight: scores.length ? 0.28 : 1,
+    });
+  }
+
+  if (!scores.length) {
+    return {
+      similarity: 0,
+      threshold:
+        a.version === "v2" && b.version === "v2"
+          ? FACE_ID_V2_MATCH_THRESHOLD
+          : FACE_ID_LEGACY_MATCH_THRESHOLD,
+    };
+  }
+
+  const totalWeight = scores.reduce((sum, entry) => sum + entry.weight, 0);
+  const similarity =
+    scores.reduce((sum, entry) => sum + entry.score * entry.weight, 0) /
+    Math.max(totalWeight, 1);
+
+  return {
+    similarity,
+    threshold:
+      a.version === "v2" && b.version === "v2"
+        ? FACE_ID_V2_MATCH_THRESHOLD
+        : FACE_ID_LEGACY_MATCH_THRESHOLD,
+  };
 };
 
 const assessFaceIdAntiSpoof = async (
@@ -3891,17 +3994,20 @@ const verifyFaceIdSubmission = (
     throw new Error("FACE_ID_TOO_FEW_SAMPLES");
   }
 
-  decodeFaceDescriptor(submission.descriptor);
+  parseFaceDescriptor(submission.descriptor);
 
-  const similarity = storedDescriptor
+  const similarityResult = storedDescriptor
     ? compareFaceDescriptors(storedDescriptor, submission.descriptor)
-    : 1;
+    : { similarity: 1, threshold: FACE_ID_V2_MATCH_THRESHOLD };
 
-  if (storedDescriptor && similarity < 0.94) {
+  if (
+    storedDescriptor &&
+    similarityResult.similarity < similarityResult.threshold
+  ) {
     throw new Error("FACE_ID_MISMATCH");
   }
 
-  return { challenge, similarity };
+  return { challenge, similarity: similarityResult.similarity };
 };
 
 const verifyFaceIdSubmissionStrict = async (
@@ -8299,6 +8405,9 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
         storedFaceId && typeof storedFaceId.descriptor === "string"
           ? storedFaceId.descriptor
           : "";
+      const storedDescriptorIsLegacy =
+        !!storedDescriptor &&
+        !storedDescriptor.startsWith(FACE_ID_DESCRIPTOR_V2_PREFIX);
       if (storedFaceId?.enabled !== true || !storedDescriptor) {
         return res.status(403).json({
           error:
@@ -8317,10 +8426,22 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
             )}.`,
         });
       }
-      await verifyFaceIdSubmissionStrict(
-        transferFaceEnrollment,
-        storedDescriptor,
-      );
+      try {
+        await verifyFaceIdSubmissionStrict(
+          transferFaceEnrollment,
+          storedDescriptor,
+        );
+      } catch (err) {
+        if (err instanceof Error && err.message === "FACE_ID_MISMATCH") {
+          if (storedDescriptorIsLegacy) {
+            return res.status(403).json({
+              error:
+                "Your FaceID profile was enrolled with an older sample format. Re-enroll FaceID in account settings once, then try this transfer again.",
+            });
+          }
+        }
+        throw err;
+      }
     }
 
     const context = await resolveTransferContext({

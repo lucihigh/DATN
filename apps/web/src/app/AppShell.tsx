@@ -4300,6 +4300,7 @@ function DashboardView() {
                   apiBase={API_BASE}
                   resetKey={transferFaceResetKey}
                   disabled={transferFaceVerifyBusy}
+                  mode="verify"
                   onChange={setTransferFaceProof}
                 />
 
@@ -6366,7 +6367,15 @@ function SettingView() {
   );
 }
 
-function MyProfileView() {
+function MyProfileView({
+  faceIdStatus,
+  faceIdStatusLoading,
+  onOpenFaceEnrollment,
+}: {
+  faceIdStatus: FaceIdAccountStatus;
+  faceIdStatusLoading: boolean;
+  onOpenFaceEnrollment: () => void;
+}) {
   const { user, token, updateUser, logout } = useAuth();
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -6662,6 +6671,35 @@ function MyProfileView() {
         </div>
       </div>
 
+      <section className="card faceid-banner">
+        <div className="faceid-banner-copy">
+          <strong>
+            {faceIdStatus.enabled ? "FaceID is active" : "FaceID is not set up"}
+          </strong>
+          <p>
+            {faceIdStatusLoading
+              ? "Checking your current FaceID status..."
+              : faceIdStatus.enabled
+                ? "Update your live face sample here whenever recognition becomes unreliable or your appearance changes."
+                : "Add a live face sample here so your account can pass future security checks and large-transfer verification."}
+          </p>
+        </div>
+        <div className="faceid-banner-actions">
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={onOpenFaceEnrollment}
+            disabled={faceIdStatusLoading}
+          >
+            {faceIdStatusLoading
+              ? "Checking..."
+              : faceIdStatus.enabled
+                ? "Update FaceID"
+                : "Add FaceID"}
+          </button>
+        </div>
+      </section>
+
       <div className="setting-actions">
         <button type="button" className="btn-primary" onClick={saveProfile}>
           Save Changes
@@ -6732,7 +6770,6 @@ function App() {
     verifiedAt: null,
   });
   const [faceIdStatusLoading, setFaceIdStatusLoading] = useState(false);
-  const [faceReminderDismissed, setFaceReminderDismissed] = useState(false);
   const [faceEnrollmentOpen, setFaceEnrollmentOpen] = useState(false);
   const [faceEnrollmentBusy, setFaceEnrollmentBusy] = useState(false);
   const [faceEnrollmentProof, setFaceEnrollmentProof] =
@@ -6787,7 +6824,6 @@ function App() {
   }, [user?.id]);
 
   useEffect(() => {
-    setFaceReminderDismissed(false);
     if (!user || !token) {
       setFaceIdStatus({
         enabled: false,
@@ -6849,6 +6885,11 @@ function App() {
     resetFaceEnrollmentModal();
   }, [resetFaceEnrollmentModal]);
 
+  const openFaceEnrollmentModal = useCallback(() => {
+    resetFaceEnrollmentModal();
+    setFaceEnrollmentOpen(true);
+  }, [resetFaceEnrollmentModal]);
+
   const handleEnrollFaceId = useCallback(async () => {
     if (!token) {
       toast("Session expired. Please login again.", "error");
@@ -6882,7 +6923,6 @@ function App() {
       }
 
       setFaceIdStatus(parseFaceIdAccountStatus(data?.metadata ?? {}));
-      setFaceReminderDismissed(false);
       closeFaceEnrollmentModal();
       toast(data?.message || "FaceID enrolled successfully.");
     } catch {
@@ -6966,7 +7006,6 @@ function App() {
     email: "guest@fpipay.app",
     avatar: "https://i.pravatar.cc/80?img=13",
   };
-  const needsFaceEnrollment = !faceIdStatusLoading && !faceIdStatus.enabled;
 
   // If not logged in, show dedicated auth shell
   if (!user) {
@@ -7251,37 +7290,6 @@ function App() {
       </aside>
 
       <main className="content">
-        {needsFaceEnrollment && !faceReminderDismissed && (
-          <section className="faceid-banner">
-            <div className="faceid-banner-copy">
-              <strong>Finish securing this wallet with FaceID</strong>
-              <p>
-                This account was created before FaceID became required. Add a
-                live face scan now to keep access recovery and future security
-                checks ready.
-              </p>
-            </div>
-            <div className="faceid-banner-actions">
-              <button
-                type="button"
-                className="pill"
-                onClick={() => setFaceReminderDismissed(true)}
-              >
-                Later
-              </button>
-              <button
-                type="button"
-                className="btn-primary"
-                onClick={() => {
-                  setFaceEnrollmentOpen(true);
-                  setFaceReminderDismissed(true);
-                }}
-              >
-                Add FaceID
-              </button>
-            </div>
-          </section>
-        )}
         <Suspense
           fallback={
             <section className="grid">
@@ -7296,7 +7304,13 @@ function App() {
           {activeTab === "Create Invoices" && <LazyCreateInvoicesView />}
           {activeTab === "Card Center" && <CardCenterView />}
           {activeTab === "Accounts" && <AccountsView />}
-          {activeTab === "My Profile" && <MyProfileView />}
+          {activeTab === "My Profile" && (
+            <MyProfileView
+              faceIdStatus={faceIdStatus}
+              faceIdStatusLoading={faceIdStatusLoading}
+              onOpenFaceEnrollment={openFaceEnrollmentModal}
+            />
+          )}
           {activeTab === "Setting" && <SettingView />}
           {activeTab === "Knowledge base" && <LazyKnowledgeBaseView />}
           {activeTab === "Notifications" && (
@@ -7343,10 +7357,13 @@ function App() {
                 >
                   <div className="faceid-modal-head">
                     <div>
-                      <h3>Add FaceID</h3>
+                      <h3>
+                        {faceIdStatus.enabled ? "Update FaceID" : "Add FaceID"}
+                      </h3>
                       <p>
-                        Complete one live face scan to bind this wallet account
-                        to your protected identity profile.
+                        {faceIdStatus.enabled
+                          ? "Complete a fresh live face scan to replace the current FaceID sample for this wallet."
+                          : "Complete one live face scan to bind this wallet account to your protected identity profile."}
                       </p>
                     </div>
                     <button
@@ -7381,7 +7398,9 @@ function App() {
                     >
                       {faceEnrollmentBusy
                         ? "Processing FaceID..."
-                        : "Enroll FaceID"}
+                        : faceIdStatus.enabled
+                          ? "Update FaceID"
+                          : "Enroll FaceID"}
                     </button>
                   </div>
                 </div>

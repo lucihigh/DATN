@@ -1,0 +1,42 @@
+version: "3.9"
+
+services:
+  workspace:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    volumes:
+      - ..:/workspaces/DATN:cached
+      - datn-node-modules:/workspaces/DATN/node_modules
+      - datn-pnpm-store:/home/node/.local/share/pnpm/store
+    command: sleep infinity
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/ewallet
+      AI_SERVICE_URL: http://127.0.0.1:8000
+      PORT_API: 4000
+      PORT_WEB: 5173
+      PORT_AI: 8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ewallet
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ../infra/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ewallet"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres-data:
+  datn-node-modules:
+  datn-pnpm-store:

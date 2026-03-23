@@ -45,6 +45,7 @@ type FaceIdCaptureProps = {
   apiBase: string;
   resetKey?: number;
   disabled?: boolean;
+  mode?: "enroll" | "verify";
   onChange: (value: FaceIdProof | null) => void;
 };
 
@@ -60,6 +61,10 @@ type DetectedFace = {
     width: number;
     height: number;
   };
+  landmarks?: Array<{
+    x: number;
+    y: number;
+  }>;
 };
 
 type AlignmentSnapshot = {
@@ -108,6 +113,12 @@ const MEDIAPIPE_WASM_PATH =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.32/wasm";
 const MEDIAPIPE_FACE_MODEL_PATH =
   "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite";
+const MEDIAPIPE_FACE_LANDMARKER_MODEL_PATH =
+  "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+const FACE_DESCRIPTOR_V2_PREFIX = "faceid_v2:";
+const LEFT_EYE_INDICES = [33, 133, 159, 145];
+const RIGHT_EYE_INDICES = [362, 263, 386, 374];
+const GEOMETRY_INDICES = [33, 133, 362, 263, 1, 61, 291, 13, 14, 152, 10];
 
 const clamp = (value: number, min: number, max: number) =>
   Math.min(Math.max(value, min), max);
@@ -118,6 +129,23 @@ const base64FromBytes = (bytes: Uint8Array) => {
     result += String.fromCharCode(byte);
   }
   return btoa(result);
+};
+
+const averagePoint = (
+  points: Array<{ x: number; y: number }>,
+  indices: number[],
+) => {
+  let sumX = 0;
+  let sumY = 0;
+  let count = 0;
+  for (const index of indices) {
+    const point = points[index];
+    if (!point) continue;
+    sumX += point.x;
+    sumY += point.y;
+    count += 1;
+  }
+  return count ? { x: sumX / count, y: sumY / count } : null;
 };
 
 const waitForVideoReady = (video: HTMLVideoElement) =>
@@ -155,7 +183,7 @@ const waitForVideoReady = (video: HTMLVideoElement) =>
     video.addEventListener("error", onError);
   });
 
-const buildFaceDescriptor = (
+const getExpandedFaceCrop = (
   sourceCanvas: HTMLCanvasElement,
   box: { x: number; y: number; width: number; height: number },
 ) => {
@@ -172,6 +200,18 @@ const buildFaceDescriptor = (
     Math.round(box.height + paddingY * 2),
     1,
     sourceCanvas.height - cropY,
+  );
+
+  return { cropX, cropY, cropWidth, cropHeight };
+};
+
+const buildLegacyFaceDescriptor = (
+  sourceCanvas: HTMLCanvasElement,
+  box: { x: number; y: number; width: number; height: number },
+) => {
+  const { cropX, cropY, cropWidth, cropHeight } = getExpandedFaceCrop(
+    sourceCanvas,
+    box,
   );
 
   const descriptorCanvas = document.createElement("canvas");
@@ -213,6 +253,171 @@ const buildFaceDescriptor = (
     bytes[index] = gray;
   }
   return base64FromBytes(bytes);
+};
+
+const buildAlignedFaceDescriptor = (
+  sourceCanvas: HTMLCanvasElement,
+  landmarks: Array<{ x: number; y: number }>,
+) => {
+  const leftEye = averagePoint(landmarks, LEFT_EYE_INDICES);
+  const rightEye = averagePoint(landmarks, RIGHT_EYE_INDICES);
+  if (!leftEye || !rightEye) {
+    return null;
+  }
+
+  const eyeDistance = Math.hypot(
+    rightEye.x - leftEye.x,
+    rightEye.y - leftEye.y,
+  );
+  if (!Number.isFinite(eyeDistance) || eyeDistance < 18) {
+    return null;
+  }
+
+  const eyeAngle = Math.atan2(rightEye.y - leftEye.y, rightEye.x - leftEye.x);
+  const eyeMidX = (leftEye.x + rightEye.x) / 2;
+  const eyeMidY = (leftEye.y + rightEye.y) / 2;
+
+  const alignedCanvas = document.createElement("canvas");
+  alignedCanvas.width = 112;
+  alignedCanvas.height = 112;
+  const alignedCtx = alignedCanvas.getContext("2d");
+  if (!alignedCtx) {
+    throw new Error("faceid-canvas-unavailable");
+  }
+  alignedCtx.fillStyle = "#000";
+  alignedCtx.fillRect(0, 0, alignedCanvas.width, alignedCanvas.height);
+  alignedCtx.save();
+  alignedCtx.translate(alignedCanvas.width / 2, alignedCanvas.height * 0.39);
+  const scale = 48 / eyeDistance;
+  alignedCtx.scale(scale, scale);
+  alignedCtx.rotate(-eyeAngle);
+  alignedCtx.translate(-eyeMidX, -eyeMidY);
+  alignedCtx.drawImage(sourceCanvas, 0, 0);
+  alignedCtx.restore();
+
+  const descriptorCanvas = document.createElement("canvas");
+  descriptorCanvas.width = 32;
+  descriptorCanvas.height = 32;
+  const descriptorCtx = descriptorCanvas.getContext("2d");
+  if (!descriptorCtx) {
+    throw new Error("faceid-canvas-unavailable");
+  }
+  descriptorCtx.drawImage(
+    alignedCanvas,
+    0,
+    0,
+    alignedCanvas.width,
+    alignedCanvas.height,
+    0,
+    0,
+    descriptorCanvas.width,
+    descriptorCanvas.height,
+  );
+
+  const pixels = descriptorCtx.getImageData(
+    0,
+    0,
+    descriptorCanvas.width,
+    descriptorCanvas.height,
+  ).data;
+  const grayscale = new Float32Array(
+    descriptorCanvas.width * descriptorCanvas.height,
+  );
+  let luminanceSum = 0;
+
+  for (let index = 0; index < grayscale.length; index += 1) {
+    const offset = index * 4;
+    const value =
+      pixels[offset] * 0.299 +
+      pixels[offset + 1] * 0.587 +
+      pixels[offset + 2] * 0.114;
+    grayscale[index] = value;
+    luminanceSum += value;
+  }
+
+  const mean = luminanceSum / Math.max(1, grayscale.length);
+  let variance = 0;
+  for (const value of grayscale) {
+    variance += (value - mean) ** 2;
+  }
+  const deviation = Math.max(
+    10,
+    Math.sqrt(variance / Math.max(1, grayscale.length)),
+  );
+  const bytes = new Uint8Array(grayscale.length);
+  for (let index = 0; index < grayscale.length; index += 1) {
+    const normalized = ((grayscale[index] - mean) / deviation) * 42 + 128;
+    bytes[index] = clamp(Math.round(normalized), 0, 255);
+  }
+  return base64FromBytes(bytes);
+};
+
+const buildGeometryDescriptor = (
+  landmarks: Array<{ x: number; y: number }>,
+) => {
+  const leftEye = averagePoint(landmarks, LEFT_EYE_INDICES);
+  const rightEye = averagePoint(landmarks, RIGHT_EYE_INDICES);
+  if (!leftEye || !rightEye) {
+    return null;
+  }
+
+  const eyeMidX = (leftEye.x + rightEye.x) / 2;
+  const eyeMidY = (leftEye.y + rightEye.y) / 2;
+  const eyeDistance = Math.hypot(
+    rightEye.x - leftEye.x,
+    rightEye.y - leftEye.y,
+  );
+  if (!Number.isFinite(eyeDistance) || eyeDistance < 18) {
+    return null;
+  }
+  const cos = (rightEye.x - leftEye.x) / eyeDistance;
+  const sin = (rightEye.y - leftEye.y) / eyeDistance;
+  const bytes = new Uint8Array(GEOMETRY_INDICES.length * 2);
+
+  GEOMETRY_INDICES.forEach((index, pointIndex) => {
+    const point = landmarks[index];
+    const dx = (point?.x ?? eyeMidX) - eyeMidX;
+    const dy = (point?.y ?? eyeMidY) - eyeMidY;
+    const alignedX = (dx * cos + dy * sin) / eyeDistance;
+    const alignedY = (-dx * sin + dy * cos) / eyeDistance;
+    bytes[pointIndex * 2] = clamp(
+      Math.round(((alignedX + 1.4) / 2.8) * 255),
+      0,
+      255,
+    );
+    bytes[pointIndex * 2 + 1] = clamp(
+      Math.round(((alignedY + 1.6) / 3.2) * 255),
+      0,
+      255,
+    );
+  });
+
+  return base64FromBytes(bytes);
+};
+
+const buildFaceDescriptor = (
+  sourceCanvas: HTMLCanvasElement,
+  face: DetectedFace,
+) => {
+  const legacy = buildLegacyFaceDescriptor(sourceCanvas, face.boundingBox);
+  if (!face.landmarks?.length) {
+    return legacy;
+  }
+
+  const aligned = buildAlignedFaceDescriptor(sourceCanvas, face.landmarks);
+  const geometry = buildGeometryDescriptor(face.landmarks);
+  if (!aligned && !geometry) {
+    return legacy;
+  }
+
+  return `${FACE_DESCRIPTOR_V2_PREFIX}${btoa(
+    JSON.stringify({
+      kind: "faceid_v2",
+      legacy,
+      aligned,
+      geometry,
+    }),
+  )}`;
 };
 
 const computeCueScore = (
@@ -288,6 +493,7 @@ export function FaceIdCapture({
   apiBase,
   resetKey = 0,
   disabled = false,
+  mode = "enroll",
   onChange,
 }: FaceIdCaptureProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -309,6 +515,7 @@ export function FaceIdCapture({
   const cueAccumulatorRef = useRef(0);
   const sampleCountRef = useRef(0);
   const lastBoxRef = useRef<DetectedFace["boundingBox"] | null>(null);
+  const lastDetectedFaceRef = useRef<DetectedFace | null>(null);
   const stepCaptureRef = useRef<
     Partial<Record<FaceIdStepId, FaceIdStepCapture>>
   >({});
@@ -340,6 +547,7 @@ export function FaceIdCapture({
   const [scanProgress, setScanProgress] = useState(0);
   const [faceAligned, setFaceAligned] = useState(false);
   const [alignmentGlow, setAlignmentGlow] = useState(0);
+  const isVerifyMode = mode === "verify";
 
   const activeStep = challenge?.steps[stepIndex] ?? null;
   const activeCueColor = activeStep ? STEP_COLORS[activeStep.id] : "#38bdf8";
@@ -368,7 +576,11 @@ export function FaceIdCapture({
     stopCamera();
     setChallenge(null);
     setStatus("idle");
-    setMessage("Register a real face scan that is fixed to this account.");
+    setMessage(
+      isVerifyMode
+        ? "Verify with a live face scan before the transfer is approved."
+        : "Register a real face scan that is fixed to this account.",
+    );
     setStepIndex(0);
     setCompletedSteps([]);
     setPreviewImage(null);
@@ -379,6 +591,7 @@ export function FaceIdCapture({
     cueAccumulatorRef.current = 0;
     sampleCountRef.current = 0;
     lastBoxRef.current = null;
+    lastDetectedFaceRef.current = null;
     stepCaptureRef.current = {};
     centerSnapshotRef.current = null;
     previousFrameRef.current = null;
@@ -390,7 +603,7 @@ export function FaceIdCapture({
     setFaceAligned(false);
     setAlignmentGlow(0);
     onChange(null);
-  }, [onChange, stopCamera]);
+  }, [isVerifyMode, onChange, stopCamera]);
 
   useEffect(() => {
     resetState();
@@ -445,57 +658,123 @@ export function FaceIdCapture({
       return detectorLoadRef.current;
     }
 
-    const ctor = (window as Window & { FaceDetector?: BrowserFaceDetectorCtor })
-      .FaceDetector;
-    if (ctor) {
-      const browserDetector = new ctor({ fastMode: true, maxDetectedFaces: 1 });
-      detectorRef.current = {
-        detect: (image) => browserDetector.detect(image),
-      };
-      return detectorRef.current;
-    }
-
     detectorLoadRef.current = (async () => {
       try {
-        const { FaceDetector, FilesetResolver } =
+        const { FaceDetector, FaceLandmarker, FilesetResolver } =
           await import("@mediapipe/tasks-vision");
         const vision =
           await FilesetResolver.forVisionTasks(MEDIAPIPE_WASM_PATH);
-        const detector = await FaceDetector.createFromOptions(vision, {
+        const landmarker = await FaceLandmarker.createFromOptions(vision, {
           baseOptions: {
-            modelAssetPath: MEDIAPIPE_FACE_MODEL_PATH,
+            modelAssetPath: MEDIAPIPE_FACE_LANDMARKER_MODEL_PATH,
           },
           runningMode: "VIDEO",
-          minDetectionConfidence: 0.55,
+          numFaces: 1,
+          minFaceDetectionConfidence: 0.55,
+          minFacePresenceConfidence: 0.55,
+          minTrackingConfidence: 0.5,
+          outputFaceBlendshapes: false,
+          outputFacialTransformationMatrixes: false,
         });
 
         const adapter: DetectorAdapter = {
           detect: async (image) => {
-            const result = detector.detectForVideo(
+            const result = landmarker.detectForVideo(
               image as TexImageSource,
               performance.now(),
             );
-            return (result.detections ?? [])
-              .map((detection) => {
-                const box = detection.boundingBox;
-                if (!box) return null;
+            const faces = (result.faceLandmarks ?? [])
+              .map((faceLandmarks): DetectedFace | null => {
+                if (!faceLandmarks.length) return null;
+                let minX = Number.POSITIVE_INFINITY;
+                let minY = Number.POSITIVE_INFINITY;
+                let maxX = Number.NEGATIVE_INFINITY;
+                let maxY = Number.NEGATIVE_INFINITY;
+                const landmarks = faceLandmarks.map((point) => {
+                  const x = point.x * (image as HTMLCanvasElement).width;
+                  const y = point.y * (image as HTMLCanvasElement).height;
+                  minX = Math.min(minX, x);
+                  minY = Math.min(minY, y);
+                  maxX = Math.max(maxX, x);
+                  maxY = Math.max(maxY, y);
+                  return { x, y };
+                });
+                if (!Number.isFinite(minX) || !Number.isFinite(minY)) {
+                  return null;
+                }
                 return {
                   boundingBox: {
-                    x: box.originX,
-                    y: box.originY,
-                    width: box.width,
-                    height: box.height,
+                    x: minX,
+                    y: minY,
+                    width: Math.max(1, maxX - minX),
+                    height: Math.max(1, maxY - minY),
                   },
+                  landmarks,
                 };
               })
-              .filter((face): face is DetectedFace => Boolean(face));
+              .filter((face): face is DetectedFace => face !== null);
+            return faces;
           },
         };
 
         detectorRef.current = adapter;
         return adapter;
       } catch {
-        return null;
+        try {
+          const { FaceDetector, FilesetResolver } =
+            await import("@mediapipe/tasks-vision");
+          const vision =
+            await FilesetResolver.forVisionTasks(MEDIAPIPE_WASM_PATH);
+          const detector = await FaceDetector.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath: MEDIAPIPE_FACE_MODEL_PATH,
+            },
+            runningMode: "VIDEO",
+            minDetectionConfidence: 0.55,
+          });
+
+          const adapter: DetectorAdapter = {
+            detect: async (image) => {
+              const result = detector.detectForVideo(
+                image as TexImageSource,
+                performance.now(),
+              );
+              return (result.detections ?? [])
+                .map((detection) => {
+                  const box = detection.boundingBox;
+                  if (!box) return null;
+                  return {
+                    boundingBox: {
+                      x: box.originX,
+                      y: box.originY,
+                      width: box.width,
+                      height: box.height,
+                    },
+                  };
+                })
+                .filter((face): face is DetectedFace => Boolean(face));
+            },
+          };
+
+          detectorRef.current = adapter;
+          return adapter;
+        } catch {
+          const ctor = (
+            window as Window & { FaceDetector?: BrowserFaceDetectorCtor }
+          ).FaceDetector;
+          if (!ctor) {
+            return null;
+          }
+          const browserDetector = new ctor({
+            fastMode: true,
+            maxDetectedFaces: 1,
+          });
+          const adapter: DetectorAdapter = {
+            detect: (image) => browserDetector.detect(image),
+          };
+          detectorRef.current = adapter;
+          return adapter;
+        }
       } finally {
         detectorLoadRef.current = null;
       }
@@ -607,7 +886,10 @@ export function FaceIdCapture({
             "Live step evidence was incomplete. Please scan again.",
           );
         }
-        const descriptor = buildFaceDescriptor(canvas, box);
+        const descriptor = buildFaceDescriptor(canvas, {
+          boundingBox: box,
+          landmarks: lastDetectedFaceRef.current?.landmarks,
+        });
         const completedRatio =
           challenge.steps.length > 0
             ? resolvedSteps.length / challenge.steps.length
@@ -648,7 +930,9 @@ export function FaceIdCapture({
         setScanProgress(1);
         setStatus("verified");
         setMessage(
-          "FaceID registered. This biometric sample is now linked to the account.",
+          isVerifyMode
+            ? "Live FaceID verification is ready for this transfer."
+            : "FaceID registered. This biometric sample is now linked to the account.",
         );
         setDiagnostic("");
         onChange(proof);
@@ -661,7 +945,7 @@ export function FaceIdCapture({
         onChange(null);
       }
     },
-    [challenge, onChange, stopCamera],
+    [challenge, isVerifyMode, onChange, stopCamera],
   );
 
   const renderCurrentFrameToCanvas = useCallback(async () => {
@@ -874,6 +1158,9 @@ export function FaceIdCapture({
 
       stepStreakRef.current = 0;
       lastBoxRef.current = box;
+      lastDetectedFaceRef.current = {
+        boundingBox: box,
+      };
       const nextCompletedSteps = completedSteps.includes(activeStep.id)
         ? completedSteps
         : [...completedSteps, activeStep.id];
@@ -938,6 +1225,7 @@ export function FaceIdCapture({
         const faces = await detector.detect(canvas);
         if (!faces.length) {
           noDetectionFramesRef.current += 1;
+          lastDetectedFaceRef.current = null;
           setFaceAligned(false);
           setAlignmentGlow(0);
           setScanProgress(
@@ -957,8 +1245,10 @@ export function FaceIdCapture({
         }
         noDetectionFramesRef.current = 0;
 
-        const box = faces[0].boundingBox;
+        const detectedFace = faces[0];
+        const box = detectedFace.boundingBox;
         lastBoxRef.current = box;
+        lastDetectedFaceRef.current = detectedFace;
         const alignment = getAlignmentSnapshot(box, canvas);
         const totalSteps = challenge?.steps.length ?? 0;
         let alignmentMessage = "Face aligned. Scanning now.";
@@ -1326,6 +1616,7 @@ export function FaceIdCapture({
       cueAccumulatorRef.current = 0;
       sampleCountRef.current = 0;
       lastBoxRef.current = null;
+      lastDetectedFaceRef.current = null;
       centerSnapshotRef.current = null;
       previousFrameRef.current = null;
       noDetectionFramesRef.current = 0;
@@ -1403,7 +1694,9 @@ export function FaceIdCapture({
     <div className={`faceid-card faceid-card-${status}`} style={cueStyle}>
       <div className="faceid-head">
         <div>
-          <strong>FaceID Enrollment</strong>
+          <strong>
+            {isVerifyMode ? "FaceID Verification" : "FaceID Enrollment"}
+          </strong>
           <p>{message}</p>
           {status === "error" && diagnostic ? (
             <small className="faceid-diagnostic">{diagnostic}</small>
@@ -1490,7 +1783,9 @@ export function FaceIdCapture({
             ? activeStep
               ? `Current step: ${activeStep.label}. Keep your face inside the oval and follow the hint above.`
               : "Keep your face inside the oval. The scan will continue automatically."
-            : "Camera preview will appear here after you start scanning."}
+            : isVerifyMode
+              ? "Camera preview will appear here after you start transfer verification."
+              : "Camera preview will appear here after you start scanning."}
         </small>
       </div>
 

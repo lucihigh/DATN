@@ -1,0 +1,46 @@
+{
+  "name": "DATN Dev",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "workspace",
+  "workspaceFolder": "/workspaces/DATN",
+  "shutdownAction": "stopCompose",
+  "remoteUser": "node",
+  "forwardPorts": [5173, 4000, 8000, 5432],
+  "portsAttributes": {
+    "5173": {
+      "label": "Web",
+      "onAutoForward": "notify"
+    },
+    "4000": {
+      "label": "API",
+      "onAutoForward": "notify"
+    },
+    "8000": {
+      "label": "AI Service",
+      "onAutoForward": "silent"
+    },
+    "5432": {
+      "label": "Postgres",
+      "onAutoForward": "silent"
+    }
+  },
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "python.defaultInterpreterPath": "/workspaces/DATN/apps/ai-service/.venv/bin/python",
+        "typescript.tsdk": "/workspaces/DATN/node_modules/typescript/lib"
+      },
+      "extensions": [
+        "ms-vscode.vscode-typescript-next",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-azuretools.vscode-docker",
+        "Prisma.prisma"
+      ]
+    }
+  }
+}
