@@ -205,10 +205,16 @@ const FACE_ID_MIN_SAMPLE_COUNT = Number(
   process.env.FACE_ID_MIN_SAMPLE_COUNT || "24",
 );
 const FACE_ID_LEGACY_MATCH_THRESHOLD = Number(
-  process.env.FACE_ID_LEGACY_MATCH_THRESHOLD || "0.91",
+  process.env.FACE_ID_LEGACY_MATCH_THRESHOLD || "0.88",
 );
 const FACE_ID_V2_MATCH_THRESHOLD = Number(
-  process.env.FACE_ID_V2_MATCH_THRESHOLD || "0.88",
+  process.env.FACE_ID_V2_MATCH_THRESHOLD || "0.76",
+);
+const FACE_ID_V2_ALIGNED_MATCH_THRESHOLD = Number(
+  process.env.FACE_ID_V2_ALIGNED_MATCH_THRESHOLD || "0.76",
+);
+const FACE_ID_V2_GEOMETRY_MATCH_THRESHOLD = Number(
+  process.env.FACE_ID_V2_GEOMETRY_MATCH_THRESHOLD || "0.7",
 );
 const FACE_ID_DESCRIPTOR_V2_PREFIX = "faceid_v2:";
 const TRANSFER_FACE_ID_THRESHOLD = Number(
@@ -3720,15 +3726,28 @@ const parseFaceDescriptor = (descriptor: string): ParsedFaceDescriptor => {
   }
 };
 
-const compareDescriptorBuffers = (a: Buffer, b: Buffer) => {
+const compareDescriptorBuffers = (
+  a: Buffer,
+  b: Buffer,
+  mode: "mean" | "midpoint" = "mean",
+) => {
   if (a.length !== b.length) return 0;
+
+  const centerA =
+    mode === "midpoint"
+      ? 127.5
+      : a.reduce((sum, value) => sum + value, 0) / Math.max(1, a.length);
+  const centerB =
+    mode === "midpoint"
+      ? 127.5
+      : b.reduce((sum, value) => sum + value, 0) / Math.max(1, b.length);
 
   let dot = 0;
   let magA = 0;
   let magB = 0;
   for (let index = 0; index < a.length; index += 1) {
-    const av = a[index] / 255;
-    const bv = b[index] / 255;
+    const av = (a[index] - centerA) / 127.5;
+    const bv = (b[index] - centerB) / 127.5;
     dot += av * bv;
     magA += av * av;
     magB += bv * bv;
@@ -3741,34 +3760,60 @@ const compareDescriptorBuffers = (a: Buffer, b: Buffer) => {
 const compareFaceDescriptors = (left: string, right: string) => {
   const a = parseFaceDescriptor(left);
   const b = parseFaceDescriptor(right);
-  const scores: Array<{ score: number; weight: number }> = [];
+  const alignedScore =
+    a.aligned && b.aligned
+      ? compareDescriptorBuffers(a.aligned, b.aligned, "midpoint")
+      : undefined;
+  const geometryScore =
+    a.geometry && b.geometry
+      ? compareDescriptorBuffers(a.geometry, b.geometry, "midpoint")
+      : undefined;
+  const legacyScore =
+    a.legacy && b.legacy
+      ? compareDescriptorBuffers(a.legacy, b.legacy, "mean")
+      : undefined;
 
-  if (a.aligned && b.aligned) {
+  const isV2Pair = a.version === "v2" && b.version === "v2";
+
+  if (isV2Pair && typeof alignedScore === "number") {
+    return {
+      similarity: alignedScore,
+      alignedScore,
+      geometryScore,
+      legacyScore,
+      threshold: FACE_ID_V2_MATCH_THRESHOLD,
+    };
+  }
+
+  const scores: Array<{ score: number; weight: number }> = [];
+  if (typeof geometryScore === "number") {
     scores.push({
-      score: compareDescriptorBuffers(a.aligned, b.aligned),
-      weight: 0.52,
+      score: geometryScore,
+      weight: 0.35,
     });
   }
-  if (a.geometry && b.geometry) {
+  if (typeof alignedScore === "number") {
     scores.push({
-      score: compareDescriptorBuffers(a.geometry, b.geometry),
-      weight: 0.2,
+      score: alignedScore,
+      weight: 0.65,
     });
   }
-  if (a.legacy && b.legacy) {
+  if (typeof legacyScore === "number") {
     scores.push({
-      score: compareDescriptorBuffers(a.legacy, b.legacy),
-      weight: scores.length ? 0.28 : 1,
+      score: legacyScore,
+      weight: scores.length ? 0.35 : 1,
     });
   }
 
   if (!scores.length) {
     return {
       similarity: 0,
-      threshold:
-        a.version === "v2" && b.version === "v2"
-          ? FACE_ID_V2_MATCH_THRESHOLD
-          : FACE_ID_LEGACY_MATCH_THRESHOLD,
+      alignedScore,
+      geometryScore,
+      legacyScore,
+      threshold: isV2Pair
+        ? FACE_ID_V2_MATCH_THRESHOLD
+        : FACE_ID_LEGACY_MATCH_THRESHOLD,
     };
   }
 
@@ -3779,10 +3824,12 @@ const compareFaceDescriptors = (left: string, right: string) => {
 
   return {
     similarity,
-    threshold:
-      a.version === "v2" && b.version === "v2"
-        ? FACE_ID_V2_MATCH_THRESHOLD
-        : FACE_ID_LEGACY_MATCH_THRESHOLD,
+    alignedScore,
+    geometryScore,
+    legacyScore,
+    threshold: isV2Pair
+      ? FACE_ID_V2_MATCH_THRESHOLD
+      : FACE_ID_LEGACY_MATCH_THRESHOLD,
   };
 };
 
@@ -3998,12 +4045,52 @@ const verifyFaceIdSubmission = (
 
   const similarityResult = storedDescriptor
     ? compareFaceDescriptors(storedDescriptor, submission.descriptor)
-    : { similarity: 1, threshold: FACE_ID_V2_MATCH_THRESHOLD };
+    : {
+        similarity: 1,
+        alignedScore: undefined,
+        geometryScore: undefined,
+        legacyScore: undefined,
+        threshold: FACE_ID_V2_MATCH_THRESHOLD,
+      };
 
+  if (
+    storedDescriptor &&
+    typeof similarityResult.alignedScore === "number" &&
+    similarityResult.alignedScore < FACE_ID_V2_ALIGNED_MATCH_THRESHOLD
+  ) {
+    console.warn("FaceID mismatch: aligned score below threshold", {
+      similarity: similarityResult.similarity,
+      alignedScore: similarityResult.alignedScore,
+      geometryScore: similarityResult.geometryScore,
+      legacyScore: similarityResult.legacyScore,
+    });
+    throw new Error("FACE_ID_MISMATCH");
+  }
+  if (
+    storedDescriptor &&
+    typeof similarityResult.alignedScore !== "number" &&
+    typeof similarityResult.geometryScore === "number" &&
+    similarityResult.geometryScore < FACE_ID_V2_GEOMETRY_MATCH_THRESHOLD
+  ) {
+    console.warn("FaceID mismatch: geometry fallback score below threshold", {
+      similarity: similarityResult.similarity,
+      alignedScore: similarityResult.alignedScore,
+      geometryScore: similarityResult.geometryScore,
+      legacyScore: similarityResult.legacyScore,
+    });
+    throw new Error("FACE_ID_MISMATCH");
+  }
   if (
     storedDescriptor &&
     similarityResult.similarity < similarityResult.threshold
   ) {
+    console.warn("FaceID mismatch: combined score below threshold", {
+      similarity: similarityResult.similarity,
+      alignedScore: similarityResult.alignedScore,
+      geometryScore: similarityResult.geometryScore,
+      legacyScore: similarityResult.legacyScore,
+      threshold: similarityResult.threshold,
+    });
     throw new Error("FACE_ID_MISMATCH");
   }
 

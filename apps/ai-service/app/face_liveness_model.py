@@ -9,21 +9,21 @@ from pydantic import AliasChoices, BaseModel, Field
 
 FaceStep = Literal["center", "move_left", "move_right", "move_closer"]
 
-MIN_SHARPNESS = 0.0012
-MIN_DYNAMIC_RANGE = 0.12
-MIN_ENTROPY = 1.15
+MIN_SHARPNESS = 0.0008
+MIN_DYNAMIC_RANGE = 0.09
+MIN_ENTROPY = 1.0
 MAX_DOMINANT_BIN_RATIO = 0.3
-MAX_CLIP_RATIO = 0.28
-MIN_MEAN_STEP_DELTA = 0.03
-MIN_STEP_DELTA = 0.02
-MIN_MOTION_SCORE = 0.34
-MIN_LIVENESS_SCORE = 0.8
+MAX_CLIP_RATIO = 0.34
+MIN_MEAN_STEP_DELTA = 0.02
+MIN_STEP_DELTA = 0.012
+MIN_MOTION_SCORE = 0.28
+MIN_LIVENESS_SCORE = 0.72
 MIN_FACE_COVERAGE = 0.13
 MIN_SAMPLE_COUNT = 20
-MAX_SPOOF_SCORE_TO_PASS = 0.54
-MIN_CONFIDENCE_TO_PASS = 0.46
-MIN_FACE_PARALLAX_SCORE = 0.015
-MIN_FACE_BACKGROUND_SEPARATION = 0.01
+MAX_SPOOF_SCORE_TO_PASS = 0.68
+MIN_CONFIDENCE_TO_PASS = 0.34
+MIN_FACE_PARALLAX_SCORE = 0.008
+MIN_FACE_BACKGROUND_SEPARATION = 0.004
 
 
 class FaceLivenessStepCapture(BaseModel):
@@ -288,22 +288,22 @@ def analyze_face_liveness(payload: FaceLivenessRequest) -> dict[str, object]:
     # count. These image heuristics stay conservative so dim laptop webcams do not
     # get rejected as spoofed as often.
     if sharpness < MIN_SHARPNESS:
-        spoof_score += 0.08
+        spoof_score += 0.05
         reasons.append("Face preview looked too flat or blurred for a confident live scan.")
     if dynamic_range < MIN_DYNAMIC_RANGE:
-        spoof_score += 0.06
+        spoof_score += 0.04
         reasons.append("Preview contrast was unusually low.")
     if entropy < MIN_ENTROPY:
-        spoof_score += 0.06
+        spoof_score += 0.04
         reasons.append("Preview texture looked overly uniform.")
     if dominant_bin_ratio > MAX_DOMINANT_BIN_RATIO:
-        spoof_score += 0.05
+        spoof_score += 0.03
         reasons.append("Preview tones looked posterized like a displayed image.")
     if screen_pattern_score > 0.45:
         spoof_score += 0.18
         reasons.append("Periodic screen-like patterns were detected in the face preview.")
     if clip_ratio > MAX_CLIP_RATIO:
-        spoof_score += 0.04
+        spoof_score += 0.03
         reasons.append("Preview had excessive clipped shadows or highlights.")
 
     sequence_deltas: list[float] = []
@@ -320,10 +320,10 @@ def analyze_face_liveness(payload: FaceLivenessRequest) -> dict[str, object]:
     mean_step_delta = float(np.mean(sequence_deltas)) if sequence_deltas else 0.0
     min_step_delta = float(np.min(sequence_deltas)) if sequence_deltas else 0.0
     if mean_step_delta < MIN_MEAN_STEP_DELTA:
-        spoof_score += 0.14
+        spoof_score += 0.08
         reasons.append("Challenge frames changed too little between steps.")
     elif min_step_delta < MIN_STEP_DELTA:
-        spoof_score += 0.08
+        spoof_score += 0.05
         reasons.append("At least one challenge step looked nearly identical to the center frame.")
 
     depth_signals = {
@@ -349,7 +349,7 @@ def analyze_face_liveness(payload: FaceLivenessRequest) -> dict[str, object]:
             depth_signals["coverage_gain"] >= 0.02
             and depth_signals["parallax_score"] < MIN_FACE_PARALLAX_SCORE
         ):
-            spoof_score += 0.22
+            spoof_score += 0.1
             reasons.append(
                 "Face moved closer but the scene still looked too flat, like a photo or screen."
             )
@@ -358,21 +358,21 @@ def analyze_face_liveness(payload: FaceLivenessRequest) -> dict[str, object]:
             < MIN_FACE_BACKGROUND_SEPARATION
             and depth_signals["coverage_gain"] >= 0.015
         ):
-            spoof_score += 0.12
+            spoof_score += 0.06
             reasons.append(
                 "Face and background changed too uniformly during the closer step."
             )
         if depth_signals["rigidity_score"] > 0.018:
-            spoof_score += 0.08
+            spoof_score += 0.04
             reasons.append(
                 "Background motion dominated the challenge like a rigid flat object."
             )
 
     if payload.motion_score < MIN_MOTION_SCORE:
-        spoof_score += 0.1
+        spoof_score += 0.06
         reasons.append("Motion score was lower than expected for a live face movement challenge.")
     if payload.liveness_score < MIN_LIVENESS_SCORE:
-        spoof_score += 0.08
+        spoof_score += 0.05
         reasons.append("Combined liveness evidence was below the hardened server threshold.")
     if payload.face_coverage < MIN_FACE_COVERAGE:
         spoof_score += 0.05

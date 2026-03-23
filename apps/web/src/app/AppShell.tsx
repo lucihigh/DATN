@@ -1,10 +1,13 @@
 ﻿import {
   Suspense,
   lazy,
-  useState,
+  startTransition,
   useEffect,
-  useRef,
   useCallback,
+  useDeferredValue,
+  useMemo,
+  useRef,
+  useState,
   type CSSProperties,
 } from "react";
 import { createPortal } from "react-dom";
@@ -766,6 +769,9 @@ function DashboardView() {
     followUpQuestion: null,
   });
   const [transferStep, setTransferStep] = useState<1 | 2 | 3 | 4>(1);
+  const [transferStepDirection, setTransferStepDirection] = useState<
+    "forward" | "backward"
+  >("forward");
   const [transferMethod, setTransferMethod] = useState<"account" | "qr">(
     "account",
   );
@@ -1610,25 +1616,24 @@ function DashboardView() {
     ],
   );
 
-  const getVisibleTransferMonitoring = useCallback(
-    (monitoring: AiMonitoringSummary | null) => {
-      if (!monitoring) return null;
-      const riskLevel = monitoring.riskLevel.toLowerCase();
-      const filteredReasons = monitoring.reasons.filter(
-        (reason) => reason !== "AI monitoring unavailable",
-      );
-      if (riskLevel === "low" && filteredReasons.length === 0) {
-        return null;
-      }
-      return {
-        ...monitoring,
-        reasons: filteredReasons,
-      };
-    },
-    [],
+  const visibleTransferMonitoring = useMemo(() => {
+    if (!transferMonitoring) return null;
+    const riskLevel = transferMonitoring.riskLevel.toLowerCase();
+    const filteredReasons = transferMonitoring.reasons.filter(
+      (reason) => reason !== "AI monitoring unavailable",
+    );
+    if (riskLevel === "low" && filteredReasons.length === 0) {
+      return null;
+    }
+    return {
+      ...transferMonitoring,
+      reasons: filteredReasons,
+    };
+  }, [transferMonitoring]);
+  const deferredTransferAdvisory = useDeferredValue(transferAdvisory);
+  const deferredTransferMonitoring = useDeferredValue(
+    visibleTransferMonitoring,
   );
-  const visibleTransferMonitoring =
-    getVisibleTransferMonitoring(transferMonitoring);
 
   const renderAiMonitoringPanel = useCallback(
     (monitoring: AiMonitoringSummary | null, title: string) => {
@@ -2207,7 +2212,7 @@ function DashboardView() {
     if (!resolved) return;
     await logTransferFlowEvent("STARTED");
     toast("QR scanned successfully.");
-    setTransferStep(2);
+    goToTransferStep(2);
   };
   const startTransferQrCameraScan = async (
     preferredFacingMode: "environment" | "user" = transferQrFacingMode,
@@ -2729,7 +2734,10 @@ function DashboardView() {
 
   const resetTransferFlow = () => {
     stopTransferQrCameraScan(true);
-    setTransferStep(1);
+    setTransferStepDirection("backward");
+    startTransition(() => {
+      setTransferStep(1);
+    });
     setTransferMethod("account");
     setTransferAccount("");
     setTransferRecipientUserId("");
@@ -2760,6 +2768,18 @@ function DashboardView() {
     setTransferAdvisoryAcknowledged(false);
     setTransferReceipt(null);
   };
+
+  const goToTransferStep = useCallback(
+    (nextStep: 1 | 2 | 3 | 4) => {
+      setTransferStepDirection(
+        nextStep >= transferStep ? "forward" : "backward",
+      );
+      startTransition(() => {
+        setTransferStep(nextStep);
+      });
+    },
+    [transferStep],
+  );
 
   const openTransferModal = () => {
     setTransferOpen(true);
@@ -2799,13 +2819,18 @@ function DashboardView() {
   }, [transferOpen, transferStep, transferMethod]);
 
   useEffect(() => {
-    if (transferOtpResendAt <= Date.now()) return;
+    if (
+      transferOtpResendAt <= Date.now() ||
+      (!transferFaceVerifyOpen && (!transferOpen || transferStep !== 3))
+    ) {
+      return;
+    }
     const timer = window.setInterval(
       () => setTransferOtpClock(Date.now()),
       1000,
     );
     return () => window.clearInterval(timer);
-  }, [transferOtpResendAt]);
+  }, [transferFaceVerifyOpen, transferOpen, transferOtpResendAt, transferStep]);
 
   useEffect(() => {
     if (typeof document === "undefined") return;
@@ -2867,7 +2892,20 @@ function DashboardView() {
       } | null;
       const monitoring = parseAiMonitoringSummary(data?.anomaly);
       const advisory = parseTransferSafetyAdvisory(data?.transferAdvisory);
-      const visibleMonitoring = getVisibleTransferMonitoring(monitoring);
+      const visibleMonitoring = (() => {
+        if (!monitoring) return null;
+        const riskLevel = monitoring.riskLevel.toLowerCase();
+        const filteredReasons = monitoring.reasons.filter(
+          (reason) => reason !== "AI monitoring unavailable",
+        );
+        if (riskLevel === "low" && filteredReasons.length === 0) {
+          return null;
+        }
+        return {
+          ...monitoring,
+          reasons: filteredReasons,
+        };
+      })();
       if (monitoring) {
         setTransferMonitoring(monitoring);
       } else if (resp.ok || resp.status === 409 || resp.status === 423) {
@@ -3038,7 +3076,7 @@ function DashboardView() {
     const resolved = await resolveTransferRecipient(transferAccount);
     if (!resolved) return;
     await logTransferFlowEvent("STARTED");
-    setTransferStep(2);
+    goToTransferStep(2);
   };
   const continueTransferAmount = async () => {
     const amount = Number(transferAmount.replace(/,/g, ""));
@@ -3072,14 +3110,14 @@ function DashboardView() {
       advisoryAcknowledged: Boolean(transferAdvisory),
     });
     if (sent) {
-      setTransferStep(3);
+      goToTransferStep(3);
     }
   };
 
   const closeTransferFaceVerification = useCallback(() => {
     setTransferFaceVerifyOpen(false);
     setTransferOpen(true);
-    setTransferStep(3);
+    goToTransferStep(3);
     setTransferFaceProof(null);
     setTransferFaceResetKey((value) => value + 1);
     setTransferFaceVerifyBusy(false);
@@ -3243,7 +3281,7 @@ function DashboardView() {
       ]);
       closeTransferFaceVerification();
       await refreshWalletSnapshot({ force: true });
-      setTransferStep(4);
+      goToTransferStep(4);
       toast("Transfer completed successfully");
       return true;
     },
@@ -3785,441 +3823,446 @@ function DashboardView() {
                 })}
               </div>
 
-              {transferStep === 1 && (
-                <div className="transfer-body">
-                  <div className="transfer-method-tabs">
-                    <button
-                      type="button"
-                      className={transferMethod === "account" ? "active" : ""}
-                      onClick={() => {
-                        setTransferMethod("account");
-                        stopTransferQrCameraScan(true);
-                      }}
-                    >
-                      Account Number
-                    </button>
-                    <button
-                      type="button"
-                      className={transferMethod === "qr" ? "active" : ""}
-                      onClick={() => setTransferMethod("qr")}
-                    >
-                      Scan QR
-                    </button>
-                  </div>
+              <div
+                key={`transfer-step-${transferStep}`}
+                className={`transfer-stage transfer-stage-${transferStepDirection}`}
+              >
+                {transferStep === 1 && (
+                  <div className="transfer-body">
+                    <div className="transfer-method-tabs">
+                      <button
+                        type="button"
+                        className={transferMethod === "account" ? "active" : ""}
+                        onClick={() => {
+                          setTransferMethod("account");
+                          stopTransferQrCameraScan(true);
+                        }}
+                      >
+                        Account Number
+                      </button>
+                      <button
+                        type="button"
+                        className={transferMethod === "qr" ? "active" : ""}
+                        onClick={() => setTransferMethod("qr")}
+                      >
+                        Scan QR
+                      </button>
+                    </div>
 
-                  {transferMethod === "account" ? (
-                    <label className="form-group">
-                      <span>Recipient Account Number</span>
+                    {transferMethod === "account" ? (
+                      <label className="form-group">
+                        <span>Recipient Account Number</span>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          placeholder="Enter bank account number"
+                          value={transferAccount}
+                          onChange={(e) => {
+                            void dismissTransferAdvisory();
+                            setTransferAccount(
+                              e.target.value.replace(/\D/g, "").slice(0, 19),
+                            );
+                            setTransferMonitoring(null);
+                            setTransferAdvisory(null);
+                            setTransferAdvisoryAcknowledged(false);
+                          }}
+                        />
+                      </label>
+                    ) : (
+                      <div className="transfer-qr-zone">
+                        <div className="transfer-qr-actions">
+                          <label className="transfer-qr-upload">
+                            <input
+                              type="file"
+                              accept="image/*"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (!file) return;
+                                setTransferQrFile(file.name);
+                                void detectQrFromImageFile(file);
+                                e.currentTarget.value = "";
+                              }}
+                            />
+                            <span>Upload transfer QR image</span>
+                          </label>
+                          {!transferQrCameraOn ? (
+                            <button
+                              type="button"
+                              className="pill"
+                              onClick={() => {
+                                setTransferShowMyQr(false);
+                                void startTransferQrCameraScan();
+                              }}
+                            >
+                              Scan QR by camera
+                            </button>
+                          ) : (
+                            <>
+                              <button
+                                type="button"
+                                className="pill"
+                                onClick={() => stopTransferQrCameraScan()}
+                              >
+                                Stop camera
+                              </button>
+                              <button
+                                type="button"
+                                className="pill"
+                                onClick={() => {
+                                  const nextMode =
+                                    transferQrFacingMode === "environment"
+                                      ? "user"
+                                      : "environment";
+                                  setTransferQrFacingMode(nextMode);
+                                  void startTransferQrCameraScan(nextMode);
+                                }}
+                              >
+                                Switch camera
+                              </button>
+                            </>
+                          )}
+                          <button
+                            type="button"
+                            className="pill"
+                            onClick={() =>
+                              setTransferShowMyQr((v) => {
+                                const next = !v;
+                                if (next) {
+                                  stopTransferQrCameraScan(true);
+                                }
+                                return next;
+                              })
+                            }
+                          >
+                            {transferShowMyQr ? "Hide my QR" : "Show my QR"}
+                          </button>
+                        </div>
+                        <div className="muted">
+                          {transferQrFile
+                            ? `QR file: ${transferQrFile}`
+                            : "No QR file selected yet."}
+                        </div>
+                        {transferQrCameraError && (
+                          <small className="transfer-input-error">
+                            {transferQrCameraError}
+                          </small>
+                        )}
+                        {transferQrCameraPanelOpen && (
+                          <>
+                            <div className="transfer-qr-device-row">
+                              <label className="transfer-qr-device-label">
+                                Camera
+                                <select
+                                  value={transferQrDeviceId}
+                                  onChange={(e) =>
+                                    setTransferQrDeviceId(e.target.value)
+                                  }
+                                  disabled={transferQrDevices.length === 0}
+                                >
+                                  {transferQrDevices.length === 0 ? (
+                                    <option value="">No camera found</option>
+                                  ) : (
+                                    transferQrDevices.map((cam, idx) => (
+                                      <option
+                                        key={cam.deviceId || String(idx)}
+                                        value={cam.deviceId}
+                                      >
+                                        {cam.label || `Camera ${idx + 1}`}
+                                      </option>
+                                    ))
+                                  )}
+                                </select>
+                              </label>
+                              <button
+                                type="button"
+                                className="pill"
+                                onClick={() => void loadTransferQrDevices()}
+                              >
+                                Reload cameras
+                              </button>
+                            </div>
+                            <div
+                              className={`transfer-qr-camera ${transferQrCameraOn ? "active" : ""}`}
+                            >
+                              <div className="transfer-qr-preview">
+                                <video
+                                  ref={transferQrVideoRef}
+                                  className="transfer-qr-video"
+                                  autoPlay
+                                  playsInline
+                                  muted
+                                />
+                                <div
+                                  className="transfer-qr-target"
+                                  aria-hidden="true"
+                                />
+                              </div>
+                              <small className="muted">
+                                {transferQrCameraOn
+                                  ? `Place the QR inside the square frame to auto-detect. Current camera: ${
+                                      transferQrFacingMode === "environment"
+                                        ? "Back"
+                                        : "Front"
+                                    }.`
+                                  : "Camera preview will appear here after you start scanning."}
+                              </small>
+                            </div>
+                          </>
+                        )}
+                        {transferShowMyQr && (
+                          <div className="transfer-my-qr-card">
+                            <span>My account QR</span>
+                            {ownQrImageUrl ? (
+                              <img
+                                src={ownQrImageUrl}
+                                alt={`My QR ${wallet?.accountNumber ?? ""}`}
+                                className="transfer-my-qr-image"
+                              />
+                            ) : (
+                              <small className="muted">
+                                Wallet QR is not available yet.
+                              </small>
+                            )}
+                            {wallet?.accountNumber && (
+                              <strong>Account: {wallet.accountNumber}</strong>
+                            )}
+                            {ownQrImageUrl && (
+                              <button
+                                type="button"
+                                className="btn-primary transfer-my-qr-download"
+                                onClick={handleDownloadOwnQr}
+                                disabled={transferQrDownloadBusy}
+                              >
+                                {transferQrDownloadBusy
+                                  ? "Downloading..."
+                                  : "Download QR"}
+                              </button>
+                            )}
+                            {ownQrPayload && (
+                              <small className="muted transfer-my-qr-payload">
+                                {ownQrPayload}
+                              </small>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    <div className="transfer-actions">
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        onClick={continueTransferRecipient}
+                      >
+                        Continue
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {transferStep === 2 && (
+                  <div className="transfer-body">
+                    <div className="transfer-summary">
+                      <span>To Account</span>
+                      <strong>{transferAccount}</strong>
+                      <small>{transferReceiverName}</small>
+                    </div>
+                    <label className="form-group transfer-amount-field">
+                      <span>Amount (USD)</span>
                       <input
                         type="text"
-                        inputMode="numeric"
-                        placeholder="Enter bank account number"
-                        value={transferAccount}
+                        inputMode="decimal"
+                        placeholder="Enter transfer amount"
+                        value={transferAmount}
                         onChange={(e) => {
                           void dismissTransferAdvisory();
-                          setTransferAccount(
-                            e.target.value.replace(/\D/g, "").slice(0, 19),
+                          setTransferAmount(
+                            e.target.value.replace(/[^0-9.]/g, ""),
                           );
+                          setTransferFaceProof(null);
+                          setTransferFaceResetKey((value) => value + 1);
+                          setTransferMonitoring(null);
+                          setTransferAdvisory(null);
+                          setTransferAdvisoryAcknowledged(false);
+                        }}
+                      />
+                      {isInsufficientBalance && (
+                        <small className="transfer-input-error">
+                          Insufficient balance
+                        </small>
+                      )}
+                      {exceedsRestrictedTransferLimit &&
+                        restrictedTransferLimit !== null && (
+                          <small className="transfer-input-error">
+                            This sign-in can only transfer up to $
+                            {restrictedTransferLimit.toLocaleString("en-US")}.
+                          </small>
+                        )}
+                      {isTransferFaceIdRequired && !transferFaceIdEnabled && (
+                        <small className="transfer-input-error">
+                          Transfers above $
+                          {TRANSFER_FACE_ID_THRESHOLD.toLocaleString("en-US")}{" "}
+                          require FaceID enrollment on this account.
+                        </small>
+                      )}
+                    </label>
+                    <label className="form-group">
+                      <span>Transfer Content</span>
+                      <input
+                        type="text"
+                        value={transferContent}
+                        onChange={(e) => {
+                          void dismissTransferAdvisory();
+                          setTransferContent(e.target.value);
                           setTransferMonitoring(null);
                           setTransferAdvisory(null);
                           setTransferAdvisoryAcknowledged(false);
                         }}
                       />
                     </label>
-                  ) : (
-                    <div className="transfer-qr-zone">
-                      <div className="transfer-qr-actions">
-                        <label className="transfer-qr-upload">
-                          <input
-                            type="file"
-                            accept="image/*"
-                            onChange={(e) => {
-                              const file = e.target.files?.[0];
-                              if (!file) return;
-                              setTransferQrFile(file.name);
-                              void detectQrFromImageFile(file);
-                              e.currentTarget.value = "";
-                            }}
-                          />
-                          <span>Upload transfer QR image</span>
-                        </label>
-                        {!transferQrCameraOn ? (
-                          <button
-                            type="button"
-                            className="pill"
-                            onClick={() => {
-                              setTransferShowMyQr(false);
-                              void startTransferQrCameraScan();
-                            }}
-                          >
-                            Scan QR by camera
-                          </button>
-                        ) : (
-                          <>
-                            <button
-                              type="button"
-                              className="pill"
-                              onClick={() => stopTransferQrCameraScan()}
-                            >
-                              Stop camera
-                            </button>
-                            <button
-                              type="button"
-                              className="pill"
-                              onClick={() => {
-                                const nextMode =
-                                  transferQrFacingMode === "environment"
-                                    ? "user"
-                                    : "environment";
-                                setTransferQrFacingMode(nextMode);
-                                void startTransferQrCameraScan(nextMode);
-                              }}
-                            >
-                              Switch camera
-                            </button>
-                          </>
-                        )}
-                        <button
-                          type="button"
-                          className="pill"
-                          onClick={() =>
-                            setTransferShowMyQr((v) => {
-                              const next = !v;
-                              if (next) {
-                                stopTransferQrCameraScan(true);
-                              }
-                              return next;
-                            })
-                          }
-                        >
-                          {transferShowMyQr ? "Hide my QR" : "Show my QR"}
-                        </button>
+                    <div className="transfer-actions">
+                      <button
+                        type="button"
+                        className="pill"
+                        onClick={() => {
+                          void dismissTransferAdvisory();
+                          goToTransferStep(1);
+                          setTransferMonitoring(null);
+                          setTransferAdvisory(null);
+                          setTransferAdvisoryAcknowledged(false);
+                        }}
+                      >
+                        Back
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        onClick={continueTransferAmount}
+                        disabled={
+                          !canContinueTransferAmount ||
+                          transferOtpBusy ||
+                          isTransferHardBlocked
+                        }
+                      >
+                        {transferContinueLabel}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {transferStep === 3 && (
+                  <div className="transfer-body">
+                    <div className="transfer-confirm-card">
+                      <div>
+                        <span>Recipient</span>
+                        <strong>{transferAccount}</strong>
                       </div>
-                      <div className="muted">
-                        {transferQrFile
-                          ? `QR file: ${transferQrFile}`
-                          : "No QR file selected yet."}
+                      <div>
+                        <span>Amount</span>
+                        <strong>${transferAmount}</strong>
                       </div>
-                      {transferQrCameraError && (
-                        <small className="transfer-input-error">
-                          {transferQrCameraError}
+                      <div>
+                        <span>Content</span>
+                        <strong>
+                          {transferContent || defaultTransferContent}
+                        </strong>
+                      </div>
+                    </div>
+                    {transferOtpDestination && (
+                      <div className="transfer-summary">
+                        <span>OTP delivery</span>
+                        <strong>{transferOtpDestination}</strong>
+                        <small>
+                          {transferOtpExpiresAt
+                            ? `Expires at ${new Date(
+                                transferOtpExpiresAt,
+                              ).toLocaleTimeString("en-US", {
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })}`
+                            : "Check your inbox for the 6-digit code."}
                         </small>
-                      )}
-                      {transferQrCameraPanelOpen && (
-                        <>
-                          <div className="transfer-qr-device-row">
-                            <label className="transfer-qr-device-label">
-                              Camera
-                              <select
-                                value={transferQrDeviceId}
-                                onChange={(e) =>
-                                  setTransferQrDeviceId(e.target.value)
-                                }
-                                disabled={transferQrDevices.length === 0}
-                              >
-                                {transferQrDevices.length === 0 ? (
-                                  <option value="">No camera found</option>
-                                ) : (
-                                  transferQrDevices.map((cam, idx) => (
-                                    <option
-                                      key={cam.deviceId || String(idx)}
-                                      value={cam.deviceId}
-                                    >
-                                      {cam.label || `Camera ${idx + 1}`}
-                                    </option>
-                                  ))
-                                )}
-                              </select>
-                            </label>
-                            <button
-                              type="button"
-                              className="pill"
-                              onClick={() => void loadTransferQrDevices()}
-                            >
-                              Reload cameras
-                            </button>
-                          </div>
-                          <div
-                            className={`transfer-qr-camera ${transferQrCameraOn ? "active" : ""}`}
-                          >
-                            <div className="transfer-qr-preview">
-                              <video
-                                ref={transferQrVideoRef}
-                                className="transfer-qr-video"
-                                autoPlay
-                                playsInline
-                                muted
-                              />
-                              <div
-                                className="transfer-qr-target"
-                                aria-hidden="true"
-                              />
-                            </div>
-                            <small className="muted">
-                              {transferQrCameraOn
-                                ? `Place the QR inside the square frame to auto-detect. Current camera: ${
-                                    transferQrFacingMode === "environment"
-                                      ? "Back"
-                                      : "Front"
-                                  }.`
-                                : "Camera preview will appear here after you start scanning."}
-                            </small>
-                          </div>
-                        </>
-                      )}
-                      {transferShowMyQr && (
-                        <div className="transfer-my-qr-card">
-                          <span>My account QR</span>
-                          {ownQrImageUrl ? (
-                            <img
-                              src={ownQrImageUrl}
-                              alt={`My QR ${wallet?.accountNumber ?? ""}`}
-                              className="transfer-my-qr-image"
-                            />
-                          ) : (
-                            <small className="muted">
-                              Wallet QR is not available yet.
-                            </small>
-                          )}
-                          {wallet?.accountNumber && (
-                            <strong>Account: {wallet.accountNumber}</strong>
-                          )}
-                          {ownQrImageUrl && (
-                            <button
-                              type="button"
-                              className="btn-primary transfer-my-qr-download"
-                              onClick={handleDownloadOwnQr}
-                              disabled={transferQrDownloadBusy}
-                            >
-                              {transferQrDownloadBusy
-                                ? "Downloading..."
-                                : "Download QR"}
-                            </button>
-                          )}
-                          {ownQrPayload && (
-                            <small className="muted transfer-my-qr-payload">
-                              {ownQrPayload}
-                            </small>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  <div className="transfer-actions">
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      onClick={continueTransferRecipient}
-                    >
-                      Continue
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {transferStep === 2 && (
-                <div className="transfer-body">
-                  <div className="transfer-summary">
-                    <span>To Account</span>
-                    <strong>{transferAccount}</strong>
-                    <small>{transferReceiverName}</small>
-                  </div>
-                  <label className="form-group transfer-amount-field">
-                    <span>Amount (USD)</span>
-                    <input
-                      type="text"
-                      inputMode="decimal"
-                      placeholder="Enter transfer amount"
-                      value={transferAmount}
-                      onChange={(e) => {
-                        void dismissTransferAdvisory();
-                        setTransferAmount(
-                          e.target.value.replace(/[^0-9.]/g, ""),
-                        );
-                        setTransferFaceProof(null);
-                        setTransferFaceResetKey((value) => value + 1);
-                        setTransferMonitoring(null);
-                        setTransferAdvisory(null);
-                        setTransferAdvisoryAcknowledged(false);
-                      }}
-                    />
-                    {isInsufficientBalance && (
-                      <small className="transfer-input-error">
-                        Insufficient balance
-                      </small>
+                      </div>
                     )}
-                    {exceedsRestrictedTransferLimit &&
-                      restrictedTransferLimit !== null && (
-                        <small className="transfer-input-error">
-                          This sign-in can only transfer up to $
-                          {restrictedTransferLimit.toLocaleString("en-US")}.
-                        </small>
-                      )}
-                    {isTransferFaceIdRequired && !transferFaceIdEnabled && (
-                      <small className="transfer-input-error">
-                        Transfers above $
-                        {TRANSFER_FACE_ID_THRESHOLD.toLocaleString("en-US")}{" "}
-                        require FaceID enrollment on this account.
-                      </small>
+                    <label className="form-group">
+                      <span>Enter OTP</span>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        maxLength={6}
+                        disabled={transferOtpVerifyBusy}
+                        value={transferOtpInput}
+                        onChange={(e) =>
+                          setTransferOtpInput(
+                            e.target.value.replace(/\D/g, "").slice(0, 6),
+                          )
+                        }
+                        placeholder="6-digit OTP"
+                      />
+                    </label>
+                    {transferOtpError && (
+                      <div className="card-otp-error">{transferOtpError}</div>
                     )}
-                  </label>
-                  <label className="form-group">
-                    <span>Transfer Content</span>
-                    <input
-                      type="text"
-                      value={transferContent}
-                      onChange={(e) => {
-                        void dismissTransferAdvisory();
-                        setTransferContent(e.target.value);
-                        setTransferMonitoring(null);
-                        setTransferAdvisory(null);
-                        setTransferAdvisoryAcknowledged(false);
-                      }}
-                    />
-                  </label>
-                  <div className="transfer-actions">
-                    <button
-                      type="button"
-                      className="pill"
-                      onClick={() => {
-                        void dismissTransferAdvisory();
-                        setTransferStep(1);
-                        setTransferMonitoring(null);
-                        setTransferAdvisory(null);
-                        setTransferAdvisoryAcknowledged(false);
-                      }}
-                    >
-                      Back
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      onClick={continueTransferAmount}
-                      disabled={
-                        !canContinueTransferAmount ||
-                        transferOtpBusy ||
-                        isTransferHardBlocked
-                      }
-                    >
-                      {transferContinueLabel}
-                    </button>
+                    <div className="transfer-actions">
+                      <button
+                        type="button"
+                        className="pill"
+                        disabled={
+                          transferOtpCooldownSeconds > 0 ||
+                          transferOtpBusy ||
+                          transferOtpVerifyBusy
+                        }
+                        onClick={() =>
+                          void generateTransferOtp({
+                            advisoryAcknowledged: Boolean(transferAdvisory),
+                          })
+                        }
+                      >
+                        {transferOtpBusy
+                          ? "Sending..."
+                          : transferOtpCooldownSeconds > 0
+                            ? `Resend in ${transferOtpCooldownSeconds}s`
+                            : "Resend OTP"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        onClick={verifyTransferOtpAndSubmit}
+                        disabled={transferOtpBusy || transferOtpVerifyBusy}
+                      >
+                        {transferOtpVerifyBusy
+                          ? "Verifying OTP..."
+                          : "Confirm Transfer"}
+                      </button>
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
 
-              {transferStep === 3 && (
-                <div className="transfer-body">
-                  <div className="transfer-confirm-card">
-                    <div>
-                      <span>Recipient</span>
-                      <strong>{transferAccount}</strong>
-                    </div>
-                    <div>
-                      <span>Amount</span>
-                      <strong>${transferAmount}</strong>
-                    </div>
-                    <div>
-                      <span>Content</span>
-                      <strong>
-                        {transferContent || defaultTransferContent}
-                      </strong>
+                {transferStep === 4 && (
+                  <div className="transfer-body transfer-success">
+                    <div className="transfer-success-icon">OK</div>
+                    <h4>Transfer Successful</h4>
+                    {transferReceipt && (
+                      <TransactionReceiptCard receipt={transferReceipt} />
+                    )}
+                    <div className="transfer-actions">
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        onClick={closeTransferModal}
+                      >
+                        Finish
+                      </button>
                     </div>
                   </div>
-                  {transferOtpDestination && (
-                    <div className="transfer-summary">
-                      <span>OTP delivery</span>
-                      <strong>{transferOtpDestination}</strong>
-                      <small>
-                        {transferOtpExpiresAt
-                          ? `Expires at ${new Date(
-                              transferOtpExpiresAt,
-                            ).toLocaleTimeString("en-US", {
-                              hour: "2-digit",
-                              minute: "2-digit",
-                            })}`
-                          : "Check your inbox for the 6-digit code."}
-                      </small>
-                    </div>
-                  )}
-                  <label className="form-group">
-                    <span>Enter OTP</span>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      maxLength={6}
-                      disabled={transferOtpVerifyBusy}
-                      value={transferOtpInput}
-                      onChange={(e) =>
-                        setTransferOtpInput(
-                          e.target.value.replace(/\D/g, "").slice(0, 6),
-                        )
-                      }
-                      placeholder="6-digit OTP"
-                    />
-                  </label>
-                  {transferOtpError && (
-                    <div className="card-otp-error">{transferOtpError}</div>
-                  )}
-                  <div className="transfer-actions">
-                    <button
-                      type="button"
-                      className="pill"
-                      disabled={
-                        transferOtpCooldownSeconds > 0 ||
-                        transferOtpBusy ||
-                        transferOtpVerifyBusy
-                      }
-                      onClick={() =>
-                        void generateTransferOtp({
-                          advisoryAcknowledged: Boolean(transferAdvisory),
-                        })
-                      }
-                    >
-                      {transferOtpBusy
-                        ? "Sending..."
-                        : transferOtpCooldownSeconds > 0
-                          ? `Resend in ${transferOtpCooldownSeconds}s`
-                          : "Resend OTP"}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      onClick={verifyTransferOtpAndSubmit}
-                      disabled={transferOtpBusy || transferOtpVerifyBusy}
-                    >
-                      {transferOtpVerifyBusy
-                        ? "Verifying OTP..."
-                        : "Confirm Transfer"}
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {transferStep === 4 && (
-                <div className="transfer-body transfer-success">
-                  <div className="transfer-success-icon">OK</div>
-                  <h4>Transfer Successful</h4>
-                  {transferReceipt && (
-                    <TransactionReceiptCard receipt={transferReceipt} />
-                  )}
-                  <div className="transfer-actions">
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      onClick={closeTransferModal}
-                    >
-                      Finish
-                    </button>
-                  </div>
-                </div>
-              )}
+                )}
+              </div>
             </div>
             {transferStep === 2 &&
-              (transferAdvisory || transferMonitoring) &&
+              (deferredTransferAdvisory || deferredTransferMonitoring) &&
               renderTransferAmountAiPanel(
-                transferAdvisory,
-                transferMonitoring,
+                deferredTransferAdvisory,
+                deferredTransferMonitoring,
                 {
                   external: true,
                 },
