@@ -770,6 +770,7 @@ function DashboardView() {
     "account",
   );
   const [transferAccount, setTransferAccount] = useState("");
+  const [transferRecipientUserId, setTransferRecipientUserId] = useState("");
   const [transferReceiverName, setTransferReceiverName] = useState("");
   const [transferAmount, setTransferAmount] = useState("");
   const [transferContent, setTransferContent] = useState("");
@@ -2161,7 +2162,7 @@ function DashboardView() {
   const resolveTransferRecipient = async (accountNumber: string) => {
     if (!token) {
       toast("Session expired. Please login again.", "error");
-      return false;
+      return null;
     }
     try {
       const resp = await fetch(
@@ -2174,19 +2175,26 @@ function DashboardView() {
         error?: string;
         holderName?: string;
         accountNumber?: string;
+        userId?: string;
       } | null;
       if (!resp.ok || !data?.accountNumber) {
         toast(data?.error || "Recipient account not found", "error");
-        return false;
+        return null;
       }
       setTransferAccount(data.accountNumber);
+      setTransferRecipientUserId(data.userId || "");
       setTransferReceiverName(
         data.holderName || `Account ${data.accountNumber.slice(-4)}`,
       );
-      return true;
+      return {
+        accountNumber: data.accountNumber,
+        holderName:
+          data.holderName || `Account ${data.accountNumber.slice(-4)}`,
+        userId: data.userId || "",
+      };
     } catch {
       toast("Cannot verify account with server", "error");
-      return false;
+      return null;
     }
   };
   const handleTransferQrPayloadDetected = async (payload: string) => {
@@ -2197,6 +2205,7 @@ function DashboardView() {
     }
     const resolved = await resolveTransferRecipient(extracted);
     if (!resolved) return;
+    await logTransferFlowEvent("STARTED");
     toast("QR scanned successfully.");
     setTransferStep(2);
   };
@@ -2723,6 +2732,7 @@ function DashboardView() {
     setTransferStep(1);
     setTransferMethod("account");
     setTransferAccount("");
+    setTransferRecipientUserId("");
     setTransferReceiverName("");
     setTransferAmount("");
     setTransferContent(defaultTransferContent);
@@ -2757,6 +2767,21 @@ function DashboardView() {
   };
 
   const closeTransferModal = () => {
+    const shouldLogCancelled =
+      transferStep < 4 &&
+      Boolean(
+        transferAccount ||
+        transferRecipientUserId ||
+        transferAmount ||
+        transferOtpChallengeId ||
+        transferAdvisory ||
+        transferMonitoring,
+      );
+    if (shouldLogCancelled) {
+      void logTransferFlowEvent("CANCELLED", {
+        reason: "USER_CLOSED_TRANSFER_MODAL",
+      });
+    }
     void dismissTransferAdvisory();
     setTransferOpen(false);
     resetTransferFlow();
@@ -2951,6 +2976,55 @@ function DashboardView() {
     transferAccount,
     transferAmount,
   ]);
+  const logTransferFlowEvent = useCallback(
+    async (
+      eventType: "STARTED" | "CANCELLED",
+      options?: {
+        amount?: number | null;
+        reason?: string;
+      },
+    ) => {
+      if (!token) return;
+
+      try {
+        await fetch(`${API_BASE}/transfer/flow-event`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            eventType,
+            toAccount: transferAccount || null,
+            toUserId: transferRecipientUserId || null,
+            amount:
+              typeof options?.amount === "number"
+                ? options.amount
+                : Number(transferAmount.replace(/,/g, "")) || null,
+            note: transferContent.trim() || null,
+            requestKey:
+              transferMonitoring?.requestKey ||
+              transferAdvisory?.requestKey ||
+              null,
+            step: transferStep,
+            reason: options?.reason || null,
+          }),
+        });
+      } catch {
+        // Best-effort telemetry only.
+      }
+    },
+    [
+      token,
+      transferAccount,
+      transferRecipientUserId,
+      transferAmount,
+      transferContent,
+      transferMonitoring?.requestKey,
+      transferAdvisory?.requestKey,
+      transferStep,
+    ],
+  );
   const continueTransferRecipient = async () => {
     if (transferMethod === "account") {
       if (!/^\d{8,19}$/.test(transferAccount)) {
@@ -2963,6 +3037,7 @@ function DashboardView() {
     }
     const resolved = await resolveTransferRecipient(transferAccount);
     if (!resolved) return;
+    await logTransferFlowEvent("STARTED");
     setTransferStep(2);
   };
   const continueTransferAmount = async () => {
@@ -7003,8 +7078,14 @@ function App() {
               onClick={() => setShowNotifications((v) => !v)}
               aria-haspopup="true"
               aria-expanded={showNotifications}
+              aria-label={`Notifications${unreadNotificationCount > 0 ? `, ${unreadNotificationCount} unread` : ""}`}
             >
-              N
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path
+                  d="M12 4.75a4.25 4.25 0 0 0-4.25 4.25v2.12c0 .86-.27 1.69-.77 2.39l-1.01 1.39a1.25 1.25 0 0 0 1.01 1.99h10.04a1.25 1.25 0 0 0 1.01-1.99l-1.01-1.39a4.1 4.1 0 0 1-.77-2.39V9A4.25 4.25 0 0 0 12 4.75Zm0 15.5a2.74 2.74 0 0 1-2.48-1.58h4.96A2.74 2.74 0 0 1 12 20.25Z"
+                  fill="currentColor"
+                />
+              </svg>
               {unreadNotificationCount > 0 && (
                 <span className="badge">{unreadNotificationCount}</span>
               )}

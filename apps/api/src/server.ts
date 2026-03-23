@@ -585,6 +585,74 @@ const normalizeRecord = (value: unknown): Record<string, unknown> => {
   return {};
 };
 
+const inferAdminAuditCategory = (action: string) => {
+  const normalized = action.toUpperCase();
+  if (normalized.includes("LOGIN") || normalized.includes("MFA"))
+    return "login";
+  if (
+    normalized.includes("TRANSFER") ||
+    normalized.includes("TRANSACTION") ||
+    normalized.includes("WITHDRAW") ||
+    normalized.includes("DEPOSIT") ||
+    normalized.includes("PAYMENT") ||
+    normalized.includes("REFUND")
+  ) {
+    return "tx";
+  }
+  if (normalized.includes("USER") || normalized.includes("ROLE")) return "um";
+  if (
+    normalized.includes("PROFILE") ||
+    normalized.includes("PASSWORD") ||
+    normalized.includes("ACCOUNT")
+  ) {
+    return "acc";
+  }
+  return "sec";
+};
+
+const inferAdminAuditStatus = (action: string, details: unknown) => {
+  const normalizedAction = action.toUpperCase();
+  const normalizedDetails =
+    typeof details === "string"
+      ? details.toUpperCase()
+      : JSON.stringify(details ?? {}).toUpperCase();
+  if (
+    normalizedAction.includes("FAIL") ||
+    normalizedAction.includes("BLOCK") ||
+    normalizedAction.includes("DENY") ||
+    normalizedAction.includes("ALERT") ||
+    normalizedDetails.includes("FAIL") ||
+    normalizedDetails.includes("BLOCK")
+  ) {
+    return "fail";
+  }
+  if (
+    normalizedAction.includes("PENDING") ||
+    normalizedAction.includes("REVIEW") ||
+    normalizedDetails.includes("PENDING") ||
+    normalizedDetails.includes("REVIEW")
+  ) {
+    return "pending";
+  }
+  return "ok";
+};
+
+const inferAdminAuditSource = (input: {
+  actor: string;
+  action: string;
+  metadata: unknown;
+}) => {
+  const metadata = normalizeRecord(input.metadata);
+  if (
+    input.actor === "ai-service" ||
+    input.action.toUpperCase().startsWith("AI_") ||
+    metadata.category === "funds_flow_training"
+  ) {
+    return "ai";
+  }
+  return "human";
+};
+
 const asStringOrNull = (value: unknown) =>
   typeof value === "string" && value.trim() ? value.trim() : null;
 
@@ -1171,9 +1239,11 @@ const buildStoredAiMonitoring = (input: AnomalyResponse) => ({
 });
 
 type FundsFlowLifecycle =
+  | "STARTED"
   | "PENDING_OTP"
   | "REVIEW_REQUIRED"
   | "BLOCKED"
+  | "CANCELLED"
   | "OTP_VERIFIED"
   | "COMPLETED";
 
@@ -7931,6 +8001,101 @@ app.post("/transfer/advisory/dismiss", requireAuth, async (req, res) => {
   return res.json({ status: "ok" });
 });
 
+app.post("/transfer/flow-event", requireAuth, async (req, res) => {
+  const senderUserId = req.user?.sub;
+  if (!senderUserId) return res.status(401).json({ error: "Unauthorized" });
+
+  const body = req.body as {
+    eventType?: unknown;
+    toAccount?: unknown;
+    toUserId?: unknown;
+    amount?: unknown;
+    note?: unknown;
+    requestKey?: unknown;
+    step?: unknown;
+    reason?: unknown;
+  };
+
+  const eventType =
+    typeof body.eventType === "string" ? body.eventType.trim() : "";
+  if (eventType !== "STARTED" && eventType !== "CANCELLED") {
+    return res.status(400).json({ error: "Unsupported transfer flow event" });
+  }
+
+  const toAccount =
+    typeof body.toAccount === "string"
+      ? body.toAccount.replace(/\D/g, "").slice(0, 19)
+      : "";
+  const toUserId =
+    typeof body.toUserId === "string" && body.toUserId.trim()
+      ? body.toUserId.trim()
+      : null;
+  const note =
+    typeof body.note === "string" && body.note.trim() ? body.note.trim() : null;
+  const requestKey =
+    typeof body.requestKey === "string" && body.requestKey.trim()
+      ? body.requestKey.trim()
+      : null;
+  const step =
+    typeof body.step === "number" && Number.isFinite(body.step)
+      ? Math.trunc(body.step)
+      : typeof body.step === "string" && body.step.trim()
+        ? body.step.trim()
+        : null;
+  const reason =
+    typeof body.reason === "string" && body.reason.trim()
+      ? body.reason.trim()
+      : null;
+  const amount = toPositiveAmount(body.amount);
+
+  await logAuditEvent({
+    actor: req.user?.email,
+    userId: senderUserId,
+    action:
+      eventType === "STARTED"
+        ? "TRANSFER_FLOW_STARTED"
+        : "TRANSFER_FLOW_CANCELLED",
+    details: {
+      amount: amount ?? null,
+      toAccount: toAccount || null,
+      step,
+      reason,
+    },
+    metadata: {
+      requestKey,
+      toUserId,
+      note,
+      eventType,
+      observedAt: new Date().toISOString(),
+    },
+    ipAddress: getRequestIp(req),
+  });
+
+  if (amount) {
+    await logFundsFlowEvent({
+      actor: req.user?.email,
+      userId: senderUserId,
+      ipAddress: getRequestIp(req),
+      channel: "WALLET_TRANSFER",
+      lifecycle: eventType,
+      direction: "OUTFLOW",
+      amount,
+      currency: "USD",
+      toAccount: toAccount || null,
+      fromUserId: senderUserId,
+      toUserId,
+      requestKey,
+      note,
+      sourceLabel:
+        eventType === "STARTED"
+          ? "TRANSFER_FLOW_STARTED"
+          : "TRANSFER_FLOW_CANCELLED",
+    });
+  }
+
+  return res.json({ status: "ok" });
+});
+
 app.post("/transfer/otp/verify", requireAuth, async (req, res) => {
   const senderUserId = req.user?.sub;
   if (!senderUserId) return res.status(401).json({ error: "Unauthorized" });
@@ -9000,20 +9165,85 @@ app.get(
   requireAuth,
   requireRole(["ADMIN"]),
   async (req, res) => {
-    const limit = Math.min(
-      parseInt(String(req.query.limit ?? "100"), 10) || 100,
-      300,
+    const page = Math.max(parseInt(String(req.query.page ?? "1"), 10) || 1, 1);
+    const pageSize = Math.min(
+      Math.max(parseInt(String(req.query.pageSize ?? "10"), 10) || 10, 1),
+      100,
     );
-    const logs = await createAuditLogRepository().findLatest(limit);
-    const normalized = logs.map((log) => ({
+    const rangeDays = Math.max(
+      parseInt(String(req.query.rangeDays ?? "30"), 10) || 30,
+      0,
+    );
+    const activity =
+      typeof req.query.activity === "string"
+        ? req.query.activity.trim()
+        : "all";
+    const status =
+      typeof req.query.status === "string" ? req.query.status.trim() : "all";
+    const accountQuery =
+      typeof req.query.accountQuery === "string"
+        ? req.query.accountQuery.trim()
+        : "";
+    const source =
+      typeof req.query.source === "string" ? req.query.source.trim() : "human";
+
+    const createdAtFilter =
+      rangeDays > 0
+        ? { gte: new Date(Date.now() - rangeDays * 24 * 60 * 60 * 1000) }
+        : undefined;
+
+    const logs = await prisma.auditLog.findMany({
+      where: {
+        createdAt: createdAtFilter,
+        ...(accountQuery
+          ? {
+              actor: {
+                contains: accountQuery,
+                mode: "insensitive",
+              },
+            }
+          : {}),
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    const filtered = logs.filter((log) => {
+      const category = inferAdminAuditCategory(log.action);
+      const inferredStatus = inferAdminAuditStatus(log.action, log.details);
+      const inferredSource = inferAdminAuditSource({
+        actor: log.actor,
+        action: log.action,
+        metadata: log.metadata,
+      });
+
+      if (activity !== "all" && category !== activity) return false;
+      if (status !== "all" && inferredStatus !== status) return false;
+      if (source !== "all" && inferredSource !== source) return false;
+      return true;
+    });
+
+    const totalCount = filtered.length;
+    const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+    const currentPage = Math.min(page, totalPages);
+    const start = (currentPage - 1) * pageSize;
+    const pageItems = filtered.slice(start, start + pageSize);
+
+    const normalized = pageItems.map((log) => ({
       id: log.id,
       actor: log.actor,
       action: log.action,
       details: log.details ?? "",
       ipAddress: log.ipAddress ?? "unknown",
       createdAt: log.createdAt,
+      metadata: log.metadata ?? {},
     }));
-    res.json(normalized);
+    res.json({
+      logs: normalized,
+      totalCount,
+      page: currentPage,
+      pageSize,
+      totalPages,
+    });
   },
 );
 
