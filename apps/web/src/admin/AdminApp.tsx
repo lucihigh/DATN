@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import { useAuth } from "../context/AuthContext";
 
@@ -84,6 +85,7 @@ type AuditLogDoc = {
   action: string;
   details?: string | Record<string, unknown> | null;
   ipAddress?: string | null;
+  metadata?: Record<string, unknown> | null;
   createdAt: string;
 };
 
@@ -145,12 +147,41 @@ type AdminAlertApi = {
   merchantCategory?: string | null;
 };
 
+const AUDIT_ACTION_LABELS: Record<string, string> = {
+  LOGIN_TRUSTED_IP: "Trusted Login",
+  SESSION_REPLACED: "Session Replaced",
+  FUNDS_FLOW_EVENT: "Funds Flow",
+  TRANSFER_FLOW_STARTED: "Transfer Started",
+  TRANSFER_FLOW_CANCELLED: "Transfer Cancelled",
+  TRANSFER_ADVISORY_PRESENTED: "Transfer Warning",
+  TRANSFER_ADVISORY_ACKNOWLEDGED: "Warning Accepted",
+  TRANSFER_ADVISORY_DISMISSED: "Warning Dismissed",
+  TRANSFER_SAFETY_BLOCKED: "Transfer Blocked",
+  TRANSFER_OTP_SENT: "OTP Sent",
+  TRANSFER_OTP_PREVERIFIED: "OTP Checked",
+  TRANSFER_OTP_VERIFIED: "Transfer Confirmed",
+  AI_TRANSACTION_ALERT: "AI Risk Alert",
+  AI_TRANSACTION_SCORE: "AI Risk Check",
+  AI_LOGIN_ALERT: "AI Login Alert",
+  AI_LOGIN_SCORE: "AI Login Check",
+};
+
 const prettyAction = (action: string) =>
+  AUDIT_ACTION_LABELS[action] ||
   action
     .toLowerCase()
     .split("_")
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join(" ");
+
+const formatUsdAmount = (amount?: number | null, currency?: string | null) => {
+  if (amount == null || !Number.isFinite(amount)) return "Unknown";
+  const suffix = currency?.trim() || "USD";
+  return `${Number(amount).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })} ${suffix}`;
+};
 
 const inferAuditCategoryClass = (
   action: string,
@@ -208,16 +239,128 @@ const inferAuditStatusClass = (
   return "ok";
 };
 
+const asTrimmedString = (value: unknown): string | undefined =>
+  typeof value === "string" && value.trim() ? value.trim() : undefined;
+
+const pickAuditString = (...values: Array<unknown>): string | undefined => {
+  for (const value of values) {
+    const normalized = asTrimmedString(value);
+    if (normalized) return normalized;
+  }
+  return undefined;
+};
+
+const buildAuditLocationLabel = (
+  source?: Record<string, unknown>,
+  ipAddress?: string | null,
+) => {
+  const location =
+    pickAuditString(
+      source?.location,
+      source?.city,
+      [source?.city, source?.region, source?.country]
+        .filter((part) => typeof part === "string" && part.trim())
+        .join(", "),
+      source?.country,
+    ) ?? "";
+
+  if (location) return location;
+  const ip = asTrimmedString(ipAddress);
+  if (!ip) return "";
+  if (ip === "127.0.0.1") return "Local device";
+  if (
+    ip.startsWith("10.") ||
+    ip.startsWith("192.168.") ||
+    /^172\.(1[6-9]|2\d|3[0-1])\./.test(ip) ||
+    ip === "::1"
+  ) {
+    return "Private network";
+  }
+  return `IP ${ip}`;
+};
+
+const formatAuditLocation = (value?: string) => {
+  const normalized = asTrimmedString(value);
+  if (!normalized) return "-";
+  if (normalized === "Local device") return "Current device";
+  if (normalized === "Private network") return "Private network";
+  if (normalized.startsWith("IP ")) {
+    return `IP: ${normalized.slice(3)}`;
+  }
+  return normalized;
+};
+
+const formatAlertOrigin = (
+  location?: string | null,
+  ipAddress?: string | null,
+) => {
+  const normalizedLocation = asTrimmedString(location);
+  if (normalizedLocation) return normalizedLocation;
+
+  const ip = asTrimmedString(ipAddress);
+  if (!ip) return "Source unavailable";
+  if (ip === "127.0.0.1" || ip === "::1") return "Local testing";
+  if (
+    ip.startsWith("10.") ||
+    ip.startsWith("192.168.") ||
+    /^172\.(1[6-9]|2\d|3[0-1])\./.test(ip)
+  ) {
+    return "Private network";
+  }
+  return `IP ${ip}`;
+};
+
+const summarizeAuditUserAgent = (value?: string) => {
+  const userAgent = asTrimmedString(value);
+  if (!userAgent) return "-";
+
+  const browser = userAgent.match(/Edg\/(\d+)/)?.[1]
+    ? `Edge ${userAgent.match(/Edg\/(\d+)/)?.[1]}`
+    : userAgent.match(/Chrome\/(\d+)/)?.[1]
+      ? `Chrome ${userAgent.match(/Chrome\/(\d+)/)?.[1]}`
+      : userAgent.match(/Firefox\/(\d+)/)?.[1]
+        ? `Firefox ${userAgent.match(/Firefox\/(\d+)/)?.[1]}`
+        : userAgent.match(/Version\/(\d+).+Safari\//)?.[1]
+          ? `Safari ${userAgent.match(/Version\/(\d+).+Safari\//)?.[1]}`
+          : "";
+
+  const device = /Windows/i.test(userAgent)
+    ? "Windows PC"
+    : /Mac OS X/i.test(userAgent)
+      ? "Mac"
+      : /Android/i.test(userAgent)
+        ? "Android"
+        : /\biPhone\b|\biPad\b|\biOS\b/i.test(userAgent)
+          ? "iPhone/iPad"
+          : /Linux/i.test(userAgent)
+            ? "Linux"
+            : "Device";
+
+  return [device, browser].filter(Boolean).join(" - ") || userAgent;
+};
+
+const formatAuditRequestId = (value?: string) => {
+  const requestId = asTrimmedString(value);
+  if (!requestId) return "-";
+  if (requestId.length <= 18) return requestId;
+  return `${requestId.slice(0, 8)}...${requestId.slice(-6)}`;
+};
+
 const mapAuditDocToView = (doc: AuditLogDoc): AuditLogView => {
   const detailsObj =
     doc.details && typeof doc.details === "object" ? doc.details : undefined;
+  const metadataObj =
+    doc.metadata && typeof doc.metadata === "object" ? doc.metadata : undefined;
   const detail =
     typeof doc.details === "string"
       ? doc.details
       : (typeof detailsObj?.message === "string" && detailsObj.message) ||
         (typeof detailsObj?.reason === "string" && detailsObj.reason) ||
+        (typeof detailsObj?.detail === "string" && detailsObj.detail) ||
         (typeof detailsObj?.description === "string" &&
           detailsObj.description) ||
+        (typeof metadataObj?.message === "string" && metadataObj.message) ||
+        (typeof metadataObj?.reason === "string" && metadataObj.reason) ||
         prettyAction(doc.action);
   const categoryClass = inferAuditCategoryClass(doc.action);
   const statusClass = inferAuditStatusClass(doc.action, doc.details);
@@ -238,11 +381,33 @@ const mapAuditDocToView = (doc: AuditLogDoc): AuditLogView => {
     status,
     statusClass,
     userAgent:
-      typeof detailsObj?.userAgent === "string" ? detailsObj.userAgent : "",
+      pickAuditString(
+        detailsObj?.userAgent,
+        detailsObj?.currentUserAgent,
+        detailsObj?.previousUserAgent,
+        detailsObj?.device,
+        metadataObj?.userAgent,
+        metadataObj?.currentUserAgent,
+        metadataObj?.previousUserAgent,
+      ) ?? "",
     requestId:
-      typeof detailsObj?.requestId === "string" ? detailsObj.requestId : "",
+      pickAuditString(
+        detailsObj?.requestId,
+        detailsObj?.eventId,
+        detailsObj?.sessionId,
+        detailsObj?.loginEventId,
+        detailsObj?.transactionEventId,
+        metadataObj?.requestId,
+        metadataObj?.eventId,
+        metadataObj?.sessionId,
+        metadataObj?.loginEventId,
+        metadataObj?.transactionEventId,
+        doc._id,
+      ) ?? "",
     location:
-      typeof detailsObj?.location === "string" ? detailsObj.location : "",
+      buildAuditLocationLabel(detailsObj, doc.ipAddress) ||
+      buildAuditLocationLabel(metadataObj, doc.ipAddress) ||
+      "",
   };
 };
 
@@ -276,6 +441,52 @@ const parseDateLoose = (value: string): Date | null => {
   const fallback = new Date(value.replace(" ", "T"));
   return Number.isNaN(fallback.getTime()) ? null : fallback;
 };
+
+const startOfDay = (date: Date) =>
+  new Date(date.getFullYear(), date.getMonth(), date.getDate());
+
+const endOfDay = (date: Date) =>
+  new Date(
+    date.getFullYear(),
+    date.getMonth(),
+    date.getDate(),
+    23,
+    59,
+    59,
+    999,
+  );
+
+const addDays = (date: Date, amount: number) => {
+  const next = new Date(date);
+  next.setDate(next.getDate() + amount);
+  return next;
+};
+
+const addMonths = (date: Date, amount: number) =>
+  new Date(date.getFullYear(), date.getMonth() + amount, date.getDate());
+
+const addYears = (date: Date, amount: number) =>
+  new Date(date.getFullYear() + amount, date.getMonth(), date.getDate());
+
+const getWeekStart = (date: Date) => {
+  const normalized = startOfDay(date);
+  const day = normalized.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  return addDays(normalized, diff);
+};
+
+const isWithinRange = (date: Date | null, start: Date, end: Date) =>
+  Boolean(
+    date &&
+    date.getTime() >= start.getTime() &&
+    date.getTime() <= end.getTime(),
+  );
+
+const formatMoneyCompact = (amount: number) =>
+  `$${amount.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
 
 const styles = `
   .ana-page {
@@ -395,9 +606,28 @@ const styles = `
 
   .ana-grid-main { display:grid; grid-template-columns: 2.1fr 0.9fr; gap:16px; margin-bottom:16px; }
   .ana-bar-chart { display:grid; grid-template-columns: repeat(12, 1fr); gap:12px; align-items:end; height:260px; }
-  .ana-bar-item { text-align:center; }
-  .ana-bar { width:100%; background:#5b21b6; border-radius:10px 10px 6px 6px; }
+  .ana-bar-item {
+    height:100%;
+    display:flex;
+    flex-direction:column;
+    justify-content:flex-end;
+    text-align:center;
+    min-height:0;
+  }
+  .ana-bar {
+    width:100%;
+    background:#5b21b6;
+    border-radius:10px 10px 6px 6px;
+    min-height:0;
+  }
   .ana-bar-label { margin-top:6px; font-size:12px; color:#6b7280; }
+  .ana-chart-empty {
+    height:100%;
+    display:grid;
+    place-items:center;
+    color:#6b7280;
+    font-size:14px;
+  }
   .ana-chart-head {
     display:flex; align-items:center; justify-content:space-between;
     margin-bottom:8px; color:#9ca3af; font-weight:700; letter-spacing:0.2px;
@@ -447,6 +677,14 @@ const styles = `
     overflow: hidden;
     height: 100dvh;
   }
+  .mf-main.audit-view {
+    display: flex;
+    flex-direction: column;
+  }
+  .mf-main.users-view {
+    display: flex;
+    flex-direction: column;
+  }
   .ana-page.no-scroll { padding: 0; }
   .mf-sidebar {
     position: fixed;
@@ -495,13 +733,26 @@ const styles = `
   .mf-logo { color: #111827; }
 
   /* User management */
-  .user-card { background:#fff; border-radius:16px; padding:20px; box-shadow:0 10px 28px rgba(0,0,0,0.08); }
+  .user-card {
+    background:#fff;
+    border-radius:16px;
+    padding:20px;
+    box-shadow:0 10px 28px rgba(0,0,0,0.08);
+    display:flex;
+    flex:1;
+    flex-direction:column;
+    min-height:calc(100vh - 56px);
+  }
   .user-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:18px; }
   .user-actions { display:flex; gap:10px; align-items:center; }
   .user-search { padding:10px 12px; border:1px solid #e5e7eb; border-radius:10px; min-width:220px; }
-  .user-table-wrap { overflow-x:auto; }
+  .user-table-wrap { overflow:auto; flex:1; min-height:0; }
   .user-table { width:100%; border-collapse:collapse; }
-  .user-table th, .user-table td { padding:14px 10px; text-align:left; border-bottom:1px solid #eceff5; font-size:14px; }
+  .user-table th, .user-table td { padding:10px 10px; text-align:left; border-bottom:1px solid #eceff5; font-size:14px; vertical-align:middle; }
+  .user-table td { line-height:1.25; }
+  .user-person { display:flex; gap:12px; align-items:center; min-height:42px; }
+  .user-contact { display:grid; gap:4px; }
+  .user-action-group { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
   .user-badge { padding:4px 10px; border-radius:12px; font-weight:700; font-size:12px; display:inline-block; }
   .user-badge.active { background:#d1fae5; color:#0f5132; border:1px solid #a7f3d0; }
   .user-badge.locked { background:#ffe4e6; color:#b91c1c; border:1px solid #fecdd3; }
@@ -535,7 +786,7 @@ const styles = `
   .theme-dark .user-filter-panel label { color:#a3b1d6; }
   .theme-dark .user-filter-panel select { background:#0f1934; border:1px solid #1b2748; color:#e7ecff; }
   .theme-dark .user-filter-actions button { background:#162143; border:1px solid #1b2748; color:#e7ecff; }
-  .user-footer { padding:12px 0 6px; color:#6b7280; font-size:13px; display:flex; justify-content:space-between; align-items:center; }
+  .user-footer { padding:12px 0 6px; color:#6b7280; font-size:13px; display:flex; justify-content:space-between; align-items:center; margin-top:auto; }
   .pager { display:flex; gap:8px; }
   .pager button { width:34px; height:34px; border-radius:8px; border:1px solid #e5e7eb; background:#fff; cursor:pointer; }
   .pager button.active { background:#1f6bff; color:#fff; border-color:#1f6bff; }
@@ -731,7 +982,8 @@ const styles = `
     box-shadow: 0 24px 64px rgba(0, 0, 0, 0.22);
     max-width: 820px;
     width: min(100%, 820px);
-    overflow: hidden;
+    max-height: min(80vh, 900px);
+    overflow: auto;
   }
   .tx-head {
     display:flex; justify-content:space-between; align-items:center;
@@ -758,6 +1010,10 @@ const styles = `
     box-shadow: 0 22px 40px rgba(4, 11, 24, 0.45);
     padding: 18px;
     color: #d6e6ff;
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: calc(100dvh - 56px);
   }
   .audit-tabs { display:flex; align-items:center; gap:18px; border-bottom:1px solid #1d3552; padding-bottom:10px; margin-bottom:16px; }
   .audit-tab {
@@ -800,7 +1056,13 @@ const styles = `
     padding-right:12px;
   }
   .audit-count { color:#7089a9; font-size:13px; letter-spacing:0.4px; text-transform:uppercase; font-weight:700; }
-  .audit-table-wrap { border:1px solid #1f3857; border-radius:14px; overflow:hidden; background:#0a1a2f; }
+  .audit-table-wrap {
+    border:1px solid #1f3857;
+    border-radius:14px;
+    overflow:hidden;
+    background:#0a1a2f;
+    flex:1;
+  }
   .audit-table { width:100%; border-collapse:collapse; }
   .audit-table th, .audit-table td { padding:14px 12px; text-align:left; vertical-align:middle; border-bottom:1px solid #1a3350; }
   .audit-table th { background:#0d2139; color:#87a7cd; font-size:14px; letter-spacing:0.2px; text-transform:none; }
@@ -830,12 +1092,23 @@ const styles = `
     color:#9cb5d6;
     font-size:13px;
   }
+  .audit-meta > div { min-width: 0; }
+  .audit-meta span { word-break: break-word; overflow-wrap: anywhere; }
   .audit-meta strong { display:block; color:#d7e7ff; font-size:12px; margin-bottom:4px; }
   .audit-pagination {
     display:flex;
     justify-content:flex-end;
+    align-items:center;
+    gap:10px;
     margin-top:14px;
     color:#6e89ad;
+  }
+  .audit-page-meta { font-size:13px; color:#7089a9; }
+  .pager-ellipsis {
+    min-width:34px;
+    text-align:center;
+    color:#7089a9;
+    font-weight:700;
   }
 
   /* Light theme overrides for audit log */
@@ -894,6 +1167,31 @@ const styles = `
   }
   .alerts-head h2 { margin:0 0 4px; font-size:28px; color:#eef4ff; }
   .alerts-head p { margin:0; color:#89a3c8; }
+  .alerts-summary-bar {
+    display:grid;
+    grid-template-columns:repeat(4, minmax(140px, 1fr));
+    gap:10px;
+    margin:0 0 18px;
+  }
+  .alerts-stat {
+    border:1px solid #1d3a5b;
+    border-radius:14px;
+    background:#0b1a2f;
+    padding:12px 14px;
+  }
+  .alerts-stat strong {
+    display:block;
+    color:#eef4ff;
+    font-size:20px;
+    margin-bottom:4px;
+  }
+  .alerts-stat span {
+    color:#89a3c8;
+    font-size:12px;
+    text-transform:uppercase;
+    letter-spacing:0.3px;
+    font-weight:700;
+  }
   .alerts-filters { display:flex; gap:10px; flex-wrap:wrap; }
   .alerts-filter,
   .alerts-search {
@@ -924,6 +1222,41 @@ const styles = `
   }
   .alerts-summary { display:grid; gap:6px; }
   .alerts-summary h3 { margin:0; color:#eef4ff; font-size:19px; }
+  .alerts-one-line {
+    margin:0;
+    color:#dbe8ff;
+    font-size:14px;
+    line-height:1.5;
+    display:-webkit-box;
+    -webkit-line-clamp:1;
+    -webkit-box-orient:vertical;
+    overflow:hidden;
+  }
+  .alerts-body {
+    display:grid;
+    gap:12px;
+  }
+  .alerts-core-grid {
+    display:grid;
+    grid-template-columns:minmax(0, 1.4fr) minmax(320px, 0.9fr);
+    gap:14px;
+    align-items:start;
+  }
+  .alerts-primary {
+    display:grid;
+    gap:10px;
+    min-width:0;
+  }
+  .alerts-explanation.compact {
+    margin:0;
+    color:#dbe8ff;
+    line-height:1.55;
+  }
+  .alerts-compact-reasons {
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+  }
   .alerts-meta-line {
     display:flex;
     gap:8px;
@@ -974,9 +1307,9 @@ const styles = `
   }
   .alerts-signals {
     display:grid;
-    grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));
+    grid-template-columns:repeat(2, minmax(0, 1fr));
     gap:10px;
-    margin-bottom:14px;
+    margin:0;
   }
   .alerts-signal {
     border:1px solid #1d3a5b;
@@ -1046,6 +1379,9 @@ const styles = `
   .theme-light .alerts-summary h3,
   .theme-light .alerts-signal span,
   .theme-light .alerts-extra strong { color:#0f172a; }
+  .theme-light .alerts-stat { background:#ffffff; border-color:#dbe5f3; }
+  .theme-light .alerts-stat strong { color:#0f172a; }
+  .theme-light .alerts-stat span { color:#64748b; }
   .theme-light .alerts-head p,
   .theme-light .alerts-meta-line,
   .theme-light .alerts-extra { color:#64748b; }
@@ -1097,6 +1433,8 @@ const styles = `
     .audit-select { min-width: 150px; }
   }
   @media (max-width: 900px) {
+    .alerts-summary-bar { grid-template-columns:repeat(2, minmax(140px, 1fr)); }
+    .alerts-core-grid { grid-template-columns:1fr; }
     .audit-filters { width: 100%; }
     .audit-select { flex: 1 1 170px; min-width: 0; }
     .audit-input { flex: 1 1 220px; min-width: 0; }
@@ -1136,6 +1474,11 @@ function KpiCard({ card }: { card: KpiCard }) {
 function AdminApp() {
   const { user, token, logout } = useAuth();
   const theme: "dark" = "dark";
+  const getAuditPageSize = () => {
+    if (typeof window === "undefined") return 10;
+    const availableHeight = window.innerHeight - 320;
+    return Math.max(8, Math.min(14, Math.floor(availableHeight / 60)));
+  };
   const [period, setPeriod] = useState<"year" | "month" | "week">("year");
   const [selectedDate, setSelectedDate] = useState(() => {
     // default to current date for realistic demo
@@ -1170,8 +1513,24 @@ function AdminApp() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [alerts, setAlerts] = useState<AdminAlertApi[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLogView[]>([]);
+  const [auditTotalCount, setAuditTotalCount] = useState(0);
   const [adminDataLoading, setAdminDataLoading] = useState(false);
   const [adminDataError, setAdminDataError] = useState("");
+  const [auditPageSize, setAuditPageSize] = useState(getAuditPageSize);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const updateAuditPageSize = () => {
+      setAuditPageSize(getAuditPageSize());
+    };
+
+    updateAuditPageSize();
+    window.addEventListener("resize", updateAuditPageSize);
+    return () => {
+      window.removeEventListener("resize", updateAuditPageSize);
+    };
+  }, []);
 
   const mapAdminTxnToView = (t: AdminTransactionApi): Transaction => ({
     id: t.id,
@@ -1225,11 +1584,10 @@ function AdminApp() {
       setAdminDataError("");
 
       try {
-        const [usersResp, txResp, alertsResp, auditResp] = await Promise.all([
+        const [usersResp, txResp, alertsResp] = await Promise.all([
           fetch(`${API_BASE}/admin/users`, { headers }),
           fetch(`${API_BASE}/admin/transactions`, { headers }),
           fetch(`${API_BASE}/admin/alerts`, { headers }),
-          fetch(`${API_BASE}/admin/audit-logs`, { headers }),
         ]);
 
         const usersData = (await usersResp
@@ -1241,14 +1599,6 @@ function AdminApp() {
         const alertsData = (await alertsResp
           .json()
           .catch(() => [])) as AdminAlertApi[];
-        const auditData = (await auditResp.json().catch(() => [])) as Array<{
-          id: string;
-          actor?: string;
-          action?: string;
-          details?: string | Record<string, unknown>;
-          ipAddress?: string;
-          createdAt?: string;
-        }>;
 
         if (usersResp.ok) setUsers(usersData.map(mapUser));
         else setUsers([]);
@@ -1256,28 +1606,11 @@ function AdminApp() {
         else setTransactions([]);
         if (alertsResp.ok) setAlerts(alertsData);
         else setAlerts([]);
-        if (auditResp.ok) {
-          const mapped = auditData.map((d) =>
-            mapAuditDocToView({
-              _id: d.id,
-              userId: null,
-              actor: d.actor,
-              action: d.action || "UNKNOWN",
-              details: d.details,
-              ipAddress: d.ipAddress,
-              createdAt: d.createdAt || new Date().toISOString(),
-            }),
-          );
-          setAuditLogs(mapped);
-        } else {
-          setAuditLogs([]);
-        }
 
         const responseErrors = [
           !usersResp.ok ? `/admin/users: ${usersResp.status}` : null,
           !txResp.ok ? `/admin/transactions: ${txResp.status}` : null,
           !alertsResp.ok ? `/admin/alerts: ${alertsResp.status}` : null,
-          !auditResp.ok ? `/admin/audit-logs: ${auditResp.status}` : null,
         ].filter(Boolean);
 
         if (responseErrors.length > 0) {
@@ -1289,7 +1622,6 @@ function AdminApp() {
         setUsers([]);
         setTransactions([]);
         setAlerts([]);
-        setAuditLogs([]);
         setAdminDataError(
           err instanceof Error
             ? `Admin API is unavailable: ${err.message}. Check that the API server is running and can reach the database.`
@@ -1329,7 +1661,7 @@ function AdminApp() {
   >("all");
   const [userSort, setUserSort] = useState<"latest" | "oldest">("latest");
   const [userPage, setUserPage] = useState(1);
-  const userPageSize = 7;
+  const userPageSize = 10;
   const [txUser, setTxUser] = useState<AdminUser | null>(null);
   const [expandedAlert, setExpandedAlert] = useState<string | null>(null);
   const [alertStatusFilter, setAlertStatusFilter] = useState<
@@ -1354,10 +1686,18 @@ function AdminApp() {
   const [auditStatus, setAuditStatus] = useState<
     "all" | "ok" | "pending" | "fail"
   >("all");
+  const [auditSource, setAuditSource] = useState<"human" | "ai" | "all">(
+    "human",
+  );
   const [auditAccountQuery, setAuditAccountQuery] = useState("");
   const [auditPage, setAuditPage] = useState(1);
-  const auditPageSize = 5;
   const alertPageSize = 4;
+
+  useEffect(() => {
+    if (expandedAudit && !auditLogs.some((item) => item.id === expandedAudit)) {
+      setExpandedAudit(null);
+    }
+  }, [expandedAudit, auditLogs]);
 
   const openAvatarPicker = () => {
     avatarInputRef.current?.click();
@@ -1481,6 +1821,18 @@ function AdminApp() {
     1,
     Math.ceil(filteredAlerts.length / alertPageSize),
   );
+  const alertSummary = useMemo(
+    () => ({
+      total: filteredAlerts.length,
+      pending: filteredAlerts.filter(
+        (item) => item.adminStatus === "pending_review",
+      ).length,
+      high: filteredAlerts.filter((item) => item.riskLevel === "high").length,
+      transaction: filteredAlerts.filter((item) => item.type === "transaction")
+        .length,
+    }),
+    [filteredAlerts],
+  );
   const currentAlertPage = Math.min(alertPage, totalAlertPages);
   const paginatedAlerts = useMemo(() => {
     const start = (currentAlertPage - 1) * alertPageSize;
@@ -1535,53 +1887,129 @@ function AdminApp() {
 
   useEffect(() => {
     setAuditPage(1);
-  }, [auditRange, auditActivity, auditStatus, auditAccountQuery]);
+  }, [auditRange, auditActivity, auditStatus, auditAccountQuery, auditSource]);
 
-  const filteredAuditLogs = useMemo(() => {
-    const maxAgeDays = Number(auditRange);
-    const accountQuery = auditAccountQuery.trim().toLowerCase();
-    const now = new Date();
-    const list = auditLogs.filter((log) => {
-      const logDate = new Date(log.ts.replace(" ", "T"));
-      if (!Number.isNaN(maxAgeDays)) {
-        const diff =
-          (now.getTime() -
-            (Number.isNaN(logDate.getTime())
-              ? now.getTime()
-              : logDate.getTime())) /
-          (1000 * 60 * 60 * 24);
-        if (diff > maxAgeDays) return false;
-      }
-      if (auditActivity !== "all" && log.categoryClass !== auditActivity)
-        return false;
-      if (auditStatus !== "all" && log.statusClass !== auditStatus)
-        return false;
-      if (accountQuery && !log.admin.toLowerCase().includes(accountQuery))
-        return false;
-      return true;
+  useEffect(() => {
+    if (!token || user?.role !== "ADMIN") return;
+
+    const headers = { Authorization: `Bearer ${token}` };
+    const params = new URLSearchParams({
+      page: String(auditPage),
+      pageSize: String(auditPageSize),
+      rangeDays: auditRange,
+      activity: auditActivity,
+      status: auditStatus,
+      source: auditSource,
     });
-    if (expandedAudit && !list.some((l) => l.id === expandedAudit)) {
-      setExpandedAudit(null);
+    if (auditAccountQuery.trim()) {
+      params.set("accountQuery", auditAccountQuery.trim());
     }
-    return list;
+
+    const loadAuditLogs = async () => {
+      try {
+        const auditResp = await fetch(
+          `${API_BASE}/admin/audit-logs?${params.toString()}`,
+          { headers },
+        );
+        const payload = (await auditResp.json().catch(() => null)) as {
+          logs?: Array<{
+            id: string;
+            actor?: string;
+            action?: string;
+            details?: string | Record<string, unknown>;
+            ipAddress?: string;
+            metadata?: Record<string, unknown>;
+            createdAt?: string;
+          }>;
+          totalCount?: number;
+          totalPages?: number;
+          page?: number;
+          error?: string;
+        } | null;
+
+        if (!auditResp.ok) {
+          setAuditLogs([]);
+          setAuditTotalCount(0);
+          return;
+        }
+
+        const mapped = (payload?.logs || []).map((d) =>
+          mapAuditDocToView({
+            _id: d.id,
+            userId: null,
+            actor: d.actor,
+            action: d.action || "UNKNOWN",
+            details: d.details,
+            ipAddress: d.ipAddress,
+            metadata: d.metadata,
+            createdAt: d.createdAt || new Date().toISOString(),
+          }),
+        );
+        setAuditLogs(mapped);
+        setAuditTotalCount(
+          typeof payload?.totalCount === "number"
+            ? payload.totalCount
+            : mapped.length,
+        );
+        if (typeof payload?.page === "number" && payload.page !== auditPage) {
+          setAuditPage(payload.page);
+        }
+      } catch {
+        setAuditLogs([]);
+        setAuditTotalCount(0);
+      }
+    };
+
+    void loadAuditLogs();
   }, [
-    auditLogs,
+    token,
+    user?.role,
+    auditPage,
+    auditPageSize,
     auditRange,
     auditActivity,
     auditStatus,
+    auditSource,
     auditAccountQuery,
-    expandedAudit,
   ]);
 
   const totalAuditPages = Math.max(
     1,
-    Math.ceil(filteredAuditLogs.length / auditPageSize),
+    Math.ceil(auditTotalCount / auditPageSize),
   );
   const currentAuditPage = Math.min(auditPage, totalAuditPages);
-  const paginatedAuditLogs = useMemo(() => {
-    const start = (currentAuditPage - 1) * auditPageSize;
-    return filteredAuditLogs.slice(start, start + auditPageSize);
-  }, [filteredAuditLogs, currentAuditPage]);
+  const visibleAuditPages = useMemo(() => {
+    if (totalAuditPages <= 7) {
+      return Array.from({ length: totalAuditPages }, (_, i) => i + 1);
+    }
+
+    if (currentAuditPage <= 4) {
+      return [1, 2, 3, 4, 5, "...", totalAuditPages] as const;
+    }
+
+    if (currentAuditPage >= totalAuditPages - 3) {
+      return [
+        1,
+        "...",
+        totalAuditPages - 4,
+        totalAuditPages - 3,
+        totalAuditPages - 2,
+        totalAuditPages - 1,
+        totalAuditPages,
+      ] as const;
+    }
+
+    return [
+      1,
+      "...",
+      currentAuditPage - 1,
+      currentAuditPage,
+      currentAuditPage + 1,
+      "...",
+      totalAuditPages,
+    ] as const;
+  }, [currentAuditPage, totalAuditPages]);
+  const paginatedAuditLogs = auditLogs;
 
   const handleExportCsv = () => {
     const header = [
@@ -1595,7 +2023,7 @@ function AdminApp() {
       "RequestID",
       "Location",
     ];
-    const rows = filteredAuditLogs.map((l) =>
+    const rows = auditLogs.map((l) =>
       [
         l.ts,
         l.admin,
@@ -1622,34 +2050,71 @@ function AdminApp() {
   };
 
   const analytics = useMemo(() => {
+    const anchorDate = (() => {
+      const parsed = new Date(selectedDate);
+      return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+    })();
+    const selectedMonth = anchorDate.getMonth();
+    const selectedYear = anchorDate.getFullYear();
+
+    const currentRange =
+      period === "year"
+        ? {
+            start: new Date(selectedYear, 0, 1),
+            end: new Date(selectedYear, 11, 31, 23, 59, 59, 999),
+          }
+        : period === "month"
+          ? {
+              start: new Date(selectedYear, selectedMonth, 1),
+              end: new Date(
+                selectedYear,
+                selectedMonth + 1,
+                0,
+                23,
+                59,
+                59,
+                999,
+              ),
+            }
+          : {
+              start: getWeekStart(anchorDate),
+              end: endOfDay(addDays(getWeekStart(anchorDate), 6)),
+            };
+
+    const previousRange =
+      period === "year"
+        ? {
+            start: addYears(currentRange.start, -1),
+            end: addYears(currentRange.end, -1),
+          }
+        : period === "month"
+          ? {
+              start: new Date(selectedYear, selectedMonth - 1, 1),
+              end: new Date(selectedYear, selectedMonth, 0, 23, 59, 59, 999),
+            }
+          : {
+              start: addDays(currentRange.start, -7),
+              end: endOfDay(addDays(currentRange.start, -1)),
+            };
+
     const txRows = transactions.map((t) => {
       const amountNum = parseCurrencyAmount(t.amount);
       const dateObj = parseDateLoose(t.date);
-      const month = dateObj?.getMonth() ?? -1;
-      return { ...t, amountNum, dateObj, month };
+      return { ...t, amountNum, dateObj };
     });
 
-    const completedTx = txRows.filter((t) => t.status === "Completed");
-    const monthlyGmv = Array.from({ length: 12 }, () => 0);
-    const monthlyTxCount = Array.from({ length: 12 }, () => 0);
-    const monthlyAvgTx = Array.from({ length: 12 }, () => 0);
-
-    for (const tx of completedTx) {
-      if (tx.month >= 0 && tx.month < 12) {
-        monthlyGmv[tx.month] += tx.amountNum;
-        monthlyTxCount[tx.month] += 1;
-      }
-    }
-    monthlyAvgTx.forEach((_, idx) => {
-      monthlyAvgTx[idx] =
-        monthlyTxCount[idx] > 0 ? monthlyGmv[idx] / monthlyTxCount[idx] : 0;
-    });
-
-    const selectedMonth = (() => {
-      const d = new Date(selectedDate);
-      return Number.isNaN(d.getTime()) ? new Date().getMonth() : d.getMonth();
-    })();
-    const prevMonth = selectedMonth === 0 ? 11 : selectedMonth - 1;
+    const currentTx = txRows.filter((t) =>
+      isWithinRange(t.dateObj, currentRange.start, currentRange.end),
+    );
+    const previousTx = txRows.filter((t) =>
+      isWithinRange(t.dateObj, previousRange.start, previousRange.end),
+    );
+    const completedCurrentTx = currentTx.filter(
+      (t) => t.status === "Completed",
+    );
+    const completedPreviousTx = previousTx.filter(
+      (t) => t.status === "Completed",
+    );
 
     const totalUsers = users.length;
     const activeUsers = users.filter((u) => u.status === "Active").length;
@@ -1657,10 +2122,12 @@ function AdminApp() {
     const adminUsers = users.filter((u) => u.role === "Admin").length;
     const userUsers = users.filter((u) => u.role === "User").length;
 
-    const successCount = txRows.filter((t) => t.status === "Completed").length;
-    const pendingCount = txRows.filter((t) => t.status === "Pending").length;
-    const failedCount = txRows.filter((t) => t.status === "Failed").length;
-    const totalTx = txRows.length;
+    const successCount = currentTx.filter(
+      (t) => t.status === "Completed",
+    ).length;
+    const pendingCount = currentTx.filter((t) => t.status === "Pending").length;
+    const failedCount = currentTx.filter((t) => t.status === "Failed").length;
+    const totalTx = currentTx.length;
     const successRate = totalTx > 0 ? (successCount / totalTx) * 100 : 0;
 
     const profileCompleted = users.filter(
@@ -1669,66 +2136,59 @@ function AdminApp() {
     const profileCompletionRate =
       totalUsers > 0 ? (profileCompleted / totalUsers) * 100 : 0;
 
-    const currentMonthGmv = monthlyGmv[selectedMonth];
-    const prevMonthGmv = monthlyGmv[prevMonth];
+    const currentPeriodGmv = completedCurrentTx.reduce(
+      (sum, tx) => sum + tx.amountNum,
+      0,
+    );
+    const previousPeriodGmv = completedPreviousTx.reduce(
+      (sum, tx) => sum + tx.amountNum,
+      0,
+    );
     const gmvDelta =
-      prevMonthGmv > 0
-        ? ((currentMonthGmv - prevMonthGmv) / prevMonthGmv) * 100
-        : currentMonthGmv > 0
+      previousPeriodGmv > 0
+        ? ((currentPeriodGmv - previousPeriodGmv) / previousPeriodGmv) * 100
+        : currentPeriodGmv > 0
           ? 100
           : 0;
 
-    const txTypeMap = new Map<string, { count: number; amount: number }>();
-    for (const tx of completedTx) {
-      const key = tx.type;
-      const current = txTypeMap.get(key) ?? { count: 0, amount: 0 };
+    const currentTypeMap = new Map<string, { count: number; amount: number }>();
+    for (const tx of completedCurrentTx) {
+      const current = currentTypeMap.get(tx.type) ?? { count: 0, amount: 0 };
       current.count += 1;
       current.amount += tx.amountNum;
-      txTypeMap.set(key, current);
+      currentTypeMap.set(tx.type, current);
     }
-    const totalTypeCount = Array.from(txTypeMap.values()).reduce(
-      (sum, t) => sum + t.count,
+    const totalTypeCount = Array.from(currentTypeMap.values()).reduce(
+      (sum, item) => sum + item.count,
       0,
     );
-    const categories = Array.from(txTypeMap.entries())
+    const categories = Array.from(currentTypeMap.entries())
       .map(([name, info]) => ({
         name,
         count: info.count,
+        amount: info.amount,
         value:
           totalTypeCount > 0
             ? Math.round((info.count / totalTypeCount) * 100)
             : 0,
       }))
       .sort((a, b) => b.count - a.count)
-      .slice(0, 6);
+      .slice(0, 5);
 
-    const now = new Date();
-    const thisMonthAudit = auditLogs.filter((log) => {
-      const d = parseDateLoose(log.ts);
-      return (
-        d &&
-        d.getFullYear() === now.getFullYear() &&
-        d.getMonth() === selectedMonth
-      );
-    });
-    const prevMonthAudit = auditLogs.filter((log) => {
-      const d = parseDateLoose(log.ts);
-      return (
-        d && d.getFullYear() === now.getFullYear() && d.getMonth() === prevMonth
-      );
-    });
-    const thisMonthLogin = thisMonthAudit.filter(
-      (l) => l.categoryClass === "login",
-    ).length;
-    const prevMonthLogin = prevMonthAudit.filter(
-      (l) => l.categoryClass === "login",
-    ).length;
-    const thisMonthSecurity = thisMonthAudit.filter(
-      (l) => l.statusClass === "fail",
-    ).length;
-    const prevMonthSecurity = prevMonthAudit.filter(
-      (l) => l.statusClass === "fail",
-    ).length;
+    const currentAudit = auditLogs.filter((log) =>
+      isWithinRange(
+        parseDateLoose(log.ts),
+        currentRange.start,
+        currentRange.end,
+      ),
+    );
+    const previousAudit = auditLogs.filter((log) =>
+      isWithinRange(
+        parseDateLoose(log.ts),
+        previousRange.start,
+        previousRange.end,
+      ),
+    );
 
     const engagementChannels = [
       {
@@ -1738,34 +2198,164 @@ function AdminApp() {
       },
       {
         name: "Transactions",
-        now: monthlyTxCount[selectedMonth],
-        prev: monthlyTxCount[prevMonth],
+        now: currentTx.length,
+        prev: previousTx.length,
       },
       {
         name: "Login events",
-        now: thisMonthLogin,
-        prev: prevMonthLogin,
+        now: currentAudit.filter((l) => l.categoryClass === "login").length,
+        prev: previousAudit.filter((l) => l.categoryClass === "login").length,
       },
       {
         name: "Security alerts",
-        now: thisMonthSecurity,
-        prev: prevMonthSecurity,
+        now: currentAudit.filter((l) => l.statusClass === "fail").length,
+        prev: previousAudit.filter((l) => l.statusClass === "fail").length,
       },
     ];
 
-    const revenueTrend = (() => {
-      const out: { month: string; now: number; prev: number }[] = [];
-      for (let i = 7; i >= 0; i -= 1) {
-        const idx = (selectedMonth - i + 12) % 12;
-        const prevIdx = (idx - 1 + 12) % 12;
-        out.push({
-          month: MONTH_LABELS[idx],
-          now: monthlyAvgTx[idx],
-          prev: monthlyAvgTx[prevIdx],
-        });
-      }
-      return out;
-    })();
+    const gmvChart =
+      period === "year"
+        ? {
+            title: "GMV by Month",
+            labels: MONTH_LABELS,
+            data: MONTH_LABELS.map((_, monthIndex) =>
+              txRows
+                .filter(
+                  (tx) =>
+                    tx.status === "Completed" &&
+                    tx.dateObj?.getFullYear() === selectedYear &&
+                    tx.dateObj.getMonth() === monthIndex,
+                )
+                .reduce((sum, tx) => sum + tx.amountNum, 0),
+            ),
+          }
+        : period === "month"
+          ? (() => {
+              const daysInMonth = new Date(
+                selectedYear,
+                selectedMonth + 1,
+                0,
+              ).getDate();
+              const bucketCount = Math.ceil(daysInMonth / 7);
+              const labels = Array.from(
+                { length: bucketCount },
+                (_, index) => `W${index + 1}`,
+              );
+              const data = Array.from({ length: bucketCount }, () => 0);
+              for (const tx of completedCurrentTx) {
+                if (!tx.dateObj) continue;
+                const bucketIndex = Math.floor((tx.dateObj.getDate() - 1) / 7);
+                data[bucketIndex] += tx.amountNum;
+              }
+              return { title: "GMV by Week", labels, data };
+            })()
+          : (() => {
+              const labels = Array.from({ length: 7 }, (_, index) =>
+                addDays(currentRange.start, index).toLocaleDateString("en-US", {
+                  weekday: "short",
+                }),
+              );
+              const data = Array.from({ length: 7 }, () => 0);
+              for (const tx of completedCurrentTx) {
+                if (!tx.dateObj) continue;
+                const bucketIndex = Math.floor(
+                  (startOfDay(tx.dateObj).getTime() -
+                    currentRange.start.getTime()) /
+                    (24 * 60 * 60 * 1000),
+                );
+                if (bucketIndex >= 0 && bucketIndex < 7) {
+                  data[bucketIndex] += tx.amountNum;
+                }
+              }
+              return { title: "GMV by Day", labels, data };
+            })();
+
+    const revenueTrend =
+      period === "year"
+        ? MONTH_LABELS.map((label, monthIndex) => {
+            const nowTx = txRows.filter(
+              (tx) =>
+                tx.status === "Completed" &&
+                tx.dateObj?.getFullYear() === selectedYear &&
+                tx.dateObj.getMonth() === monthIndex,
+            );
+            const prevTx = txRows.filter(
+              (tx) =>
+                tx.status === "Completed" &&
+                tx.dateObj?.getFullYear() === selectedYear - 1 &&
+                tx.dateObj.getMonth() === monthIndex,
+            );
+            const nowAmount = nowTx.reduce((sum, tx) => sum + tx.amountNum, 0);
+            const prevAmount = prevTx.reduce(
+              (sum, tx) => sum + tx.amountNum,
+              0,
+            );
+            return {
+              month: label,
+              now: nowTx.length ? nowAmount / nowTx.length : 0,
+              prev: prevTx.length ? prevAmount / prevTx.length : 0,
+            };
+          })
+        : period === "month"
+          ? gmvChart.labels.map((label, index) => {
+              const nowTx = completedCurrentTx.filter((tx) => {
+                if (!tx.dateObj) return false;
+                return Math.floor((tx.dateObj.getDate() - 1) / 7) === index;
+              });
+              const prevTx = completedPreviousTx.filter((tx) => {
+                if (!tx.dateObj) return false;
+                return Math.floor((tx.dateObj.getDate() - 1) / 7) === index;
+              });
+              const nowAmount = nowTx.reduce(
+                (sum, tx) => sum + tx.amountNum,
+                0,
+              );
+              const prevAmount = prevTx.reduce(
+                (sum, tx) => sum + tx.amountNum,
+                0,
+              );
+              return {
+                month: label,
+                now: nowTx.length ? nowAmount / nowTx.length : 0,
+                prev: prevTx.length ? prevAmount / prevTx.length : 0,
+              };
+            })
+          : gmvChart.labels.map((label, index) => {
+              const currentDay = startOfDay(addDays(currentRange.start, index));
+              const previousDay = startOfDay(
+                addDays(previousRange.start, index),
+              );
+              const nowTx = completedCurrentTx.filter(
+                (tx) =>
+                  tx.dateObj &&
+                  startOfDay(tx.dateObj).getTime() === currentDay.getTime(),
+              );
+              const prevTx = completedPreviousTx.filter(
+                (tx) =>
+                  tx.dateObj &&
+                  startOfDay(tx.dateObj).getTime() === previousDay.getTime(),
+              );
+              const nowAmount = nowTx.reduce(
+                (sum, tx) => sum + tx.amountNum,
+                0,
+              );
+              const prevAmount = prevTx.reduce(
+                (sum, tx) => sum + tx.amountNum,
+                0,
+              );
+              return {
+                month: label,
+                now: nowTx.length ? nowAmount / nowTx.length : 0,
+                prev: prevTx.length ? prevAmount / prevTx.length : 0,
+              };
+            });
+
+    const periodTitle =
+      period === "year"
+        ? "Yearly GMV"
+        : period === "month"
+          ? "Monthly GMV"
+          : "Weekly GMV";
 
     const kpiCards: KpiCard[] = [
       {
@@ -1837,44 +2427,29 @@ function AdminApp() {
         ],
       },
       {
-        title: "Monthly GMV",
-        value: `$${currentMonthGmv.toLocaleString("en-US", {
-          minimumFractionDigits: 2,
-          maximumFractionDigits: 2,
-        })}`,
+        title: periodTitle,
+        value: formatMoneyCompact(currentPeriodGmv),
         delta: `${gmvDelta >= 0 ? "+" : ""}${gmvDelta.toFixed(1)}%`,
         items: [
           {
             label: "Transfer",
-            value: `$${(txTypeMap.get("Transfer")?.amount ?? 0).toLocaleString(
-              "en-US",
-              {
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2,
-              },
-            )}`,
+            value: formatMoneyCompact(
+              currentTypeMap.get("Transfer")?.amount ?? 0,
+            ),
             color: "#5b21b6",
           },
           {
             label: "Payment",
-            value: `$${(txTypeMap.get("Payment")?.amount ?? 0).toLocaleString(
-              "en-US",
-              {
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2,
-              },
-            )}`,
+            value: formatMoneyCompact(
+              currentTypeMap.get("Payment")?.amount ?? 0,
+            ),
             color: "#6366f1",
           },
           {
             label: "Refund",
-            value: `$${(txTypeMap.get("Refund")?.amount ?? 0).toLocaleString(
-              "en-US",
-              {
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2,
-              },
-            )}`,
+            value: formatMoneyCompact(
+              currentTypeMap.get("Refund")?.amount ?? 0,
+            ),
             color: "#f59e0b",
           },
         ],
@@ -1883,32 +2458,18 @@ function AdminApp() {
 
     return {
       kpiCards,
-      monthlyGmv,
       categories,
       engagementChannels,
       revenueTrend,
       selectedMonth,
+      gmvChart,
+      periodTitle,
     };
-  }, [transactions, users, auditLogs, selectedDate]);
-
-  const filteredBars = useMemo(() => {
-    const { monthlyGmv, selectedMonth } = analytics;
-    if (period === "year") return { data: monthlyGmv, labels: MONTH_LABELS };
-
-    const len = period === "month" ? 6 : 4;
-    const data: number[] = [];
-    const labels: string[] = [];
-    for (let i = len - 1; i >= 0; i -= 1) {
-      const idx = (selectedMonth - i + 12) % 12;
-      data.push(monthlyGmv[idx]);
-      labels.push(MONTH_LABELS[idx]);
-    }
-    return { data, labels };
-  }, [analytics, period]);
+  }, [transactions, users, auditLogs, selectedDate, period]);
 
   const maxMonthly = useMemo(
-    () => Math.max(1, ...filteredBars.data),
-    [filteredBars],
+    () => Math.max(1, ...analytics.gmvChart.data),
+    [analytics.gmvChart],
   );
 
   const maxChannel = useMemo(
@@ -2005,7 +2566,7 @@ function AdminApp() {
       </aside>
 
       <div
-        className={`mf-main ana-page ${active === "profile" ? "no-scroll" : ""}`}
+        className={`mf-main ana-page ${active === "profile" ? "no-scroll" : ""} ${active === "audit" ? "audit-view" : ""} ${active === "users" ? "users-view" : ""}`}
       >
         {adminDataError ? (
           <div className="ana-status-banner error">
@@ -2067,29 +2628,71 @@ function AdminApp() {
             <section className="ana-grid-main">
               <div className="ana-card">
                 <div className="ana-chart-head">
-                  <span>Monthly GMV</span>
+                  <span>{analytics.gmvChart.title}</span>
                   <span className="ana-muted" aria-hidden="true"></span>
                 </div>
-                <div className="ana-bar-chart">
-                  {filteredBars.data.map((v, i) => (
-                    <div key={filteredBars.labels[i]} className="ana-bar-item">
+                {analytics.gmvChart.data.every((value) => value <= 0) ? (
+                  <div className="ana-chart-empty">
+                    No GMV data for the selected period.
+                  </div>
+                ) : (
+                  <div
+                    className="ana-bar-chart"
+                    style={{
+                      gridTemplateColumns: `repeat(${analytics.gmvChart.data.length}, minmax(0, 1fr))`,
+                    }}
+                  >
+                    {analytics.gmvChart.data.map((v, i) => (
                       <div
-                        className="ana-bar"
-                        style={{ height: `${(v / maxMonthly) * 100}%` }}
-                      />
-                      <div className="ana-bar-label">
-                        {filteredBars.labels[i]}
+                        key={analytics.gmvChart.labels[i]}
+                        className="ana-bar-item"
+                      >
+                        <div
+                          className="ana-bar"
+                          style={{
+                            height: `${(v / maxMonthly) * 100}%`,
+                            minHeight: v > 0 ? 10 : 0,
+                          }}
+                        />
+                        <div className="ana-bar-label">
+                          {analytics.gmvChart.labels[i]}
+                        </div>
                       </div>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div className="ana-card">
                 <h4>Top services by volume</h4>
                 <div className="ana-pie-wrap">
-                  <div className="ana-pie">
-                    <div className="ana-pie-center">Sales</div>
+                  <div
+                    className="ana-pie"
+                    style={{
+                      background:
+                        analytics.categories.length > 0
+                          ? `conic-gradient(${analytics.categories
+                              .map((category, index, list) => {
+                                const start = list
+                                  .slice(0, index)
+                                  .reduce((sum, item) => sum + item.value, 0);
+                                const end = start + category.value;
+                                const colors = [
+                                  "#5b21b6",
+                                  "#7c3aed",
+                                  "#8b5cf6",
+                                  "#a78bfa",
+                                  "#c4b5fd",
+                                ];
+                                return `${colors[index % colors.length]} ${start}% ${end}%`;
+                              })
+                              .join(", ")})`
+                          : undefined,
+                    }}
+                  >
+                    <div className="ana-pie-center">
+                      {analytics.categories[0]?.name || "No data"}
+                    </div>
                   </div>
                   <ul className="ana-legend">
                     {analytics.categories.map((c, i) => (
@@ -2102,7 +2705,7 @@ function AdminApp() {
                         />
                         <div>
                           <strong>{c.name}</strong>
-                          <p className="ana-muted">{c.count} products</p>
+                          <p className="ana-muted">{c.count} transactions</p>
                         </div>
                         <span className="value">{c.value}%</span>
                       </li>
@@ -2196,10 +2799,10 @@ function AdminApp() {
           <div className="alerts-card">
             <div className="alerts-head">
               <div>
-                <h2>AI Alert Review</h2>
+                <h2>AI Alerts</h2>
                 <p>
-                  Review why the model flagged each case, then confirm, dismiss,
-                  or escalate it.
+                  Review flagged cases, decide quickly, and open details only
+                  when you need them.
                 </p>
               </div>
               <div className="alerts-filters">
@@ -2251,6 +2854,25 @@ function AdminApp() {
               </div>
             </div>
 
+            <div className="alerts-summary-bar">
+              <div className="alerts-stat">
+                <strong>{alertSummary.total}</strong>
+                <span>Matching alerts</span>
+              </div>
+              <div className="alerts-stat">
+                <strong>{alertSummary.pending}</strong>
+                <span>Pending review</span>
+              </div>
+              <div className="alerts-stat">
+                <strong>{alertSummary.high}</strong>
+                <span>High risk</span>
+              </div>
+              <div className="alerts-stat">
+                <strong>{alertSummary.transaction}</strong>
+                <span>Transaction alerts</span>
+              </div>
+            </div>
+
             {filteredAlerts.length === 0 ? (
               <div className="alerts-empty">
                 No alerts match the current filters.
@@ -2294,14 +2916,13 @@ function AdminApp() {
                                   ? alert.createdAt
                                   : createdAt.toLocaleString("en-US")}
                               </span>
-                              <span>•</span>
-                              <span>{alert.ipAddress || "IP unavailable"}</span>
-                              {alert.location ? (
-                                <>
-                                  <span>•</span>
-                                  <span>{alert.location}</span>
-                                </>
-                              ) : null}
+                              <span>|</span>
+                              <span>
+                                {formatAlertOrigin(
+                                  alert.location,
+                                  alert.ipAddress,
+                                )}
+                              </span>
                             </div>
                           </div>
                           <button
@@ -2313,144 +2934,184 @@ function AdminApp() {
                               )
                             }
                           >
-                            {isExpanded ? "Hide details" : "More details"}
+                            {isExpanded ? "Hide details" : "Open details"}
                           </button>
                         </div>
 
-                        <p className="alerts-explanation">
-                          {alert.explanation}
+                        <p className="alerts-one-line">
+                          {alert.reasons[0] ||
+                            alert.explanation ||
+                            "Open details to review this alert."}
                         </p>
 
-                        <div className="alerts-reasons">
-                          {alert.reasons.length ? (
-                            alert.reasons.map((reason) => (
-                              <span key={reason} className="alerts-reason">
-                                {reason}
-                              </span>
-                            ))
-                          ) : (
-                            <span className="alerts-reason">
-                              No explicit reason
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="alerts-signals">
-                          {alert.keySignals.map((signal) => (
-                            <div
-                              key={`${alert.id}-${signal.label}`}
-                              className="alerts-signal"
-                              data-tone={signal.tone}
-                            >
-                              <strong>{signal.label}</strong>
-                              <span>{signal.value}</span>
-                            </div>
-                          ))}
-                        </div>
-
-                        <div className="alerts-actions">
-                          <div className="alerts-buttons">
-                            <button
-                              className="alerts-btn primary"
-                              type="button"
-                              disabled={alertActionBusyId === alert.id}
-                              onClick={() =>
-                                void handleAlertReview(
-                                  alert.id,
-                                  "confirmed_risk",
-                                )
-                              }
-                            >
-                              Confirm risk
-                            </button>
-                            <button
-                              className="alerts-btn safe"
-                              type="button"
-                              disabled={alertActionBusyId === alert.id}
-                              onClick={() =>
-                                void handleAlertReview(
-                                  alert.id,
-                                  "false_positive",
-                                )
-                              }
-                            >
-                              False positive
-                            </button>
-                            <button
-                              className="alerts-btn warn"
-                              type="button"
-                              disabled={alertActionBusyId === alert.id}
-                              onClick={() =>
-                                void handleAlertReview(alert.id, "escalated")
-                              }
-                            >
-                              Escalate
-                            </button>
-                            <button
-                              className="alerts-btn"
-                              type="button"
-                              disabled={alertActionBusyId === alert.id}
-                              onClick={() =>
-                                void handleAlertReview(
-                                  alert.id,
-                                  "pending_review",
-                                )
-                              }
-                            >
-                              Reset
-                            </button>
-                          </div>
-                          {alertActionBusyId === alert.id ? (
-                            <span className="alerts-meta-line">
-                              Updating review state...
-                            </span>
-                          ) : null}
-                        </div>
-
                         {isExpanded ? (
-                          <div className="alerts-extra">
-                            <div>
-                              <strong>AI action</strong>
-                              <span>
-                                {alert.aiDecision || "Monitoring only"}
-                              </span>
+                          <>
+                            <div className="alerts-body">
+                              <div className="alerts-core-grid">
+                                <div className="alerts-primary">
+                                  <p className="alerts-explanation compact">
+                                    {alert.explanation}
+                                  </p>
+                                  <div className="alerts-compact-reasons">
+                                    {alert.reasons.map((reason) => (
+                                      <span
+                                        key={`${alert.id}-${reason}`}
+                                        className="alerts-reason"
+                                      >
+                                        {reason}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </div>
+                                <div className="alerts-signals">
+                                  <div
+                                    className="alerts-signal"
+                                    data-tone="warn"
+                                  >
+                                    <strong>Risk level</strong>
+                                    <span>
+                                      {formatRiskLabel(alert.riskLevel)}
+                                    </span>
+                                  </div>
+                                  <div
+                                    className="alerts-signal"
+                                    data-tone="info"
+                                  >
+                                    <strong>Anomaly score</strong>
+                                    <span>
+                                      {typeof alert.anomalyScore === "number"
+                                        ? `${Math.round(alert.anomalyScore)}%`
+                                        : "N/A"}
+                                    </span>
+                                  </div>
+                                  <div
+                                    className="alerts-signal"
+                                    data-tone="warn"
+                                  >
+                                    <strong>Amount</strong>
+                                    <span>
+                                      {alert.amount != null
+                                        ? formatUsdAmount(
+                                            alert.amount,
+                                            alert.currency,
+                                          )
+                                        : "Unknown"}
+                                    </span>
+                                  </div>
+                                  <div
+                                    className="alerts-signal"
+                                    data-tone="info"
+                                  >
+                                    <strong>Origin</strong>
+                                    <span>
+                                      {formatAlertOrigin(
+                                        alert.location,
+                                        alert.ipAddress,
+                                      )}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="alerts-actions">
+                                <div className="alerts-buttons">
+                                  <button
+                                    type="button"
+                                    className="alerts-btn primary"
+                                    onClick={() =>
+                                      handleAlertReview(
+                                        alert.id,
+                                        "confirmed_risk",
+                                      )
+                                    }
+                                  >
+                                    Confirm risk
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="alerts-btn safe"
+                                    onClick={() =>
+                                      handleAlertReview(
+                                        alert.id,
+                                        "false_positive",
+                                      )
+                                    }
+                                  >
+                                    False positive
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="alerts-btn warn"
+                                    onClick={() =>
+                                      handleAlertReview(alert.id, "escalated")
+                                    }
+                                  >
+                                    Escalate
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="alerts-btn"
+                                    onClick={() =>
+                                      handleAlertReview(
+                                        alert.id,
+                                        "pending_review",
+                                      )
+                                    }
+                                  >
+                                    Reset
+                                  </button>
+                                </div>
+                              </div>
                             </div>
-                            <div>
-                              <strong>Model</strong>
-                              <span>
-                                {alert.modelVersion || "unknown"}
-                                {alert.modelSource
-                                  ? ` · ${alert.modelSource}`
-                                  : ""}
-                              </span>
+
+                            <div className="alerts-extra">
+                              <div>
+                                <strong>Full explanation</strong>
+                                <span>{alert.explanation}</span>
+                              </div>
+                              <div>
+                                <strong>AI action</strong>
+                                <span>
+                                  {alert.aiDecision || "Monitoring only"}
+                                </span>
+                              </div>
+                              <div>
+                                <strong>Model</strong>
+                                <span>
+                                  {alert.modelVersion || "unknown"}
+                                  {alert.modelSource
+                                    ? ` - ${alert.modelSource}`
+                                    : ""}
+                                </span>
+                              </div>
+                              <div>
+                                <strong>Event reference</strong>
+                                <span>
+                                  {alert.transactionId ||
+                                    alert.eventId ||
+                                    "Unavailable"}
+                                </span>
+                              </div>
+                              <div>
+                                <strong>Reviewed by</strong>
+                                <span>
+                                  {alert.reviewedBy || "-"}
+                                  {reviewedAt &&
+                                  !Number.isNaN(reviewedAt.getTime())
+                                    ? ` - ${reviewedAt.toLocaleString("en-US")}`
+                                    : ""}
+                                </span>
+                              </div>
+                              <div>
+                                <strong>Admin note</strong>
+                                <span>{alert.adminNote || "No note"}</span>
+                              </div>
+                              <div>
+                                <strong>Source</strong>
+                                <span>{alert.sourceAction}</span>
+                              </div>
                             </div>
-                            <div>
-                              <strong>Event reference</strong>
-                              <span>
-                                {alert.transactionId ||
-                                  alert.eventId ||
-                                  "Unavailable"}
-                              </span>
-                            </div>
-                            <div>
-                              <strong>Reviewed by</strong>
-                              <span>
-                                {alert.reviewedBy || "-"}
-                                {reviewedAt &&
-                                !Number.isNaN(reviewedAt.getTime())
-                                  ? ` · ${reviewedAt.toLocaleString("en-US")}`
-                                  : ""}
-                              </span>
-                            </div>
-                            <div>
-                              <strong>Admin note</strong>
-                              <span>{alert.adminNote || "No note"}</span>
-                            </div>
-                            <div>
-                              <strong>Source</strong>
-                              <span>{alert.sourceAction}</span>
-                            </div>
-                          </div>
+                          </>
                         ) : null}
                       </article>
                     );
@@ -2789,13 +3450,7 @@ function AdminApp() {
                     {paginatedUsers.map((u) => (
                       <tr key={u.id} className="user-row">
                         <td>
-                          <div
-                            style={{
-                              display: "flex",
-                              gap: 12,
-                              alignItems: "center",
-                            }}
-                          >
+                          <div className="user-person">
                             <img
                               className="user-avatar"
                               src={u.avatar}
@@ -2808,8 +3463,10 @@ function AdminApp() {
                           </div>
                         </td>
                         <td style={{ color: "var(--text)" }}>
-                          <div>{u.email}</div>
-                          <div className="user-title">{u.phone}</div>
+                          <div className="user-contact">
+                            <div>{u.email}</div>
+                            <div className="user-title">{u.phone}</div>
+                          </div>
                         </td>
                         <td style={{ color: "var(--text)" }}>{u.role}</td>
                         <td style={{ color: "var(--text)" }}>
@@ -2829,113 +3486,108 @@ function AdminApp() {
                             {u.status}
                           </span>
                         </td>
-                        <td
-                          style={{
-                            display: "flex",
-                            gap: 8,
-                            flexWrap: "wrap",
-                            alignItems: "center",
-                          }}
-                        >
-                          <button
-                            className="user-btn primary"
-                            onClick={async () => {
-                              if (!token) return;
-                              const value = window.prompt(
-                                `Enter amount to top up for ${u.email}`,
-                                "100",
-                              );
-                              if (value === null) return;
-                              const amount = Number(value);
-                              if (!Number.isFinite(amount) || amount <= 0) {
-                                window.alert(
-                                  "Amount must be a positive number.",
+                        <td>
+                          <div className="user-action-group">
+                            <button
+                              className="user-btn primary"
+                              onClick={async () => {
+                                if (!token) return;
+                                const value = window.prompt(
+                                  `Enter amount to top up for ${u.email}`,
+                                  "100",
                                 );
-                                return;
-                              }
+                                if (value === null) return;
+                                const amount = Number(value);
+                                if (!Number.isFinite(amount) || amount <= 0) {
+                                  window.alert(
+                                    "Amount must be a positive number.",
+                                  );
+                                  return;
+                                }
 
-                              const resp = await fetch(
-                                `${API_BASE}/admin/users/${u.id}/deposit`,
-                                {
-                                  method: "POST",
-                                  headers: {
-                                    "Content-Type": "application/json",
-                                    Authorization: `Bearer ${token}`,
+                                const resp = await fetch(
+                                  `${API_BASE}/admin/users/${u.id}/deposit`,
+                                  {
+                                    method: "POST",
+                                    headers: {
+                                      "Content-Type": "application/json",
+                                      Authorization: `Bearer ${token}`,
+                                    },
+                                    body: JSON.stringify({ amount }),
                                   },
-                                  body: JSON.stringify({ amount }),
-                                },
-                              );
-                              const payload = (await resp
-                                .json()
-                                .catch(() => null)) as {
-                                error?: string;
-                                transaction?: AdminTransactionApi;
-                              } | null;
-                              if (!resp.ok || !payload?.transaction) {
-                                window.alert(
-                                  payload?.error || "Top up failed.",
                                 );
-                                return;
-                              }
+                                const payload = (await resp
+                                  .json()
+                                  .catch(() => null)) as {
+                                  error?: string;
+                                  transaction?: AdminTransactionApi;
+                                } | null;
+                                if (!resp.ok || !payload?.transaction) {
+                                  window.alert(
+                                    payload?.error || "Top up failed.",
+                                  );
+                                  return;
+                                }
 
-                              setTransactions((list) => [
-                                mapAdminTxnToView(payload.transaction!),
-                                ...list,
-                              ]);
-                              window.alert(
-                                `Added $${amount.toLocaleString("en-US", {
-                                  minimumFractionDigits: 2,
-                                  maximumFractionDigits: 2,
-                                })} to ${u.email}`,
-                              );
-                            }}
-                          >
-                            Add Money
-                          </button>
-                          <button
-                            className="user-btn danger"
-                            onClick={async () => {
-                              if (!token) return;
-                              const targetStatus =
-                                u.status === "Locked" ? "ACTIVE" : "DISABLED";
-                              const resp = await fetch(
-                                `${API_BASE}/admin/users/${u.id}/status`,
-                                {
-                                  method: "PATCH",
-                                  headers: {
-                                    "Content-Type": "application/json",
-                                    Authorization: `Bearer ${token}`,
+                                setTransactions((list) => [
+                                  mapAdminTxnToView(payload.transaction!),
+                                  ...list,
+                                ]);
+                                window.alert(
+                                  `Added $${amount.toLocaleString("en-US", {
+                                    minimumFractionDigits: 2,
+                                    maximumFractionDigits: 2,
+                                  })} to ${u.email}`,
+                                );
+                              }}
+                            >
+                              Add Money
+                            </button>
+                            <button
+                              className="user-btn danger"
+                              onClick={async () => {
+                                if (!token) return;
+                                const targetStatus =
+                                  u.status === "Locked" ? "ACTIVE" : "DISABLED";
+                                const resp = await fetch(
+                                  `${API_BASE}/admin/users/${u.id}/status`,
+                                  {
+                                    method: "PATCH",
+                                    headers: {
+                                      "Content-Type": "application/json",
+                                      Authorization: `Bearer ${token}`,
+                                    },
+                                    body: JSON.stringify({
+                                      status: targetStatus,
+                                      reason: "manual update from admin panel",
+                                    }),
                                   },
-                                  body: JSON.stringify({
-                                    status: targetStatus,
-                                    reason: "manual update from admin panel",
-                                  }),
-                                },
-                              );
-                              if (!resp.ok) return;
-                              setUsers((list) =>
-                                list.map((x) =>
-                                  x.id === u.id
-                                    ? {
-                                        ...x,
-                                        status:
-                                          targetStatus === "ACTIVE"
-                                            ? "Active"
-                                            : "Locked",
-                                      }
-                                    : x,
-                                ),
-                              );
-                            }}
-                          >
-                            {u.status === "Locked" ? "Unlock" : "Lock"}
-                          </button>
-                          <button
-                            className="user-btn text"
-                            onClick={() => setTxUser(u)}
-                          >
-                            Transactions
-                          </button>
+                                );
+                                if (!resp.ok) return;
+                                setUsers((list) =>
+                                  list.map((x) =>
+                                    x.id === u.id
+                                      ? {
+                                          ...x,
+                                          status:
+                                            targetStatus === "ACTIVE"
+                                              ? "Active"
+                                              : "Locked",
+                                        }
+                                      : x,
+                                  ),
+                                );
+                              }}
+                            >
+                              {u.status === "Locked" ? "Unlock" : "Lock"}
+                            </button>
+                            <button
+                              className="user-btn text"
+                              onClick={() => setTxUser(u)}
+                            >
+                              Transactions
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -2989,61 +3641,72 @@ function AdminApp() {
               </div>
             </div>
 
-            {txUser && (
-              <div className="tx-backdrop" role="dialog" aria-modal="true">
-                <div className="tx-modal">
-                  <div className="tx-head">
-                    <h3>Transactions · {txUser.name}</h3>
-                    <button
-                      className="tx-close"
-                      aria-label="Close"
-                      onClick={() => setTxUser(null)}
+            {txUser && typeof document !== "undefined"
+              ? createPortal(
+                  <div
+                    className="tx-backdrop"
+                    role="dialog"
+                    aria-modal="true"
+                    onClick={() => setTxUser(null)}
+                  >
+                    <div
+                      className="tx-modal"
+                      onClick={(e) => e.stopPropagation()}
                     >
-                      X
-                    </button>
-                  </div>
-                  <table className="tx-table">
-                    <thead>
-                      <tr>
-                        <th>Date</th>
-                        <th>Type</th>
-                        <th>Amount</th>
-                        <th>Status</th>
-                        <th>Reference</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {userTransactions.length ? (
-                        userTransactions.map((t) => (
-                          <tr key={t.id}>
-                            <td>{t.date}</td>
-                            <td>{t.type}</td>
-                            <td>{t.amount}</td>
-                            <td>
-                              <span
-                                className={`tx-chip ${t.status.toLowerCase()}`}
-                              >
-                                {t.status}
-                              </span>
-                            </td>
-                            <td>{t.reference}</td>
+                      <div className="tx-head">
+                        <h3>Transactions · {txUser.name}</h3>
+                        <button
+                          className="tx-close"
+                          aria-label="Close"
+                          onClick={() => setTxUser(null)}
+                        >
+                          X
+                        </button>
+                      </div>
+                      <table className="tx-table">
+                        <thead>
+                          <tr>
+                            <th>Date</th>
+                            <th>Type</th>
+                            <th>Amount</th>
+                            <th>Status</th>
+                            <th>Reference</th>
                           </tr>
-                        ))
-                      ) : (
-                        <tr>
-                          <td
-                            colSpan={5}
-                            style={{ textAlign: "center", padding: 18 }}
-                          >
-                            No transactions recorded.
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
+                        </thead>
+                        <tbody>
+                          {userTransactions.length ? (
+                            userTransactions.map((t) => (
+                              <tr key={t.id}>
+                                <td>{t.date}</td>
+                                <td>{t.type}</td>
+                                <td>{t.amount}</td>
+                                <td>
+                                  <span
+                                    className={`tx-chip ${t.status.toLowerCase()}`}
+                                  >
+                                    {t.status}
+                                  </span>
+                                </td>
+                                <td>{t.reference}</td>
+                              </tr>
+                            ))
+                          ) : (
+                            <tr>
+                              <td
+                                colSpan={5}
+                                style={{ textAlign: "center", padding: 18 }}
+                              >
+                                No transactions recorded.
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>,
+                  document.body,
+                )
+              : null}
           </>
         )}
 
@@ -3102,9 +3765,20 @@ function AdminApp() {
                   <option value="pending">Pending</option>
                   <option value="fail">Failed</option>
                 </select>
+                <select
+                  className="audit-select"
+                  value={auditSource}
+                  onChange={(e) =>
+                    setAuditSource(e.target.value as typeof auditSource)
+                  }
+                >
+                  <option value="human">User Activity</option>
+                  <option value="all">All Sources</option>
+                  <option value="ai">AI / System</option>
+                </select>
               </div>
               <span className="audit-count">
-                Showing {filteredAuditLogs.length} logs
+                Showing {auditTotalCount} logs
               </span>
             </div>
 
@@ -3187,16 +3861,22 @@ function AdminApp() {
                             <td colSpan={6}>
                               <div className="audit-meta">
                                 <div>
-                                  <strong>Request ID</strong>
-                                  <span>{log.requestId ?? "-"}</span>
+                                  <strong>Log ID</strong>
+                                  <span title={log.requestId || "-"}>
+                                    {formatAuditRequestId(log.requestId)}
+                                  </span>
                                 </div>
                                 <div>
-                                  <strong>Location</strong>
-                                  <span>{log.location ?? "-"}</span>
+                                  <strong>Where</strong>
+                                  <span>
+                                    {formatAuditLocation(log.location)}
+                                  </span>
                                 </div>
                                 <div>
-                                  <strong>User Agent</strong>
-                                  <span>{log.userAgent ?? "-"}</span>
+                                  <strong>Device</strong>
+                                  <span title={log.userAgent || "-"}>
+                                    {summarizeAuditUserAgent(log.userAgent)}
+                                  </span>
                                 </div>
                                 <div>
                                   <strong>Export</strong>
@@ -3220,6 +3900,9 @@ function AdminApp() {
             </div>
 
             <div className="audit-pagination">
+              <span className="audit-page-meta">
+                Page {currentAuditPage} / {totalAuditPages}
+              </span>
               <div className="pager">
                 <button
                   disabled={currentAuditPage === 1}
@@ -3227,18 +3910,21 @@ function AdminApp() {
                 >
                   {"<"}
                 </button>
-                {Array.from(
-                  { length: Math.min(totalAuditPages, 5) },
-                  (_, i) => i + 1,
-                ).map((n) => (
-                  <button
-                    key={n}
-                    className={n === currentAuditPage ? "active" : ""}
-                    onClick={() => setAuditPage(n)}
-                  >
-                    {n}
-                  </button>
-                ))}
+                {visibleAuditPages.map((item, index) =>
+                  item === "..." ? (
+                    <span key={`ellipsis-${index}`} className="pager-ellipsis">
+                      ...
+                    </span>
+                  ) : (
+                    <button
+                      key={item}
+                      className={item === currentAuditPage ? "active" : ""}
+                      onClick={() => setAuditPage(item)}
+                    >
+                      {item}
+                    </button>
+                  ),
+                )}
                 <button
                   disabled={
                     currentAuditPage === totalAuditPages ||
