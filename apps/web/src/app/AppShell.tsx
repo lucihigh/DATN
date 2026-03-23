@@ -20,11 +20,8 @@ import {
   type LoginMonitoring,
   type SessionReplacementAlert,
 } from "../context/AuthContext";
-import { FaceIdCapture, type FaceIdProof } from "../components/FaceIdCapture";
-import {
-  SliderCaptcha,
-  type SliderCaptchaValue,
-} from "../components/SliderCaptcha";
+import type { FaceIdProof } from "../components/FaceIdCapture";
+import type { SliderCaptchaValue } from "../components/SliderCaptcha";
 import { useToast } from "../context/ToastContext";
 import { useTheme } from "../context/ThemeContext";
 import { useActivityNotifications } from "./hooks/useActivityNotifications";
@@ -35,6 +32,14 @@ const LazyCreateInvoicesView = lazy(() => import("./views/CreateInvoicesView"));
 const LazyKnowledgeBaseView = lazy(() => import("./views/KnowledgeBaseView"));
 const LazyNotificationsView = lazy(() => import("./views/NotificationsView"));
 const LazyKycView = lazy(() => import("./views/KycView"));
+const LazyFaceIdCapture = lazy(async () => {
+  const mod = await import("../components/FaceIdCapture");
+  return { default: mod.FaceIdCapture };
+});
+const LazySliderCaptcha = lazy(async () => {
+  const mod = await import("../components/SliderCaptcha");
+  return { default: mod.SliderCaptcha };
+});
 
 const API_BASE =
   (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ||
@@ -45,6 +50,40 @@ const NOTIFICATION_READ_STORAGE_PREFIX = "fpipay_notification_reads";
 const COPILOT_REQUEST_TIMEOUT_MS = 90000;
 const PROFESSIONAL_PASSWORD_MIN_LENGTH = 12;
 const TRANSFER_FACE_ID_THRESHOLD = 10000;
+const FORCE_AUTH_HERO_MOTION_CLASS = "force-auth-hero-motion";
+
+function DeferredFaceIdCapture(props: {
+  apiBase: string;
+  resetKey?: number;
+  disabled?: boolean;
+  mode?: "enroll" | "verify";
+  onChange: (value: FaceIdProof | null) => void;
+}) {
+  return (
+    <Suspense
+      fallback={<div className="faceid-card">Loading FaceID scanner...</div>}
+    >
+      <LazyFaceIdCapture {...props} />
+    </Suspense>
+  );
+}
+
+function DeferredSliderCaptcha(props: {
+  apiBase: string;
+  resetKey?: number;
+  disabled?: boolean;
+  onChange: (value: SliderCaptchaValue | null) => void;
+}) {
+  return (
+    <Suspense
+      fallback={
+        <div className="auth-password-strength">Loading security check...</div>
+      }
+    >
+      <LazySliderCaptcha {...props} />
+    </Suspense>
+  );
+}
 
 type PasswordStrengthCheck = {
   id: "length" | "uppercase" | "lowercase" | "number" | "special" | "no_spaces";
@@ -2678,7 +2717,7 @@ function DashboardView() {
       void refreshSecurityAlerts({ silent: true });
     };
 
-    const interval = window.setInterval(refreshIfVisible, 5000);
+    const interval = window.setInterval(refreshIfVisible, 20000);
     window.addEventListener("focus", refreshIfVisible);
     document.addEventListener("visibilitychange", refreshIfVisible);
 
@@ -4315,7 +4354,9 @@ function DashboardView() {
                     </div>
                     <div>
                       <span>Amount</span>
-                      <strong>${transferAmount}</strong>
+                      <strong className="transfer-faceid-money">
+                        ${transferAmount}
+                      </strong>
                     </div>
                     <div>
                       <span>OTP</span>
@@ -4324,7 +4365,7 @@ function DashboardView() {
                     {transferRollingOutflowAmount !== null ? (
                       <div>
                         <span>24h outgoing</span>
-                        <strong>
+                        <strong className="transfer-faceid-money">
                           $
                           {transferRollingOutflowAmount.toLocaleString(
                             "en-US",
@@ -4339,19 +4380,19 @@ function DashboardView() {
                   </div>
                 </div>
 
-                <FaceIdCapture
+                {transferOtpError ? (
+                  <div className="card-otp-error transfer-faceid-error">
+                    {transferOtpError}
+                  </div>
+                ) : null}
+
+                <DeferredFaceIdCapture
                   apiBase={API_BASE}
                   resetKey={transferFaceResetKey}
                   disabled={transferFaceVerifyBusy}
                   mode="verify"
                   onChange={setTransferFaceProof}
                 />
-
-                {transferOtpError ? (
-                  <div className="card-otp-error transfer-faceid-error">
-                    {transferOtpError}
-                  </div>
-                ) : null}
 
                 <div className="faceid-modal-actions transfer-faceid-actions">
                   <button
@@ -7197,56 +7238,58 @@ function App() {
                 {notificationsBusy && notifications.length === 0 && (
                   <div className="notif-empty">Loading activity...</div>
                 )}
-                {!notificationsBusy &&
-                  visibleDropdownNotifications.map((notification) => (
-                    <button
-                      key={notification.id}
-                      type="button"
-                      className={`notif-row ${!notification.read ? "unread" : ""}`}
-                      onClick={() => {
-                        markNotificationRead(notification.id);
-                        setActiveTab("Notifications");
-                        setShowNotifications(false);
-                      }}
-                    >
-                      <div className="notif-row-head">
-                        <span
-                          className={`notif-pill notif-${notification.type}`}
-                        >
-                          {notification.type === "transactions"
-                            ? "Balance"
-                            : "Security"}
-                        </span>
-                        <span className="notif-time">
-                          {notification.timeLabel}
-                        </span>
-                      </div>
-                      <strong className="notif-title">
-                        {notification.title}
-                      </strong>
-                      <div className="notif-message">
-                        {notification.message}
-                      </div>
-                      {notification.meta && (
-                        <div className="notif-meta" title={notification.meta}>
-                          {notification.meta}
+                <div className="notif-dropdown-list">
+                  {!notificationsBusy &&
+                    visibleDropdownNotifications.map((notification) => (
+                      <button
+                        key={notification.id}
+                        type="button"
+                        className={`notif-row ${!notification.read ? "unread" : ""}`}
+                        onClick={() => {
+                          markNotificationRead(notification.id);
+                          setActiveTab("Notifications");
+                          setShowNotifications(false);
+                        }}
+                      >
+                        <div className="notif-row-head">
+                          <span
+                            className={`notif-pill notif-${notification.type}`}
+                          >
+                            {notification.type === "transactions"
+                              ? "Balance"
+                              : "Security"}
+                          </span>
+                          <span className="notif-time">
+                            {notification.timeLabel}
+                          </span>
                         </div>
-                      )}
-                      {notification.amountText && (
-                        <span
-                          className={`notif-amount notif-amount-${notification.amountTone || "positive"}`}
-                        >
-                          {notification.amountText}
-                        </span>
-                      )}
-                    </button>
-                  ))}
-                {!notificationsBusy &&
-                  visibleDropdownNotifications.length === 0 && (
-                    <div className="notif-empty">
-                      {notificationsError || "No account activity yet."}
-                    </div>
-                  )}
+                        <strong className="notif-title">
+                          {notification.title}
+                        </strong>
+                        <div className="notif-message">
+                          {notification.message}
+                        </div>
+                        {notification.meta && (
+                          <div className="notif-meta" title={notification.meta}>
+                            {notification.meta}
+                          </div>
+                        )}
+                        {notification.amountText && (
+                          <span
+                            className={`notif-amount notif-amount-${notification.amountTone || "positive"}`}
+                          >
+                            {notification.amountText}
+                          </span>
+                        )}
+                      </button>
+                    ))}
+                  {!notificationsBusy &&
+                    visibleDropdownNotifications.length === 0 && (
+                      <div className="notif-empty">
+                        {notificationsError || "No account activity yet."}
+                      </div>
+                    )}
+                </div>
                 <div className="notif-actions">
                   <button
                     type="button"
@@ -7418,7 +7461,7 @@ function App() {
                       X
                     </button>
                   </div>
-                  <FaceIdCapture
+                  <DeferredFaceIdCapture
                     apiBase={API_BASE}
                     resetKey={faceEnrollmentResetKey}
                     disabled={faceEnrollmentBusy}
@@ -7619,6 +7662,13 @@ function AuthShell({
   const [forgotCaptchaResetKey, setForgotCaptchaResetKey] = useState(0);
   const signupPasswordStrength = getPasswordStrength(signupForm.password);
   const forgotPasswordStrength = getPasswordStrength(forgotNewPassword);
+
+  useEffect(() => {
+    document.documentElement.classList.add(FORCE_AUTH_HERO_MOTION_CLASS);
+    return () => {
+      document.documentElement.classList.remove(FORCE_AUTH_HERO_MOTION_CLASS);
+    };
+  }, []);
 
   useEffect(() => {
     if (
@@ -8441,8 +8491,8 @@ function AuthShell({
             <span className="dot red" />
             <span className="dot yellow" />
             <span className="dot green" />
-            <span className="screen-title">FPI Command</span>
-            <span className="screen-pill">Live shield</span>
+            <span className="screen-title screen-title-fall">FPI Command</span>
+            <span className="screen-pill screen-title-fall">Live shield</span>
           </div>
           <div className="screen-body">
             <div className="screen-topline">
@@ -8466,10 +8516,10 @@ function AuthShell({
               ))}
             </div>
             <div className="screen-balance">
-              <div className="screen-balance-copy">
-                <div className="muted">Protected balance</div>
-                <div className="big">$12,450.00</div>
-                <div className="screen-balance-note">
+              <div className="screen-balance-copy screen-copy-fall">
+                <div className="muted screen-copy-text">Protected balance</div>
+                <div className="big screen-copy-title">$12,450.00</div>
+                <div className="screen-balance-note screen-copy-text">
                   Smart routing active across wallet, card, and mobile sign-in.
                 </div>
               </div>
@@ -8502,20 +8552,26 @@ function AuthShell({
               ))}
             </div>
             <div className="screen-stats">
-              <div>
-                <span className="muted">Income</span>
-                <strong>$6,320</strong>
-                <small>Flow stable</small>
+              <div className="screen-copy-fall">
+                <span className="muted screen-copy-text">Income</span>
+                <strong className="screen-copy-title">$6,320</strong>
+                <small className="screen-copy-text">Flow stable</small>
               </div>
-              <div>
-                <span className="muted">Expenses</span>
-                <strong>$3,980</strong>
-                <small>Policy guarded</small>
+              <div
+                className="screen-copy-fall"
+                style={{ "--copy-delay": "1.02s" } as CSSProperties}
+              >
+                <span className="muted screen-copy-text">Expenses</span>
+                <strong className="screen-copy-title">$3,980</strong>
+                <small className="screen-copy-text">Policy guarded</small>
               </div>
-              <div className="screen-stat-highlight">
-                <span className="muted">Intelligence</span>
-                <strong>Active</strong>
-                <small>Adaptive alerts on</small>
+              <div
+                className="screen-stat-highlight screen-copy-fall"
+                style={{ "--copy-delay": "1.12s" } as CSSProperties}
+              >
+                <span className="muted screen-copy-text">Intelligence</span>
+                <strong className="screen-copy-title">Active</strong>
+                <small className="screen-copy-text">Adaptive alerts on</small>
               </div>
             </div>
           </div>
@@ -8596,7 +8652,7 @@ function AuthShell({
                   Forgot password
                 </a>
               </div>
-              <SliderCaptcha
+              <DeferredSliderCaptcha
                 apiBase={API_BASE}
                 resetKey={signinCaptchaResetKey}
                 disabled={authBusy}
@@ -8670,7 +8726,7 @@ function AuthShell({
                 </span>
               </label>
               {renderLoginMonitoring(lastLoginMonitoring)}
-              <SliderCaptcha
+              <DeferredSliderCaptcha
                 apiBase={API_BASE}
                 resetKey={signinCaptchaResetKey}
                 disabled={authBusy}
@@ -8709,12 +8765,15 @@ function AuthShell({
         )}
         {mode === "signup" && (
           <div className="auth-form-shell">
-            <form className="auth-form-modern" onSubmit={handleSignUp}>
+            <form
+              className="auth-form-modern auth-form-signup"
+              onSubmit={handleSignUp}
+            >
               <h2>Sign Up</h2>
               <p className="muted">
                 Create your FPIPay account to start managing finances smartly.
               </p>
-              <div className="grid-two">
+              <div className="grid-signup-top">
                 <label className="auth-label">
                   Full Name
                   <input
@@ -8737,8 +8796,6 @@ function AuthShell({
                     required
                   />
                 </label>
-              </div>
-              <div className="grid-two">
                 <label className="auth-label">
                   Phone Number
                   <input
@@ -8750,6 +8807,8 @@ function AuthShell({
                     required
                   />
                 </label>
+              </div>
+              <div className="grid-signup-top">
                 <label className="auth-label">
                   Date of Birth
                   <input
@@ -8762,31 +8821,31 @@ function AuthShell({
                     required
                   />
                 </label>
+                <label className="auth-label">
+                  Email Address
+                  <input
+                    type="email"
+                    value={signupForm.email}
+                    onChange={(e) =>
+                      setSignupForm({ ...signupForm, email: e.target.value })
+                    }
+                    placeholder="Enter your email"
+                    required
+                  />
+                </label>
+                <label className="auth-label">
+                  Address
+                  <input
+                    value={signupForm.address}
+                    onChange={(e) =>
+                      setSignupForm({ ...signupForm, address: e.target.value })
+                    }
+                    placeholder="Enter your address"
+                    required
+                  />
+                </label>
               </div>
-              <label className="auth-label">
-                Address
-                <input
-                  value={signupForm.address}
-                  onChange={(e) =>
-                    setSignupForm({ ...signupForm, address: e.target.value })
-                  }
-                  placeholder="Enter your address"
-                  required
-                />
-              </label>
-              <label className="auth-label">
-                Email Address
-                <input
-                  type="email"
-                  value={signupForm.email}
-                  onChange={(e) =>
-                    setSignupForm({ ...signupForm, email: e.target.value })
-                  }
-                  placeholder="Enter your email"
-                  required
-                />
-              </label>
-              <div className="grid-two">
+              <div className="grid-signup-password">
                 <label className="auth-label">
                   Password
                   <div className="password-wrap">
@@ -8819,7 +8878,6 @@ function AuthShell({
                       {showPassword ? "Hide" : "Show"}
                     </button>
                   </div>
-                  {renderPasswordStrength(signupPasswordStrength)}
                 </label>
                 <label className="auth-label">
                   Confirm Password
@@ -8834,8 +8892,11 @@ function AuthShell({
                     required
                   />
                 </label>
+                <div className="auth-strength-slot">
+                  {renderPasswordStrength(signupPasswordStrength)}
+                </div>
               </div>
-              <div className="auth-terms-row">
+              <div className="auth-terms-row auth-span-two">
                 <label className="auth-checkbox">
                   <input
                     type="checkbox"
@@ -8855,20 +8916,22 @@ function AuthShell({
                   terms & privacy
                 </button>
               </div>
-              <SliderCaptcha
-                apiBase={API_BASE}
-                resetKey={signupCaptchaResetKey}
-                disabled={authBusy}
-                onChange={setSignupCaptcha}
-              />
+              <div className="auth-span-two">
+                <DeferredSliderCaptcha
+                  apiBase={API_BASE}
+                  resetKey={signupCaptchaResetKey}
+                  disabled={authBusy}
+                  onChange={setSignupCaptcha}
+                />
+              </div>
               <button
                 type="submit"
-                className="btn-primary auth-submit"
+                className="btn-primary auth-submit auth-span-two"
                 disabled={authBusy}
               >
                 {authBusy ? "Creating..." : "Create Account"}
               </button>
-              <p className="auth-switch">
+              <p className="auth-switch auth-span-two">
                 Already have an account?{" "}
                 <button
                   type="button"
@@ -8916,7 +8979,7 @@ function AuthShell({
                       X
                     </button>
                   </div>
-                  <FaceIdCapture
+                  <DeferredFaceIdCapture
                     apiBase={API_BASE}
                     resetKey={signupFaceResetKey}
                     disabled={authBusy}
@@ -8982,7 +9045,7 @@ function AuthShell({
                     : "Check your inbox for the latest code."}
                 </span>
               </label>
-              <SliderCaptcha
+              <DeferredSliderCaptcha
                 apiBase={API_BASE}
                 resetKey={signupCaptchaResetKey}
                 disabled={authBusy}
@@ -9037,7 +9100,7 @@ function AuthShell({
                   required
                 />
               </label>
-              <SliderCaptcha
+              <DeferredSliderCaptcha
                 apiBase={API_BASE}
                 resetKey={forgotCaptchaResetKey}
                 disabled={authBusy}
@@ -9096,7 +9159,7 @@ function AuthShell({
                     : "Check your inbox for the latest code."}
                 </span>
               </label>
-              <SliderCaptcha
+              <DeferredSliderCaptcha
                 apiBase={API_BASE}
                 resetKey={forgotCaptchaResetKey}
                 disabled={authBusy}

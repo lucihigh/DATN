@@ -225,7 +225,7 @@ export function useActivityNotifications({
       if (document.visibilityState === "visible") {
         void refreshNotifications({ silent: true });
       }
-    }, 15000);
+    }, 45000);
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {

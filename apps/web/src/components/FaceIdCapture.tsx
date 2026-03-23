@@ -107,8 +107,8 @@ const STEP_COLORS: Record<FaceIdStepId, string> = {
 };
 
 const PROCESS_INTERVAL_MS = 140;
-const REQUIRED_STEP_STREAK = 3;
-const COMPAT_REQUIRED_STEP_STREAK = 3;
+const REQUIRED_STEP_STREAK = 2;
+const COMPAT_REQUIRED_STEP_STREAK = 2;
 const MEDIAPIPE_WASM_PATH =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.32/wasm";
 const MEDIAPIPE_FACE_MODEL_PATH =
@@ -730,7 +730,7 @@ export function FaceIdCapture({
               modelAssetPath: MEDIAPIPE_FACE_MODEL_PATH,
             },
             runningMode: "VIDEO",
-            minDetectionConfidence: 0.55,
+            minDetectionConfidence: 0.42,
           });
 
           const adapter: DetectorAdapter = {
@@ -894,7 +894,7 @@ export function FaceIdCapture({
           challenge.steps.length > 0
             ? resolvedSteps.length / challenge.steps.length
             : 0;
-        const motionScore = clamp(motionAccumulatorRef.current / 0.6, 0, 1);
+        const motionScore = clamp(motionAccumulatorRef.current / 0.45, 0, 1);
         const cueScore = clamp(
           sampleCountRef.current > 0
             ? cueAccumulatorRef.current / sampleCountRef.current
@@ -908,7 +908,7 @@ export function FaceIdCapture({
           1,
         );
         const livenessScore = clamp(
-          completedRatio * 0.45 + motionScore * 0.35 + cueScore * 0.2,
+          completedRatio * 0.4 + motionScore * 0.4 + cueScore * 0.2,
           0,
           1,
         );
@@ -999,19 +999,19 @@ export function FaceIdCapture({
       const deltaX = centerX - targetCenterX;
       const deltaY = centerY - targetCenterY;
       const sizeRatio = coverage / Math.max(targetCoverage, 0.0001);
-      const horizontalScore = clamp(1 - Math.abs(deltaX) / 0.14, 0, 1);
-      const verticalScore = clamp(1 - Math.abs(deltaY) / 0.15, 0, 1);
-      const sizeScore = clamp(1 - Math.abs(1 - sizeRatio) / 0.65, 0, 1);
+      const horizontalScore = clamp(1 - Math.abs(deltaX) / 0.18, 0, 1);
+      const verticalScore = clamp(1 - Math.abs(deltaY) / 0.19, 0, 1);
+      const sizeScore = clamp(1 - Math.abs(1 - sizeRatio) / 0.82, 0, 1);
       const glow = clamp(
         horizontalScore * 0.35 + verticalScore * 0.35 + sizeScore * 0.3,
         0,
         1,
       );
       const aligned =
-        sizeRatio >= 0.56 &&
-        sizeRatio <= 1.34 &&
-        Math.abs(deltaX) <= 0.11 &&
-        Math.abs(deltaY) <= 0.12;
+        sizeRatio >= 0.48 &&
+        sizeRatio <= 1.48 &&
+        Math.abs(deltaX) <= 0.15 &&
+        Math.abs(deltaY) <= 0.16;
 
       return {
         centerX,
@@ -1071,8 +1071,8 @@ export function FaceIdCapture({
         matched = Boolean(
           baseline &&
           alignment.coverage >= Math.max(baseline.coverage * 1.12, 0.135) &&
-          Math.abs(alignment.deltaX) <= 0.13 &&
-          Math.abs(alignment.deltaY) <= 0.14 &&
+          Math.abs(alignment.deltaX) <= 0.16 &&
+          Math.abs(alignment.deltaY) <= 0.17 &&
           motionMetric >= 0.008,
         );
         hint = "Move closer until your face fills more of the oval.";
@@ -1149,7 +1149,7 @@ export function FaceIdCapture({
       const matched =
         activeStep.id === "center"
           ? sampleCountRef.current >= 4 && motionMetric >= 0.01
-          : motionMetric >= (activeStep.id === "move_closer" ? 0.085 : 0.05);
+          : motionMetric >= (activeStep.id === "move_closer" ? 0.06 : 0.035);
 
       stepStreakRef.current = matched ? stepStreakRef.current + 1 : 0;
       if (stepStreakRef.current < COMPAT_REQUIRED_STEP_STREAK) {
@@ -1253,17 +1253,17 @@ export function FaceIdCapture({
         const totalSteps = challenge?.steps.length ?? 0;
         let alignmentMessage = "Face aligned. Scanning now.";
 
-        if (alignment.sizeRatio < 0.46) {
+        if (alignment.sizeRatio < 0.4) {
           alignmentMessage = "Move closer until your face fits the oval.";
-        } else if (alignment.sizeRatio > 1.48) {
+        } else if (alignment.sizeRatio > 1.58) {
           alignmentMessage = "Move a little back so your full face fits.";
-        } else if (alignment.deltaX < -0.11) {
+        } else if (alignment.deltaX < -0.15) {
           alignmentMessage = "Move slightly to the right.";
-        } else if (alignment.deltaX > 0.11) {
+        } else if (alignment.deltaX > 0.15) {
           alignmentMessage = "Move slightly to the left.";
-        } else if (alignment.deltaY < -0.13) {
+        } else if (alignment.deltaY < -0.17) {
           alignmentMessage = "Lower your face into the oval.";
-        } else if (alignment.deltaY > 0.13) {
+        } else if (alignment.deltaY > 0.17) {
           alignmentMessage = "Raise your face into the oval.";
         } else if (activeStep?.id === "move_left") {
           alignmentMessage = "Turn or move slightly to the left.";
@@ -1681,8 +1681,7 @@ export function FaceIdCapture({
     return "Required";
   }, [status]);
 
-  const shouldShowCameraPicker =
-    !active && !disabled && availableCameras.length > 1;
+  const shouldShowCameraPicker = availableCameras.length > 1;
   const visibleProgress = active ? scanProgress : status === "verified" ? 1 : 0;
 
   const cueStyle = {

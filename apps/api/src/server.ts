@@ -37,6 +37,7 @@ import { hashPassword, verifyPassword } from "./security/password";
 import {
   getSecurityPolicy,
   getDefaultSecurityPolicy,
+  invalidateSecurityPolicyCache,
 } from "./services/securityPolicy";
 import { logAuditEvent } from "./services/audit";
 import {
@@ -95,6 +96,62 @@ const AI_SERVICE_WORKDIR =
     path.resolve(process.cwd(), "../../apps/ai-service"),
   ].find((candidate) => existsSync(candidate)) ||
   path.resolve(process.cwd(), "../ai-service");
+
+function runAsyncSideEffect(label: string, work: () => Promise<unknown>) {
+  void work().catch((error) => {
+    console.error(`Background side effect failed: ${label}`, error);
+  });
+}
+
+type UserCacheScope = "auth" | "wallet" | "transactions" | "security";
+
+const USER_RESPONSE_CACHE_TTL_MS = Number(
+  process.env.USER_RESPONSE_CACHE_TTL_MS || "4000",
+);
+const userResponseCache = new Map<
+  string,
+  { expiresAt: number; value: unknown }
+>();
+
+function getUserCacheKey(userId: string, scope: UserCacheScope) {
+  return `${scope}:${userId}`;
+}
+
+async function getCachedUserResponse<T>(
+  userId: string,
+  scope: UserCacheScope,
+  load: () => Promise<T>,
+  ttlMs = USER_RESPONSE_CACHE_TTL_MS,
+): Promise<T> {
+  const key = getUserCacheKey(userId, scope);
+  const cached = userResponseCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value as T;
+  }
+
+  const value = await load();
+  userResponseCache.set(key, {
+    value,
+    expiresAt: Date.now() + ttlMs,
+  });
+  return value;
+}
+
+function invalidateUserResponseCache(
+  userId: string,
+  scopes?: UserCacheScope[],
+) {
+  const targets: UserCacheScope[] = scopes || [
+    "auth",
+    "wallet",
+    "transactions",
+    "security",
+  ];
+
+  for (const scope of targets) {
+    userResponseCache.delete(getUserCacheKey(userId, scope));
+  }
+}
 
 const app = express();
 app.set("trust proxy", true);
@@ -193,28 +250,28 @@ const FACE_ID_CHALLENGE_TTL_MS =
   Number(process.env.FACE_ID_CHALLENGE_TTL_SECONDS || "300") * 1000;
 const FACE_ID_SECRET_KEY = process.env.FACE_ID_SECRET_KEY || CAPTCHA_SECRET_KEY;
 const FACE_ID_MIN_LIVENESS_SCORE = Number(
-  process.env.FACE_ID_MIN_LIVENESS_SCORE || "0.84",
+  process.env.FACE_ID_MIN_LIVENESS_SCORE || "0.78",
 );
 const FACE_ID_MIN_MOTION_SCORE = Number(
-  process.env.FACE_ID_MIN_MOTION_SCORE || "0.38",
+  process.env.FACE_ID_MIN_MOTION_SCORE || "0.28",
 );
 const FACE_ID_MIN_FACE_COVERAGE = Number(
-  process.env.FACE_ID_MIN_FACE_COVERAGE || "0.14",
+  process.env.FACE_ID_MIN_FACE_COVERAGE || "0.11",
 );
 const FACE_ID_MIN_SAMPLE_COUNT = Number(
-  process.env.FACE_ID_MIN_SAMPLE_COUNT || "24",
+  process.env.FACE_ID_MIN_SAMPLE_COUNT || "18",
 );
 const FACE_ID_LEGACY_MATCH_THRESHOLD = Number(
-  process.env.FACE_ID_LEGACY_MATCH_THRESHOLD || "0.88",
+  process.env.FACE_ID_LEGACY_MATCH_THRESHOLD || "0.84",
 );
 const FACE_ID_V2_MATCH_THRESHOLD = Number(
-  process.env.FACE_ID_V2_MATCH_THRESHOLD || "0.76",
+  process.env.FACE_ID_V2_MATCH_THRESHOLD || "0.72",
 );
 const FACE_ID_V2_ALIGNED_MATCH_THRESHOLD = Number(
-  process.env.FACE_ID_V2_ALIGNED_MATCH_THRESHOLD || "0.76",
+  process.env.FACE_ID_V2_ALIGNED_MATCH_THRESHOLD || "0.68",
 );
 const FACE_ID_V2_GEOMETRY_MATCH_THRESHOLD = Number(
-  process.env.FACE_ID_V2_GEOMETRY_MATCH_THRESHOLD || "0.7",
+  process.env.FACE_ID_V2_GEOMETRY_MATCH_THRESHOLD || "0.64",
 );
 const FACE_ID_DESCRIPTOR_V2_PREFIX = "faceid_v2:";
 const TRANSFER_FACE_ID_THRESHOLD = Number(
@@ -3605,7 +3662,7 @@ const FACE_ID_STEP_LABELS: Record<FaceIdStep, string> = {
 };
 
 const buildFaceIdChallenge = () => {
-  const steps: FaceIdStep[] = ["center", "move_closer"];
+  const steps: FaceIdStep[] = ["center"];
   const issuedAt = Date.now();
   const payload: FaceIdChallengePayload = {
     kind: "faceid_v1",
@@ -4056,7 +4113,8 @@ const verifyFaceIdSubmission = (
   if (
     storedDescriptor &&
     typeof similarityResult.alignedScore === "number" &&
-    similarityResult.alignedScore < FACE_ID_V2_ALIGNED_MATCH_THRESHOLD
+    similarityResult.alignedScore < FACE_ID_V2_ALIGNED_MATCH_THRESHOLD &&
+    similarityResult.similarity < similarityResult.threshold - 0.02
   ) {
     console.warn("FaceID mismatch: aligned score below threshold", {
       similarity: similarityResult.similarity,
@@ -4070,7 +4128,8 @@ const verifyFaceIdSubmission = (
     storedDescriptor &&
     typeof similarityResult.alignedScore !== "number" &&
     typeof similarityResult.geometryScore === "number" &&
-    similarityResult.geometryScore < FACE_ID_V2_GEOMETRY_MATCH_THRESHOLD
+    similarityResult.geometryScore < FACE_ID_V2_GEOMETRY_MATCH_THRESHOLD &&
+    similarityResult.similarity < similarityResult.threshold - 0.02
   ) {
     console.warn("FaceID mismatch: geometry fallback score below threshold", {
       similarity: similarityResult.similarity,
@@ -5722,12 +5781,14 @@ app.post("/auth/register", async (req, res) => {
       maxAttempts: OTP_MAX_ATTEMPTS,
     });
 
-    await sendRegisterOtpEmail({
-      to: email,
-      recipientName: pendingUser.fullName || email.split("@")[0] || "User",
-      otpCode: otpChallenge.otpCode,
-      expiresInMinutes: REGISTER_OTP_TTL_MINUTES,
-    });
+    runAsyncSideEffect("sendRegisterOtpEmail", () =>
+      sendRegisterOtpEmail({
+        to: email,
+        recipientName: pendingUser.fullName || email.split("@")[0] || "User",
+        otpCode: otpChallenge.otpCode,
+        expiresInMinutes: REGISTER_OTP_TTL_MINUTES,
+      }),
+    );
 
     await logAuditEvent({
       actor: email,
@@ -6200,21 +6261,25 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
           }),
         },
       });
-      await sendLoginOtpEmail({
-        to: userDoc.email,
-        recipientName:
-          userDoc.fullName || userDoc.email.split("@")[0] || "User",
-        otpCode: otpChallenge.otpCode,
-        expiresInMinutes: LOGIN_OTP_TTL_MINUTES,
-      });
-      await sendLoginRiskAlertEmail({
-        to: userDoc.email,
-        recipientName:
-          userDoc.fullName || userDoc.email.split("@")[0] || "User",
-        ipAddress: currentIp,
-        userAgent: currentUserAgent,
-        reason: reviewReason,
-      });
+      runAsyncSideEffect("sendLoginOtpEmail", () =>
+        sendLoginOtpEmail({
+          to: userDoc.email,
+          recipientName:
+            userDoc.fullName || userDoc.email.split("@")[0] || "User",
+          otpCode: otpChallenge.otpCode,
+          expiresInMinutes: LOGIN_OTP_TTL_MINUTES,
+        }),
+      );
+      runAsyncSideEffect("sendLoginRiskAlertEmail", () =>
+        sendLoginRiskAlertEmail({
+          to: userDoc.email,
+          recipientName:
+            userDoc.fullName || userDoc.email.split("@")[0] || "User",
+          ipAddress: currentIp,
+          userAgent: currentUserAgent,
+          reason: reviewReason,
+        }),
+      );
 
       await logAuditEvent({
         actor: email,
@@ -6281,14 +6346,16 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
     let notice: string | undefined;
     if (effectiveRiskLevel === "medium") {
       notice = `New or unusual device detected. Large transfers above $${MEDIUM_RISK_TRANSFER_LIMIT.toLocaleString("en-US")} are temporarily restricted for this session.`;
-      await sendLoginRiskAlertEmail({
-        to: userDoc.email,
-        recipientName:
-          userDoc.fullName || userDoc.email.split("@")[0] || "User",
-        ipAddress: currentIp,
-        userAgent: currentUserAgent,
-        reason: reviewReason,
-      });
+      runAsyncSideEffect("sendLoginRiskAlertEmail", () =>
+        sendLoginRiskAlertEmail({
+          to: userDoc.email,
+          recipientName:
+            userDoc.fullName || userDoc.email.split("@")[0] || "User",
+          ipAddress: currentIp,
+          userAgent: currentUserAgent,
+          reason: reviewReason,
+        }),
+      );
       await logAuditEvent({
         actor: email,
         action: "LOGIN_MEDIUM_RISK",
@@ -6488,6 +6555,8 @@ app.post("/auth/login/verify", async (req, res) => {
       });
     }
 
+    invalidateUserResponseCache(userDoc.id, ["auth", "security"]);
+
     return res.json(
       buildAuthPayload(userDoc, sessionResult.sessionId, {
         notice: loginNotice,
@@ -6594,12 +6663,15 @@ app.post("/auth/password/otp/send", async (req, res) => {
       maxAttempts: OTP_MAX_ATTEMPTS,
     });
 
-    await sendPasswordResetOtpEmail({
-      to: userDoc.email,
-      recipientName: userDoc.fullName || userDoc.email.split("@")[0] || "User",
-      otpCode: otpChallenge.otpCode,
-      expiresInMinutes: RESET_PASSWORD_OTP_TTL_MINUTES,
-    });
+    runAsyncSideEffect("sendPasswordResetOtpEmail", () =>
+      sendPasswordResetOtpEmail({
+        to: userDoc.email,
+        recipientName:
+          userDoc.fullName || userDoc.email.split("@")[0] || "User",
+        otpCode: otpChallenge.otpCode,
+        expiresInMinutes: RESET_PASSWORD_OTP_TTL_MINUTES,
+      }),
+    );
 
     await logAuditEvent({
       actor: userDoc.email,
@@ -6779,13 +6851,15 @@ app.post("/auth/session-alert/respond", async (req, res) => {
         maxAttempts: OTP_MAX_ATTEMPTS,
       });
 
-      await sendPasswordResetOtpEmail({
-        to: userDoc.email,
-        recipientName:
-          userDoc.fullName || userDoc.email.split("@")[0] || "User",
-        otpCode: otpChallenge.otpCode,
-        expiresInMinutes: RESET_PASSWORD_OTP_TTL_MINUTES,
-      });
+      runAsyncSideEffect("sendPasswordResetOtpEmail", () =>
+        sendPasswordResetOtpEmail({
+          to: userDoc.email,
+          recipientName:
+            userDoc.fullName || userDoc.email.split("@")[0] || "User",
+          otpCode: otpChallenge.otpCode,
+          expiresInMinutes: RESET_PASSWORD_OTP_TTL_MINUTES,
+        }),
+      );
 
       challengeId = otpChallenge.challengeId;
       expiresAt = otpChallenge.expiresAt.toISOString();
@@ -6870,6 +6944,8 @@ app.post("/auth/change-password", requireAuth, async (req, res) => {
     ipAddress: getRequestIp(req),
   });
 
+  invalidateUserResponseCache(userDoc.id, ["auth", "security"]);
+
   return res.status(204).send();
 });
 
@@ -6946,6 +7022,8 @@ app.post("/auth/face/enroll", requireAuth, async (req, res) => {
       },
       ipAddress: getRequestIp(req),
     });
+
+    invalidateUserResponseCache(userId, ["auth", "security"]);
 
     return res.json({
       status: "ok",
@@ -7030,31 +7108,41 @@ app.get("/auth/me", requireAuth, async (req, res) => {
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
   try {
-    const userRepository = createUserRepository();
-    const userDoc = await userRepository.findValidatedById(userId);
-    if (!userDoc) return res.status(404).json({ error: "User not found" });
+    const payload = await getCachedUserResponse(userId, "auth", async () => {
+      const userRepository = createUserRepository();
+      const userDoc = await userRepository.findValidatedById(userId);
+      if (!userDoc) {
+        throw new Error("AUTH_USER_NOT_FOUND");
+      }
 
-    const metadata =
-      userDoc.metadata && typeof userDoc.metadata === "object"
-        ? (userDoc.metadata as Record<string, unknown>)
-        : {};
-    const authSecurityState = getAuthSecurityState(userDoc.metadata);
+      const metadata =
+        userDoc.metadata && typeof userDoc.metadata === "object"
+          ? (userDoc.metadata as Record<string, unknown>)
+          : {};
+      const authSecurityState = getAuthSecurityState(userDoc.metadata);
 
-    return res.json({
-      id: userDoc.id,
-      email: userDoc.email,
-      role: userDoc.role,
-      fullName: userDoc.fullName ?? "",
-      phone: typeof userDoc.phone === "string" ? userDoc.phone : "",
-      address: typeof userDoc.address === "string" ? userDoc.address : "",
-      dob: typeof userDoc.dob === "string" ? userDoc.dob : "",
-      avatar: typeof metadata.avatar === "string" ? metadata.avatar : undefined,
-      metadata: buildPublicUserMetadata(metadata),
-      security:
-        authSecurityState.activeSession?.security ??
-        buildSessionSecurityState("low"),
+      return {
+        id: userDoc.id,
+        email: userDoc.email,
+        role: userDoc.role,
+        fullName: userDoc.fullName ?? "",
+        phone: typeof userDoc.phone === "string" ? userDoc.phone : "",
+        address: typeof userDoc.address === "string" ? userDoc.address : "",
+        dob: typeof userDoc.dob === "string" ? userDoc.dob : "",
+        avatar:
+          typeof metadata.avatar === "string" ? metadata.avatar : undefined,
+        metadata: buildPublicUserMetadata(metadata),
+        security:
+          authSecurityState.activeSession?.security ??
+          buildSessionSecurityState("low"),
+      };
     });
+
+    return res.json(payload);
   } catch (err) {
+    if (err instanceof Error && err.message === "AUTH_USER_NOT_FOUND") {
+      return res.status(404).json({ error: "User not found" });
+    }
     console.error("Failed to get profile", err);
     return res.status(500).json({ error: "Internal error" });
   }
@@ -7110,6 +7198,8 @@ app.patch("/auth/me", requireAuth, async (req, res) => {
       details: { fullName: Boolean(fullName), phone: Boolean(phone) },
       ipAddress: getRequestIp(req),
     });
+
+    invalidateUserResponseCache(userId, ["auth"]);
 
     return res.json({
       id: updated.id,
@@ -7370,27 +7460,32 @@ app.get("/wallet/me", requireAuth, async (req, res) => {
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
   try {
-    const wallet = await getOrCreateWalletByUserId(userId);
-    const metadata =
-      wallet.metadata && typeof wallet.metadata === "object"
-        ? (wallet.metadata as Record<string, unknown>)
-        : {};
-    const payload: components["schemas"]["Wallet"] = {
-      id: wallet.id,
-      balance: Number(wallet.balance),
-      currency: wallet.currency,
-    };
-    return res.json({
-      ...payload,
-      accountNumber:
-        typeof metadata.accountNumber === "string"
-          ? metadata.accountNumber
-          : "",
-      qrPayload:
-        typeof metadata.qrPayload === "string" ? metadata.qrPayload : "",
-      qrImageUrl:
-        typeof metadata.qrImageUrl === "string" ? metadata.qrImageUrl : "",
+    const payload = await getCachedUserResponse(userId, "wallet", async () => {
+      const wallet = await getOrCreateWalletByUserId(userId);
+      const metadata =
+        wallet.metadata && typeof wallet.metadata === "object"
+          ? (wallet.metadata as Record<string, unknown>)
+          : {};
+      const basePayload: components["schemas"]["Wallet"] = {
+        id: wallet.id,
+        balance: Number(wallet.balance),
+        currency: wallet.currency,
+      };
+
+      return {
+        ...basePayload,
+        accountNumber:
+          typeof metadata.accountNumber === "string"
+            ? metadata.accountNumber
+            : "",
+        qrPayload:
+          typeof metadata.qrPayload === "string" ? metadata.qrPayload : "",
+        qrImageUrl:
+          typeof metadata.qrImageUrl === "string" ? metadata.qrImageUrl : "",
+      };
     });
+
+    return res.json(payload);
   } catch (err) {
     console.error("Failed to get wallet", err);
     return res.status(500).json({ error: "Internal error" });
@@ -7538,6 +7633,8 @@ app.post("/wallet/deposit", requireAuth, async (req, res) => {
       balanceAfter: Number(depositResult.updated.balance),
     });
 
+    invalidateUserResponseCache(userId, ["wallet", "transactions"]);
+
     return res.json({
       id: depositResult.updated.id,
       balance: Number(depositResult.updated.balance),
@@ -7631,19 +7728,21 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
         ),
         sourceLabel: "CONTINUOUS_LARGE_TRANSFER_BLOCK",
       });
-      await sendTransferRiskAlertEmail({
-        to: user.email,
-        recipientName: user.fullName || user.email.split("@")[0] || "User",
-        amount: context.amount,
-        currency: context.senderWallet.currency,
-        toAccount: context.receiverAccountNumber,
-        reason:
-          transferStepUpPolicy.blockReason ||
-          "Repeated large outgoing transfers were detected.",
-        totalOutflowWindow: transferStepUpPolicy.rollingOutflowAmount,
-        windowLabel: `${CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES} minutes`,
-        actionRequired: "blocked",
-      });
+      runAsyncSideEffect("sendTransferRiskAlertEmail", () =>
+        sendTransferRiskAlertEmail({
+          to: user.email,
+          recipientName: user.fullName || user.email.split("@")[0] || "User",
+          amount: context.amount,
+          currency: context.senderWallet.currency,
+          toAccount: context.receiverAccountNumber,
+          reason:
+            transferStepUpPolicy.blockReason ||
+            "Repeated large outgoing transfers were detected.",
+          totalOutflowWindow: transferStepUpPolicy.rollingOutflowAmount,
+          windowLabel: `${CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES} minutes`,
+          actionRequired: "blocked",
+        }),
+      );
       return res.status(423).json({
         error:
           transferStepUpPolicy.blockReason ||
@@ -7673,22 +7772,24 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
         ),
         sourceLabel: "FACE_ID_REQUIRED",
       });
-      await sendTransferRiskAlertEmail({
-        to: user.email,
-        recipientName: user.fullName || user.email.split("@")[0] || "User",
-        amount: context.amount,
-        currency: context.senderWallet.currency,
-        toAccount: context.receiverAccountNumber,
-        reason:
-          transferStepUpPolicy.faceIdReason ||
-          `Transfers above ${formatMoneyAmount(
-            context.senderWallet.currency,
-            TRANSFER_FACE_ID_THRESHOLD,
-          )} require FaceID verification.`,
-        totalOutflowWindow: transferStepUpPolicy.rollingOutflowAmount,
-        windowLabel: `${CUMULATIVE_TRANSFER_FACE_ID_WINDOW_MINUTES} minutes`,
-        actionRequired: "faceid",
-      });
+      runAsyncSideEffect("sendTransferRiskAlertEmail", () =>
+        sendTransferRiskAlertEmail({
+          to: user.email,
+          recipientName: user.fullName || user.email.split("@")[0] || "User",
+          amount: context.amount,
+          currency: context.senderWallet.currency,
+          toAccount: context.receiverAccountNumber,
+          reason:
+            transferStepUpPolicy.faceIdReason ||
+            `Transfers above ${formatMoneyAmount(
+              context.senderWallet.currency,
+              TRANSFER_FACE_ID_THRESHOLD,
+            )} require FaceID verification.`,
+          totalOutflowWindow: transferStepUpPolicy.rollingOutflowAmount,
+          windowLabel: `${CUMULATIVE_TRANSFER_FACE_ID_WINDOW_MINUTES} minutes`,
+          actionRequired: "faceid",
+        }),
+      );
       return res.status(403).json({
         error:
           transferStepUpPolicy.faceIdReason ||
@@ -8025,32 +8126,36 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       },
     });
 
-    await sendTransferOtpEmail({
-      to: user.email,
-      recipientName: user.fullName || user.email.split("@")[0] || "User",
-      otpCode: otpChallenge.otpCode,
-      expiresInMinutes: TRANSFER_OTP_TTL_MINUTES,
-      amount: context.amount,
-      toAccount: context.receiverAccountNumber,
-    });
+    runAsyncSideEffect("sendTransferOtpEmail", () =>
+      sendTransferOtpEmail({
+        to: user.email,
+        recipientName: user.fullName || user.email.split("@")[0] || "User",
+        otpCode: otpChallenge.otpCode,
+        expiresInMinutes: TRANSFER_OTP_TTL_MINUTES,
+        amount: context.amount,
+        toAccount: context.receiverAccountNumber,
+      }),
+    );
 
     if (
       transferStepUpPolicy.faceIdRequired &&
       context.amount <= TRANSFER_FACE_ID_THRESHOLD
     ) {
-      await sendTransferRiskAlertEmail({
-        to: user.email,
-        recipientName: user.fullName || user.email.split("@")[0] || "User",
-        amount: context.amount,
-        currency: context.senderWallet.currency,
-        toAccount: context.receiverAccountNumber,
-        reason:
-          transferStepUpPolicy.faceIdReason ||
-          `Your total outgoing transfers in the last ${CUMULATIVE_TRANSFER_FACE_ID_WINDOW_MINUTES} minutes require FaceID verification.`,
-        totalOutflowWindow: transferStepUpPolicy.rollingOutflowAmount,
-        windowLabel: `${CUMULATIVE_TRANSFER_FACE_ID_WINDOW_MINUTES} minutes`,
-        actionRequired: "faceid",
-      });
+      runAsyncSideEffect("sendTransferRiskAlertEmail", () =>
+        sendTransferRiskAlertEmail({
+          to: user.email,
+          recipientName: user.fullName || user.email.split("@")[0] || "User",
+          amount: context.amount,
+          currency: context.senderWallet.currency,
+          toAccount: context.receiverAccountNumber,
+          reason:
+            transferStepUpPolicy.faceIdReason ||
+            `Your total outgoing transfers in the last ${CUMULATIVE_TRANSFER_FACE_ID_WINDOW_MINUTES} minutes require FaceID verification.`,
+          totalOutflowWindow: transferStepUpPolicy.rollingOutflowAmount,
+          windowLabel: `${CUMULATIVE_TRANSFER_FACE_ID_WINDOW_MINUTES} minutes`,
+          actionRequired: "faceid",
+        }),
+      );
     }
 
     await logAuditEvent({
@@ -8669,6 +8774,16 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
       counterpartyLabel: getRecipientName(senderUser),
     });
 
+    invalidateUserResponseCache(senderUserId, [
+      "wallet",
+      "transactions",
+      "security",
+    ]);
+    invalidateUserResponseCache(context.resolvedReceiverUserId, [
+      "wallet",
+      "transactions",
+    ]);
+
     return res.json({
       status: "ok",
       reconciliationId: transferResult.reconciliationId,
@@ -8797,36 +8912,42 @@ app.get("/transactions", requireAuth, async (req, res) => {
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
   try {
-    const wallets = await prisma.wallet.findMany({
-      where: { userId },
-      select: { id: true },
-    });
-    const walletIds = wallets.map((w) => w.id);
+    const payload = await getCachedUserResponse(
+      userId,
+      "transactions",
+      async () => {
+        const wallets = await prisma.wallet.findMany({
+          where: { userId },
+          select: { id: true },
+        });
+        const walletIds = wallets.map((w) => w.id);
 
-    const txns = await prisma.transaction.findMany({
-      where: {
-        ...(walletIds.length
-          ? { walletId: { in: walletIds } }
-          : { walletId: "__NO_WALLET__" }),
+        const txns = await prisma.transaction.findMany({
+          where: {
+            ...(walletIds.length
+              ? { walletId: { in: walletIds } }
+              : { walletId: "__NO_WALLET__" }),
+          },
+          orderBy: { createdAt: "desc" },
+          take: 120,
+        });
+
+        return txns
+          .map((txn) => safelyDecryptTransaction(txn, "/transactions"))
+          .filter((txn): txn is NonNullable<typeof txn> => Boolean(txn))
+          .map((decrypted) => ({
+            id: decrypted.id,
+            amount: decrypted.amount,
+            type: decrypted.type,
+            status: decrypted.status,
+            description: decrypted.description ?? undefined,
+            createdAt: decrypted.createdAt.toISOString(),
+            metadata: decrypted.metadata,
+          }));
       },
-      orderBy: { createdAt: "desc" },
-      take: 200,
-    });
-
-    return res.json(
-      txns
-        .map((txn) => safelyDecryptTransaction(txn, "/transactions"))
-        .filter((txn): txn is NonNullable<typeof txn> => Boolean(txn))
-        .map((decrypted) => ({
-          id: decrypted.id,
-          amount: decrypted.amount,
-          type: decrypted.type,
-          status: decrypted.status,
-          description: decrypted.description ?? undefined,
-          createdAt: decrypted.createdAt.toISOString(),
-          metadata: decrypted.metadata,
-        })),
     );
+
+    return res.json(payload);
   } catch (err) {
     console.error("Failed to list transactions", err);
     return res.status(500).json({ error: "Internal error" });
@@ -8842,125 +8963,144 @@ app.get("/security/overview", requireAuth, async (req, res) => {
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
   try {
-    const [policy, userDoc] = await Promise.all([
-      getSecurityPolicy(),
-      createUserRepository().findValidatedById(userId),
-    ]);
+    const payload = await getCachedUserResponse(
+      userId,
+      "security",
+      async () => {
+        const [policy, userDoc] = await Promise.all([
+          getSecurityPolicy(),
+          createUserRepository().findValidatedById(userId),
+        ]);
 
-    if (!userDoc) return res.status(404).json({ error: "User not found" });
+        if (!userDoc) {
+          throw new Error("SECURITY_USER_NOT_FOUND");
+        }
 
-    const authSecurityState = getAuthSecurityState(userDoc.metadata);
-    const activeSession = authSecurityState.activeSession;
-    const currentRequestLocation = getRequestLocation(req);
-    const activeSessionReferenceTime = Date.parse(
-      authSecurityState.lastLoginAt || activeSession?.issuedAt || "",
+        const authSecurityState = getAuthSecurityState(userDoc.metadata);
+        const activeSession = authSecurityState.activeSession;
+        const currentRequestLocation = getRequestLocation(req);
+        const activeSessionReferenceTime = Date.parse(
+          authSecurityState.lastLoginAt || activeSession?.issuedAt || "",
+        );
+        const repo = createLoginEventRepository();
+        const since = new Date(
+          Date.now() - SECURITY_OVERVIEW_WINDOW_DAYS * 24 * 60 * 60 * 1000,
+        );
+        const events = await repo.findByUserSince(userId, since, 50);
+        const trustedByIp = new Map(
+          authSecurityState.trustedIps.map((entry) => [entry.ipAddress, entry]),
+        );
+
+        const userFacingEvents = events.filter(
+          (event) => !isSyntheticAiLoginEvent(event),
+        );
+        const visibleEvents = userFacingEvents.length
+          ? userFacingEvents
+          : events;
+
+        const alerts = visibleEvents.slice(0, 12).map((event) => {
+          const normalizedIp = normalizeIpAddress(event.ipAddress);
+          return buildUserSecurityAlert(
+            event,
+            policy.anomalyAlertThreshold,
+            normalizedIp ? trustedByIp.get(normalizedIp) : undefined,
+          );
+        });
+
+        const recentLogins = visibleEvents.slice(0, 20).map((event) => {
+          const storedDeviceContext =
+            event.metadata && typeof event.metadata === "object"
+              ? normalizeClientDeviceContext(
+                  (event.metadata as Record<string, unknown>).deviceContext,
+                )
+              : undefined;
+          const eventIsCurrentSessionLogin =
+            Boolean(event.success) &&
+            Boolean(activeSession) &&
+            Number.isFinite(activeSessionReferenceTime) &&
+            Math.abs(event.createdAt.getTime() - activeSessionReferenceTime) <=
+              30 * 60 * 1000 &&
+            (!activeSession?.userAgent ||
+              !event.userAgent ||
+              event.userAgent === activeSession.userAgent);
+          const effectiveIp = normalizeIpAddress(
+            event.ipAddress ||
+              (eventIsCurrentSessionLogin
+                ? activeSession?.ipAddress || authSecurityState.lastLoginIp
+                : undefined),
+          );
+          const effectiveUserAgent =
+            event.userAgent ||
+            (eventIsCurrentSessionLogin ? activeSession?.userAgent : undefined);
+          const currentSessionLocation =
+            eventIsCurrentSessionLogin &&
+            currentRequestLocation !== "Local device" &&
+            currentRequestLocation !== "Private network"
+              ? currentRequestLocation
+              : undefined;
+          const effectiveLocation = buildSecurityLocationLabel({
+            location: event.location || currentSessionLocation,
+            ipAddress: effectiveIp,
+          });
+          const deviceSummary = buildUserAgentDeviceSummary(
+            effectiveUserAgent,
+            storedDeviceContext,
+          );
+          const trustedIp = effectiveIp
+            ? trustedByIp.get(effectiveIp)
+            : undefined;
+          return {
+            id: event.id,
+            location: effectiveLocation,
+            ipAddress: effectiveIp ?? undefined,
+            userAgent: effectiveUserAgent ?? "Unknown device",
+            deviceTitle: deviceSummary.title,
+            deviceDetail: deviceSummary.detail,
+            success: Boolean(event.success),
+            anomaly: event.anomaly ?? 0,
+            riskUnavailable: isFallbackMonitoringLoginEvent(event),
+            createdAt: event.createdAt.toISOString(),
+            trustedIp: Boolean(trustedIp),
+          };
+        });
+
+        const trustedDevices = authSecurityState.trustedIps.map(
+          (entry, index) => {
+            const matchingEvent = visibleEvents.find(
+              (event) =>
+                Boolean(event.success) &&
+                normalizeIpAddress(event.ipAddress) === entry.ipAddress,
+            );
+
+            return {
+              id: `trusted-device-${index + 1}`,
+              ipAddress: entry.ipAddress,
+              location: buildSecurityLocationLabel({
+                location: matchingEvent?.location,
+                ipAddress: entry.ipAddress,
+              }),
+              userAgent: matchingEvent?.userAgent ?? "Saved trusted device",
+              firstSeenAt: entry.firstSeenAt,
+              lastSeenAt: entry.lastSeenAt,
+              lastVerifiedAt: entry.lastVerifiedAt,
+              current: entry.ipAddress === authSecurityState.lastLoginIp,
+            };
+          },
+        );
+
+        return {
+          alerts,
+          recentLogins,
+          trustedDevices,
+        };
+      },
     );
-    const repo = createLoginEventRepository();
-    const since = new Date(
-      Date.now() - SECURITY_OVERVIEW_WINDOW_DAYS * 24 * 60 * 60 * 1000,
-    );
-    const events = await repo.findByUserSince(userId, since, 50);
-    const trustedByIp = new Map(
-      authSecurityState.trustedIps.map((entry) => [entry.ipAddress, entry]),
-    );
 
-    const userFacingEvents = events.filter(
-      (event) => !isSyntheticAiLoginEvent(event),
-    );
-    const visibleEvents = userFacingEvents.length ? userFacingEvents : events;
-
-    const alerts = visibleEvents.slice(0, 12).map((event) => {
-      const normalizedIp = normalizeIpAddress(event.ipAddress);
-      return buildUserSecurityAlert(
-        event,
-        policy.anomalyAlertThreshold,
-        normalizedIp ? trustedByIp.get(normalizedIp) : undefined,
-      );
-    });
-
-    const recentLogins = visibleEvents.slice(0, 20).map((event) => {
-      const storedDeviceContext =
-        event.metadata && typeof event.metadata === "object"
-          ? normalizeClientDeviceContext(
-              (event.metadata as Record<string, unknown>).deviceContext,
-            )
-          : undefined;
-      const eventIsCurrentSessionLogin =
-        Boolean(event.success) &&
-        Boolean(activeSession) &&
-        Number.isFinite(activeSessionReferenceTime) &&
-        Math.abs(event.createdAt.getTime() - activeSessionReferenceTime) <=
-          30 * 60 * 1000 &&
-        (!activeSession?.userAgent ||
-          !event.userAgent ||
-          event.userAgent === activeSession.userAgent);
-      const effectiveIp = normalizeIpAddress(
-        event.ipAddress ||
-          (eventIsCurrentSessionLogin
-            ? activeSession?.ipAddress || authSecurityState.lastLoginIp
-            : undefined),
-      );
-      const effectiveUserAgent =
-        event.userAgent ||
-        (eventIsCurrentSessionLogin ? activeSession?.userAgent : undefined);
-      const currentSessionLocation =
-        eventIsCurrentSessionLogin &&
-        currentRequestLocation !== "Local device" &&
-        currentRequestLocation !== "Private network"
-          ? currentRequestLocation
-          : undefined;
-      const effectiveLocation = buildSecurityLocationLabel({
-        location: event.location || currentSessionLocation,
-        ipAddress: effectiveIp,
-      });
-      const deviceSummary = buildUserAgentDeviceSummary(
-        effectiveUserAgent,
-        storedDeviceContext,
-      );
-      const trustedIp = effectiveIp ? trustedByIp.get(effectiveIp) : undefined;
-      return {
-        id: event.id,
-        location: effectiveLocation,
-        ipAddress: effectiveIp ?? undefined,
-        userAgent: effectiveUserAgent ?? "Unknown device",
-        deviceTitle: deviceSummary.title,
-        deviceDetail: deviceSummary.detail,
-        success: Boolean(event.success),
-        anomaly: event.anomaly ?? 0,
-        riskUnavailable: isFallbackMonitoringLoginEvent(event),
-        createdAt: event.createdAt.toISOString(),
-        trustedIp: Boolean(trustedIp),
-      };
-    });
-
-    const trustedDevices = authSecurityState.trustedIps.map((entry, index) => {
-      const matchingEvent = visibleEvents.find(
-        (event) =>
-          Boolean(event.success) &&
-          normalizeIpAddress(event.ipAddress) === entry.ipAddress,
-      );
-
-      return {
-        id: `trusted-device-${index + 1}`,
-        ipAddress: entry.ipAddress,
-        location: buildSecurityLocationLabel({
-          location: matchingEvent?.location,
-          ipAddress: entry.ipAddress,
-        }),
-        userAgent: matchingEvent?.userAgent ?? "Saved trusted device",
-        firstSeenAt: entry.firstSeenAt,
-        lastSeenAt: entry.lastSeenAt,
-        lastVerifiedAt: entry.lastVerifiedAt,
-        current: entry.ipAddress === authSecurityState.lastLoginIp,
-      };
-    });
-
-    return res.json({
-      alerts,
-      recentLogins,
-      trustedDevices,
-    });
+    return res.json(payload);
   } catch (err) {
+    if (err instanceof Error && err.message === "SECURITY_USER_NOT_FOUND") {
+      return res.status(404).json({ error: "User not found" });
+    }
     console.error("Failed to load security overview", err);
     return res.status(500).json({ error: "Internal error" });
   }
@@ -9672,6 +9812,8 @@ app.post(
         anomalyAlertThreshold: policy.anomalyAlertThreshold,
       },
     });
+
+    invalidateSecurityPolicyCache();
 
     res.json({ status: "updated", policy });
   },
