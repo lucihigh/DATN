@@ -23,3 +23,10 @@ This repository is a pnpm-powered monorepo scaffold for the **FPIPay** project: 
 - `pnpm dev` now starts `web`, `api`, and `ai-service` together.
 - `apps/ai-service` uses `apps/ai-service/.venv` automatically when present, otherwise falls back to `py`/`python`.
 - If `AI_SERVICE_URL` points to `localhost` or `127.0.0.1`, `apps/api` also auto-starts the local AI runtime when needed.
+
+## Dev Container
+- Open the repo in VS Code and run `Dev Containers: Reopen in Container`.
+- The container provisions Node, pnpm, Python, a local Postgres service, and installs workspace dependencies automatically.
+- If `.env` is missing, it is created from `.env.example` during container setup.
+- After the container finishes building, run `pnpm dev`.
+- Inside the container, Postgres is available at `postgres:5432` and the app ports are `5173` (web), `4000` (api), and `8000` (ai-service).
