@@ -153,7 +153,7 @@ const API_BASE =
   (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ||
   "http://localhost:4000";
 const SESSION_EXPIRED_EVENT = "auth:session-expired";
-const SESSION_VERIFY_INTERVAL_MS = 10000;
+const SESSION_VERIFY_INTERVAL_MS = 60000;
 const PUBLIC_IP_CACHE_KEY = "fpipay_public_ip_cache";
 const PUBLIC_IP_CACHE_TTL_MS = 30 * 1000;
 const PUBLIC_IP_FETCH_TIMEOUT_MS = 5000;
