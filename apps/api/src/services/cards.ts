@@ -1,3 +1,11 @@
+import crypto from "crypto";
+
+import {
+  decryptField,
+  encryptField,
+  isEncryptedString,
+} from "../security/encryption";
+
 const CARD_VAULT_KEY = "cardVault";
 
 export type CardType = "Mastercard" | "Visa" | "Payoneer" | "Skrill";
@@ -16,6 +24,8 @@ export type StoredCard = {
   isPrimary: boolean;
   createdAt: string;
   updatedAt: string;
+  encryptedNumber?: unknown;
+  encryptedCvv?: unknown;
 };
 
 const asObject = (value: unknown) =>
@@ -45,6 +55,40 @@ const asCardStatus = (value: unknown): CardStatus | undefined => {
   return undefined;
 };
 
+const sanitizeCvv = (value: string) => {
+  const digits = value.replace(/\D/g, "");
+  return /^\d{3,4}$/.test(digits) ? digits : "";
+};
+
+const fallbackEncrypt = (value: string) => `plain:${value}`;
+const fallbackDecrypt = (value: string) =>
+  value.startsWith("plain:") ? value.slice("plain:".length) : value;
+
+const encryptCardSecret = (value: string, aad: string) => {
+  try {
+    return encryptField(value, { aad });
+  } catch {
+    return fallbackEncrypt(value);
+  }
+};
+
+const decryptCardSecret = (value: unknown, aad: string): string | undefined => {
+  if (!value) return undefined;
+  if (typeof value === "string") {
+    return fallbackDecrypt(value);
+  }
+  if (!isEncryptedString(value)) return undefined;
+  try {
+    return decryptField(value, { aad });
+  } catch {
+    try {
+      return decryptField(value);
+    } catch {
+      return undefined;
+    }
+  }
+};
+
 export const maskCardNumber = (value: string) => {
   const digits = value.replace(/\D/g, "");
   const last4 = digits.slice(-4).padStart(4, "*");
@@ -67,6 +111,8 @@ const toStoredCard = (value: unknown): StoredCard | null => {
   const status = asCardStatus(raw.status);
   const createdAt = asTrimmedString(raw.createdAt);
   const updatedAt = asTrimmedString(raw.updatedAt);
+  const encryptedNumber = raw.encryptedNumber;
+  const encryptedCvv = raw.encryptedCvv;
   if (
     !id ||
     !type ||
@@ -96,6 +142,8 @@ const toStoredCard = (value: unknown): StoredCard | null => {
     isPrimary: Boolean(raw.isPrimary),
     createdAt,
     updatedAt,
+    encryptedNumber,
+    encryptedCvv,
   };
 };
 
@@ -132,11 +180,21 @@ export const createStoredCard = (input: {
   rawCardNumber: string;
   expiryMonth: string;
   expiryYear: string;
+  rawCvv?: string;
   isPrimary: boolean;
   createdAt?: Date;
 }): StoredCard => {
   const occurredAt = input.createdAt ?? new Date();
   const { last4, maskedNumber } = maskCardNumber(input.rawCardNumber);
+  const sanitizedCvv = input.rawCvv ? sanitizeCvv(input.rawCvv) : "";
+  const encryptedNumber = encryptCardSecret(
+    input.rawCardNumber,
+    `card:${input.id}:number`,
+  );
+  const encryptedCvv = sanitizedCvv
+    ? encryptCardSecret(sanitizedCvv, `card:${input.id}:cvv`)
+    : undefined;
+
   return {
     id: input.id,
     type: input.type,
@@ -150,7 +208,41 @@ export const createStoredCard = (input: {
     isPrimary: input.isPrimary,
     createdAt: occurredAt.toISOString(),
     updatedAt: occurredAt.toISOString(),
+    encryptedNumber,
+    encryptedCvv,
   };
+};
+
+export const getStoredCardFullNumber = (card: StoredCard) => {
+  const decrypted = decryptCardSecret(
+    card.encryptedNumber,
+    `card:${card.id}:number`,
+  );
+  if (!decrypted) return undefined;
+  const digits = decrypted.replace(/\D/g, "");
+  return /^\d{12,19}$/.test(digits) ? digits : undefined;
+};
+
+export const getStoredCardCvv = (card: StoredCard) => {
+  const decrypted = decryptCardSecret(card.encryptedCvv, `card:${card.id}:cvv`);
+  if (!decrypted) return undefined;
+  const digits = sanitizeCvv(decrypted);
+  return digits || undefined;
+};
+
+export const deriveVirtualCardCvv = (seed: string) => {
+  const hash = crypto.createHash("sha256").update(seed).digest();
+  const value = (((hash[0] << 16) | (hash[1] << 8) | hash[2]) % 900) + 100;
+  return String(value);
+};
+
+export const deriveVirtualCardNumber = (seed: string) => {
+  const hash = crypto.createHash("sha256").update(seed).digest("hex");
+  const digits = hash
+    .split("")
+    .map((char) => (Number.parseInt(char, 16) % 10).toString())
+    .join("");
+  return `4${digits.slice(0, 15)}`;
 };
 
 export const normalizePrimaryCard = (cards: StoredCard[]) => {

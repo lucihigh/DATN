@@ -131,6 +131,7 @@ type RequestIpInput = {
   ip?: string | null;
   headers?: Record<string, unknown>;
   socket?: { remoteAddress?: string | null } | null;
+  connection?: { remoteAddress?: string | null } | null;
 };
 
 export const resolveRequestIpAddress = (input: RequestIpInput) => {
@@ -139,6 +140,11 @@ export const resolveRequestIpAddress = (input: RequestIpInput) => {
     ...readHeaderValues(headers["x-demo-public-ip"]),
     ...readHeaderValues(headers["cf-connecting-ip"]),
     ...readHeaderValues(headers["true-client-ip"]),
+    ...readHeaderValues(headers["x-client-ip"]),
+    ...readHeaderValues(headers["x-cluster-client-ip"]),
+    ...readHeaderValues(headers["x-vercel-forwarded-for"]),
+    ...readHeaderValues(headers["fly-client-ip"]),
+    ...readHeaderValues(headers["fastly-client-ip"]),
     ...readHeaderValues(headers["x-real-ip"]),
     ...readHeaderValues(headers["x-forwarded-for"]).flatMap((value) =>
       value.split(","),
@@ -146,6 +152,7 @@ export const resolveRequestIpAddress = (input: RequestIpInput) => {
     ...readHeaderValues(headers.forwarded).flatMap(parseForwardedHeader),
     input.ip ?? undefined,
     input.socket?.remoteAddress ?? undefined,
+    input.connection?.remoteAddress ?? undefined,
   ]
     .map((value) =>
       normalizeIpAddress(typeof value === "string" ? value : undefined),
