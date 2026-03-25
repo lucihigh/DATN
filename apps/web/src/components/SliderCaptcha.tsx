@@ -30,6 +30,7 @@ type SliderCaptchaProps = {
 
 const CAPTCHA_SOURCE_WIDTH = 736;
 const CAPTCHA_SOURCE_HEIGHT = 440;
+const CAPTCHA_MAX_STAGE_WIDTH = 360;
 const randomInt = (min: number, max: number) =>
   Math.floor(Math.random() * (max - min + 1)) + min;
 
@@ -270,7 +271,25 @@ export function SliderCaptcha({
       return;
     }
 
-    const maxOffset = challenge.stageWidthPx - challenge.pieceWidthPx;
+    const scale =
+      challenge.stageWidthPx > CAPTCHA_MAX_STAGE_WIDTH
+        ? CAPTCHA_MAX_STAGE_WIDTH / challenge.stageWidthPx
+        : 1;
+    const displayStageWidth = Math.round(challenge.stageWidthPx * scale);
+    const displayPieceWidth = Math.max(
+      52,
+      Math.round(challenge.pieceWidthPx * scale),
+    );
+    const displayTargetOffset = clamp(
+      Math.round(challenge.targetOffsetPx * scale),
+      0,
+      Math.max(0, displayStageWidth - displayPieceWidth),
+    );
+    const displayTolerance = Math.max(
+      6,
+      Math.round(challenge.tolerancePx * scale),
+    );
+    const maxOffset = displayStageWidth - displayPieceWidth;
     const handleMove = (event: PointerEvent) => {
       const nextOffset = clamp(
         dragStartOffsetRef.current + (event.clientX - dragStartXRef.current),
@@ -283,8 +302,7 @@ export function SliderCaptcha({
     const handleUp = () => {
       const finalOffset = offsetRef.current;
       const matched =
-        Math.abs(finalOffset - challenge.targetOffsetPx) <=
-        challenge.tolerancePx;
+        Math.abs(finalOffset - displayTargetOffset) <= displayTolerance;
 
       setDragging(false);
       if (!matched) {
@@ -295,7 +313,7 @@ export function SliderCaptcha({
         return;
       }
 
-      updateOffset(challenge.targetOffsetPx);
+      updateOffset(displayTargetOffset);
       onChange({
         captchaToken: challenge.captchaToken,
         captchaOffset: challenge.targetOffsetPx,
@@ -342,8 +360,16 @@ export function SliderCaptcha({
     setDragging(true);
   };
 
-  const stageWidth = challenge?.stageWidthPx ?? 360;
-  const pieceWidth = challenge?.pieceWidthPx ?? 72;
+  const displayScale =
+    challenge && challenge.stageWidthPx > CAPTCHA_MAX_STAGE_WIDTH
+      ? CAPTCHA_MAX_STAGE_WIDTH / challenge.stageWidthPx
+      : 1;
+  const stageWidth = challenge
+    ? Math.round(challenge.stageWidthPx * displayScale)
+    : CAPTCHA_MAX_STAGE_WIDTH;
+  const pieceWidth = challenge
+    ? Math.max(52, Math.round(challenge.pieceWidthPx * displayScale))
+    : 72;
   const thumbWidth = 58;
   const stageHeight = Math.round(
     (stageWidth * CAPTCHA_SOURCE_HEIGHT) / CAPTCHA_SOURCE_WIDTH,
@@ -354,10 +380,15 @@ export function SliderCaptcha({
   );
   const pieceTop = Math.max(10, Math.round(stageHeight * 0.08));
   const maxOffset = Math.max(0, stageWidth - pieceWidth);
-  const targetOffset = clamp(challenge?.targetOffsetPx ?? 0, 0, maxOffset);
+  const targetOffset = clamp(
+    challenge ? Math.round(challenge.targetOffsetPx * displayScale) : 0,
+    0,
+    maxOffset,
+  );
 
   const panelStyle = {
-    width: `min(100%, ${stageWidth + 78}px)`,
+    width: `${stageWidth + 78}px`,
+    maxWidth: "calc(100vw - 28px)",
   } satisfies CSSProperties;
   const surfaceStyle = {
     width: `${stageWidth}px`,

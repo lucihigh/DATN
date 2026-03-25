@@ -140,3 +140,23 @@ py scripts/retrain_from_mongo.py --promote
 ```powershell
 pytest -q
 ```
+
+## Anti-scam and AML rule engine (transaction score)
+
+`POST /ai/tx/score` now returns extra fields from deterministic anti-scam/AML rules:
+
+- `model_risk_level`: risk from IF model + adaptive thresholds
+- `rule_risk_level`: risk from rule engine
+- `rule_score`, `rule_hit_count`, `rule_hits`
+- `warning_vi`: Vietnamese warning package for end-user UX
+
+Rule implementation file:
+
+- `app/fraud_rules.py`
+
+Training/operations documents:
+
+- `docs/aml_scam_dataset_schema.json`
+- `docs/aml_scam_labeling_guideline.vi.md`
+- `docs/aml_scam_warning_prompts.vi.md`
+- `docs/aml_scam_scenario_catalog.csv` (240 scenarios)

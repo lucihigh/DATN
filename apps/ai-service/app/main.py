@@ -46,6 +46,7 @@ from app.login_model import (
     resolve_request_key as resolve_login_request_key,
 )
 from app.face_liveness_model import FaceLivenessRequest, analyze_face_liveness
+from app.fraud_rules import evaluate_transaction_rules
 from app.transaction_model import (
     TX_FEATURE_NAMES,
     TrainTransactionRequest,
@@ -789,6 +790,15 @@ def _adjust_tx_risk_level(base_risk: str, event: TransactionEvent) -> str:
     )
 
 
+def _max_risk_level(*levels: str) -> str:
+    rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+    best = "LOW"
+    for level in levels:
+        if rank.get(level, -1) > rank.get(best, -1):
+            best = level
+    return best
+
+
 def _build_reasons(event: LoginEvent, features: np.ndarray, history_signals: dict[str, Any] | None = None) -> list[str]:
     return build_login_reasons(
         event=event,
@@ -812,6 +822,16 @@ def _build_tx_reasons(event: TransactionEvent, features: np.ndarray) -> list[str
         merchant_categories=app.state.tx_merchant_categories,
         feedback_profile=getattr(app.state, "tx_feedback_profile", {}) or {},
     )
+
+
+def _merge_tx_reasons(model_reasons: list[str], rule_reasons: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for reason in [*model_reasons, *rule_reasons]:
+        if reason not in seen:
+            seen.add(reason)
+            merged.append(reason)
+    return merged
 
 
 def _resolve_artifact_paths() -> tuple[Path, Path]:
@@ -2601,8 +2621,17 @@ def score_transaction(
         float(app.state.tx_thresholds["score_max"]),
     )
     risk_level_base = _score_to_level(score_value, app.state.tx_thresholds)
-    risk_level = _adjust_tx_risk_level(risk_level_base, event)
-    reasons = _build_tx_reasons(event, features)
+    model_adjusted_risk = _adjust_tx_risk_level(risk_level_base, event)
+    model_reasons = _build_tx_reasons(event, features)
+    rule_eval = evaluate_transaction_rules(
+        event,
+        learned_countries=set(getattr(app.state, "tx_countries", set()) or set()),
+    )
+    risk_level = _max_risk_level(model_adjusted_risk, rule_eval.rule_risk_level)
+    reasons = _merge_tx_reasons(
+        model_reasons,
+        [hit.reason for hit in rule_eval.hits],
+    )
     try:
         mongo_persist = _persist_tx_score_to_mongo(
             event=event,
@@ -2645,6 +2674,18 @@ def score_transaction(
         "risk_level_base": risk_level_base,
         "risk_level": risk_level,
         "reasons": reasons,
+        "model_risk_level": model_adjusted_risk,
+        "rule_risk_level": rule_eval.rule_risk_level,
+        "rule_score": rule_eval.rule_score,
+        "rule_hit_count": len(rule_eval.hits),
+        "rule_hits": [hit.to_dict() for hit in rule_eval.hits],
+        "warning_vi": {
+            "title": rule_eval.warning_title,
+            "message": rule_eval.warning_message,
+            "do_not": rule_eval.do_not,
+            "must_do": rule_eval.must_do,
+            "prompt_template_id": rule_eval.prompt_template_id,
+        },
         "monitoring_only": True,
         "action": AI_TX_ACTION,
         "model_source": app.state.tx_model_source,
