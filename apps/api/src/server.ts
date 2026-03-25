@@ -42,6 +42,7 @@ import {
 import { logAuditEvent } from "./services/audit";
 import {
   sendBalanceChangeEmail,
+  sendCardDetailsOtpEmail,
   sendLoginOtpEmail,
   sendLoginRiskAlertEmail,
   sendPasswordResetOtpEmail,
@@ -69,6 +70,10 @@ import {
 } from "./services/transactionSecurity";
 import {
   createStoredCard,
+  deriveVirtualCardCvv,
+  deriveVirtualCardNumber,
+  getStoredCardCvv,
+  getStoredCardFullNumber,
   getStoredCards,
   normalizePrimaryCard,
   setStoredCards,
@@ -233,6 +238,9 @@ const REGISTER_OTP_TTL_MINUTES = LOGIN_OTP_TTL_MINUTES;
 const RESET_PASSWORD_OTP_TTL_MINUTES = Number(
   process.env.RESET_PASSWORD_OTP_TTL_MINUTES || "10",
 );
+const CARD_DETAILS_OTP_TTL_MINUTES = Number(
+  process.env.CARD_DETAILS_OTP_TTL_MINUTES || "5",
+);
 const OTP_MAX_ATTEMPTS = Number(process.env.OTP_MAX_ATTEMPTS || "5");
 const CAPTCHA_TRACK_WIDTH_PX = Number(
   process.env.CAPTCHA_TRACK_WIDTH_PX || "440",
@@ -250,16 +258,16 @@ const FACE_ID_CHALLENGE_TTL_MS =
   Number(process.env.FACE_ID_CHALLENGE_TTL_SECONDS || "300") * 1000;
 const FACE_ID_SECRET_KEY = process.env.FACE_ID_SECRET_KEY || CAPTCHA_SECRET_KEY;
 const FACE_ID_MIN_LIVENESS_SCORE = Number(
-  process.env.FACE_ID_MIN_LIVENESS_SCORE || "0.78",
+  process.env.FACE_ID_MIN_LIVENESS_SCORE || "0.66",
 );
 const FACE_ID_MIN_MOTION_SCORE = Number(
-  process.env.FACE_ID_MIN_MOTION_SCORE || "0.28",
+  process.env.FACE_ID_MIN_MOTION_SCORE || "0.22",
 );
 const FACE_ID_MIN_FACE_COVERAGE = Number(
-  process.env.FACE_ID_MIN_FACE_COVERAGE || "0.11",
+  process.env.FACE_ID_MIN_FACE_COVERAGE || "0.085",
 );
 const FACE_ID_MIN_SAMPLE_COUNT = Number(
-  process.env.FACE_ID_MIN_SAMPLE_COUNT || "18",
+  process.env.FACE_ID_MIN_SAMPLE_COUNT || "12",
 );
 const FACE_ID_LEGACY_MATCH_THRESHOLD = Number(
   process.env.FACE_ID_LEGACY_MATCH_THRESHOLD || "0.84",
@@ -326,6 +334,24 @@ type AnomalyResponse = {
   modelSource?: string | null;
   modelVersion?: string | null;
   requestKey?: string | null;
+  ruleRiskLevel?: "low" | "medium" | "high";
+  modelRiskLevel?: "low" | "medium" | "high";
+  ruleScore?: number;
+  ruleHitCount?: number;
+  ruleHits?: Array<{
+    ruleId?: string;
+    title?: string;
+    reason?: string;
+    userWarning?: string;
+    riskLevel?: string;
+  }>;
+  warning?: {
+    title?: string;
+    message?: string;
+    doNot?: string[];
+    mustDo?: string[];
+    promptTemplateId?: string;
+  } | null;
 };
 
 type TransferSafetyAdvisory = {
@@ -597,6 +623,61 @@ const normalizeRiskLevel = (value: unknown): AnomalyResponse["riskLevel"] => {
   return "low";
 };
 
+const normalizeWarningPayload = (
+  value: unknown,
+): AnomalyResponse["warning"] => {
+  if (!value || typeof value !== "object") return null;
+  const data = value as Record<string, unknown>;
+  const toList = (input: unknown) =>
+    Array.isArray(input)
+      ? input.filter((item): item is string => typeof item === "string")
+      : [];
+  return {
+    title: typeof data.title === "string" ? data.title : undefined,
+    message: typeof data.message === "string" ? data.message : undefined,
+    doNot: toList(data.do_not ?? data.doNot),
+    mustDo: toList(data.must_do ?? data.mustDo),
+    promptTemplateId:
+      typeof data.prompt_template_id === "string"
+        ? data.prompt_template_id
+        : typeof data.promptTemplateId === "string"
+          ? data.promptTemplateId
+          : undefined,
+  };
+};
+
+const normalizeRuleHits = (value: unknown): AnomalyResponse["ruleHits"] => {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const data = entry as Record<string, unknown>;
+    return [
+      {
+        ruleId:
+          typeof data.rule_id === "string"
+            ? data.rule_id
+            : typeof data.ruleId === "string"
+              ? data.ruleId
+              : undefined,
+        title: typeof data.title === "string" ? data.title : undefined,
+        reason: typeof data.reason === "string" ? data.reason : undefined,
+        userWarning:
+          typeof data.user_warning === "string"
+            ? data.user_warning
+            : typeof data.userWarning === "string"
+              ? data.userWarning
+              : undefined,
+        riskLevel:
+          typeof data.risk_level === "string"
+            ? data.risk_level
+            : typeof data.riskLevel === "string"
+              ? data.riskLevel
+              : undefined,
+      },
+    ];
+  });
+};
+
 const normalizeAiResponse = (value: unknown): AnomalyResponse => {
   if (!value || typeof value !== "object") return DEFAULT_AI_RESPONSE;
   const data = value as Record<string, unknown>;
@@ -639,6 +720,29 @@ const normalizeAiResponse = (value: unknown): AnomalyResponse => {
         : typeof data.requestKey === "string"
           ? data.requestKey
           : null,
+    ruleRiskLevel: normalizeRiskLevel(
+      data.rule_risk_level ?? data.ruleRiskLevel,
+    ),
+    modelRiskLevel: normalizeRiskLevel(
+      data.model_risk_level ??
+        data.modelRiskLevel ??
+        data.risk_level ??
+        data.riskLevel,
+    ),
+    ruleScore:
+      typeof data.rule_score === "number"
+        ? data.rule_score
+        : typeof data.ruleScore === "number"
+          ? data.ruleScore
+          : undefined,
+    ruleHitCount:
+      typeof data.rule_hit_count === "number"
+        ? data.rule_hit_count
+        : typeof data.ruleHitCount === "number"
+          ? data.ruleHitCount
+          : undefined,
+    ruleHits: normalizeRuleHits(data.rule_hits ?? data.ruleHits),
+    warning: normalizeWarningPayload(data.warning_vi ?? data.warning),
   };
 };
 
@@ -1932,7 +2036,19 @@ const buildTransferSafetyAdvisory = (input: {
   const hasBlockSizedAmount = amount > TRANSFER_SCAM_BLOCK_MIN_AMOUNT;
   const hasNearZeroRemainingBalance =
     remainingBalance <= TRANSFER_SCAM_BLOCK_MAX_REMAINING_BALANCE;
-  const shouldBlock = hasBlockSizedAmount && hasNearZeroRemainingBalance;
+  const hasSuspiciousNoteSignal = noteRiskReasons.length > 0;
+  const hasRecipientFraudHistory =
+    input.behaviorProfile.sameRecipientFlaggedCount90d > 0 ||
+    input.behaviorProfile.similarFlaggedAmountCount90d > 0;
+  const hasHighRiskAiSignal = input.aiResult.riskLevel === "high";
+  const shouldBlock =
+    hasBlockSizedAmount &&
+    ((hasSuspiciousNoteSignal &&
+      (!input.recipientProfile.isKnownRecipient ||
+        hasNearZeroRemainingBalance)) ||
+      (hasNearZeroRemainingBalance &&
+        hasRecipientFraudHistory &&
+        hasHighRiskAiSignal));
 
   if (shouldBlock) {
     const blockedUntil = new Date(
@@ -2260,6 +2376,11 @@ const buildCopilotSystemInstructions = (language: CopilotLanguage) =>
     "Answer as a practical financial assistant for a wallet app.",
     "Use the wallet context and transaction context provided.",
     `Reply in ${language === "vi" ? "Vietnamese" : "English"} and keep the same language as the user's latest message.`,
+    "Prioritize user safety over convenience when the message contains signs of fraud, impersonation, urgency, OTP harvesting, remote-access setup, fake refunds, fake investment schemes, or account-takeover attempts.",
+    "If a message looks like a scam, clearly say so, tell the user not to send money or codes, and recommend official verification steps.",
+    "You can answer stock-market, equity, index, ETF, and portfolio-allocation questions at an educational and practical level.",
+    "For stock-market questions, help with concepts such as ticker basics, index vs stock, sector concentration, diversification, valuation checkpoints, drawdown risk, and how to read metrics like P/E, EPS, market cap, revenue growth, margin, debt, and free cash flow.",
+    "When the user asks for market analysis without requiring exact real-time numbers, provide a concise structured framework and clearly label assumptions.",
     "Do not claim real-time market prices unless they were already provided by another tool in the app context.",
     "If the user asks for exact live market prices and no live quote is present, say that live quote support should be used.",
     "Return valid JSON only with these keys:",
@@ -2664,6 +2785,77 @@ const detectMarketIntent = (message: string): MarketIntent | null => {
   );
 };
 
+const collectMarketIntents = (message: string): MarketIntent[] => {
+  const normalizedMessage = normalizeCopilotText(message);
+  const intents = new Map<string, MarketIntent>();
+
+  const pushIntent = (intent: MarketIntent | null) => {
+    if (!intent) return;
+    intents.set(intent.symbol, intent);
+  };
+
+  pushIntent(extractFxIntent(normalizedMessage));
+
+  for (const [alias, intent] of Object.entries(COPILOT_COMPANY_ALIASES)) {
+    if (normalizedMessage.includes(alias)) {
+      pushIntent(intent);
+    }
+  }
+
+  for (const [alias, intent] of Object.entries(COPILOT_INDEX_ALIASES)) {
+    if (normalizedMessage.includes(alias)) {
+      pushIntent(intent);
+    }
+  }
+
+  const tickerMatches = message.match(/\b[A-Z]{1,5}(?:\.[A-Z]{1,3})?\b/g) || [];
+  for (const rawSymbol of tickerMatches) {
+    const symbol = rawSymbol.toUpperCase();
+    if (!COPILOT_COMMON_MARKET_SYMBOLS.has(symbol) && symbol.length < 2) {
+      continue;
+    }
+    pushIntent({
+      assetClass: /index|nasdaq|dow|s&p|vnindex|vn-index/i.test(message)
+        ? "index"
+        : "stock",
+      symbol,
+      label: symbol,
+    });
+  }
+
+  if (/bitcoin|\bbtc\b/.test(normalizedMessage)) {
+    pushIntent({
+      assetClass: "crypto",
+      symbol: "BTC-USD",
+      label: "Bitcoin",
+      quoteHint: "USD",
+    });
+  }
+
+  if (/ethereum|\beth\b/.test(normalizedMessage)) {
+    pushIntent({
+      assetClass: "crypto",
+      symbol: "ETH-USD",
+      label: "Ethereum",
+      quoteHint: "USD",
+    });
+  }
+
+  if (/gia vang|gold|\bxau\b/.test(normalizedMessage)) {
+    pushIntent({
+      assetClass: "commodity",
+      symbol: "GC=F",
+      label: "Gold futures",
+      quoteHint: "USD",
+    });
+  }
+
+  const primaryIntent = detectMarketIntent(message);
+  pushIntent(primaryIntent);
+
+  return Array.from(intents.values()).slice(0, 6);
+};
+
 const formatMarketPrice = (value: number) => {
   const decimals = value >= 1000 ? 2 : value >= 100 ? 2 : value >= 1 ? 4 : 6;
   return value.toLocaleString("en-US", {
@@ -2941,6 +3133,456 @@ const buildHeuristicDepositPlan = (input: {
   };
 };
 
+const buildHeuristicStockEducationResponse = (input: {
+  latestMessage: string;
+  language: CopilotLanguage;
+  intent: MarketIntent | null;
+  intents: MarketIntent[];
+}): CopilotResponsePayload | null => {
+  const latest = normalizeCopilotText(input.latestMessage);
+  const asksCompare =
+    /\b(compare|comparison|vs|versus|so sanh|khac nhau)\b/.test(latest);
+  const asksAllocation =
+    /\b(portfolio|allocation|phan bo|diversif|da dang hoa|etf|index fund)\b/.test(
+      latest,
+    );
+  const asksValuation =
+    /\b(pe|p\/e|eps|valuation|dinh gia|market cap|von hoa|dividend|free cash flow|fcf|debt|no vay|margin|bien loi nhuan|revenue|doanh thu)\b/.test(
+      latest,
+    );
+  const asksStockLearning =
+    /\b(co phieu|chung khoan|stock|share|ticker|index|etf|portfolio|valuation|dinh gia|sector|nganh|beta|dividend|eps|pe|market cap)\b/.test(
+      latest,
+    );
+  const asksWatchlist =
+    /\b(watchlist|danh sach theo doi|theo doi|screen|scanner|shortlist|goi y ma|nhom co phieu)\b/.test(
+      latest,
+    );
+
+  if (
+    !asksCompare &&
+    !asksAllocation &&
+    !asksValuation &&
+    !asksStockLearning &&
+    !asksWatchlist
+  ) {
+    return null;
+  }
+
+  const focusLabel =
+    input.intent?.label ||
+    localizeCopilotText(
+      input.language,
+      "co phieu / chi so",
+      "stocks / indexes",
+    );
+  const mentionedSymbols = input.intents.map((item) => item.symbol).slice(0, 4);
+  const mentionedLabels = input.intents.map((item) => item.label).slice(0, 4);
+
+  if (asksWatchlist) {
+    const watchlistTheme = /\b(bank|banking|ngan hang)\b/.test(latest)
+      ? "banking"
+      : /\b(tech|technology|cong nghe|ai|semiconductor|chip)\b/.test(latest)
+        ? "technology"
+        : /\b(dividend|co tuc|income)\b/.test(latest)
+          ? "dividend"
+          : /\b(vietnam|vn|viet nam)\b/.test(latest)
+            ? "vietnam"
+            : "core";
+
+    const watchlistRows =
+      watchlistTheme === "banking"
+        ? [
+            ["VCB.VN", "Quality leader", "Asset quality and credit growth"],
+            [
+              "TCB.VN",
+              "Private bank scale",
+              "CASA, fee mix, margin discipline",
+            ],
+            ["MBB.VN", "Operational efficiency", "Loan mix and provisioning"],
+            [
+              "ACB.VN",
+              "Retail franchise",
+              "Deposit stability and asset quality",
+            ],
+          ]
+        : watchlistTheme === "technology"
+          ? [
+              ["AAPL", "Platform moat", "Services mix and device cycle"],
+              [
+                "MSFT",
+                "Enterprise quality",
+                "Cloud growth and margin resilience",
+              ],
+              [
+                "NVDA",
+                "AI demand leader",
+                "Revenue concentration and valuation",
+              ],
+              [
+                "FPT.VN",
+                "Vietnam tech compounder",
+                "Export pipeline and margin",
+              ],
+            ]
+          : watchlistTheme === "dividend"
+            ? [
+                [
+                  "VNM.VN",
+                  "Defensive cash flow",
+                  "Payout durability and volume trend",
+                ],
+                [
+                  "VCB.VN",
+                  "Quality compounder",
+                  "Yield not highest, franchise is strong",
+                ],
+                [
+                  "MSFT",
+                  "Dividend growth",
+                  "Cash flow and balance sheet strength",
+                ],
+                ["KO", "Income classic", "Yield stability and pricing power"],
+              ]
+            : watchlistTheme === "vietnam"
+              ? [
+                  [
+                    "FPT.VN",
+                    "Technology",
+                    "Export growth and execution quality",
+                  ],
+                  [
+                    "VCB.VN",
+                    "Banking",
+                    "Credit quality and valuation vs peers",
+                  ],
+                  ["HPG.VN", "Materials", "Steel cycle sensitivity and margin"],
+                  [
+                    "MWG.VN",
+                    "Consumer",
+                    "Demand recovery and store productivity",
+                  ],
+                ]
+              : [
+                  [
+                    "SPY",
+                    "US equity core",
+                    "Broad exposure and lower single-name risk",
+                  ],
+                  [
+                    "QQQ",
+                    "Growth-heavy core",
+                    "Tech concentration and valuation",
+                  ],
+                  [
+                    "^VNINDEX",
+                    "Vietnam market lens",
+                    "Macro beta and domestic cycle",
+                  ],
+                  [
+                    "AAPL",
+                    "Single-stock benchmark",
+                    "Quality franchise vs concentration risk",
+                  ],
+                ];
+
+    const watchlistTable = buildCopilotMarkdownTable(
+      input.language === "vi"
+        ? ["Ma", "Vai tro", "Diem can theo doi"]
+        : ["Symbol", "Role", "What to track"],
+      watchlistRows,
+    );
+
+    return {
+      reply:
+        input.language === "vi"
+          ? `Toi da tao mot watchlist mau theo chu de ${watchlistTheme === "banking" ? "ngan hang" : watchlistTheme === "technology" ? "cong nghe" : watchlistTheme === "dividend" ? "co tuc" : watchlistTheme === "vietnam" ? "co phieu Viet Nam" : "cot loi"}. Day la danh sach de theo doi va sang loc, khong phai khuyen nghi mua ban.\n\n${watchlistTable}`
+          : `I built a starter ${watchlistTheme} watchlist. Treat it as a tracking and screening list, not an automatic buy list.\n\n${watchlistTable}`,
+      topic: "stock-watchlist",
+      suggestedActions:
+        input.language === "vi"
+          ? [
+              "Giu watchlist o muc 5-8 ma de de theo doi.",
+              "Sang loc tiep theo tang truong, dinh gia, no vay va bien loi nhuan.",
+              "Neu muon, toi co the rut gon watchlist theo phong thu, tang truong, hoac co tuc.",
+            ]
+          : [
+              "Keep the watchlist around 5-8 names so it stays actionable.",
+              "Refine it by growth, valuation, debt, and margin quality.",
+              "If you want, I can narrow the list for defensive, growth, or dividend style.",
+            ],
+      suggestedDepositAmount: null,
+      riskLevel: "medium",
+      confidence: 0.79,
+      followUpQuestion: localizeCopilotText(
+        input.language,
+        "Ban muon toi rut gon watchlist nay theo tieu chi nao: tang truong, re hon, hay phong thu?",
+        "How do you want me to refine this watchlist: growth, cheaper valuation, or more defensive names?",
+      ),
+    };
+  }
+
+  if (asksCompare || mentionedSymbols.length >= 2) {
+    const compareNames =
+      mentionedLabels.length >= 2 ? mentionedLabels.join(" vs ") : focusLabel;
+    const comparisonTable = buildCopilotMarkdownTable(
+      input.language === "vi"
+        ? ["Goc nhin", "Co phieu don le", "Chi so / ETF rong"]
+        : ["Lens", "Single stock", "Broad index / ETF"],
+      [
+        input.language === "vi"
+          ? [
+              "Rui ro",
+              "Cao hon, phu thuoc mot doanh nghiep",
+              "Thap hon nho da dang hoa",
+            ]
+          : [
+              "Risk",
+              "Higher, tied to one company",
+              "Lower through diversification",
+            ],
+        input.language === "vi"
+          ? [
+              "Loi nhuan ky vong",
+              "Co the vuot troi neu chon dung",
+              "On dinh hon, kho vuot troi lon",
+            ]
+          : [
+              "Expected return",
+              "Can outperform if chosen well",
+              "More stable, harder to dramatically outperform",
+            ],
+        input.language === "vi"
+          ? ["Bien dong", "Manh hon", "Thuong mem hon"]
+          : ["Volatility", "Usually sharper", "Usually smoother"],
+        input.language === "vi"
+          ? [
+              "Cong viec can lam",
+              "Can theo doi ket qua kinh doanh va dinh gia",
+              "Chu yeu theo doi phan bo va ky luat giai ngan",
+            ]
+          : [
+              "Work required",
+              "Need earnings and valuation tracking",
+              "Mostly allocation and discipline tracking",
+            ],
+      ],
+    );
+
+    return {
+      reply:
+        input.language === "vi"
+          ? `Neu ban dang so sanh ${compareNames}, khung nhin huu ich nhat van la: muc do tap trung, do ben loi nhuan, dinh gia, va rui ro drawdown. Voi nha dau tu ca nhan, diem khac nhau lon nhat thuong den tu do da dang hoa va kha nang chiu bien dong.\n\n${comparisonTable}`
+          : `If you are comparing ${compareNames}, the most useful lens is concentration, earnings durability, valuation, and drawdown risk. For most individual investors, the biggest difference still comes from diversification and tolerance for volatility.\n\n${comparisonTable}`,
+      topic: "stock-comparison-framework",
+      suggestedActions:
+        input.language === "vi"
+          ? [
+              "Neu ban moi bat dau, uu tien mot lop tai san rong truoc khi tang ty trong co phieu don le.",
+              "So sanh co phieu theo cung mot nganh va cung mot chu ky kinh doanh.",
+              "Dung muc cat lo va kich thuoc vi the phu hop voi muc chiu rui ro.",
+            ]
+          : [
+              "If you are early, build a broad core allocation before sizing single-stock bets.",
+              "Compare stocks against peers in the same sector and business cycle.",
+              "Set position size and downside rules before entering concentrated trades.",
+            ],
+      suggestedDepositAmount: null,
+      riskLevel: "medium",
+      confidence: 0.82,
+      followUpQuestion: localizeCopilotText(
+        input.language,
+        "Ban muon toi so sanh tiep theo gi: co phieu My va VN, co phieu va ETF, hay co phieu tang truong va co tuc?",
+        "What do you want to compare next: US vs Vietnam stocks, stock vs ETF, or growth vs dividend style?",
+      ),
+    };
+  }
+
+  const checklistTable = buildCopilotMarkdownTable(
+    input.language === "vi"
+      ? ["Chi so", "Cach doc nhanh", "Y nghia"]
+      : ["Metric", "Quick read", "Why it matters"],
+    [
+      input.language === "vi"
+        ? [
+            "Tang truong doanh thu",
+            "So voi cung ky va trung binh 2-3 nam",
+            "Cho biet doanh nghiep con mo rong hay khong",
+          ]
+        : [
+            "Revenue growth",
+            "Compare YoY and vs 2-3 year average",
+            "Shows whether the business is still expanding",
+          ],
+      input.language === "vi"
+        ? [
+            "Bien loi nhuan",
+            "On dinh, mo rong hay co lai/giam",
+            "Cho thay chat luong tang truong",
+          ]
+        : [
+            "Margin trend",
+            "Stable, expanding, or compressing",
+            "Signals quality of growth",
+          ],
+      input.language === "vi"
+        ? [
+            "P/E hoac dinh gia",
+            "So voi lich su va peers",
+            "Cho biet ky vong da bi day len den dau",
+          ]
+        : [
+            "P/E or valuation",
+            "Compare against history and peers",
+            "Shows how much optimism is already priced in",
+          ],
+      input.language === "vi"
+        ? [
+            "No vay va dong tien",
+            "No rong, FCF, kha nang tra lai",
+            "Giup do suc ben khi chu ky xau di",
+          ]
+        : [
+            "Debt and cash flow",
+            "Net debt, FCF, interest coverage",
+            "Helps judge resilience in weaker cycles",
+          ],
+      input.language === "vi"
+        ? [
+            "Rui ro tap trung",
+            "Ty trong 1 ma, 1 nganh, 1 chu de",
+            "Tranh danh muc nghieng qua muc",
+          ]
+        : [
+            "Concentration risk",
+            "Weight in one stock, sector, or theme",
+            "Prevents accidental overexposure",
+          ],
+    ],
+  );
+
+  return {
+    reply:
+      input.language === "vi"
+        ? `Toi co the ho tro tra loi nhieu cau hoi chung khoan hon theo dang khung phan tich, ngay ca khi khong co quote realtime cho ${focusLabel}. Khi xem mot co phieu hay chi so, toi uu tien 5 nhom chi so duoi day de tranh mua theo cam tinh.\n\n${checklistTable}`
+        : `I can handle broader stock-market questions with an analysis framework even when a live quote is not the main need for ${focusLabel}. When reviewing a stock or index, I would start with the five checkpoints below so the discussion stays disciplined.\n\n${checklistTable}`,
+    topic: asksAllocation
+      ? "portfolio-allocation-framework"
+      : asksValuation
+        ? "stock-valuation-framework"
+        : "stock-analysis-framework",
+    suggestedActions:
+      input.language === "vi"
+        ? [
+            "Hoi toi phan tich mot ticker cu the theo khung doanh thu, bien loi nhuan, dinh gia, no vay va rui ro.",
+            "Hoi cach phan bo giua ETF rong va co phieu don le theo muc chiu rui ro.",
+            "Hoi toi lap watchlist co phieu My hoac VN theo tieu chi cua ban.",
+          ]
+        : [
+            "Ask me to review a specific ticker using revenue, margin, valuation, debt, and risk.",
+            "Ask for an allocation split between broad ETFs and single stocks based on your risk tolerance.",
+            "Ask me to build a US or Vietnam stock watchlist around your criteria.",
+          ],
+    suggestedDepositAmount: null,
+    riskLevel: asksAllocation ? "medium" : "low",
+    confidence: 0.8,
+    followUpQuestion: localizeCopilotText(
+      input.language,
+      "Ban muon toi ap dung khung nay cho ticker nao, hay muon mot watchlist theo nganh?",
+      "Which ticker do you want this framework applied to, or do you want a sector-based watchlist?",
+    ),
+  };
+};
+
+const buildHeuristicScamProtectionResponse = (input: {
+  latestMessage: string;
+  language: CopilotLanguage;
+}): CopilotResponsePayload | null => {
+  const latest = normalizeCopilotText(input.latestMessage);
+  const matchesScamSignals =
+    /\b(otp|ma otp|verification code|ma xac minh|faceid|sinh trac|safe account|tai khoan an toan|security team|support team|nhan vien ngan hang|bank staff|refund|hoan tien|customs|hai quan|tax|thue|penalty|phat|unlock|mo khoa|broker|forex|crypto signal|guaranteed return|bao loi nhuan|remote access|anydesk|teamviewer|screen share|chia se man hinh|chuyen ngay|urgent|gap)\b/.test(
+      latest,
+    );
+
+  if (!matchesScamSignals) {
+    return null;
+  }
+
+  const riskTable = buildCopilotMarkdownTable(
+    input.language === "vi"
+      ? ["Dau hieu", "Tai sao nguy hiem"]
+      : ["Signal", "Why it is dangerous"],
+    [
+      input.language === "vi"
+        ? [
+            "Yeu cau OTP / FaceID",
+            "Khong ai hop le can ban doc ma OTP hoac quet sinh trac de 'ho tro'",
+          ]
+        : [
+            "Requests for OTP / FaceID",
+            "No legitimate helper needs your OTP or biometric action to 'assist' you",
+          ],
+      input.language === "vi"
+        ? [
+            "Chuyen tien vao 'tai khoan an toan'",
+            "Day la kieu danh cap pho bien de day tien ra khoi tai khoan cua ban",
+          ]
+        : [
+            "Transfer to a 'safe account'",
+            "This is a common theft script used to move money out of your control",
+          ],
+      input.language === "vi"
+        ? [
+            "Ap luc gap, de doa, phi mo khoa / hoan tien",
+            "Lua dao thuong ep ban ra quyet dinh truoc khi kip xac minh",
+          ]
+        : [
+            "Urgency, threats, unlock/refund fees",
+            "Scammers pressure you before you have time to verify",
+          ],
+      input.language === "vi"
+        ? [
+            "Cai app dieu khien tu xa / chia se man hinh",
+            "Co the bi chiem quyen truy cap va lo ma xac thuc",
+          ]
+        : [
+            "Remote-access app / screen sharing",
+            "Can expose account access and verification codes",
+          ],
+    ],
+  );
+
+  return {
+    reply:
+      input.language === "vi"
+        ? `Tin nhan nay co dau hieu lua dao hoac chiem doat tai khoan. Dung chuyen tien, dung doc OTP, dung quet FaceID, va dung cai app dieu khien tu xa cho nguoi la ngay lap tuc.\n\n${riskTable}`
+        : `This message shows signs of a scam or account-takeover attempt. Do not send money, do not read any OTP aloud, do not complete FaceID for someone else, and do not install remote-access software.\n\n${riskTable}`,
+    topic: "scam-protection",
+    suggestedActions:
+      input.language === "vi"
+        ? [
+            "Ngat lien lac voi nguoi dang thuc giuc ban va tu goi lai qua kenh chinh thuc cua ngan hang / vi.",
+            "Khong bam link, khong cai app la, khong chia se man hinh.",
+            "Neu da lo OTP hoac da chuyen tien, khoa truy cap, doi mat khau, va lien he ho tro chinh thuc ngay.",
+            "Neu co dau hieu chiem tai khoan, doi mat khau email truoc, sau do doi mat khau vi va ket thuc cac phien dang nhap.",
+          ]
+        : [
+            "Break contact with the caller and call the bank or wallet provider back through an official channel.",
+            "Do not open links, install unknown apps, or share your screen.",
+            "If you already exposed an OTP or sent money, lock access, change passwords, and contact official support immediately.",
+            "If takeover is possible, secure your email first, then your wallet password and active sessions.",
+          ],
+    suggestedDepositAmount: null,
+    riskLevel: "high",
+    confidence: 0.94,
+    followUpQuestion: localizeCopilotText(
+      input.language,
+      "Ban muon toi kiem tra nhanh tinh huong nay theo checklist anti-scam 30 giay khong?",
+      "Do you want me to walk through a 30-second anti-scam checklist for this situation?",
+    ),
+  };
+};
+
 const buildHeuristicCopilotResponse = (input: {
   currentBalance: number;
   currency: string;
@@ -2951,6 +3593,15 @@ const buildHeuristicCopilotResponse = (input: {
 }): CopilotResponsePayload => {
   const language = detectCopilotLanguage(input.latestMessage);
   const latest = normalizeCopilotText(input.latestMessage);
+  const marketIntent = detectMarketIntent(input.latestMessage);
+  const marketIntents = collectMarketIntents(input.latestMessage);
+  const scamProtectionResponse = buildHeuristicScamProtectionResponse({
+    latestMessage: input.latestMessage,
+    language,
+  });
+  if (scamProtectionResponse) {
+    return scamProtectionResponse;
+  }
   const income = Math.max(0, Number(input.monthlyIncome || 0));
   const expenses = Math.max(0, Number(input.monthlyExpenses || 0));
   const balance = Math.max(0, Number(input.currentBalance || 0));
@@ -3104,6 +3755,16 @@ const buildHeuristicCopilotResponse = (input: {
       latest,
     )
   ) {
+    const stockEducationResponse = buildHeuristicStockEducationResponse({
+      latestMessage: input.latestMessage,
+      language,
+      intent: marketIntent,
+      intents: marketIntents,
+    });
+    if (stockEducationResponse) {
+      return stockEducationResponse;
+    }
+
     return {
       reply: localizeCopilotText(
         language,
@@ -3662,7 +4323,7 @@ const FACE_ID_STEP_LABELS: Record<FaceIdStep, string> = {
 };
 
 const buildFaceIdChallenge = () => {
-  const steps: FaceIdStep[] = ["center"];
+  const steps: FaceIdStep[] = ["center", "move_closer"];
   const issuedAt = Date.now();
   const payload: FaceIdChallengePayload = {
     kind: "faceid_v1",
@@ -4914,6 +5575,12 @@ const serializeCard = (card: StoredCard) => ({
   createdAt: card.createdAt,
   updatedAt: card.updatedAt,
 });
+
+const formatCardNumberGroups = (digits: string) =>
+  digits
+    .replace(/\D/g, "")
+    .replace(/(.{4})/g, "$1 ")
+    .trim();
 
 const toPositiveAmount = (value: unknown) => {
   const parsed = typeof value === "number" ? value : Number(value);
@@ -7252,6 +7919,7 @@ app.post("/cards", requireAuth, async (req, res) => {
     holder?: unknown;
     expiryMonth?: unknown;
     expiryYear?: unknown;
+    cvv?: unknown;
   };
   const type =
     body.type === "Mastercard" ||
@@ -7268,6 +7936,7 @@ app.post("/cards", requireAuth, async (req, res) => {
     typeof body.expiryMonth === "string" ? body.expiryMonth.trim() : "";
   const expiryYear =
     typeof body.expiryYear === "string" ? body.expiryYear.trim() : "";
+  const cvv = typeof body.cvv === "string" ? body.cvv.replace(/\D/g, "") : "";
 
   if (
     !type ||
@@ -7275,7 +7944,8 @@ app.post("/cards", requireAuth, async (req, res) => {
     !holder ||
     !/^\d{12,19}$/.test(number) ||
     !/^(0[1-9]|1[0-2])$/.test(expiryMonth) ||
-    !/^\d{2,4}$/.test(expiryYear)
+    !/^\d{2,4}$/.test(expiryYear) ||
+    (cvv.length > 0 && !/^\d{3,4}$/.test(cvv))
   ) {
     return res.status(400).json({ error: "Invalid card payload" });
   }
@@ -7297,6 +7967,7 @@ app.post("/cards", requireAuth, async (req, res) => {
         bank,
         holder,
         rawCardNumber: number,
+        rawCvv: cvv,
         expiryMonth,
         expiryYear: expiryYear.length === 2 ? `20${expiryYear}` : expiryYear,
         isPrimary: cards.length === 0,
@@ -7452,6 +8123,195 @@ app.delete("/cards/:id", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("Failed to delete card", err);
     return res.status(500).json({ error: "Internal error" });
+  }
+});
+
+app.post("/card/details/otp/send", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  try {
+    const userRepository = createUserRepository();
+    const userDoc = await userRepository.findValidatedById(userId);
+    if (!userDoc) return res.status(404).json({ error: "User not found" });
+
+    const otpChallenge = await createEmailOtpChallenge({
+      userId,
+      purpose: "CARD_DETAILS",
+      destination: userDoc.email,
+      ttlMinutes: CARD_DETAILS_OTP_TTL_MINUTES,
+      maxAttempts: OTP_MAX_ATTEMPTS,
+      metadata: {
+        action: "CARD_DETAILS_VIEW",
+      },
+    });
+
+    runAsyncSideEffect("sendCardDetailsOtpEmail", () =>
+      sendCardDetailsOtpEmail({
+        to: userDoc.email,
+        recipientName: getRecipientName(userDoc),
+        otpCode: otpChallenge.otpCode,
+        expiresInMinutes: CARD_DETAILS_OTP_TTL_MINUTES,
+      }),
+    );
+
+    await logAuditEvent({
+      actor: req.user?.email,
+      userId,
+      action: "CARD_DETAILS_OTP_SENT",
+      details: {
+        challengeId: otpChallenge.challengeId,
+      },
+      ipAddress: getRequestIp(req),
+    });
+
+    return res.json({
+      status: "ok",
+      challengeId: otpChallenge.challengeId,
+      expiresAt: otpChallenge.expiresAt.toISOString(),
+      destination: maskEmail(userDoc.email),
+      retryAfterSeconds: otpChallenge.retryAfterSeconds,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === "OTP_COOLDOWN_ACTIVE") {
+      return res.status(429).json({
+        error: "OTP recently sent. Please wait before requesting another code.",
+        retryAfterSeconds:
+          "retryAfterSeconds" in err
+            ? (err as { retryAfterSeconds: number }).retryAfterSeconds
+            : 60,
+      });
+    }
+    console.error("Failed to send card details OTP", err);
+    return res.status(500).json({ error: "Failed to send card details OTP" });
+  }
+});
+
+app.post("/card/details/otp/verify", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const body = req.body as {
+    challengeId?: unknown;
+    otp?: unknown;
+  };
+  const challengeId =
+    typeof body.challengeId === "string" ? body.challengeId.trim() : "";
+  const otp = typeof body.otp === "string" ? body.otp.trim() : "";
+
+  if (!challengeId || !/^\d{6}$/.test(otp)) {
+    return res.status(400).json({ error: "Invalid OTP payload" });
+  }
+
+  try {
+    await verifyEmailOtpChallenge({
+      userId,
+      purpose: "CARD_DETAILS",
+      challengeId,
+      otp,
+    });
+    await consumeOtpChallenge(challengeId);
+
+    const userRepository = createUserRepository();
+    const userDoc = await userRepository.findValidatedById(userId);
+    if (!userDoc) return res.status(404).json({ error: "User not found" });
+
+    const cards = getStoredCards(userDoc.metadata);
+    const primaryCard = cards.find((card) => card.isPrimary) ?? cards[0];
+    const wallet = await getOrCreateWalletByUserId(userId);
+    const walletMetadata =
+      wallet.metadata && typeof wallet.metadata === "object"
+        ? (wallet.metadata as Record<string, unknown>)
+        : {};
+    const walletAccountNumber =
+      typeof walletMetadata.accountNumber === "string"
+        ? walletMetadata.accountNumber
+        : "";
+
+    const accountSeed = `${userId}:${walletAccountNumber || wallet.id}`;
+    const fullCardDigits =
+      (primaryCard && getStoredCardFullNumber(primaryCard)) ||
+      deriveVirtualCardNumber(accountSeed);
+    const cvv =
+      (primaryCard && getStoredCardCvv(primaryCard)) ||
+      deriveVirtualCardCvv(accountSeed);
+    const cardType = primaryCard
+      ? `${primaryCard.type}${primaryCard.bank ? ` - ${primaryCard.bank}` : ""}`
+      : "Virtual Debit";
+    const expiryYear =
+      primaryCard?.expiryYear || String(new Date().getFullYear() + 3);
+    const expiryMonth = primaryCard?.expiryMonth || "12";
+    const createdAt = primaryCard?.createdAt || wallet.createdAt.toISOString();
+    const updatedAt = primaryCard?.updatedAt || wallet.updatedAt.toISOString();
+
+    await logAuditEvent({
+      actor: req.user?.email,
+      userId,
+      action: "CARD_DETAILS_OTP_VERIFIED",
+      details: {
+        challengeId,
+      },
+      ipAddress: getRequestIp(req),
+    });
+
+    return res.json({
+      status: "ok",
+      verified: true,
+      cardDetails: {
+        holder: primaryCard?.holder || userDoc.fullName || userDoc.email,
+        type: cardType,
+        number: formatCardNumberGroups(fullCardDigits),
+        expiry: `${expiryMonth}/${expiryYear.slice(-2)}`,
+        cvv,
+        status:
+          primaryCard?.status === "FROZEN"
+            ? "Frozen"
+            : primaryCard
+              ? "Active"
+              : "Virtual",
+        issuedAt: new Date(createdAt).toLocaleDateString("en-US", {
+          month: "short",
+          day: "2-digit",
+          year: "numeric",
+        }),
+        linkedAccount: walletAccountNumber
+          ? `Wallet ${walletAccountNumber}`
+          : `Wallet ${wallet.id}`,
+        dailyLimit: "Policy based",
+        contactless: primaryCard ? "Enabled" : "Virtual",
+        onlinePayment: primaryCard ? "Enabled" : "Virtual",
+        lastActivity: new Date(updatedAt).toLocaleString("en-US"),
+      },
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === "OTP_CHALLENGE_NOT_FOUND") {
+      return res.status(404).json({ error: "OTP challenge not found" });
+    }
+    if (err instanceof Error && err.message === "OTP_CHALLENGE_ALREADY_USED") {
+      return res.status(400).json({ error: "OTP challenge already used" });
+    }
+    if (err instanceof Error && err.message === "OTP_EXPIRED") {
+      return res.status(400).json({ error: "OTP has expired" });
+    }
+    if (err instanceof Error && err.message === "OTP_TOO_MANY_ATTEMPTS") {
+      return res.status(429).json({ error: "Too many invalid OTP attempts" });
+    }
+    if (err instanceof Error && err.message === "OTP_INCORRECT") {
+      const remainingAttempts =
+        "remainingAttempts" in err
+          ? (err as { remainingAttempts?: number }).remainingAttempts
+          : undefined;
+      return res.status(400).json({
+        error:
+          typeof remainingAttempts === "number" && remainingAttempts > 0
+            ? `Incorrect OTP. ${remainingAttempts} attempt${
+                remainingAttempts === 1 ? "" : "s"
+              } remaining.`
+            : "Incorrect OTP",
+      });
+    }
+    console.error("Failed to verify card details OTP", err);
+    return res.status(500).json({ error: "Failed to verify card details OTP" });
   }
 });
 

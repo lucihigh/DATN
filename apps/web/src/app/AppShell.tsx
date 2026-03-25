@@ -3,6 +3,7 @@
   lazy,
   startTransition,
   useEffect,
+  useLayoutEffect,
   useCallback,
   useDeferredValue,
   useMemo,
@@ -288,7 +289,7 @@ const dashboardQuickActions = [
     id: "transfer",
     title: "Internal Transfer",
     detail: "Move funds between accounts",
-    icon: "GO",
+    icon: "TX",
   },
 ];
 
@@ -340,6 +341,7 @@ type TransactionReceipt = {
   executedAt: string;
   fromAccount: string;
   toAccount: string;
+  recipientName?: string;
   amountUsd: string;
   feeUsd: string;
   note: string;
@@ -457,6 +459,21 @@ type CopilotInsight = {
 };
 
 const IPV4_ADDRESS_PATTERN = /\b(?:\d{1,3}\.){3}\d{1,3}\b/;
+const TRANSFER_HARD_BLOCK_NOTE_PATTERNS = [
+  /\b(otp|ma otp|verification code|ma xac minh|faceid|sinh trac)\b/i,
+  /\b(safe account|tai khoan an toan|security team|support team)\b/i,
+  /\b(anydesk|teamviewer|remote access|screen share|chia se man hinh)\b/i,
+];
+const TRANSFER_BLOCKED_NOTE_PATTERNS = [
+  /\b(refund|hoan tien|unlock|mo khoa|verification fee|phi xac minh)\b/i,
+  /\b(customs|hai quan|tax|thue|penalty|phat)\b/i,
+];
+const TRANSFER_WARNING_NOTE_PATTERNS = [
+  /\b(urgent|gap|immediately|right now|ngay lap tuc|khan cap)\b/i,
+  /\b(invest|investment|dau tu|broker|forex|crypto signal|guaranteed return|bao loi nhuan)\b/i,
+];
+const TRANSFER_GENERIC_NOTE_PATTERN =
+  /^(transfer|payment|test|chuyen tien|ck|thanh toan|gui tien)$/i;
 
 const normalizeNotificationCopy = (value?: string) =>
   (value || "").replace(/\s+/g, " ").trim();
@@ -465,6 +482,29 @@ const truncateNotificationCopy = (value: string, maxLength: number) =>
   value.length <= maxLength
     ? value
     : `${value.slice(0, maxLength - 3).trimEnd()}...`;
+
+const getNotificationDayLabel = (createdAt: string) => {
+  const date = new Date(createdAt);
+  if (Number.isNaN(date.getTime())) return "Recent";
+
+  const dayStart = new Date(date);
+  dayStart.setHours(0, 0, 0, 0);
+
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+
+  const yesterdayStart = new Date(todayStart);
+  yesterdayStart.setDate(todayStart.getDate() - 1);
+
+  if (dayStart.getTime() === todayStart.getTime()) return "Today";
+  if (dayStart.getTime() === yesterdayStart.getTime()) return "Yesterday";
+
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(date);
+};
 
 const summarizeUserAgent = (value?: string) => {
   const userAgent = normalizeNotificationCopy(value);
@@ -545,6 +585,24 @@ type AiMonitoringSummary = {
   modelSource?: string | null;
   modelVersion?: string | null;
   requestKey?: string | null;
+  modelRiskLevel?: string | null;
+  ruleRiskLevel?: string | null;
+  ruleScore?: number | null;
+  ruleHitCount?: number | null;
+  ruleHits?: Array<{
+    ruleId?: string;
+    title?: string;
+    reason?: string;
+    userWarning?: string;
+    riskLevel?: string;
+  }>;
+  warning?: {
+    title?: string;
+    message?: string;
+    doNot?: string[];
+    mustDo?: string[];
+    promptTemplateId?: string;
+  } | null;
 };
 
 function Ring({ value }: { value: number }) {
@@ -784,10 +842,29 @@ function DashboardView() {
   const [showWalletId, setShowWalletId] = useState(false);
   const [detailsModalOpen, setDetailsModalOpen] = useState(false);
   const [detailsStep, setDetailsStep] = useState<"otp" | "details">("otp");
-  const [otpCode, setOtpCode] = useState("");
   const [otpInput, setOtpInput] = useState("");
   const [otpError, setOtpError] = useState("");
-  const [otpAttempts, setOtpAttempts] = useState(0);
+  const [cardOtpChallengeId, setCardOtpChallengeId] = useState("");
+  const [cardOtpDestination, setCardOtpDestination] = useState("");
+  const [cardOtpExpiresAt, setCardOtpExpiresAt] = useState("");
+  const [cardOtpResendAt, setCardOtpResendAt] = useState(0);
+  const [cardOtpClock, setCardOtpClock] = useState(Date.now());
+  const [cardOtpSending, setCardOtpSending] = useState(false);
+  const [cardOtpVerifying, setCardOtpVerifying] = useState(false);
+  const [verifiedCardDetails, setVerifiedCardDetails] = useState<{
+    holder: string;
+    number: string;
+    type: string;
+    expiry: string;
+    cvv: string;
+    status: string;
+    issuedAt: string;
+    linkedAccount: string;
+    dailyLimit: string;
+    contactless: string;
+    onlinePayment: string;
+    lastActivity: string;
+  } | null>(null);
   const [transferOpen, setTransferOpen] = useState(false);
   const [copilotOpen, setCopilotOpen] = useState(false);
   const [copilotBusy, setCopilotBusy] = useState(false);
@@ -796,7 +873,7 @@ function DashboardView() {
     {
       role: "assistant",
       content:
-        "I can help with budget, spending, savings targets, and live FX, gold, crypto, and stock quotes. Ask me what you want to improve.",
+        "I can help with budget, spending, savings targets, market questions, and scam protection. I can flag risky requests like OTP sharing, 'safe account' transfers, fake refunds, and high-pressure investment scams.",
     },
   ]);
   const [copilotInsight, setCopilotInsight] = useState<CopilotInsight>({
@@ -866,6 +943,7 @@ function DashboardView() {
   const [transactionHistory, setTransactionHistory] = useState<
     TransactionHistoryItem[]
   >([]);
+  const [dashboardCards, setDashboardCards] = useState<CardCenterCard[]>([]);
   const [securityAlerts, setSecurityAlerts] = useState<SecurityAlertItem[]>(
     dashboardSecurityAlerts,
   );
@@ -884,19 +962,87 @@ function DashboardView() {
   const [selectedTransactionReceipt, setSelectedTransactionReceipt] =
     useState<TransactionReceipt | null>(null);
 
+  const primaryDashboardCard =
+    dashboardCards.find((card) => card.isPrimary) || dashboardCards[0] || null;
+  const walletDigitsForCard = (wallet?.accountNumber || wallet?.id || "")
+    .replace(/\D/g, "")
+    .padStart(12, "0");
+  const virtualCardNumber = `4${walletDigitsForCard.repeat(4).slice(0, 15)}`
+    .replace(/(.{4})/g, "$1 ")
+    .trim();
+  const virtualCardCvv = String(
+    ((walletDigitsForCard
+      .split("")
+      .map((digit) => Number(digit))
+      .reduce((sum, value) => sum + value, 0) %
+      900) +
+      100) %
+      1000 || 382,
+  ).padStart(3, "0");
   const cardProfile = {
-    holder: "Alex Thompson",
-    number: "1234 5678 9012 5678",
-    type: "Visa Signature",
-    expiry: "09/29",
-    cvv: "***",
-    status: "Active",
-    issuedAt: "San Francisco Main Branch",
-    linkedAccount: "Checking **** 8841",
-    dailyLimit: "$10,000.00",
-    contactless: "Enabled",
-    onlinePayment: "Enabled",
-    lastActivity: "Mar 05, 2026 / 09:42 AM",
+    holder:
+      verifiedCardDetails?.holder ||
+      primaryDashboardCard?.holder ||
+      user?.name ||
+      "FPIPay User",
+    number:
+      verifiedCardDetails?.number ||
+      primaryDashboardCard?.number ||
+      virtualCardNumber,
+    type:
+      verifiedCardDetails?.type ||
+      (primaryDashboardCard
+        ? `${primaryDashboardCard.type}${primaryDashboardCard.bank ? ` - ${primaryDashboardCard.bank}` : ""}`
+        : "Virtual Debit"),
+    expiry:
+      verifiedCardDetails?.expiry ||
+      (primaryDashboardCard
+        ? `${primaryDashboardCard.expiryMonth}/${primaryDashboardCard.expiryYear.slice(-2)}`
+        : "12/29"),
+    cvv: verifiedCardDetails?.cvv || virtualCardCvv,
+    status:
+      verifiedCardDetails?.status ||
+      (primaryDashboardCard?.status === "FROZEN"
+        ? "Frozen"
+        : primaryDashboardCard
+          ? "Active"
+          : "Virtual"),
+    issuedAt: verifiedCardDetails?.issuedAt
+      ? verifiedCardDetails.issuedAt
+      : primaryDashboardCard
+        ? new Date(primaryDashboardCard.createdAt).toLocaleString("en-US", {
+            month: "short",
+            day: "2-digit",
+            year: "numeric",
+          })
+        : new Date().toLocaleDateString("en-US", {
+            month: "short",
+            day: "2-digit",
+            year: "numeric",
+          }),
+    linkedAccount:
+      verifiedCardDetails?.linkedAccount ||
+      (wallet?.accountNumber ? `Wallet ${wallet.accountNumber}` : "Wallet"),
+    dailyLimit:
+      verifiedCardDetails?.dailyLimit ||
+      (sessionSecurity.restrictLargeTransfers &&
+      typeof sessionSecurity.maxTransferAmount === "number"
+        ? `$${sessionSecurity.maxTransferAmount.toLocaleString("en-US", {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          })}`
+        : "Policy based"),
+    contactless:
+      verifiedCardDetails?.contactless ||
+      (primaryDashboardCard ? "Enabled" : "Virtual"),
+    onlinePayment:
+      verifiedCardDetails?.onlinePayment ||
+      (primaryDashboardCard ? "Enabled" : "Virtual"),
+    lastActivity:
+      verifiedCardDetails?.lastActivity ||
+      (recentTransactions[0]
+        ? new Date(recentTransactions[0].createdAt).toLocaleString("en-US")
+        : "No recent activity"),
   };
 
   const walletRaw = wallet?.accountNumber || wallet?.id || "";
@@ -934,10 +1080,109 @@ function DashboardView() {
     transferAmountNumber > 0 &&
     !isInsufficientBalance &&
     !exceedsRestrictedTransferLimit;
-  const isTransferHardBlocked = transferAdvisory?.severity === "blocked";
+  const localTransferPreflightAdvisory =
+    useMemo<TransferSafetyAdvisory | null>(() => {
+      if (
+        !wallet ||
+        !Number.isFinite(transferAmountNumber) ||
+        transferAmountNumber <= 0
+      ) {
+        return null;
+      }
+
+      const note = transferContent.trim();
+      const balance = Math.max(Number(wallet.balance) || 0, 1);
+      const ratio = transferAmountNumber / balance;
+      const remainingBalance = Math.max(balance - transferAmountNumber, 0);
+      const recipientLabel =
+        transferReceiverName.trim() ||
+        (transferAccount
+          ? `account ending ${transferAccount.slice(-4)}`
+          : "this recipient");
+
+      const hardBlockedReasons = TRANSFER_HARD_BLOCK_NOTE_PATTERNS.filter(
+        (pattern) => pattern.test(note),
+      ).map(
+        () =>
+          "Transfer content contains phrases strongly associated with OTP theft, fake support, or remote-access scams.",
+      );
+
+      if (hardBlockedReasons.length > 0) {
+        return {
+          requestKey: null,
+          severity: "blocked",
+          title: "High-risk transfer wording detected",
+          message: `This payment note looks like a scam script targeting ${recipientLabel}. FPIPay recommends stopping and verifying through an official channel before sending any money.`,
+          confirmationLabel: "Blocked for safety review",
+          reasons: hardBlockedReasons,
+          requiresAcknowledgement: false,
+          transferRatio: ratio,
+          remainingBalance,
+          remainingBalanceRatio: remainingBalance / balance,
+          amount: transferAmountNumber,
+          currency: wallet.currency || "USD",
+          blockedUntil: null,
+        };
+      }
+
+      const warningReasons: string[] = [];
+      if (
+        TRANSFER_BLOCKED_NOTE_PATTERNS.some((pattern) => pattern.test(note))
+      ) {
+        warningReasons.push(
+          "Transfer content includes refund, fee, tax, or penalty wording that often appears in scam instructions.",
+        );
+      }
+      if (
+        TRANSFER_WARNING_NOTE_PATTERNS.some((pattern) => pattern.test(note))
+      ) {
+        warningReasons.push(
+          "Transfer content includes urgency, investment, or guaranteed-return language often seen in scams.",
+        );
+      }
+      if (
+        note &&
+        TRANSFER_GENERIC_NOTE_PATTERN.test(note) &&
+        transferAmountNumber >= 5000
+      ) {
+        warningReasons.push(
+          "Payment note is too generic for a meaningful transfer and may be hard to verify later.",
+        );
+      }
+
+      if (warningReasons.length === 0) {
+        return null;
+      }
+
+      return {
+        requestKey: null,
+        severity: "warning",
+        title: "Pre-transfer safety warning",
+        message: `Before sending money to ${recipientLabel}, verify the request through a trusted contact path and confirm why this payment needs this amount and note.`,
+        confirmationLabel: "Continue carefully",
+        reasons: warningReasons,
+        requiresAcknowledgement: false,
+        transferRatio: ratio,
+        remainingBalance,
+        remainingBalanceRatio: remainingBalance / balance,
+        amount: transferAmountNumber,
+        currency: wallet.currency || "USD",
+        blockedUntil: null,
+      };
+    }, [
+      transferAccount,
+      transferAmountNumber,
+      transferContent,
+      transferReceiverName,
+      wallet,
+    ]);
+  const effectiveTransferAdvisory =
+    transferAdvisory || localTransferPreflightAdvisory;
+  const isTransferHardBlocked =
+    effectiveTransferAdvisory?.severity === "blocked";
   const isTransferPreOtpWarning =
-    transferAdvisory?.severity === "blocked" ||
-    transferAdvisory?.requiresAcknowledgement === true;
+    effectiveTransferAdvisory?.severity === "blocked" ||
+    effectiveTransferAdvisory?.requiresAcknowledgement === true;
   const transferContinueLabel = transferOtpBusy
     ? isTransferPreOtpWarning && !transferAdvisoryAcknowledged
       ? "Reviewing transfer..."
@@ -945,7 +1190,7 @@ function DashboardView() {
     : isTransferHardBlocked
       ? "Blocked for safety review"
       : isTransferPreOtpWarning && !transferAdvisoryAcknowledged
-        ? transferAdvisory.confirmationLabel
+        ? effectiveTransferAdvisory.confirmationLabel
         : "Continue to OTP";
   const ownQrPayload =
     wallet?.qrPayload ||
@@ -963,13 +1208,19 @@ function DashboardView() {
     0,
     Math.ceil((transferOtpResendAt - transferOtpClock) / 1000),
   );
+  const cardOtpCooldownSeconds = Math.max(
+    0,
+    Math.ceil((cardOtpResendAt - cardOtpClock) / 1000),
+  );
   const monthlyIncomeValue = 0;
   const monthlyExpensesValue = 0;
   const copilotSuggestedPrompts = [
+    "Is this message asking for my OTP a scam?",
+    "Someone told me to move money to a safe account. What should I do?",
     "What is the USD/VND exchange rate today?",
-    "What is the gold price today?",
-    "How much is Bitcoin today?",
-    "What is AAPL stock price today?",
+    "Compare AAPL vs MSFT vs NVDA.",
+    "What should I check before buying a stock?",
+    "Build a Vietnam banking watchlist.",
   ];
   const copilotHasInsight = Boolean(
     copilotInsight.topic ||
@@ -1019,6 +1270,12 @@ function DashboardView() {
         }),
         fromAccount: tx.metadata?.fromAccount || fallbackFromAccount,
         toAccount: tx.metadata?.toAccount || fallbackToAccount,
+        recipientName:
+          tx.description && tx.description.trim().length > 0
+            ? tx.description.trim()
+            : tx.metadata?.toAccount
+              ? `Account ****${tx.metadata.toAccount.slice(-4)}`
+              : undefined,
         amountUsd: Number(tx.amount || 0).toLocaleString("en-US", {
           minimumFractionDigits: 2,
           maximumFractionDigits: 2,
@@ -1239,12 +1496,73 @@ function DashboardView() {
     (value: unknown): AiMonitoringSummary | null => {
       if (!value || typeof value !== "object") return null;
       const data = value as Record<string, unknown>;
+      const asStringList = (input: unknown) =>
+        Array.isArray(input)
+          ? input.filter((item): item is string => typeof item === "string")
+          : [];
       const score =
         typeof data.score === "number"
           ? data.score
           : typeof data.anomaly_score === "number"
             ? data.anomaly_score
             : 0;
+      const warningRaw =
+        data.warning ?? data.warning_vi ?? data.warningVi ?? null;
+      const warning =
+        warningRaw && typeof warningRaw === "object"
+          ? (() => {
+              const warningData = warningRaw as Record<string, unknown>;
+              return {
+                title:
+                  typeof warningData.title === "string"
+                    ? warningData.title
+                    : undefined,
+                message:
+                  typeof warningData.message === "string"
+                    ? warningData.message
+                    : undefined,
+                doNot: asStringList(warningData.doNot ?? warningData.do_not),
+                mustDo: asStringList(warningData.mustDo ?? warningData.must_do),
+                promptTemplateId:
+                  typeof warningData.promptTemplateId === "string"
+                    ? warningData.promptTemplateId
+                    : typeof warningData.prompt_template_id === "string"
+                      ? warningData.prompt_template_id
+                      : undefined,
+              };
+            })()
+          : null;
+      const rawRuleHits = data.ruleHits ?? data.rule_hits;
+      const ruleHits = Array.isArray(rawRuleHits)
+        ? rawRuleHits.flatMap((entry) => {
+            if (!entry || typeof entry !== "object") return [];
+            const hit = entry as Record<string, unknown>;
+            return [
+              {
+                ruleId:
+                  typeof hit.ruleId === "string"
+                    ? hit.ruleId
+                    : typeof hit.rule_id === "string"
+                      ? hit.rule_id
+                      : undefined,
+                title: typeof hit.title === "string" ? hit.title : undefined,
+                reason: typeof hit.reason === "string" ? hit.reason : undefined,
+                userWarning:
+                  typeof hit.userWarning === "string"
+                    ? hit.userWarning
+                    : typeof hit.user_warning === "string"
+                      ? hit.user_warning
+                      : undefined,
+                riskLevel:
+                  typeof hit.riskLevel === "string"
+                    ? hit.riskLevel
+                    : typeof hit.risk_level === "string"
+                      ? hit.risk_level
+                      : undefined,
+              },
+            ];
+          })
+        : [];
       return {
         score,
         riskLevel:
@@ -1253,11 +1571,7 @@ function DashboardView() {
             : typeof data.risk_level === "string"
               ? data.risk_level
               : "low",
-        reasons: Array.isArray(data.reasons)
-          ? data.reasons.filter(
-              (item): item is string => typeof item === "string",
-            )
-          : [],
+        reasons: asStringList(data.reasons),
         monitoringOnly: Boolean(
           data.monitoringOnly ?? data.monitoring_only ?? true,
         ),
@@ -1280,6 +1594,32 @@ function DashboardView() {
             : typeof data.request_key === "string"
               ? data.request_key
               : null,
+        modelRiskLevel:
+          typeof data.modelRiskLevel === "string"
+            ? data.modelRiskLevel
+            : typeof data.model_risk_level === "string"
+              ? data.model_risk_level
+              : null,
+        ruleRiskLevel:
+          typeof data.ruleRiskLevel === "string"
+            ? data.ruleRiskLevel
+            : typeof data.rule_risk_level === "string"
+              ? data.rule_risk_level
+              : null,
+        ruleScore:
+          typeof data.ruleScore === "number"
+            ? data.ruleScore
+            : typeof data.rule_score === "number"
+              ? data.rule_score
+              : null,
+        ruleHitCount:
+          typeof data.ruleHitCount === "number"
+            ? data.ruleHitCount
+            : typeof data.rule_hit_count === "number"
+              ? data.rule_hit_count
+              : null,
+        ruleHits,
+        warning,
       };
     },
     [],
@@ -1453,151 +1793,47 @@ function DashboardView() {
         (transferAccount
           ? `account ending ${transferAccount.slice(-4)}`
           : "this recipient");
-      const previousOutgoingTransfers = transactionHistory
-        .filter((item) => item.amountTone === "negative")
-        .map((item) => {
-          const fromReceipt = parseUsdLikeNumber(item.receipt?.amountUsd);
-          return fromReceipt > 0
-            ? fromReceipt
-            : Math.abs(parseUsdLikeNumber(item.amount));
-        })
-        .filter((value) => value > 0);
-      const largestPreviousTransfer = previousOutgoingTransfers.length
-        ? Math.max(...previousOutgoingTransfers)
-        : 0;
-      const averagePreviousTransfer = previousOutgoingTransfers.length
-        ? previousOutgoingTransfers.reduce((sum, value) => sum + value, 0) /
-          previousOutgoingTransfers.length
-        : 0;
-      const amountVsAverage =
-        averagePreviousTransfer > 0 ? amount / averagePreviousTransfer : null;
-      const previousTransfersToRecipient = transactionHistory.filter((item) => {
-        const receiptAccount = item.receipt?.toAccount || "";
-        const receiptLabel = item.entity.toLowerCase();
-        return (
-          (transferAccount && receiptAccount === transferAccount) ||
-          (transferReceiverName &&
-            receiptLabel.includes(transferReceiverName.toLowerCase()))
-        );
-      }).length;
-      const isNewRecipient = previousTransfersToRecipient === 0;
-      const noteIsGeneric =
-        transferContent.trim().length < 8 ||
-        /^(transfer|payment|banking|send money|test|gift|invoice)$/i.test(
-          transferContent.trim(),
-        );
-      const aiReasons: string[] = [];
-      if (isNewRecipient) {
-        aiReasons.push(
-          `${recipientLabel} does not appear in your recent completed transfer history.`,
-        );
-      }
-      if (amountVsAverage && amountVsAverage >= 3) {
-        aiReasons.push(
-          `This amount is about ${amountVsAverage.toFixed(1)}x higher than your usual outgoing transfer size.`,
-        );
-      } else if (
-        largestPreviousTransfer > 0 &&
-        amount > largestPreviousTransfer
-      ) {
-        aiReasons.push(
-          `This amount is larger than your biggest recent completed transfer.`,
-        );
-      } else if (amount >= TRANSFER_FACE_ID_THRESHOLD) {
-        aiReasons.push(
-          `This is a high-value transfer that automatically triggers stronger review.`,
-        );
-      }
-      if (noteIsGeneric && amount >= TRANSFER_FACE_ID_THRESHOLD) {
-        aiReasons.push(
-          `The transfer note is quite generic for a high-value payment, so recipient confirmation matters more.`,
-        );
-      }
-      for (const rawReason of [
+      const title =
+        advisory?.title ||
+        monitoring?.warning?.title ||
+        (tone === "blocked"
+          ? `AI paused transfer to ${recipientLabel}`
+          : tone === "warning"
+            ? "Transfer requires stronger review"
+            : tone === "safe"
+              ? "Light transfer check"
+              : "AI transfer review");
+
+      const riskText =
+        monitoring?.riskLevel?.toLowerCase() === "high"
+          ? "Risk score is high for this transfer."
+          : monitoring?.riskLevel?.toLowerCase() === "medium"
+            ? "Risk score is elevated for this transfer."
+            : "Risk score is low for this transfer.";
+      const message =
+        advisory?.message ||
+        monitoring?.warning?.message ||
+        `You are sending ${formatTransferAdvisoryAmount(amount, "USD")} to ${recipientLabel}. ${riskText}`;
+
+      const reasonPool = [
         ...(advisory?.reasons || []),
         ...(monitoring?.reasons || []),
-      ]) {
-        const cleaned = rawReason.replace(/\s+/g, " ").trim();
-        if (
-          cleaned &&
-          !aiReasons.some(
-            (reason) => reason.toLowerCase() === cleaned.toLowerCase(),
-          )
-        ) {
-          aiReasons.push(cleaned);
-        }
-        if (aiReasons.length >= 3) break;
-      }
-
-      let title = advisory?.title || "AI transfer review";
-      if (!isHighValueTransfer && tone !== "blocked") {
-        title = "AI review: low-risk transfer check";
-      }
-      if (tone === "blocked") {
-        title = `AI paused transfer to ${recipientLabel}`;
-      } else if (
-        isHighValueTransfer &&
-        isNewRecipient &&
-        (amountVsAverage
-          ? amountVsAverage >= 2
-          : amount >= TRANSFER_FACE_ID_THRESHOLD)
-      ) {
-        title = `New recipient with an unusually large amount`;
-      } else if (
-        isHighValueTransfer &&
-        amountVsAverage &&
-        amountVsAverage >= 3
-      ) {
-        title = `Amount is far above your recent transfer pattern`;
-      } else if (isHighValueTransfer && isNewRecipient) {
-        title = `First transfer to this recipient`;
-      } else if (
-        isHighValueTransfer &&
-        noteIsGeneric &&
-        amount >= TRANSFER_FACE_ID_THRESHOLD
-      ) {
-        title = `High-value transfer needs clearer recipient verification`;
-      }
-
-      const narrativeParts = [
-        `You are sending ${formatTransferAdvisoryAmount(amount, "USD")} to ${recipientLabel}.`,
+        ...(monitoring?.ruleHits || []).flatMap((hit) =>
+          [hit.userWarning, hit.reason, hit.title].filter(
+            (value): value is string =>
+              typeof value === "string" && value.trim().length > 0,
+          ),
+        ),
+        ...((monitoring?.warning?.mustDo || []).map((item) => `Do: ${item}`) ||
+          []),
+        ...((monitoring?.warning?.doNot || []).map(
+          (item) => `Do not: ${item}`,
+        ) || []),
       ];
-      if (!isHighValueTransfer) {
-        narrativeParts.push(
-          isNewRecipient
-            ? `AI sees this as a small transfer to a newer recipient and is only showing a light advisory check.`
-            : `This amount stays below the high-risk threshold, so AI is only giving a light review.`,
-        );
-      } else if (isNewRecipient) {
-        narrativeParts.push(
-          `This receiver looks new for this wallet, so AI recommends an out-of-band confirmation before you continue.`,
-        );
-      } else if (amountVsAverage && amountVsAverage >= 3) {
-        narrativeParts.push(
-          `The amount is much higher than your recent transfer pattern, which increases fraud review sensitivity.`,
-        );
-      } else if (
-        largestPreviousTransfer > 0 &&
-        amount > largestPreviousTransfer
-      ) {
-        narrativeParts.push(
-          `It is larger than your previous completed transfers, so confirm the purpose and beneficiary carefully.`,
-        );
-      } else if (noteIsGeneric && amount >= TRANSFER_FACE_ID_THRESHOLD) {
-        narrativeParts.push(
-          `The payment note is generic, so AI is asking for a clearer recipient check before OTP is sent.`,
-        );
-      } else if (monitoring?.riskLevel.toLowerCase() === "high") {
-        narrativeParts.push(
-          `AI sees multiple scam-like signals around this payment and wants a stronger review first.`,
-        );
-      } else {
-        narrativeParts.push(
-          `AI wants you to verify the receiver and amount through a trusted channel before continuing.`,
-        );
-      }
-      const message = narrativeParts.join(" ");
-      const reasons = aiReasons.slice(0, 3);
+      const reasons = reasonPool
+        .map((item) => item.replace(/\s+/g, " ").trim())
+        .filter((item, index, arr) => item && arr.indexOf(item) === index)
+        .slice(0, 4);
 
       return (
         <aside
@@ -1646,10 +1882,8 @@ function DashboardView() {
     },
     [
       formatTransferAdvisoryAmount,
-      transactionHistory,
       transferAccount,
       transferAmount,
-      transferContent,
       transferReceiverName,
       wallet?.balance,
     ],
@@ -1669,7 +1903,6 @@ function DashboardView() {
       reasons: filteredReasons,
     };
   }, [transferMonitoring]);
-  const deferredTransferAdvisory = useDeferredValue(transferAdvisory);
   const deferredTransferMonitoring = useDeferredValue(
     visibleTransferMonitoring,
   );
@@ -2675,6 +2908,35 @@ function DashboardView() {
   }, [refreshWalletSnapshot]);
 
   useEffect(() => {
+    if (!token || !user?.id) {
+      setDashboardCards([]);
+      return;
+    }
+    let cancelled = false;
+    const loadDashboardCards = async () => {
+      try {
+        const resp = await fetch(`${API_BASE}/cards`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const data = (await resp.json().catch(() => null)) as {
+          cards?: CardCenterCard[];
+        } | null;
+        if (!resp.ok || !Array.isArray(data?.cards) || cancelled) {
+          if (!cancelled) setDashboardCards([]);
+          return;
+        }
+        setDashboardCards(data.cards);
+      } catch {
+        if (!cancelled) setDashboardCards([]);
+      }
+    };
+    void loadDashboardCards();
+    return () => {
+      cancelled = true;
+    };
+  }, [token, user?.id]);
+
+  useEffect(() => {
     void refreshSecurityAlerts({ silent: true });
   }, [refreshSecurityAlerts]);
 
@@ -2728,47 +2990,146 @@ function DashboardView() {
     };
   }, [refreshSecurityAlerts, refreshWalletSnapshot, token]);
 
-  const generateOtp = () => {
-    const next = String(Math.floor(100000 + Math.random() * 900000));
-    setOtpCode(next);
-    setOtpInput("");
-    setOtpError("");
-    setOtpAttempts(0);
-    toast(`OTP sent to +1 *** **67 (demo OTP: ${next})`, "info");
-  };
+  const sendCardDetailsOtp = useCallback(async () => {
+    if (!token) {
+      toast("Session expired. Please login again.", "error");
+      return false;
+    }
+    setCardOtpSending(true);
+    try {
+      const resp = await fetch(`${API_BASE}/card/details/otp/send`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      const data = (await resp.json().catch(() => null)) as {
+        error?: string;
+        challengeId?: string;
+        destination?: string;
+        expiresAt?: string;
+        retryAfterSeconds?: number;
+      } | null;
+      if (!resp.ok || !data?.challengeId) {
+        setOtpError(data?.error || "Failed to send OTP");
+        return false;
+      }
+      setCardOtpChallengeId(data.challengeId);
+      setCardOtpDestination(data.destination || "");
+      setCardOtpExpiresAt(data.expiresAt || "");
+      setCardOtpResendAt(
+        Date.now() + Number(data.retryAfterSeconds || 60) * 1000,
+      );
+      setOtpInput("");
+      setOtpError("");
+      toast(
+        data.destination
+          ? `OTP sent to ${data.destination}`
+          : "OTP sent to your email",
+        "info",
+      );
+      return true;
+    } catch {
+      setOtpError("Cannot connect to API server.");
+      return false;
+    } finally {
+      setCardOtpSending(false);
+    }
+  }, [token, toast]);
 
   const openDetailsModal = () => {
     setDetailsModalOpen(true);
     setDetailsStep("otp");
-    generateOtp();
+    setOtpInput("");
+    setOtpError("");
+    setVerifiedCardDetails(null);
+    setCardOtpChallengeId("");
+    setCardOtpDestination("");
+    setCardOtpExpiresAt("");
+    setCardOtpResendAt(0);
+    void sendCardDetailsOtp();
   };
 
   const closeDetailsModal = () => {
     setDetailsModalOpen(false);
     setOtpInput("");
     setOtpError("");
-    setOtpAttempts(0);
+    setVerifiedCardDetails(null);
+    setCardOtpChallengeId("");
+    setCardOtpDestination("");
+    setCardOtpExpiresAt("");
+    setCardOtpResendAt(0);
     setDetailsStep("otp");
   };
 
-  const verifyOtpAndShowDetails = () => {
+  const verifyOtpAndShowDetails = async () => {
     if (!/^\d{6}$/.test(otpInput)) {
       setOtpError("OTP must be exactly 6 digits.");
       return;
     }
-    if (otpInput !== otpCode) {
-      const nextAttempts = otpAttempts + 1;
-      setOtpAttempts(nextAttempts);
-      setOtpError("Incorrect OTP. Please try again.");
-      if (nextAttempts >= 3) {
-        generateOtp();
-        setOtpError("Too many failed attempts. A new OTP has been sent.");
-      }
+    if (!cardOtpChallengeId || !token) {
+      setOtpError("OTP challenge expired. Please resend OTP.");
       return;
     }
-    setOtpError("");
-    setDetailsStep("details");
-    toast("OTP verified successfully");
+    setCardOtpVerifying(true);
+    try {
+      const resp = await fetch(`${API_BASE}/card/details/otp/verify`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          challengeId: cardOtpChallengeId,
+          otp: otpInput,
+        }),
+      });
+      const data = (await resp.json().catch(() => null)) as {
+        error?: string;
+        cardDetails?: {
+          holder?: string;
+          number?: string;
+          type?: string;
+          expiry?: string;
+          cvv?: string;
+          status?: string;
+          issuedAt?: string;
+          linkedAccount?: string;
+          dailyLimit?: string;
+          contactless?: string;
+          onlinePayment?: string;
+          lastActivity?: string;
+        };
+      } | null;
+      if (!resp.ok) {
+        setOtpError(data?.error || "OTP verification failed");
+        return;
+      }
+      if (data?.cardDetails) {
+        setVerifiedCardDetails({
+          holder: data.cardDetails.holder || "",
+          number: data.cardDetails.number || "",
+          type: data.cardDetails.type || "",
+          expiry: data.cardDetails.expiry || "",
+          cvv: data.cardDetails.cvv || "",
+          status: data.cardDetails.status || "",
+          issuedAt: data.cardDetails.issuedAt || "",
+          linkedAccount: data.cardDetails.linkedAccount || "",
+          dailyLimit: data.cardDetails.dailyLimit || "",
+          contactless: data.cardDetails.contactless || "",
+          onlinePayment: data.cardDetails.onlinePayment || "",
+          lastActivity: data.cardDetails.lastActivity || "",
+        });
+      }
+      setOtpError("");
+      setDetailsStep("details");
+      toast("OTP verified successfully");
+    } catch {
+      setOtpError("Cannot connect to API server.");
+    } finally {
+      setCardOtpVerifying(false);
+    }
   };
 
   const resetTransferFlow = () => {
@@ -2870,6 +3231,18 @@ function DashboardView() {
     );
     return () => window.clearInterval(timer);
   }, [transferFaceVerifyOpen, transferOpen, transferOtpResendAt, transferStep]);
+
+  useEffect(() => {
+    if (
+      cardOtpResendAt <= Date.now() ||
+      !detailsModalOpen ||
+      detailsStep !== "otp"
+    ) {
+      return;
+    }
+    const timer = window.setInterval(() => setCardOtpClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [cardOtpResendAt, detailsModalOpen, detailsStep]);
 
   useEffect(() => {
     if (typeof document === "undefined") return;
@@ -3133,6 +3506,14 @@ function DashboardView() {
     if (!canContinueTransferAmount) {
       return;
     }
+    if (localTransferPreflightAdvisory?.severity === "blocked") {
+      toast(
+        localTransferPreflightAdvisory.title ||
+          "This transfer is blocked for safety review.",
+        "error",
+      );
+      return;
+    }
     if (amount > TRANSFER_FACE_ID_THRESHOLD && !transferFaceIdEnabled) {
       toast(
         `Transfers above $${TRANSFER_FACE_ID_THRESHOLD.toLocaleString(
@@ -3146,7 +3527,7 @@ function DashboardView() {
       setTransferContent(defaultTransferContent);
     }
     const sent = await generateTransferOtp({
-      advisoryAcknowledged: Boolean(transferAdvisory),
+      advisoryAcknowledged: Boolean(effectiveTransferAdvisory),
     });
     if (sent) {
       goToTransferStep(3);
@@ -3283,6 +3664,9 @@ function DashboardView() {
         executedAt,
         fromAccount: wallet?.accountNumber || "Primary Checking",
         toAccount: targetAccount,
+        recipientName:
+          transferReceiverName.trim() ||
+          `Account ****${targetAccount.slice(-4)}`,
         amountUsd: amount.toLocaleString("en-US", {
           minimumFractionDigits: 2,
           maximumFractionDigits: 2,
@@ -3307,6 +3691,9 @@ function DashboardView() {
             executedAt,
             fromAccount: wallet?.accountNumber || "Primary Checking",
             toAccount: targetAccount,
+            recipientName:
+              transferReceiverName.trim() ||
+              `Account ****${targetAccount.slice(-4)}`,
             amountUsd: amount.toLocaleString("en-US", {
               minimumFractionDigits: 2,
               maximumFractionDigits: 2,
@@ -3382,6 +3769,9 @@ function DashboardView() {
     <section className="dashboard-v2">
       <div className="dashboard-v2-top">
         <article className="dashboard-wallet-card">
+          <div className="dashboard-wallet-orb dashboard-wallet-orb-a" />
+          <div className="dashboard-wallet-orb dashboard-wallet-orb-b" />
+          <div className="dashboard-wallet-orb dashboard-wallet-orb-c" />
           <div className="dashboard-wallet-head">
             <div>
               <div className="dashboard-wallet-label">Total Wallet Balance</div>
@@ -3393,6 +3783,15 @@ function DashboardView() {
                     )}`
                   : "USD 0.00"}
               </h2>
+              <div className="dashboard-wallet-trust-row">
+                <span className="dashboard-wallet-trust-pill">
+                  Protected Wallet
+                </span>
+                <span className="dashboard-wallet-trust-dot" />
+                <span className="dashboard-wallet-trust-meta">
+                  Realtime Ledger
+                </span>
+              </div>
             </div>
           </div>
           <div className="dashboard-wallet-foot">
@@ -3698,9 +4097,15 @@ function DashboardView() {
             {detailsStep === "otp" ? (
               <div className="card-otp-step">
                 <p className="muted">
-                  To view full card details, enter the 6-digit OTP sent to your
-                  registered phone number.
+                  To view full card details, enter the 6-digit OTP sent to{" "}
+                  {cardOtpDestination || "your registered email"}.
                 </p>
+                {cardOtpExpiresAt ? (
+                  <p className="muted">
+                    OTP expires at{" "}
+                    {new Date(cardOtpExpiresAt).toLocaleString("en-US")}
+                  </p>
+                ) : null}
                 <label className="form-group">
                   <span>Enter OTP</span>
                   <input
@@ -3712,19 +4117,34 @@ function DashboardView() {
                       setOtpInput(e.target.value.replace(/\D/g, "").slice(0, 6))
                     }
                     placeholder="6-digit OTP"
+                    disabled={cardOtpVerifying}
                   />
                 </label>
                 {otpError && <div className="card-otp-error">{otpError}</div>}
                 <div className="card-otp-actions">
-                  <button type="button" className="pill" onClick={generateOtp}>
-                    Resend OTP
+                  <button
+                    type="button"
+                    className="pill"
+                    onClick={() => void sendCardDetailsOtp()}
+                    disabled={cardOtpSending || cardOtpCooldownSeconds > 0}
+                  >
+                    {cardOtpSending
+                      ? "Sending..."
+                      : cardOtpCooldownSeconds > 0
+                        ? `Resend in ${cardOtpCooldownSeconds}s`
+                        : "Resend OTP"}
                   </button>
                   <button
                     type="button"
                     className="btn-primary"
-                    onClick={verifyOtpAndShowDetails}
+                    onClick={() => void verifyOtpAndShowDetails()}
+                    disabled={
+                      cardOtpVerifying ||
+                      cardOtpSending ||
+                      otpInput.length !== 6
+                    }
                   >
-                    Verify & Continue
+                    {cardOtpVerifying ? "Verifying..." : "Verify & Continue"}
                   </button>
                 </div>
               </div>
@@ -4279,7 +4699,9 @@ function DashboardView() {
 
                 {transferStep === 4 && (
                   <div className="transfer-body transfer-success">
-                    <div className="transfer-success-icon">OK</div>
+                    <div className="transfer-success-icon" aria-hidden="true">
+                      <span>✓</span>
+                    </div>
                     <h4>Transfer Successful</h4>
                     {transferReceipt && (
                       <TransactionReceiptCard receipt={transferReceipt} />
@@ -4298,9 +4720,9 @@ function DashboardView() {
               </div>
             </div>
             {transferStep === 2 &&
-              (deferredTransferAdvisory || deferredTransferMonitoring) &&
+              (effectiveTransferAdvisory || deferredTransferMonitoring) &&
               renderTransferAmountAiPanel(
-                deferredTransferAdvisory,
+                effectiveTransferAdvisory,
                 deferredTransferMonitoring,
                 {
                   external: true,
@@ -4440,7 +4862,9 @@ function DashboardView() {
               </button>
             </div>
             <div className="transfer-body transfer-success">
-              <div className="transfer-success-icon">OK</div>
+              <div className="transfer-success-icon" aria-hidden="true">
+                <span>✓</span>
+              </div>
               <h4>Transaction Detail</h4>
               <TransactionReceiptCard receipt={selectedTransactionReceipt} />
               <div className="transfer-actions">
@@ -4641,39 +5065,61 @@ function DashboardView() {
 }
 
 function TransactionReceiptCard({ receipt }: { receipt: TransactionReceipt }) {
+  const statusTone =
+    receipt.status.toLowerCase() === "completed"
+      ? "completed"
+      : receipt.status.toLowerCase() === "pending"
+        ? "pending"
+        : "other";
   return (
     <div className="transfer-receipt">
-      <div className="transfer-receipt-row">
-        <span>Transaction ID</span>
-        <strong>{receipt.txId}</strong>
+      <div className="transfer-receipt-head">
+        <div>
+          <small className="transfer-receipt-kicker">Digital receipt</small>
+          <strong>FPIPay Transfer Confirmation</strong>
+        </div>
+        <span className={`transfer-receipt-status-pill ${statusTone}`}>
+          {receipt.status}
+        </span>
       </div>
-      <div className="transfer-receipt-row">
-        <span>Execution Time</span>
-        <strong>{receipt.executedAt}</strong>
-      </div>
-      <div className="transfer-receipt-row">
-        <span>From Account</span>
-        <strong>{receipt.fromAccount}</strong>
-      </div>
-      <div className="transfer-receipt-row">
-        <span>To Account</span>
-        <strong>{receipt.toAccount}</strong>
-      </div>
-      <div className="transfer-receipt-row">
-        <span>Amount</span>
+      <div className="transfer-receipt-amount-block">
+        <span>Total Amount</span>
         <strong>${receipt.amountUsd}</strong>
+        <small>
+          Fee ${receipt.feeUsd} • Executed at {receipt.executedAt}
+        </small>
       </div>
-      <div className="transfer-receipt-row">
-        <span>Transfer Fee</span>
-        <strong>${receipt.feeUsd}</strong>
+      <div className="transfer-receipt-grid">
+        <div className="transfer-receipt-row">
+          <span>Transaction ID</span>
+          <strong className="transfer-receipt-mono">{receipt.txId}</strong>
+        </div>
+        <div className="transfer-receipt-row">
+          <span>Status</span>
+          <strong className="transfer-receipt-status">{receipt.status}</strong>
+        </div>
+        <div className="transfer-receipt-row">
+          <span>From Account</span>
+          <strong className="transfer-receipt-mono">
+            {receipt.fromAccount}
+          </strong>
+        </div>
+        <div className="transfer-receipt-row">
+          <span>To Account</span>
+          <strong className="transfer-receipt-mono">{receipt.toAccount}</strong>
+        </div>
+        <div className="transfer-receipt-row">
+          <span>Recipient</span>
+          <strong>{receipt.recipientName || "Unavailable"}</strong>
+        </div>
+        <div className="transfer-receipt-row transfer-receipt-row-wide">
+          <span>Content</span>
+          <strong>{receipt.note}</strong>
+        </div>
       </div>
-      <div className="transfer-receipt-row">
-        <span>Content</span>
-        <strong>{receipt.note}</strong>
-      </div>
-      <div className="transfer-receipt-row">
-        <span>Status</span>
-        <strong className="transfer-receipt-status">{receipt.status}</strong>
+      <div className="transfer-receipt-foot">
+        <span>Reference: {receipt.txId.slice(-10)}</span>
+        <span>Keep this receipt for support and dispute resolution.</span>
       </div>
     </div>
   );
@@ -5122,6 +5568,7 @@ function CardCenterView() {
     number: "",
     expiryMonth: "",
     expiryYear: "",
+    cvv: "",
     holder: user?.name ?? "FPIPay User",
   });
   const [method, setMethod] = useState<CardCenterCard["type"]>("Mastercard");
@@ -5265,9 +5712,14 @@ function CardCenterView() {
       !newCard.number.trim() ||
       !newCard.bank.trim() ||
       !newCard.expiryMonth.trim() ||
-      !newCard.expiryYear.trim()
+      !newCard.expiryYear.trim() ||
+      !newCard.cvv.trim()
     ) {
       toast("Please fill all card fields", "error");
+      return;
+    }
+    if (!/^\d{3,4}$/.test(newCard.cvv.trim())) {
+      toast("CVV must be 3 or 4 digits", "error");
       return;
     }
 
@@ -5297,6 +5749,7 @@ function CardCenterView() {
         number: "",
         expiryMonth: "",
         expiryYear: "",
+        cvv: "",
         holder: user?.name ?? "FPIPay User",
       });
       toast("Card added successfully");
@@ -5715,6 +6168,21 @@ function CardCenterView() {
                       }))
                     }
                     placeholder="YYYY"
+                    required
+                  />
+                </div>
+                <div className="form-group">
+                  <label>CVV</label>
+                  <input
+                    type="password"
+                    value={newCard.cvv}
+                    onChange={(e) =>
+                      setNewCard((prev) => ({
+                        ...prev,
+                        cvv: e.target.value.replace(/\D/g, "").slice(0, 4),
+                      }))
+                    }
+                    placeholder="123"
                     required
                   />
                 </div>
@@ -6815,8 +7283,62 @@ function App() {
     useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
+  const userMenuDropdownRef = useRef<HTMLDivElement>(null);
+  const userMenuTriggerRef = useRef<HTMLButtonElement>(null);
+  const [userMenuDropdownStyle, setUserMenuDropdownStyle] =
+    useState<CSSProperties | null>(null);
   const supportMenuRef = useRef<HTMLDivElement>(null);
+  const supportMenuTriggerRef = useRef<HTMLDivElement>(null);
+  const supportMenuDropdownRef = useRef<HTMLDivElement>(null);
+  const [supportMenuDropdownStyle, setSupportMenuDropdownStyle] =
+    useState<CSSProperties | null>(null);
   const notificationMenuRef = useRef<HTMLDivElement>(null);
+  const notificationDropdownRef = useRef<HTMLDivElement>(null);
+  const notificationTriggerRef = useRef<HTMLButtonElement>(null);
+  const [notificationDropdownStyle, setNotificationDropdownStyle] =
+    useState<CSSProperties | null>(null);
+  const updateUserMenuDropdownPosition = useCallback(() => {
+    const triggerRect = userMenuTriggerRef.current?.getBoundingClientRect();
+    if (!triggerRect) return;
+    const maxWidth = 280;
+    const minPadding = 12;
+    const width = Math.min(maxWidth, window.innerWidth - minPadding * 2);
+    const left = Math.min(
+      Math.max(minPadding, triggerRect.right - width),
+      window.innerWidth - width - minPadding,
+    );
+    const top = Math.min(
+      window.innerHeight - minPadding,
+      triggerRect.bottom + 10,
+    );
+    setUserMenuDropdownStyle({
+      position: "fixed",
+      top,
+      left,
+      width,
+    });
+  }, []);
+  const updateSupportMenuDropdownPosition = useCallback(() => {
+    const triggerRect = supportMenuTriggerRef.current?.getBoundingClientRect();
+    if (!triggerRect) return;
+    const maxWidth = 320;
+    const minPadding = 12;
+    const width = Math.min(maxWidth, window.innerWidth - minPadding * 2);
+    const left = Math.min(
+      Math.max(minPadding, triggerRect.right - width),
+      window.innerWidth - width - minPadding,
+    );
+    const top = Math.min(
+      window.innerHeight - minPadding,
+      triggerRect.bottom + 10,
+    );
+    setSupportMenuDropdownStyle({
+      position: "fixed",
+      top,
+      left,
+      width,
+    });
+  }, []);
   const [invoicesExpanded, setInvoicesExpanded] = useState(false);
   const [utilitiesExpanded, setUtilitiesExpanded] = useState(false);
   const [pendingSessionAlert, setPendingSessionAlert] =
@@ -6869,16 +7391,30 @@ function App() {
     const close = (event: MouseEvent | TouchEvent) => {
       const target = event.target as Node | null;
       if (!target) return;
-      if (
-        notificationMenuRef.current &&
-        !notificationMenuRef.current.contains(target)
-      ) {
+      const clickedNotificationTrigger =
+        !!notificationMenuRef.current &&
+        notificationMenuRef.current.contains(target);
+      const clickedNotificationDropdown =
+        !!notificationDropdownRef.current &&
+        notificationDropdownRef.current.contains(target);
+      if (!clickedNotificationTrigger && !clickedNotificationDropdown) {
         setShowNotifications(false);
         setShowAllNotificationsInDropdown(false);
       }
-      if (userMenuRef.current && !userMenuRef.current.contains(target))
+      const clickedUserTrigger =
+        !!userMenuRef.current && userMenuRef.current.contains(target);
+      const clickedUserDropdown =
+        !!userMenuDropdownRef.current &&
+        userMenuDropdownRef.current.contains(target);
+      if (!clickedUserTrigger && !clickedUserDropdown) {
         setUserMenuOpen(false);
-      if (supportMenuRef.current && !supportMenuRef.current.contains(target)) {
+      }
+      const clickedSupportTrigger =
+        !!supportMenuRef.current && supportMenuRef.current.contains(target);
+      const clickedSupportDropdown =
+        !!supportMenuDropdownRef.current &&
+        supportMenuDropdownRef.current.contains(target);
+      if (!clickedSupportTrigger && !clickedSupportDropdown) {
         setUtilitiesExpanded(false);
       }
     };
@@ -7019,8 +7555,79 @@ function App() {
   useEffect(() => {
     if (!showNotifications) {
       setShowAllNotificationsInDropdown(false);
+      setNotificationDropdownStyle(null);
+      return;
     }
+    const updateDropdownPosition = () => {
+      const triggerRect =
+        notificationTriggerRef.current?.getBoundingClientRect();
+      if (!triggerRect) return;
+
+      const maxWidth = 540;
+      const minPadding = 12;
+      const width = Math.min(maxWidth, window.innerWidth - minPadding * 2);
+      const left = Math.min(
+        Math.max(minPadding, triggerRect.right - width),
+        window.innerWidth - width - minPadding,
+      );
+      const top = Math.min(
+        window.innerHeight - minPadding,
+        triggerRect.bottom + 10,
+      );
+
+      setNotificationDropdownStyle({
+        position: "fixed",
+        top,
+        left,
+        width,
+        maxHeight: Math.min(window.innerHeight - top - minPadding, 760),
+      });
+    };
+
+    updateDropdownPosition();
+    window.addEventListener("resize", updateDropdownPosition);
+    window.addEventListener("scroll", updateDropdownPosition, true);
+    return () => {
+      window.removeEventListener("resize", updateDropdownPosition);
+      window.removeEventListener("scroll", updateDropdownPosition, true);
+    };
   }, [showNotifications]);
+
+  useLayoutEffect(() => {
+    if (!userMenuOpen) {
+      setUserMenuDropdownStyle(null);
+      return;
+    }
+    updateUserMenuDropdownPosition();
+    window.addEventListener("resize", updateUserMenuDropdownPosition);
+    window.addEventListener("scroll", updateUserMenuDropdownPosition, true);
+    return () => {
+      window.removeEventListener("resize", updateUserMenuDropdownPosition);
+      window.removeEventListener(
+        "scroll",
+        updateUserMenuDropdownPosition,
+        true,
+      );
+    };
+  }, [userMenuOpen, updateUserMenuDropdownPosition]);
+
+  useLayoutEffect(() => {
+    if (!utilitiesExpanded) {
+      setSupportMenuDropdownStyle(null);
+      return;
+    }
+    updateSupportMenuDropdownPosition();
+    window.addEventListener("resize", updateSupportMenuDropdownPosition);
+    window.addEventListener("scroll", updateSupportMenuDropdownPosition, true);
+    return () => {
+      window.removeEventListener("resize", updateSupportMenuDropdownPosition);
+      window.removeEventListener(
+        "scroll",
+        updateSupportMenuDropdownPosition,
+        true,
+      );
+    };
+  }, [utilitiesExpanded, updateSupportMenuDropdownPosition]);
 
   useEffect(() => {
     setShowAllNotificationsInDropdown(false);
@@ -7084,6 +7691,35 @@ function App() {
   const visibleDropdownNotifications = showAllNotificationsInDropdown
     ? dropdownNotifications
     : latestDropdownNotifications;
+  const groupedDropdownNotifications = useMemo(() => {
+    const groups: Array<{
+      key: string;
+      label: string;
+      items: typeof visibleDropdownNotifications;
+    }> = [];
+    const groupIndexByKey = new Map<string, number>();
+
+    visibleDropdownNotifications.forEach((notification) => {
+      const label = getNotificationDayLabel(notification.createdAt);
+      const createdAtDate = new Date(notification.createdAt);
+      const key = Number.isNaN(createdAtDate.getTime())
+        ? `unknown-${notification.id}`
+        : createdAtDate.toISOString().slice(0, 10);
+      const existingIndex = groupIndexByKey.get(key);
+      if (existingIndex !== undefined) {
+        groups[existingIndex].items.push(notification);
+        return;
+      }
+      groupIndexByKey.set(key, groups.length);
+      groups.push({
+        key,
+        label,
+        items: [notification],
+      });
+    });
+
+    return groups;
+  }, [visibleDropdownNotifications]);
 
   const displayUser = user ?? {
     name: "Guest User",
@@ -7135,8 +7771,38 @@ function App() {
                 >
                   <div
                     className={`nav-item nav-item-parent ${activeTab === item.id ? "active" : ""} ${isExpanded ? "expanded" : ""}`}
-                    onClick={() => toggleExpanded(item)}
-                    onKeyDown={(e) => e.key === "Enter" && toggleExpanded(item)}
+                    ref={
+                      item.id === "Support" ? supportMenuTriggerRef : undefined
+                    }
+                    onClick={() => {
+                      if (item.id === "Support") {
+                        setUtilitiesExpanded((current) => {
+                          const next = !current;
+                          if (next) {
+                            updateSupportMenuDropdownPosition();
+                          }
+                          return next;
+                        });
+                        return;
+                      }
+                      toggleExpanded(item);
+                    }}
+                    onKeyDown={(e) =>
+                      e.key === "Enter" &&
+                      (() => {
+                        if (item.id === "Support") {
+                          setUtilitiesExpanded((current) => {
+                            const next = !current;
+                            if (next) {
+                              updateSupportMenuDropdownPosition();
+                            }
+                            return next;
+                          });
+                          return;
+                        }
+                        toggleExpanded(item);
+                      })()
+                    }
                     role="button"
                     tabIndex={0}
                   >
@@ -7146,6 +7812,31 @@ function App() {
                     </span>
                   </div>
                   {isExpanded &&
+                    item.id === "Support" &&
+                    createPortal(
+                      <div
+                        className="support-dropdown support-dropdown-premium"
+                        ref={supportMenuDropdownRef}
+                        style={supportMenuDropdownStyle || undefined}
+                      >
+                        {item.children.map((child) => (
+                          <button
+                            key={child.id}
+                            type="button"
+                            className={`support-dropdown-item ${activeTab === child.id ? "active" : ""}`}
+                            onClick={() => {
+                              setActiveTab(child.id);
+                              setUtilitiesExpanded(false);
+                            }}
+                          >
+                            <span className="nav-dot" /> {child.label}
+                          </button>
+                        ))}
+                      </div>,
+                      document.body,
+                    )}
+                  {isExpanded &&
+                    item.id !== "Support" &&
                     item.children.map((child) => (
                       <div
                         key={child.id}
@@ -7198,6 +7889,7 @@ function App() {
             <button
               type="button"
               className="bell"
+              ref={notificationTriggerRef}
               onClick={() => setShowNotifications((v) => !v)}
               aria-haspopup="true"
               aria-expanded={showNotifications}
@@ -7213,164 +7905,206 @@ function App() {
                 <span className="badge">{unreadNotificationCount}</span>
               )}
             </button>
-            {showNotifications && (
-              <div className="notif-dropdown">
-                <div className="notif-dropdown-head">
-                  <strong>Account activity</strong>
-                  <span className="muted">
-                    {unreadNotificationCount} unread
-                  </span>
-                </div>
-                <div className="notif-filter">
-                  <select
-                    value={notificationFilter}
-                    onChange={(e) =>
-                      setNotificationFilter(
-                        e.target.value as typeof notificationFilter,
-                      )
-                    }
-                  >
-                    <option value="all">All</option>
-                    <option value="transactions">Balance</option>
-                    <option value="security">Security</option>
-                  </select>
-                </div>
-                {notificationsBusy && notifications.length === 0 && (
-                  <div className="notif-empty">Loading activity...</div>
-                )}
-                <div className="notif-dropdown-list">
-                  {!notificationsBusy &&
-                    visibleDropdownNotifications.map((notification) => (
-                      <button
-                        key={notification.id}
-                        type="button"
-                        className={`notif-row ${!notification.read ? "unread" : ""}`}
-                        onClick={() => {
-                          markNotificationRead(notification.id);
-                          setActiveTab("Notifications");
-                          setShowNotifications(false);
-                        }}
-                      >
-                        <div className="notif-row-head">
-                          <span
-                            className={`notif-pill notif-${notification.type}`}
-                          >
-                            {notification.type === "transactions"
-                              ? "Balance"
-                              : "Security"}
-                          </span>
-                          <span className="notif-time">
-                            {notification.timeLabel}
-                          </span>
+            {showNotifications &&
+              createPortal(
+                <div
+                  className="notif-dropdown notif-dropdown-premium"
+                  ref={notificationDropdownRef}
+                  style={notificationDropdownStyle || undefined}
+                >
+                  <div className="notif-dropdown-head">
+                    <strong>Account activity</strong>
+                    <span className="muted">
+                      {unreadNotificationCount} unread
+                    </span>
+                  </div>
+                  <div className="notif-filter">
+                    <select
+                      value={notificationFilter}
+                      onChange={(e) =>
+                        setNotificationFilter(
+                          e.target.value as typeof notificationFilter,
+                        )
+                      }
+                    >
+                      <option value="all">All</option>
+                      <option value="transactions">Balance</option>
+                      <option value="security">Security</option>
+                    </select>
+                  </div>
+                  {notificationsBusy && notifications.length === 0 && (
+                    <div className="notif-empty">Loading activity...</div>
+                  )}
+                  <div className="notif-dropdown-list">
+                    {!notificationsBusy &&
+                      groupedDropdownNotifications.map((group, groupIndex) => (
+                        <div key={group.key} className="notif-group">
+                          <div className="notif-group-label">{group.label}</div>
+                          {group.items.map((notification, itemIndex) => (
+                            <button
+                              key={notification.id}
+                              type="button"
+                              className={`notif-row notif-row-premium ${!notification.read ? "unread" : ""}`}
+                              style={
+                                {
+                                  "--notif-delay": `${groupIndex * 36 + itemIndex * 48}ms`,
+                                } as CSSProperties
+                              }
+                              onClick={() => {
+                                markNotificationRead(notification.id);
+                                setActiveTab("Notifications");
+                                setShowNotifications(false);
+                              }}
+                            >
+                              <div className="notif-row-head">
+                                <span
+                                  className={`notif-icon notif-icon-${notification.type}`}
+                                  aria-hidden="true"
+                                >
+                                  {notification.type === "transactions"
+                                    ? "TX"
+                                    : "SH"}
+                                </span>
+                                <span
+                                  className={`notif-pill notif-${notification.type}`}
+                                >
+                                  {notification.type === "transactions"
+                                    ? "Balance"
+                                    : "Security"}
+                                </span>
+                                <span className="notif-time">
+                                  {notification.timeLabel}
+                                </span>
+                              </div>
+                              <strong className="notif-title">
+                                {notification.title}
+                              </strong>
+                              <div className="notif-message">
+                                {notification.message}
+                              </div>
+                              {notification.meta && (
+                                <div
+                                  className="notif-meta"
+                                  title={notification.meta}
+                                >
+                                  {notification.meta}
+                                </div>
+                              )}
+                              {notification.amountText && (
+                                <span
+                                  className={`notif-amount notif-amount-${notification.amountTone || "positive"}`}
+                                >
+                                  {notification.amountText}
+                                </span>
+                              )}
+                            </button>
+                          ))}
                         </div>
-                        <strong className="notif-title">
-                          {notification.title}
-                        </strong>
-                        <div className="notif-message">
-                          {notification.message}
+                      ))}
+                    {!notificationsBusy &&
+                      visibleDropdownNotifications.length === 0 && (
+                        <div className="notif-empty">
+                          {notificationsError || "No account activity yet."}
                         </div>
-                        {notification.meta && (
-                          <div className="notif-meta" title={notification.meta}>
-                            {notification.meta}
-                          </div>
-                        )}
-                        {notification.amountText && (
-                          <span
-                            className={`notif-amount notif-amount-${notification.amountTone || "positive"}`}
-                          >
-                            {notification.amountText}
-                          </span>
-                        )}
-                      </button>
-                    ))}
-                  {!notificationsBusy &&
-                    visibleDropdownNotifications.length === 0 && (
-                      <div className="notif-empty">
-                        {notificationsError || "No account activity yet."}
-                      </div>
-                    )}
-                </div>
-                <div className="notif-actions">
-                  <button
-                    type="button"
-                    className="pill"
-                    onClick={() => {
-                      markAllNotificationsRead();
-                      setShowNotifications(false);
-                    }}
-                    disabled={unreadNotificationCount === 0}
-                  >
-                    Mark all read
-                  </button>
-                  <button
-                    type="button"
-                    className="pill"
-                    onClick={() =>
-                      setShowAllNotificationsInDropdown((current) => !current)
-                    }
-                    disabled={dropdownNotifications.length <= 3}
-                  >
-                    {showAllNotificationsInDropdown
-                      ? "Show less"
-                      : `View all (${dropdownNotifications.length})`}
-                  </button>
-                </div>
-              </div>
-            )}
+                      )}
+                  </div>
+                  <div className="notif-actions">
+                    <button
+                      type="button"
+                      className="pill"
+                      onClick={() => {
+                        markAllNotificationsRead();
+                        setShowNotifications(false);
+                      }}
+                      disabled={unreadNotificationCount === 0}
+                    >
+                      Mark all read
+                    </button>
+                    <button
+                      type="button"
+                      className="pill"
+                      onClick={() =>
+                        setShowAllNotificationsInDropdown((current) => !current)
+                      }
+                      disabled={dropdownNotifications.length <= 3}
+                    >
+                      {showAllNotificationsInDropdown
+                        ? "Show less"
+                        : `View all (${dropdownNotifications.length})`}
+                    </button>
+                  </div>
+                </div>,
+                document.body,
+              )}
           </div>
           <div className="user-menu-wrap" ref={userMenuRef}>
             <button
               type="button"
               className="user-menu-trigger"
-              onClick={() => setUserMenuOpen(!userMenuOpen)}
+              ref={userMenuTriggerRef}
+              onClick={() =>
+                setUserMenuOpen((current) => {
+                  const next = !current;
+                  if (next) {
+                    updateUserMenuDropdownPosition();
+                  }
+                  return next;
+                })
+              }
               aria-expanded={userMenuOpen}
               aria-haspopup="true"
             >
               <img className="avatar" src={displayUser.avatar} alt="" />
               <span className="avatar-chevron">v</span>
             </button>
-            {userMenuOpen && (
-              <div className="user-menu-dropdown">
-                <span
-                  className="muted"
-                  style={{
-                    padding: "8px 14px",
-                    display: "block",
-                    fontSize: 13,
-                  }}
+            {userMenuOpen &&
+              createPortal(
+                <div
+                  className="user-menu-dropdown user-menu-dropdown-premium"
+                  ref={userMenuDropdownRef}
+                  style={userMenuDropdownStyle || undefined}
                 >
-                  {displayUser.email}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTab("My Profile");
-                    setUserMenuOpen(false);
-                  }}
-                >
-                  My profile
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTab("Setting");
-                    setUserMenuOpen(false);
-                  }}
-                >
-                  Setting
-                </button>
-                <button
-                  type="button"
-                  className="danger"
-                  onClick={() => {
-                    logout();
-                    setUserMenuOpen(false);
-                  }}
-                >
-                  Logout
-                </button>
-              </div>
-            )}
+                  <span
+                    className="muted"
+                    style={{
+                      padding: "8px 14px",
+                      display: "block",
+                      fontSize: 13,
+                    }}
+                  >
+                    {displayUser.email}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveTab("My Profile");
+                      setUserMenuOpen(false);
+                    }}
+                  >
+                    My profile
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveTab("Setting");
+                      setUserMenuOpen(false);
+                    }}
+                  >
+                    Setting
+                  </button>
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() => {
+                      logout();
+                      setUserMenuOpen(false);
+                    }}
+                  >
+                    Logout
+                  </button>
+                </div>,
+                document.body,
+              )}
           </div>
         </div>
       </aside>

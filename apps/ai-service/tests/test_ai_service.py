@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from pyod.models.iforest import IForest
 
 from app.main import app
+from app.fraud_rules import evaluate_transaction_rules
 from app.transaction_model import TransactionEvent, adjust_tx_risk_level
 
 JWT_TEST_SECRET = "jwt-test-secret-32-characters-long!"
@@ -239,6 +240,36 @@ def test_train_and_score_transaction_monitoring_only():
         assert body["action"] == "REVIEW_TRANSACTION_ONLY"
         assert body["request_key"] == "idem-tx-1"
         assert body["risk_level"] in {"LOW", "MEDIUM", "HIGH"}
+        assert body["rule_risk_level"] in {"LOW", "MEDIUM", "HIGH"}
+        assert isinstance(body["rule_hit_count"], int)
+        assert isinstance(body["rule_hits"], list)
+        assert "warning_vi" in body
+        assert "title" in body["warning_vi"]
+
+
+def test_rule_engine_returns_high_risk_for_crypto_burst_drain():
+    event = TransactionEvent(
+        user_id="u-aml-1",
+        transaction_id="tx-aml-1",
+        timestamp=datetime(2026, 3, 5, 2, 20, tzinfo=timezone.utc),
+        amount=12000,
+        currency="USD",
+        country="IR",
+        payment_method="crypto",
+        merchant_category="crypto_exchange",
+        device="Mozilla/5.0 Chrome",
+        failed_tx_24h=4,
+        velocity_1h=7,
+        daily_spend_avg_30d=120,
+        projected_daily_spend=22000,
+        balance_before=12500,
+        remaining_balance=50,
+    )
+
+    rule_eval = evaluate_transaction_rules(event, learned_countries={"us", "vn"})
+    assert rule_eval.rule_risk_level == "HIGH"
+    assert rule_eval.rule_score >= 60
+    assert len(rule_eval.hits) >= 4
 
 
 def test_small_full_balance_transfer_does_not_raise_drain_risk():

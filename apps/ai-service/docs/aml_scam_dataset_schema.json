@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AML Scam Training Event",
+  "type": "object",
+  "required": [
+    "event_id",
+    "event_time",
+    "user_id",
+    "tx_id",
+    "amount",
+    "currency",
+    "country",
+    "payment_method",
+    "merchant_category",
+    "velocity_1h",
+    "failed_tx_24h",
+    "daily_spend_avg_30d",
+    "today_spend_before",
+    "projected_daily_spend",
+    "balance_before",
+    "remaining_balance",
+    "label_risk_level",
+    "label_case_type",
+    "label_is_aml",
+    "label_is_scam"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "description": "Unique event id in feature store."
+    },
+    "event_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "user_id": {
+      "type": "string"
+    },
+    "tx_id": {
+      "type": "string"
+    },
+    "request_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "device_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "ip": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "amount": {
+      "type": "number",
+      "minimum": 0
+    },
+    "currency": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 8
+    },
+    "country": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 2
+    },
+    "payment_method": {
+      "type": "string"
+    },
+    "merchant_category": {
+      "type": "string"
+    },
+    "channel": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "counterparty_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "counterparty_bank_code": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "velocity_1h": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "failed_tx_24h": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "daily_spend_avg_30d": {
+      "type": "number",
+      "minimum": 0
+    },
+    "today_spend_before": {
+      "type": "number",
+      "minimum": 0
+    },
+    "projected_daily_spend": {
+      "type": "number",
+      "minimum": 0
+    },
+    "balance_before": {
+      "type": "number",
+      "minimum": 0
+    },
+    "remaining_balance": {
+      "type": "number",
+      "minimum": 0
+    },
+    "graph_in_degree_24h": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "graph_out_degree_24h": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "graph_fan_out_ratio_1h": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "label_risk_level": {
+      "type": "string",
+      "enum": [
+        "LOW",
+        "MEDIUM",
+        "HIGH"
+      ]
+    },
+    "label_case_type": {
+      "type": "string",
+      "enum": [
+        "normal",
+        "account_takeover",
+        "impersonation_scam",
+        "investment_scam",
+        "romance_scam",
+        "job_scam",
+        "ecommerce_scam",
+        "chargeback_abuse",
+        "mule_account",
+        "smurfing",
+        "layering",
+        "cash_out",
+        "sanction_evasion",
+        "synthetic_identity"
+      ]
+    },
+    "label_is_aml": {
+      "type": "boolean"
+    },
+    "label_is_scam": {
+      "type": "boolean"
+    },
+    "label_confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "label_evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "reviewer_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reviewed_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    }
+  }
+}

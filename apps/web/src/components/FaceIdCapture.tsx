@@ -107,7 +107,7 @@ const STEP_COLORS: Record<FaceIdStepId, string> = {
 };
 
 const PROCESS_INTERVAL_MS = 140;
-const REQUIRED_STEP_STREAK = 2;
+const REQUIRED_STEP_STREAK = 1;
 const COMPAT_REQUIRED_STEP_STREAK = 2;
 const MEDIAPIPE_WASM_PATH =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.32/wasm";
@@ -1008,10 +1008,10 @@ export function FaceIdCapture({
         1,
       );
       const aligned =
-        sizeRatio >= 0.48 &&
-        sizeRatio <= 1.48 &&
-        Math.abs(deltaX) <= 0.15 &&
-        Math.abs(deltaY) <= 0.16;
+        sizeRatio >= 0.42 &&
+        sizeRatio <= 1.56 &&
+        Math.abs(deltaX) <= 0.17 &&
+        Math.abs(deltaY) <= 0.18;
 
       return {
         centerX,
@@ -1042,8 +1042,8 @@ export function FaceIdCapture({
       if (activeStep.id === "center") {
         matched =
           alignment.aligned &&
-          alignment.coverage >= 0.1 &&
-          motionMetric <= 0.07;
+          alignment.coverage >= 0.085 &&
+          motionMetric <= 0.12;
         hint = matched
           ? "Hold still to lock the center step."
           : "Center your face inside the oval and hold still.";
@@ -1070,10 +1070,10 @@ export function FaceIdCapture({
       } else if (activeStep.id === "move_closer") {
         matched = Boolean(
           baseline &&
-          alignment.coverage >= Math.max(baseline.coverage * 1.12, 0.135) &&
-          Math.abs(alignment.deltaX) <= 0.16 &&
-          Math.abs(alignment.deltaY) <= 0.17 &&
-          motionMetric >= 0.008,
+          alignment.coverage >= Math.max(baseline.coverage * 1.08, 0.12) &&
+          Math.abs(alignment.deltaX) <= 0.18 &&
+          Math.abs(alignment.deltaY) <= 0.19 &&
+          motionMetric >= 0.005,
         );
         hint = "Move closer until your face fills more of the oval.";
       }
@@ -1148,8 +1148,8 @@ export function FaceIdCapture({
 
       const matched =
         activeStep.id === "center"
-          ? sampleCountRef.current >= 4 && motionMetric >= 0.01
-          : motionMetric >= (activeStep.id === "move_closer" ? 0.06 : 0.035);
+          ? sampleCountRef.current >= 3 && motionMetric >= 0.006
+          : motionMetric >= (activeStep.id === "move_closer" ? 0.045 : 0.03);
 
       stepStreakRef.current = matched ? stepStreakRef.current + 1 : 0;
       if (stepStreakRef.current < COMPAT_REQUIRED_STEP_STREAK) {
@@ -1334,7 +1334,7 @@ export function FaceIdCapture({
         setFaceAligned(
           stepMatched ||
             (activeStep?.id === "center" && alignment.aligned) ||
-            alignment.glow >= 0.72,
+            alignment.glow >= 0.66,
         );
         setAlignmentGlow(
           stepMatched
