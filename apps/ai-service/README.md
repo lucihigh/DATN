@@ -160,3 +160,30 @@ Training/operations documents:
 - `docs/aml_scam_labeling_guideline.vi.md`
 - `docs/aml_scam_warning_prompts.vi.md`
 - `docs/aml_scam_scenario_catalog.csv` (240 scenarios)
+
+## Train nhanh tu OpenML + PaySim + LANL/CERT
+
+Script quickstart:
+
+```powershell
+py scripts/train_quickstart_open_data.py ^
+  --openml-creditcard-csv "F:\data\creditcard.csv" ^
+  --paysim-csv "F:\data\PS_20174392719_1491204439457_log.csv" ^
+  --lanl-auth "F:\data\auth.txt" ^
+  --cert-logon-csv "F:\data\logon.csv" ^
+  --promote
+```
+
+Script se:
+
+- chuan hoa transaction data ve CSV trung gian (`step,type,amount,nameOrig,isFraud`)
+- chuan hoa login data ve schema RBA (`Login Timestamp`, `User ID`, ...)
+- goi lai `scripts/train_from_rba_csv.py` va `scripts/train_from_tx_csv.py`
+- tu rollout `active_model.json` + `active_tx_model.json` neu co `--promote`
+
+Ghi chu map dataset:
+
+- OpenML/UCI creditcard: dung `Amount`, `Class`, `Time` (neu co)
+- PaySim: dung truc tiep `step,type,amount,nameOrig,isFraud`
+- CERT logon.csv: cac cot mong doi `date,user,pc,activity`
+- LANL auth: ho tro dong CSV hoac whitespace, token cuoi cung la trang thai success/failure
