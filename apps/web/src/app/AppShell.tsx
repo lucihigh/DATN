@@ -50,7 +50,7 @@ const SESSION_REPLACEMENT_ALERT_STORAGE_KEY =
 const NOTIFICATION_READ_STORAGE_PREFIX = "fpipay_notification_reads";
 const COPILOT_REQUEST_TIMEOUT_MS = 90000;
 const PROFESSIONAL_PASSWORD_MIN_LENGTH = 12;
-const TRANSFER_FACE_ID_THRESHOLD = 10000;
+const TRANSFER_FACE_ID_THRESHOLD = 1000;
 const FORCE_AUTH_HERO_MOTION_CLASS = "force-auth-hero-motion";
 
 function DeferredFaceIdCapture(props: {
@@ -358,6 +358,14 @@ type TransactionHistoryItem = {
   receipt: TransactionReceipt;
 };
 
+type SavedTransferRecipient = {
+  accountNumber: string;
+  holderName: string;
+  userId?: string;
+  lastTransferredAt: string;
+  transferCount: number;
+};
+
 type SecurityAlertTone = "safe" | "info" | "warn";
 
 type SecurityAlertItem = {
@@ -537,6 +545,144 @@ const summarizeUserAgent = (value?: string) => {
   if (browser && os) return `${browser} on ${os}`;
   if (browser || os) return browser || os;
   return truncateNotificationCopy(userAgent, 48);
+};
+
+const summarizeDeviceUserAgent = (value?: string) => {
+  const userAgent = normalizeNotificationCopy(value);
+  if (!userAgent) {
+    return {
+      title: "Unknown device",
+      detail: "Browser and device details unavailable",
+    };
+  }
+
+  let browserLabel = "";
+  for (const [pattern, label] of [
+    [/Edg\/(\d+)/, "Edge"],
+    [/Chrome\/(\d+)/, "Chrome"],
+    [/Firefox\/(\d+)/, "Firefox"],
+    [/Version\/(\d+).+Safari\//, "Safari"],
+  ] as Array<[RegExp, string]>) {
+    const match = userAgent.match(pattern);
+    if (match) {
+      browserLabel = `${label}${match[1] ? ` ${match[1]}` : ""}`;
+      break;
+    }
+  }
+
+  let osLabel = "";
+  let deviceTitle = "Unknown device";
+  if (/Windows NT 10\.0|Windows NT 11\.0/i.test(userAgent)) {
+    osLabel = "Windows";
+    deviceTitle = "Windows PC";
+  } else if (/Mac OS X [\d_]+/i.test(userAgent)) {
+    osLabel = "macOS";
+    deviceTitle = "Mac device";
+  } else if (/iPhone/i.test(userAgent)) {
+    osLabel = "iOS";
+    deviceTitle = "iPhone";
+  } else if (/iPad/i.test(userAgent)) {
+    osLabel = "iPadOS";
+    deviceTitle = "iPad";
+  } else if (/Android/i.test(userAgent) && /Mobile/i.test(userAgent)) {
+    osLabel = "Android";
+    deviceTitle = "Android phone";
+  } else if (/Android/i.test(userAgent)) {
+    osLabel = "Android";
+    deviceTitle = "Android tablet";
+  } else if (/Linux/i.test(userAgent)) {
+    osLabel = "Linux";
+    deviceTitle = "Linux device";
+  }
+
+  const detail = [browserLabel, osLabel].filter(Boolean).join(" / ");
+  return {
+    title: deviceTitle,
+    detail:
+      detail ||
+      (userAgent.length > 64 ? `${userAgent.slice(0, 64)}...` : userAgent),
+  };
+};
+
+const normalizeSavedTransferRecipients = (value: unknown) =>
+  Array.isArray(value)
+    ? value
+        .reduce<SavedTransferRecipient[]>((acc, item) => {
+          if (!item || typeof item !== "object" || Array.isArray(item)) {
+            return acc;
+          }
+          const record = item as Record<string, unknown>;
+          const accountNumber =
+            typeof record.accountNumber === "string"
+              ? record.accountNumber.replace(/\D/g, "").slice(0, 19)
+              : "";
+          const holderName =
+            typeof record.holderName === "string"
+              ? record.holderName.trim()
+              : "";
+          const userId =
+            typeof record.userId === "string" && record.userId.trim()
+              ? record.userId.trim()
+              : undefined;
+          const lastTransferredAt =
+            typeof record.lastTransferredAt === "string"
+              ? record.lastTransferredAt
+              : "";
+          const transferCountRaw =
+            typeof record.transferCount === "number"
+              ? record.transferCount
+              : Number(record.transferCount);
+          const transferCount =
+            Number.isFinite(transferCountRaw) && transferCountRaw > 0
+              ? Math.trunc(transferCountRaw)
+              : 1;
+
+          if (!accountNumber || !holderName || !lastTransferredAt) {
+            return acc;
+          }
+
+          acc.push({
+            accountNumber,
+            holderName,
+            userId,
+            lastTransferredAt,
+            transferCount,
+          });
+          return acc;
+        }, [])
+        .sort(
+          (left, right) =>
+            Date.parse(right.lastTransferredAt) -
+            Date.parse(left.lastTransferredAt),
+        )
+    : [];
+
+const upsertSavedTransferRecipient = (
+  recipients: SavedTransferRecipient[],
+  input: {
+    accountNumber: string;
+    holderName: string;
+    userId?: string;
+    occurredAt: string;
+  },
+) => {
+  const accountNumber = input.accountNumber.replace(/\D/g, "").slice(0, 19);
+  const holderName = input.holderName.trim();
+  if (!accountNumber || !holderName) return recipients;
+
+  const matched = recipients.find(
+    (item) => item.accountNumber === accountNumber,
+  );
+  return [
+    {
+      accountNumber,
+      holderName,
+      userId: input.userId?.trim() || matched?.userId,
+      lastTransferredAt: input.occurredAt,
+      transferCount: (matched?.transferCount || 0) + 1,
+    } satisfies SavedTransferRecipient,
+    ...recipients.filter((item) => item.accountNumber !== accountNumber),
+  ].slice(0, 8);
 };
 
 const formatSecurityNotification = (alert: SecurityOverviewAlert) => {
@@ -844,12 +990,6 @@ function DashboardView() {
   const [detailsStep, setDetailsStep] = useState<"otp" | "details">("otp");
   const [otpInput, setOtpInput] = useState("");
   const [otpError, setOtpError] = useState("");
-  const [cardOtpChallengeId, setCardOtpChallengeId] = useState("");
-  const [cardOtpDestination, setCardOtpDestination] = useState("");
-  const [cardOtpExpiresAt, setCardOtpExpiresAt] = useState("");
-  const [cardOtpResendAt, setCardOtpResendAt] = useState(0);
-  const [cardOtpClock, setCardOtpClock] = useState(Date.now());
-  const [cardOtpSending, setCardOtpSending] = useState(false);
   const [cardOtpVerifying, setCardOtpVerifying] = useState(false);
   const [verifiedCardDetails, setVerifiedCardDetails] = useState<{
     holder: string;
@@ -894,6 +1034,9 @@ function DashboardView() {
   const [transferAccount, setTransferAccount] = useState("");
   const [transferRecipientUserId, setTransferRecipientUserId] = useState("");
   const [transferReceiverName, setTransferReceiverName] = useState("");
+  const [savedTransferRecipients, setSavedTransferRecipients] = useState<
+    SavedTransferRecipient[]
+  >([]);
   const [transferAmount, setTransferAmount] = useState("");
   const [transferContent, setTransferContent] = useState("");
   const [transferQrFile, setTransferQrFile] = useState("");
@@ -910,6 +1053,16 @@ function DashboardView() {
   const [transferQrDeviceId, setTransferQrDeviceId] = useState("");
   const [transferShowMyQr, setTransferShowMyQr] = useState(false);
   const [transferQrDownloadBusy, setTransferQrDownloadBusy] = useState(false);
+  const [transferPinInput, setTransferPinInput] = useState("");
+  const [transferPinError, setTransferPinError] = useState("");
+  const [transferOtpRequired, setTransferOtpRequired] = useState(false);
+  const [transferPinSetupOpen, setTransferPinSetupOpen] = useState(false);
+  const [transferPinSetupBusy, setTransferPinSetupBusy] = useState(false);
+  const [transferPinSetupError, setTransferPinSetupError] = useState("");
+  const [transferPinSetupForm, setTransferPinSetupForm] = useState({
+    pin: "",
+    confirm: "",
+  });
   const [transferOtpInput, setTransferOtpInput] = useState("");
   const [transferOtpError, setTransferOtpError] = useState("");
   const [transferOtpChallengeId, setTransferOtpChallengeId] = useState("");
@@ -921,6 +1074,7 @@ function DashboardView() {
   const [transferFaceVerifyOpen, setTransferFaceVerifyOpen] = useState(false);
   const [transferFaceVerifyBusy, setTransferFaceVerifyBusy] = useState(false);
   const [transferFaceIdEnabled, setTransferFaceIdEnabled] = useState(false);
+  const [transferPinEnabled, setTransferPinEnabled] = useState(false);
   const [transferServerFaceIdRequired, setTransferServerFaceIdRequired] =
     useState(false);
   const [transferServerFaceIdReason, setTransferServerFaceIdReason] =
@@ -931,6 +1085,7 @@ function DashboardView() {
   const [transferOtpClock, setTransferOtpClock] = useState(Date.now());
   const [transferMonitoring, setTransferMonitoring] =
     useState<AiMonitoringSummary | null>(null);
+  const [transferPreviewBusy, setTransferPreviewBusy] = useState(false);
   const [transferOtpBusy, setTransferOtpBusy] = useState(false);
   const [transferOtpVerifyBusy, setTransferOtpVerifyBusy] = useState(false);
   const [transferAdvisory, setTransferAdvisory] =
@@ -1186,12 +1341,12 @@ function DashboardView() {
   const transferContinueLabel = transferOtpBusy
     ? isTransferPreOtpWarning && !transferAdvisoryAcknowledged
       ? "Reviewing transfer..."
-      : "Sending OTP..."
+      : "Preparing security check..."
     : isTransferHardBlocked
       ? "Blocked for safety review"
       : isTransferPreOtpWarning && !transferAdvisoryAcknowledged
         ? effectiveTransferAdvisory.confirmationLabel
-        : "Continue to OTP";
+        : "Continue to security";
   const ownQrPayload =
     wallet?.qrPayload ||
     (wallet?.accountNumber
@@ -1207,10 +1362,6 @@ function DashboardView() {
   const transferOtpCooldownSeconds = Math.max(
     0,
     Math.ceil((transferOtpResendAt - transferOtpClock) / 1000),
-  );
-  const cardOtpCooldownSeconds = Math.max(
-    0,
-    Math.ceil((cardOtpResendAt - cardOtpClock) / 1000),
   );
   const monthlyIncomeValue = 0;
   const monthlyExpensesValue = 0;
@@ -1325,73 +1476,10 @@ function DashboardView() {
     });
   }, []);
 
-  const parseUserAgentSummary = useCallback((value?: string) => {
-    if (!value?.trim()) {
-      return {
-        title: "Unknown device",
-        detail: "Browser and device details unavailable",
-      };
-    }
-
-    const userAgent = value.trim();
-    const browserMatchers: Array<[RegExp, string]> = [
-      [/Edg\/(\d+)/, "Edge"],
-      [/Chrome\/(\d+)/, "Chrome"],
-      [/Firefox\/(\d+)/, "Firefox"],
-      [/Version\/(\d+).+Safari\//, "Safari"],
-    ];
-
-    let browserLabel = "";
-    for (const [pattern, label] of browserMatchers) {
-      const match = userAgent.match(pattern);
-      if (match) {
-        browserLabel = `${label}${match[1] ? ` ${match[1]}` : ""}`;
-        break;
-      }
-    }
-
-    let osLabel = "";
-    let deviceTitle = "Unknown device";
-    if (
-      /Windows NT 10\.0/.test(userAgent) ||
-      /Windows NT 11\.0/.test(userAgent)
-    ) {
-      osLabel = "Windows";
-      deviceTitle = "Windows PC";
-    } else if (/Windows NT 6\.3/.test(userAgent)) {
-      osLabel = "Windows";
-      deviceTitle = "Windows PC";
-    } else if (/Mac OS X [\d_]+/.test(userAgent)) {
-      osLabel = "macOS";
-      deviceTitle = "Mac device";
-    } else if (/iPhone/.test(userAgent)) {
-      osLabel = "iOS";
-      deviceTitle = "iPhone";
-    } else if (/iPad/.test(userAgent)) {
-      osLabel = "iPadOS";
-      deviceTitle = "iPad";
-    } else if (/iPod/.test(userAgent)) {
-      osLabel = "iOS";
-      deviceTitle = "iPod";
-    } else if (/Android/.test(userAgent) && /Mobile/i.test(userAgent)) {
-      osLabel = "Android";
-      deviceTitle = "Android phone";
-    } else if (/Android/.test(userAgent)) {
-      osLabel = "Android";
-      deviceTitle = "Android tablet";
-    } else if (/Linux/.test(userAgent)) {
-      osLabel = "Linux";
-      deviceTitle = "Linux device";
-    }
-
-    const detailParts = [browserLabel, osLabel].filter(Boolean);
-    return {
-      title: deviceTitle,
-      detail:
-        detailParts.join(" / ") ||
-        (userAgent.length > 64 ? `${userAgent.slice(0, 64)}...` : userAgent),
-    };
-  }, []);
+  const parseUserAgentSummary = useCallback(
+    (value?: string) => summarizeDeviceUserAgent(value),
+    [],
+  );
 
   const renderSecurityRecentLoginList = useCallback(
     (
@@ -1680,13 +1768,33 @@ function DashboardView() {
   );
 
   const formatTransferAdvisoryAmount = useCallback(
-    (amount: number, currency: string) =>
-      `${currency} ${amount.toLocaleString("en-US", {
+    (amount: number, currency: string) => {
+      if (!Number.isFinite(amount)) {
+        return `${currency} unavailable`;
+      }
+      const absolute = Math.abs(amount);
+      if (absolute >= 1e15) {
+        return `${currency} ${amount.toExponential(2)}`;
+      }
+      return `${currency} ${amount.toLocaleString("en-US", {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
-      })}`,
+      })}`;
+    },
     [],
   );
+  const formatTransferBalanceUsage = useCallback((ratio: number) => {
+    if (!Number.isFinite(ratio) || ratio <= 0) return "0%";
+    const percent = ratio * 100;
+    if (percent >= 9999) return ">9,999%";
+    if (percent >= 1000)
+      return `${Math.round(percent).toLocaleString("en-US")}%`;
+    if (percent >= 100) return `${Math.round(percent)}%`;
+    return `${percent.toLocaleString("en-US", {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 1,
+    })}%`;
+  }, []);
 
   const renderTransferAdvisoryPanel = useCallback(
     (
@@ -1785,37 +1893,68 @@ function DashboardView() {
       const balanceUsed =
         advisory?.transferRatio ??
         (wallet?.balance ? amount / Math.max(Number(wallet.balance), 1) : 0);
-      const afterTransfer =
-        advisory?.remainingBalance ??
-        Math.max((Number(wallet?.balance) || 0) - amount, 0);
+      const rawBalance = Number(wallet?.balance) || 0;
+      const afterTransferRaw =
+        advisory?.remainingBalance ?? rawBalance - amount;
+      const exceedsBalance = !advisory && rawBalance > 0 && amount > rawBalance;
+      const afterTransferLabel = exceedsBalance
+        ? formatTransferAdvisoryAmount(Math.abs(afterTransferRaw), "USD")
+        : formatTransferAdvisoryAmount(Math.max(afterTransferRaw, 0), "USD");
       const recipientLabel =
         transferReceiverName.trim() ||
         (transferAccount
           ? `account ending ${transferAccount.slice(-4)}`
           : "this recipient");
-      const title =
-        advisory?.title ||
-        monitoring?.warning?.title ||
-        (tone === "blocked"
-          ? `AI paused transfer to ${recipientLabel}`
+      const confidence =
+        typeof monitoring?.score === "number"
+          ? Math.max(1, Math.min(99, Math.round(monitoring.score * 100)))
+          : tone === "blocked"
+            ? 96
+            : tone === "warning"
+              ? 82
+              : tone === "safe"
+                ? 28
+                : 61;
+      const assessmentLabel =
+        tone === "blocked"
+          ? "High-risk pattern"
           : tone === "warning"
-            ? "Transfer requires stronger review"
+            ? "Step-up recommended"
             : tone === "safe"
-              ? "Light transfer check"
-              : "AI transfer review");
+              ? "Light anomaly signal"
+              : "Review signal detected";
+      const actionLabel =
+        tone === "blocked"
+          ? "Hold transfer"
+          : transferStep === 3 && transferServerFaceIdReason
+            ? "OTP + FaceID"
+            : tone === "warning"
+              ? "OTP verification"
+              : "Continue review";
+      const title =
+        tone === "blocked"
+          ? `AI risk engine paused transfer to ${recipientLabel}`
+          : tone === "warning"
+            ? `AI identified unusual signals for ${recipientLabel}`
+            : tone === "safe"
+              ? `AI noted a low-severity deviation for ${recipientLabel}`
+              : `AI is reviewing this transfer to ${recipientLabel}`;
 
-      const riskText =
-        monitoring?.riskLevel?.toLowerCase() === "high"
-          ? "Risk score is high for this transfer."
-          : monitoring?.riskLevel?.toLowerCase() === "medium"
-            ? "Risk score is elevated for this transfer."
-            : "Risk score is low for this transfer.";
       const message =
         advisory?.message ||
         monitoring?.warning?.message ||
-        `You are sending ${formatTransferAdvisoryAmount(amount, "USD")} to ${recipientLabel}. ${riskText}`;
+        (tone === "blocked"
+          ? `Multiple signals align with patterns that previously required intervention. The transfer is being held pending review.`
+          : tone === "warning"
+            ? `This transfer is still allowed to continue, but the model sees enough unusual behavior to request stronger verification before release.`
+            : tone === "safe"
+              ? `The model noticed a mild deviation from your normal transfer behavior. This does not indicate confirmed fraud, but it is worth reviewing before approval.`
+              : `The model found a few unusual features compared with your recent transfer behavior.`);
 
       const reasonPool = [
+        ...(external && transferStep === 3 && transferServerFaceIdReason
+          ? [transferServerFaceIdReason]
+          : []),
         ...(advisory?.reasons || []),
         ...(monitoring?.reasons || []),
         ...(monitoring?.ruleHits || []).flatMap((hit) =>
@@ -1841,18 +1980,31 @@ function DashboardView() {
             external ? "external" : ""
           }`}
         >
-          <div className="transfer-ai-amount-arrow" aria-hidden="true" />
           <div className="transfer-ai-amount-head">
-            <span className="transfer-ai-amount-badge">AI Monitor</span>
+            <span className="transfer-ai-amount-badge">AI Risk Analyst</span>
             <span className={`transfer-advisory-pill ${tone}`}>
               {tone === "blocked"
                 ? "Blocked"
                 : tone === "warning"
-                  ? "Warning"
+                  ? "Step-up"
                   : tone === "safe"
-                    ? "Light check"
+                    ? "Observed"
                     : "Review"}
             </span>
+          </div>
+          <div className="transfer-ai-amount-summary">
+            <div>
+              <span>Assessment</span>
+              <strong>{assessmentLabel}</strong>
+            </div>
+            <div>
+              <span>Confidence</span>
+              <strong>{confidence}%</strong>
+            </div>
+            <div>
+              <span>Next action</span>
+              <strong>{actionLabel}</strong>
+            </div>
           </div>
           <strong>{title}</strong>
           <p>{message}</p>
@@ -1863,11 +2015,15 @@ function DashboardView() {
             </div>
             <div>
               <dt>Balance used</dt>
-              <dd>{Math.max(0, Math.round(balanceUsed * 100))}%</dd>
+              <dd>
+                {exceedsBalance
+                  ? "Exceeds balance"
+                  : formatTransferBalanceUsage(balanceUsed)}
+              </dd>
             </div>
             <div>
-              <dt>After</dt>
-              <dd>{formatTransferAdvisoryAmount(afterTransfer, "USD")}</dd>
+              <dt>{exceedsBalance ? "Shortfall" : "After"}</dt>
+              <dd>{afterTransferLabel}</dd>
             </div>
           </dl>
           {reasons.length > 0 ? (
@@ -1881,10 +2037,13 @@ function DashboardView() {
       );
     },
     [
+      formatTransferBalanceUsage,
       formatTransferAdvisoryAmount,
       transferAccount,
       transferAmount,
       transferReceiverName,
+      transferServerFaceIdReason,
+      transferStep,
       wallet?.balance,
     ],
   );
@@ -1892,10 +2051,11 @@ function DashboardView() {
   const visibleTransferMonitoring = useMemo(() => {
     if (!transferMonitoring) return null;
     const riskLevel = transferMonitoring.riskLevel.toLowerCase();
+    if (riskLevel === "low") return null;
     const filteredReasons = transferMonitoring.reasons.filter(
       (reason) => reason !== "AI monitoring unavailable",
     );
-    if (riskLevel === "low" && filteredReasons.length === 0) {
+    if (filteredReasons.length === 0) {
       return null;
     }
     return {
@@ -1906,6 +2066,96 @@ function DashboardView() {
   const deferredTransferMonitoring = useDeferredValue(
     visibleTransferMonitoring,
   );
+  const showExternalTransferAiPanel = transferStep !== 4;
+
+  useEffect(() => {
+    if (!token || transferStep !== 2) {
+      setTransferPreviewBusy(false);
+      return;
+    }
+    if (
+      !transferAccount.trim() ||
+      !transferReceiverName.trim() ||
+      !Number.isFinite(transferAmountNumber) ||
+      transferAmountNumber <= 0
+    ) {
+      setTransferPreviewBusy(false);
+      setTransferMonitoring(null);
+      setTransferAdvisory(null);
+      setTransferServerFaceIdRequired(false);
+      setTransferServerFaceIdReason("");
+      setTransferRollingOutflowAmount(null);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setTransferPreviewBusy(true);
+      try {
+        const resp = await fetch(`${API_BASE}/transfer/preview`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            toAccount: transferAccount,
+            amount: transferAmountNumber,
+            note: transferContent || defaultTransferContent,
+          }),
+          signal: controller.signal,
+        });
+        const data = (await resp.json().catch(() => null)) as {
+          error?: string;
+          anomaly?: unknown;
+          transferAdvisory?: unknown;
+          faceIdRequired?: boolean;
+          faceIdReason?: string;
+          rollingOutflowAmount?: number;
+        } | null;
+        if (!resp.ok) {
+          setTransferMonitoring(null);
+          setTransferAdvisory(localTransferPreflightAdvisory);
+          setTransferServerFaceIdRequired(false);
+          setTransferServerFaceIdReason("");
+          setTransferRollingOutflowAmount(null);
+          return;
+        }
+        const monitoring = parseAiMonitoringSummary(data?.anomaly);
+        const advisory = parseTransferSafetyAdvisory(data?.transferAdvisory);
+        setTransferMonitoring(monitoring);
+        setTransferAdvisory(advisory);
+        setTransferServerFaceIdRequired(data?.faceIdRequired === true);
+        setTransferServerFaceIdReason(data?.faceIdReason || "");
+        setTransferRollingOutflowAmount(
+          typeof data?.rollingOutflowAmount === "number"
+            ? data.rollingOutflowAmount
+            : null,
+        );
+      } catch (error) {
+        if ((error as Error).name === "AbortError") return;
+      } finally {
+        if (!controller.signal.aborted) {
+          setTransferPreviewBusy(false);
+        }
+      }
+    }, 350);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [
+    defaultTransferContent,
+    localTransferPreflightAdvisory,
+    parseAiMonitoringSummary,
+    token,
+    transferAccount,
+    transferAmountNumber,
+    transferContent,
+    transferReceiverName,
+    transferStep,
+  ]);
 
   const renderAiMonitoringPanel = useCallback(
     (monitoring: AiMonitoringSummary | null, title: string) => {
@@ -2943,6 +3193,8 @@ function DashboardView() {
   useEffect(() => {
     if (!user || !token) {
       setTransferFaceIdEnabled(false);
+      setTransferPinEnabled(false);
+      setSavedTransferRecipients([]);
       return;
     }
 
@@ -2957,9 +3209,17 @@ function DashboardView() {
         } | null;
         if (!resp.ok || !data || cancelled) return;
         setTransferFaceIdEnabled(data.metadata?.faceIdEnabled === true);
+        setTransferPinEnabled(data.metadata?.transferPinEnabled === true);
+        setSavedTransferRecipients(
+          normalizeSavedTransferRecipients(
+            data.metadata?.recentTransferRecipients,
+          ),
+        );
       } catch {
         if (!cancelled) {
           setTransferFaceIdEnabled(false);
+          setTransferPinEnabled(false);
+          setSavedTransferRecipients([]);
         }
       }
     };
@@ -2990,65 +3250,12 @@ function DashboardView() {
     };
   }, [refreshSecurityAlerts, refreshWalletSnapshot, token]);
 
-  const sendCardDetailsOtp = useCallback(async () => {
-    if (!token) {
-      toast("Session expired. Please login again.", "error");
-      return false;
-    }
-    setCardOtpSending(true);
-    try {
-      const resp = await fetch(`${API_BASE}/card/details/otp/send`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-      });
-      const data = (await resp.json().catch(() => null)) as {
-        error?: string;
-        challengeId?: string;
-        destination?: string;
-        expiresAt?: string;
-        retryAfterSeconds?: number;
-      } | null;
-      if (!resp.ok || !data?.challengeId) {
-        setOtpError(data?.error || "Failed to send OTP");
-        return false;
-      }
-      setCardOtpChallengeId(data.challengeId);
-      setCardOtpDestination(data.destination || "");
-      setCardOtpExpiresAt(data.expiresAt || "");
-      setCardOtpResendAt(
-        Date.now() + Number(data.retryAfterSeconds || 60) * 1000,
-      );
-      setOtpInput("");
-      setOtpError("");
-      toast(
-        data.destination
-          ? `OTP sent to ${data.destination}`
-          : "OTP sent to your email",
-        "info",
-      );
-      return true;
-    } catch {
-      setOtpError("Cannot connect to API server.");
-      return false;
-    } finally {
-      setCardOtpSending(false);
-    }
-  }, [token, toast]);
-
   const openDetailsModal = () => {
     setDetailsModalOpen(true);
     setDetailsStep("otp");
     setOtpInput("");
     setOtpError("");
     setVerifiedCardDetails(null);
-    setCardOtpChallengeId("");
-    setCardOtpDestination("");
-    setCardOtpExpiresAt("");
-    setCardOtpResendAt(0);
-    void sendCardDetailsOtp();
   };
 
   const closeDetailsModal = () => {
@@ -3056,33 +3263,28 @@ function DashboardView() {
     setOtpInput("");
     setOtpError("");
     setVerifiedCardDetails(null);
-    setCardOtpChallengeId("");
-    setCardOtpDestination("");
-    setCardOtpExpiresAt("");
-    setCardOtpResendAt(0);
     setDetailsStep("otp");
   };
 
   const verifyOtpAndShowDetails = async () => {
     if (!/^\d{6}$/.test(otpInput)) {
-      setOtpError("OTP must be exactly 6 digits.");
+      setOtpError("Passcode must be exactly 6 digits.");
       return;
     }
-    if (!cardOtpChallengeId || !token) {
-      setOtpError("OTP challenge expired. Please resend OTP.");
+    if (!token) {
+      setOtpError("Session expired. Please login again.");
       return;
     }
     setCardOtpVerifying(true);
     try {
-      const resp = await fetch(`${API_BASE}/card/details/otp/verify`, {
+      const resp = await fetch(`${API_BASE}/card/details/pin/verify`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          challengeId: cardOtpChallengeId,
-          otp: otpInput,
+          pin: otpInput,
         }),
       });
       const data = (await resp.json().catch(() => null)) as {
@@ -3103,7 +3305,7 @@ function DashboardView() {
         };
       } | null;
       if (!resp.ok) {
-        setOtpError(data?.error || "OTP verification failed");
+        setOtpError(data?.error || "6-digit passcode verification failed");
         return;
       }
       if (data?.cardDetails) {
@@ -3124,7 +3326,7 @@ function DashboardView() {
       }
       setOtpError("");
       setDetailsStep("details");
-      toast("OTP verified successfully");
+      toast("Passcode verified successfully");
     } catch {
       setOtpError("Cannot connect to API server.");
     } finally {
@@ -3148,6 +3350,13 @@ function DashboardView() {
     setTransferQrCameraError("");
     setTransferQrFacingMode("environment");
     setTransferShowMyQr(false);
+    setTransferPinInput("");
+    setTransferPinError("");
+    setTransferOtpRequired(false);
+    setTransferPinSetupOpen(false);
+    setTransferPinSetupBusy(false);
+    setTransferPinSetupError("");
+    setTransferPinSetupForm({ pin: "", confirm: "" });
     setTransferOtpInput("");
     setTransferOtpError("");
     setTransferOtpChallengeId("");
@@ -3164,6 +3373,7 @@ function DashboardView() {
     setTransferOtpBusy(false);
     setTransferOtpVerifyBusy(false);
     setTransferMonitoring(null);
+    setTransferPreviewBusy(false);
     setTransferAdvisory(null);
     setTransferAdvisoryAcknowledged(false);
     setTransferReceipt(null);
@@ -3233,18 +3443,6 @@ function DashboardView() {
   }, [transferFaceVerifyOpen, transferOpen, transferOtpResendAt, transferStep]);
 
   useEffect(() => {
-    if (
-      cardOtpResendAt <= Date.now() ||
-      !detailsModalOpen ||
-      detailsStep !== "otp"
-    ) {
-      return;
-    }
-    const timer = window.setInterval(() => setCardOtpClock(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [cardOtpResendAt, detailsModalOpen, detailsStep]);
-
-  useEffect(() => {
     if (typeof document === "undefined") return;
     document.body.classList.toggle(
       "transfer-faceid-screen-open",
@@ -3260,6 +3458,125 @@ function DashboardView() {
       document.documentElement.classList.remove("transfer-faceid-screen-open");
     };
   }, [transferFaceVerifyOpen]);
+
+  const applyCompletedTransferResult = useCallback(
+    async (
+      transferPayload: {
+        anomaly?: unknown;
+        transaction?: {
+          id: string;
+          toAccount?: string;
+        };
+      } | null,
+    ) => {
+      const now = new Date();
+      const txId = `TXN-${now
+        .toISOString()
+        .replace(/[-:.TZ]/g, "")
+        .slice(0, 14)}-${Math.floor(1000 + Math.random() * 9000)}`;
+      const executedAt = now.toLocaleString("en-US", {
+        month: "short",
+        day: "2-digit",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: true,
+      });
+      const amount = Number(transferAmount.replace(/,/g, "")) || 0;
+      const confirmedMonitoring = parseAiMonitoringSummary(
+        transferPayload?.anomaly,
+      );
+      if (
+        confirmedMonitoring &&
+        confirmedMonitoring.riskLevel.toLowerCase() !== "low"
+      ) {
+        setTransferMonitoring(confirmedMonitoring);
+      } else {
+        setTransferMonitoring(null);
+      }
+      setTransferAdvisory(null);
+      const targetAccount =
+        transferPayload?.transaction?.toAccount || transferAccount;
+      const occurredAt = new Date().toISOString();
+      setTransferReceipt({
+        txId: transferPayload?.transaction?.id || txId,
+        executedAt,
+        fromAccount: wallet?.accountNumber || "Primary Checking",
+        toAccount: targetAccount,
+        recipientName:
+          transferReceiverName.trim() ||
+          `Account ****${targetAccount.slice(-4)}`,
+        amountUsd: amount.toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        }),
+        feeUsd: "0.00",
+        note: transferContent || defaultTransferContent,
+        status: "Completed",
+      });
+      setTransactionHistory((prev) => [
+        {
+          entity: `Transfer to **** ${targetAccount.slice(-4)}`,
+          date: executedAt,
+          id: transferPayload?.transaction?.id || txId,
+          status: "COMPLETED",
+          amount: `-$${amount.toLocaleString("en-US", {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          })}`,
+          amountTone: "negative",
+          receipt: {
+            txId: transferPayload?.transaction?.id || txId,
+            executedAt,
+            fromAccount: wallet?.accountNumber || "Primary Checking",
+            toAccount: targetAccount,
+            recipientName:
+              transferReceiverName.trim() ||
+              `Account ****${targetAccount.slice(-4)}`,
+            amountUsd: amount.toLocaleString("en-US", {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            }),
+            feeUsd: "0.00",
+            note: transferContent || defaultTransferContent,
+            status: "Completed",
+          },
+        },
+        ...prev,
+      ]);
+      setSavedTransferRecipients((prev) =>
+        upsertSavedTransferRecipient(prev, {
+          accountNumber: targetAccount,
+          holderName:
+            transferReceiverName.trim() ||
+            `Account ****${targetAccount.slice(-4)}`,
+          userId: transferRecipientUserId,
+          occurredAt,
+        }),
+      );
+      setTransferFaceVerifyOpen(false);
+      setTransferOpen(true);
+      setTransferFaceProof(null);
+      setTransferFaceResetKey((value) => value + 1);
+      setTransferFaceVerifyBusy(false);
+      await refreshWalletSnapshot({ force: true });
+      goToTransferStep(4);
+      toast("Transfer completed successfully");
+    },
+    [
+      defaultTransferContent,
+      goToTransferStep,
+      refreshWalletSnapshot,
+      toast,
+      transferAccount,
+      transferAmount,
+      transferContent,
+      transferReceiverName,
+      transferRecipientUserId,
+      wallet?.accountNumber,
+    ],
+  );
 
   const generateTransferOtp = async (options?: {
     advisoryAcknowledged?: boolean;
@@ -3281,6 +3598,7 @@ function DashboardView() {
           toAccount: transferAccount,
           amount,
           note: transferContent || defaultTransferContent,
+          transferPin: transferPinInput,
           advisoryAcknowledged:
             options?.advisoryAcknowledged === true ||
             transferAdvisoryAcknowledged,
@@ -3291,7 +3609,9 @@ function DashboardView() {
         }),
       });
       const data = (await resp.json().catch(() => null)) as {
+        status?: string;
         error?: string;
+        otpRequired?: boolean;
         challengeId?: string;
         destination?: string;
         expiresAt?: string;
@@ -3341,8 +3661,35 @@ function DashboardView() {
         return false;
       }
 
+      if (resp.ok && data?.status === "completed") {
+        setTransferAdvisoryAcknowledged(
+          options?.advisoryAcknowledged === true ||
+            transferAdvisoryAcknowledged ||
+            Boolean(advisory),
+        );
+        setTransferOtpRequired(false);
+        setTransferOtpChallengeId("");
+        setTransferOtpDestination("");
+        setTransferOtpExpiresAt("");
+        setTransferOtpInput("");
+        setTransferOtpError("");
+        setTransferPinError("");
+        await applyCompletedTransferResult(data);
+        return true;
+      }
+
       if (!resp.ok || !data?.challengeId) {
-        toast(data?.error || "Failed to send OTP email", "error");
+        const errorMessage = data?.error || "Failed to continue transfer";
+        setTransferPinError(/pin/i.test(errorMessage) ? errorMessage : "");
+        if (/must create a 6-digit transfer pin/i.test(errorMessage)) {
+          setTransferPinSetupError("");
+          setTransferPinSetupForm({ pin: "", confirm: "" });
+          setTransferPinSetupOpen(true);
+        }
+        if (!/pin/i.test(errorMessage)) {
+          setTransferOtpError(errorMessage);
+        }
+        toast(errorMessage, "error");
         return false;
       }
       setTransferAdvisoryAcknowledged(
@@ -3350,6 +3697,7 @@ function DashboardView() {
           transferAdvisoryAcknowledged ||
           Boolean(advisory),
       );
+      setTransferOtpRequired(data.otpRequired === true);
       setTransferOtpChallengeId(data.challengeId);
       setTransferOtpDestination(data.destination || "");
       setTransferOtpExpiresAt(data.expiresAt || "");
@@ -3365,6 +3713,7 @@ function DashboardView() {
       );
       setTransferOtpInput("");
       setTransferOtpError("");
+      setTransferPinError("");
       toast(
         data.destination
           ? `OTP sent to ${data.destination}`
@@ -3526,12 +3875,20 @@ function DashboardView() {
     if (!transferContent.trim()) {
       setTransferContent(defaultTransferContent);
     }
-    const sent = await generateTransferOtp({
-      advisoryAcknowledged: Boolean(effectiveTransferAdvisory),
-    });
-    if (sent) {
-      goToTransferStep(3);
+    if (!transferPinEnabled) {
+      setTransferPinSetupError("");
+      setTransferPinSetupForm({ pin: "", confirm: "" });
+      setTransferPinSetupOpen(true);
+      return;
     }
+    setTransferPinError("");
+    setTransferOtpError("");
+    setTransferOtpRequired(false);
+    setTransferOtpChallengeId("");
+    setTransferOtpDestination("");
+    setTransferOtpExpiresAt("");
+    setTransferOtpInput("");
+    goToTransferStep(3);
   };
 
   const closeTransferFaceVerification = useCallback(() => {
@@ -3542,6 +3899,64 @@ function DashboardView() {
     setTransferFaceResetKey((value) => value + 1);
     setTransferFaceVerifyBusy(false);
   }, []);
+
+  const submitTransferPinSetup = useCallback(async () => {
+    if (!token) {
+      toast("Session expired. Please login again.", "error");
+      return false;
+    }
+    if (!/^\d{6}$/.test(transferPinSetupForm.pin)) {
+      setTransferPinSetupError("Transfer PIN must be exactly 6 digits.");
+      return false;
+    }
+    if (transferPinSetupForm.pin !== transferPinSetupForm.confirm) {
+      setTransferPinSetupError("Transfer PIN confirmation does not match.");
+      return false;
+    }
+
+    setTransferPinSetupBusy(true);
+    try {
+      let resp: Response;
+      try {
+        resp = await fetch(`${API_BASE}/security/transfer-pin`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            newPin: transferPinSetupForm.pin,
+          }),
+        });
+      } catch {
+        setTransferPinSetupError("Cannot connect to API server.");
+        return false;
+      }
+
+      const data = (await resp.json().catch(() => null)) as {
+        error?: string;
+        message?: string;
+        metadata?: Record<string, unknown>;
+      } | null;
+      if (!resp.ok) {
+        setTransferPinSetupError(
+          data?.error || "Failed to create transfer PIN.",
+        );
+        return false;
+      }
+
+      setTransferPinEnabled(data?.metadata?.transferPinEnabled === true);
+      setTransferPinInput(transferPinSetupForm.pin);
+      setTransferPinSetupError("");
+      setTransferPinSetupForm({ pin: "", confirm: "" });
+      setTransferPinSetupOpen(false);
+      goToTransferStep(3);
+      toast(data?.message || "Transfer PIN created successfully.");
+      return true;
+    } finally {
+      setTransferPinSetupBusy(false);
+    }
+  }, [goToTransferStep, toast, token, transferPinSetupForm]);
 
   const verifyTransferOtpGate = useCallback(async () => {
     if (!token) {
@@ -3596,21 +4011,6 @@ function DashboardView() {
 
   const submitTransferConfirmation = useCallback(
     async (faceProof?: FaceIdProof | null) => {
-      const now = new Date();
-      const txId = `TXN-${now
-        .toISOString()
-        .replace(/[-:.TZ]/g, "")
-        .slice(0, 14)}-${Math.floor(1000 + Math.random() * 9000)}`;
-      const executedAt = now.toLocaleString("en-US", {
-        month: "short",
-        day: "2-digit",
-        year: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        hour12: true,
-      });
-      const amount = Number(transferAmount.replace(/,/g, "")) || 0;
       if (!token) {
         toast("Session expired. Please login again.", "error");
         return false;
@@ -3651,83 +4051,31 @@ function DashboardView() {
           toAccount?: string;
         };
       } | null;
-      const confirmedMonitoring = parseAiMonitoringSummary(
-        transferPayload?.anomaly,
-      );
-      if (confirmedMonitoring) {
-        setTransferMonitoring(confirmedMonitoring);
-      }
-      const targetAccount =
-        transferPayload?.transaction?.toAccount || transferAccount;
-      setTransferReceipt({
-        txId: transferPayload?.transaction?.id || txId,
-        executedAt,
-        fromAccount: wallet?.accountNumber || "Primary Checking",
-        toAccount: targetAccount,
-        recipientName:
-          transferReceiverName.trim() ||
-          `Account ****${targetAccount.slice(-4)}`,
-        amountUsd: amount.toLocaleString("en-US", {
-          minimumFractionDigits: 2,
-          maximumFractionDigits: 2,
-        }),
-        feeUsd: "0.00",
-        note: transferContent || defaultTransferContent,
-        status: "Completed",
-      });
-      setTransactionHistory((prev) => [
-        {
-          entity: `Transfer to **** ${targetAccount.slice(-4)}`,
-          date: executedAt,
-          id: transferPayload?.transaction?.id || txId,
-          status: "COMPLETED",
-          amount: `-$${amount.toLocaleString("en-US", {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2,
-          })}`,
-          amountTone: "negative",
-          receipt: {
-            txId: transferPayload?.transaction?.id || txId,
-            executedAt,
-            fromAccount: wallet?.accountNumber || "Primary Checking",
-            toAccount: targetAccount,
-            recipientName:
-              transferReceiverName.trim() ||
-              `Account ****${targetAccount.slice(-4)}`,
-            amountUsd: amount.toLocaleString("en-US", {
-              minimumFractionDigits: 2,
-              maximumFractionDigits: 2,
-            }),
-            feeUsd: "0.00",
-            note: transferContent || defaultTransferContent,
-            status: "Completed",
-          },
-        },
-        ...prev,
-      ]);
-      closeTransferFaceVerification();
-      await refreshWalletSnapshot({ force: true });
-      goToTransferStep(4);
-      toast("Transfer completed successfully");
+      await applyCompletedTransferResult(transferPayload);
       return true;
     },
     [
-      closeTransferFaceVerification,
-      defaultTransferContent,
-      refreshWalletSnapshot,
-      toast,
+      applyCompletedTransferResult,
       token,
       transferServerFaceIdRequired,
-      transferAccount,
-      transferAmount,
-      transferContent,
       transferOtpChallengeId,
       transferOtpInput,
-      wallet?.accountNumber,
+      toast,
     ],
   );
 
   const verifyTransferOtpAndSubmit = async () => {
+    if (!/^\d{6}$/.test(transferPinInput)) {
+      setTransferPinError("Transfer PIN must be exactly 6 digits.");
+      return;
+    }
+    setTransferPinError("");
+    if (!transferOtpRequired) {
+      await generateTransferOtp({
+        advisoryAcknowledged: Boolean(transferAdvisory),
+      });
+      return;
+    }
     if (!/^\d{6}$/.test(transferOtpInput)) {
       setTransferOtpError("OTP must be exactly 6 digits.");
       return;
@@ -4097,26 +4445,19 @@ function DashboardView() {
             {detailsStep === "otp" ? (
               <div className="card-otp-step">
                 <p className="muted">
-                  To view full card details, enter the 6-digit OTP sent to{" "}
-                  {cardOtpDestination || "your registered email"}.
+                  To view full card details, enter your 6-digit passcode.
                 </p>
-                {cardOtpExpiresAt ? (
-                  <p className="muted">
-                    OTP expires at{" "}
-                    {new Date(cardOtpExpiresAt).toLocaleString("en-US")}
-                  </p>
-                ) : null}
                 <label className="form-group">
-                  <span>Enter OTP</span>
+                  <span>Enter 6-digit passcode</span>
                   <input
-                    type="text"
+                    type="password"
                     inputMode="numeric"
                     maxLength={6}
                     value={otpInput}
                     onChange={(e) =>
                       setOtpInput(e.target.value.replace(/\D/g, "").slice(0, 6))
                     }
-                    placeholder="6-digit OTP"
+                    placeholder="6-digit passcode"
                     disabled={cardOtpVerifying}
                   />
                 </label>
@@ -4124,27 +4465,11 @@ function DashboardView() {
                 <div className="card-otp-actions">
                   <button
                     type="button"
-                    className="pill"
-                    onClick={() => void sendCardDetailsOtp()}
-                    disabled={cardOtpSending || cardOtpCooldownSeconds > 0}
-                  >
-                    {cardOtpSending
-                      ? "Sending..."
-                      : cardOtpCooldownSeconds > 0
-                        ? `Resend in ${cardOtpCooldownSeconds}s`
-                        : "Resend OTP"}
-                  </button>
-                  <button
-                    type="button"
                     className="btn-primary"
                     onClick={() => void verifyOtpAndShowDetails()}
-                    disabled={
-                      cardOtpVerifying ||
-                      cardOtpSending ||
-                      otpInput.length !== 6
-                    }
+                    disabled={cardOtpVerifying || otpInput.length !== 6}
                   >
-                    {cardOtpVerifying ? "Verifying..." : "Verify & Continue"}
+                    {cardOtpVerifying ? "Verifying..." : "Unlock Details"}
                   </button>
                 </div>
               </div>
@@ -4246,7 +4571,11 @@ function DashboardView() {
 
       {transferOpen && (
         <div className="modal-overlay transfer-modal-overlay">
-          <div className="transfer-modal-frame">
+          <div
+            className={`transfer-modal-frame${
+              showExternalTransferAiPanel ? " transfer-modal-frame-with-ai" : ""
+            }`}
+          >
             <div
               className="modal-card transfer-modal"
               onClick={(e) => e.stopPropagation()}
@@ -4309,24 +4638,69 @@ function DashboardView() {
                     </div>
 
                     {transferMethod === "account" ? (
-                      <label className="form-group">
-                        <span>Recipient Account Number</span>
-                        <input
-                          type="text"
-                          inputMode="numeric"
-                          placeholder="Enter bank account number"
-                          value={transferAccount}
-                          onChange={(e) => {
-                            void dismissTransferAdvisory();
-                            setTransferAccount(
-                              e.target.value.replace(/\D/g, "").slice(0, 19),
-                            );
-                            setTransferMonitoring(null);
-                            setTransferAdvisory(null);
-                            setTransferAdvisoryAcknowledged(false);
-                          }}
-                        />
-                      </label>
+                      <>
+                        <label className="form-group">
+                          <span>Recipient Account Number</span>
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            placeholder="Enter bank account number"
+                            value={transferAccount}
+                            onChange={(e) => {
+                              void dismissTransferAdvisory();
+                              setTransferAccount(
+                                e.target.value.replace(/\D/g, "").slice(0, 19),
+                              );
+                              setTransferMonitoring(null);
+                              setTransferAdvisory(null);
+                              setTransferAdvisoryAcknowledged(false);
+                            }}
+                          />
+                        </label>
+                        {savedTransferRecipients.length > 0 && (
+                          <div className="transfer-saved-recipients">
+                            <div className="transfer-saved-recipients-head">
+                              Recent recipients
+                            </div>
+                            <div className="transfer-saved-recipients-list">
+                              {savedTransferRecipients
+                                .slice(0, 6)
+                                .map((item) => (
+                                  <button
+                                    key={item.accountNumber}
+                                    type="button"
+                                    className="transfer-saved-recipient-chip"
+                                    onClick={() => {
+                                      void dismissTransferAdvisory();
+                                      setTransferAccount(item.accountNumber);
+                                      setTransferRecipientUserId(
+                                        item.userId || "",
+                                      );
+                                      setTransferReceiverName(item.holderName);
+                                      setTransferMonitoring(null);
+                                      setTransferAdvisory(null);
+                                      setTransferAdvisoryAcknowledged(false);
+                                      void (async () => {
+                                        const resolved =
+                                          await resolveTransferRecipient(
+                                            item.accountNumber,
+                                          );
+                                        if (!resolved) return;
+                                        await logTransferFlowEvent("STARTED");
+                                        goToTransferStep(2);
+                                      })();
+                                    }}
+                                  >
+                                    <strong>{item.holderName}</strong>
+                                    <span>
+                                      ****{item.accountNumber.slice(-4)}
+                                    </span>
+                                  </button>
+                                ))}
+                            </div>
+                          </div>
+                        )}
+                      </>
                     ) : (
                       <div className="transfer-qr-zone">
                         <div className="transfer-qr-actions">
@@ -4627,7 +5001,36 @@ function DashboardView() {
                         </strong>
                       </div>
                     </div>
-                    {transferOtpDestination && (
+                    {!transferPinEnabled && (
+                      <div className="transfer-summary">
+                        <span>Transfer PIN</span>
+                        <strong>Transfer PIN required</strong>
+                        <small>
+                          You need to create a 6-digit transfer PIN before
+                          making transfers.
+                        </small>
+                      </div>
+                    )}
+                    <label className="form-group">
+                      <span>Enter transfer PIN</span>
+                      <input
+                        type="password"
+                        inputMode="numeric"
+                        maxLength={6}
+                        disabled={transferOtpBusy || transferOtpVerifyBusy}
+                        value={transferPinInput}
+                        onChange={(e) =>
+                          setTransferPinInput(
+                            e.target.value.replace(/\D/g, "").slice(0, 6),
+                          )
+                        }
+                        placeholder="6-digit transfer PIN"
+                      />
+                    </label>
+                    {transferPinError && (
+                      <div className="card-otp-error">{transferPinError}</div>
+                    )}
+                    {transferOtpRequired && transferOtpDestination && (
                       <div className="transfer-summary">
                         <span>OTP delivery</span>
                         <strong>{transferOtpDestination}</strong>
@@ -4643,55 +5046,79 @@ function DashboardView() {
                         </small>
                       </div>
                     )}
-                    <label className="form-group">
-                      <span>Enter OTP</span>
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        maxLength={6}
-                        disabled={transferOtpVerifyBusy}
-                        value={transferOtpInput}
-                        onChange={(e) =>
-                          setTransferOtpInput(
-                            e.target.value.replace(/\D/g, "").slice(0, 6),
-                          )
-                        }
-                        placeholder="6-digit OTP"
-                      />
-                    </label>
+                    {transferOtpRequired && (
+                      <label className="form-group">
+                        <span>Enter OTP</span>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={6}
+                          disabled={transferOtpVerifyBusy}
+                          value={transferOtpInput}
+                          onChange={(e) =>
+                            setTransferOtpInput(
+                              e.target.value.replace(/\D/g, "").slice(0, 6),
+                            )
+                          }
+                          placeholder="6-digit OTP"
+                        />
+                      </label>
+                    )}
                     {transferOtpError && (
                       <div className="card-otp-error">{transferOtpError}</div>
                     )}
                     <div className="transfer-actions">
-                      <button
-                        type="button"
-                        className="pill"
-                        disabled={
-                          transferOtpCooldownSeconds > 0 ||
-                          transferOtpBusy ||
-                          transferOtpVerifyBusy
-                        }
-                        onClick={() =>
-                          void generateTransferOtp({
-                            advisoryAcknowledged: Boolean(transferAdvisory),
-                          })
-                        }
-                      >
-                        {transferOtpBusy
-                          ? "Sending..."
-                          : transferOtpCooldownSeconds > 0
-                            ? `Resend in ${transferOtpCooldownSeconds}s`
-                            : "Resend OTP"}
-                      </button>
+                      {transferOtpRequired ? (
+                        <button
+                          type="button"
+                          className="pill"
+                          disabled={
+                            transferOtpCooldownSeconds > 0 ||
+                            transferOtpBusy ||
+                            transferOtpVerifyBusy
+                          }
+                          onClick={() =>
+                            void generateTransferOtp({
+                              advisoryAcknowledged: Boolean(transferAdvisory),
+                            })
+                          }
+                        >
+                          {transferOtpBusy
+                            ? "Sending..."
+                            : transferOtpCooldownSeconds > 0
+                              ? `Resend in ${transferOtpCooldownSeconds}s`
+                              : "Resend OTP"}
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="pill"
+                          onClick={() => {
+                            setTransferOtpRequired(false);
+                            setTransferOtpInput("");
+                            setTransferOtpError("");
+                            setTransferOtpChallengeId("");
+                            setTransferOtpDestination("");
+                            setTransferOtpExpiresAt("");
+                            goToTransferStep(2);
+                          }}
+                        >
+                          Back
+                        </button>
+                      )}
                       <button
                         type="button"
                         className="btn-primary"
                         onClick={verifyTransferOtpAndSubmit}
                         disabled={transferOtpBusy || transferOtpVerifyBusy}
                       >
-                        {transferOtpVerifyBusy
-                          ? "Verifying OTP..."
-                          : "Confirm Transfer"}
+                        {transferOtpRequired
+                          ? transferOtpVerifyBusy
+                            ? "Verifying OTP..."
+                            : "Confirm Transfer"
+                          : transferOtpBusy
+                            ? "Checking risk..."
+                            : "Authorize Transfer"}
                       </button>
                     </div>
                   </div>
@@ -4719,15 +5146,154 @@ function DashboardView() {
                 )}
               </div>
             </div>
-            {transferStep === 2 &&
-              (effectiveTransferAdvisory || deferredTransferMonitoring) &&
-              renderTransferAmountAiPanel(
-                effectiveTransferAdvisory,
-                deferredTransferMonitoring,
-                {
-                  external: true,
-                },
-              )}
+            {showExternalTransferAiPanel &&
+              (effectiveTransferAdvisory || deferredTransferMonitoring ? (
+                renderTransferAmountAiPanel(
+                  effectiveTransferAdvisory,
+                  deferredTransferMonitoring,
+                  {
+                    external: true,
+                  },
+                )
+              ) : (
+                <aside className="transfer-ai-amount-panel external transfer-ai-amount-panel-idle">
+                  <div className="transfer-ai-amount-head">
+                    <span className="transfer-ai-amount-badge">
+                      AI Risk Analyst
+                    </span>
+                    <span className="transfer-advisory-pill caution">
+                      {transferPreviewBusy ? "Analyzing" : "Standby"}
+                    </span>
+                  </div>
+                  <div className="transfer-ai-amount-summary">
+                    <div>
+                      <span>Assessment</span>
+                      <strong>
+                        {transferPreviewBusy
+                          ? "Running model"
+                          : "Awaiting transfer data"}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Confidence</span>
+                      <strong>{transferPreviewBusy ? "..." : "0%"}</strong>
+                    </div>
+                    <div>
+                      <span>Next action</span>
+                      <strong>
+                        {transferPreviewBusy ? "Evaluate" : "Monitor"}
+                      </strong>
+                    </div>
+                  </div>
+                  <strong>AI monitoring will appear here</strong>
+                  <p>
+                    {transferPreviewBusy
+                      ? "Checking recipient history, transfer size, recent behavior, and verification requirements with the transaction risk model."
+                      : "Recipient history, transfer size, recent behavior, and verification requirements will be summarized in this panel before approval."}
+                  </p>
+                </aside>
+              ))}
+            {transferPinSetupOpen && (
+              <div
+                className="transfer-pin-setup-overlay"
+                onClick={() => {
+                  if (transferPinSetupBusy) return;
+                  setTransferPinSetupOpen(false);
+                  setTransferPinSetupError("");
+                }}
+              >
+                <div
+                  className="transfer-pin-setup-card"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="transfer-pin-setup-head">
+                    <div>
+                      <h4>Create Transfer PIN</h4>
+                      <p>
+                        Set your 6-digit transfer PIN now to continue this
+                        transfer.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      onClick={() => {
+                        if (transferPinSetupBusy) return;
+                        setTransferPinSetupOpen(false);
+                        setTransferPinSetupError("");
+                      }}
+                      aria-label="Close transfer PIN setup"
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <label className="form-group">
+                    <span>Transfer PIN</span>
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      maxLength={6}
+                      disabled={transferPinSetupBusy}
+                      value={transferPinSetupForm.pin}
+                      onChange={(e) =>
+                        setTransferPinSetupForm((prev) => ({
+                          ...prev,
+                          pin: e.target.value.replace(/\D/g, "").slice(0, 6),
+                        }))
+                      }
+                      placeholder="Enter 6 digits"
+                    />
+                  </label>
+                  <label className="form-group">
+                    <span>Confirm transfer PIN</span>
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      maxLength={6}
+                      disabled={transferPinSetupBusy}
+                      value={transferPinSetupForm.confirm}
+                      onChange={(e) =>
+                        setTransferPinSetupForm((prev) => ({
+                          ...prev,
+                          confirm: e.target.value
+                            .replace(/\D/g, "")
+                            .slice(0, 6),
+                        }))
+                      }
+                      placeholder="Re-enter 6 digits"
+                    />
+                  </label>
+                  {transferPinSetupError && (
+                    <div className="card-otp-error">
+                      {transferPinSetupError}
+                    </div>
+                  )}
+                  <div className="transfer-actions">
+                    <button
+                      type="button"
+                      className="pill"
+                      disabled={transferPinSetupBusy}
+                      onClick={() => {
+                        setTransferPinSetupOpen(false);
+                        setTransferPinSetupError("");
+                      }}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      disabled={transferPinSetupBusy}
+                      onClick={() => {
+                        void submitTransferPinSetup();
+                      }}
+                    >
+                      {transferPinSetupBusy ? "Saving..." : "Create PIN"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -6473,9 +7039,14 @@ function Toggle({
 }
 
 function SettingView() {
-  const { updateUser } = useAuth();
+  const { user, token, logout, updateUser } = useAuth();
   const { toast } = useToast();
   const { theme } = useTheme();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const isAuthExpired = (status: number, message?: string) =>
+    status === 401 ||
+    status === 403 ||
+    /invalid|expired|token|jwt/i.test((message || "").toLowerCase());
   const [settingTab, setSettingTab] = useState<SettingTabId>("preferences");
   const [profile, setProfile] = useState<ProfileForm>(() => {
     try {
@@ -6498,6 +7069,14 @@ function SettingView() {
     next: "",
     confirm: "",
   });
+  const [transferPinForm, setTransferPinForm] = useState({
+    current: "",
+    next: "",
+    confirm: "",
+  });
+  const [transferPinBusy, setTransferPinBusy] = useState(false);
+  const [transferPinEnabledStatus, setTransferPinEnabledStatus] =
+    useState(false);
   const [security, setSecurity] = useState(() => {
     try {
       const s = localStorage.getItem(SETTING_SECURITY_KEY);
@@ -6533,6 +7112,17 @@ function SettingView() {
         saveLogin: true,
         devices: [],
       };
+    }
+  });
+  const [avatarUrl, setAvatarUrl] = useState(() => {
+    try {
+      return (
+        localStorage.getItem(PROFILE_AVATAR_KEY) ??
+        user?.avatar ??
+        "https://i.pravatar.cc/120?img=12"
+      );
+    } catch {
+      return user?.avatar ?? "https://i.pravatar.cc/120?img=12";
     }
   });
 
@@ -6581,10 +7171,156 @@ function SettingView() {
     toast("Password updated (demo)");
   };
 
-  const saveProfile = () => {
-    localStorage.setItem(SETTING_PROFILE_KEY, JSON.stringify(profile));
-    updateUser({ name: profile.name, email: profile.email });
-    toast("Profile saved successfully");
+  useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+
+    const loadTransferPinStatus = async () => {
+      try {
+        const resp = await fetch(`${API_BASE}/auth/me`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const data = (await resp.json().catch(() => null)) as {
+          metadata?: Record<string, unknown>;
+        } | null;
+        if (!resp.ok || !data || cancelled) return;
+        setTransferPinEnabledStatus(data.metadata?.transferPinEnabled === true);
+      } catch {
+        // ignore temporary load errors in settings
+      }
+    };
+
+    void loadTransferPinStatus();
+    return () => {
+      cancelled = true;
+    };
+  }, [token, user?.id]);
+
+  const saveTransferPin = async () => {
+    if (!token) {
+      toast("Session expired. Please login again.", "error");
+      return;
+    }
+    if (!/^\d{6}$/.test(transferPinForm.next)) {
+      toast("Transfer PIN must be exactly 6 digits", "error");
+      return;
+    }
+    if (transferPinForm.next !== transferPinForm.confirm) {
+      toast("Transfer PIN confirmation does not match", "error");
+      return;
+    }
+
+    setTransferPinBusy(true);
+    try {
+      const resp = await fetch(`${API_BASE}/security/transfer-pin`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          currentPin: transferPinForm.current || undefined,
+          newPin: transferPinForm.next,
+        }),
+      });
+      const data = (await resp.json().catch(() => null)) as {
+        error?: string;
+        message?: string;
+        metadata?: Record<string, unknown>;
+      } | null;
+      if (!resp.ok) {
+        toast(data?.error || "Failed to update transfer PIN", "error");
+        return;
+      }
+
+      setTransferPinEnabledStatus(data?.metadata?.transferPinEnabled === true);
+      setTransferPinForm({ current: "", next: "", confirm: "" });
+      toast(data?.message || "Transfer PIN updated successfully");
+    } finally {
+      setTransferPinBusy(false);
+    }
+  };
+
+  const saveProfile = async () => {
+    if (!token) {
+      toast("Session expired. Please login again.", "error");
+      return;
+    }
+
+    try {
+      const resp = await fetch(`${API_BASE}/auth/me`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          fullName: profile.name,
+          phone: profile.phone,
+          address: profile.address,
+          dob: profile.dateOfBirth,
+          metadata: {
+            userName: profile.userName,
+            avatar: avatarUrl,
+          },
+        }),
+      });
+      const data = (await resp.json().catch(() => null)) as {
+        error?: string;
+        fullName?: string;
+        email?: string;
+      } | null;
+      if (!resp.ok) {
+        if (isAuthExpired(resp.status, data?.error)) {
+          toast("Session expired. Please sign in again.", "error");
+          logout();
+          return;
+        }
+        toast(data?.error || "Failed to save profile", "error");
+        return;
+      }
+
+      localStorage.setItem(SETTING_PROFILE_KEY, JSON.stringify(profile));
+      localStorage.setItem(PROFILE_AVATAR_KEY, avatarUrl);
+      updateUser({
+        name: data?.fullName || profile.name,
+        email: data?.email || profile.email,
+        avatar: avatarUrl,
+      });
+      toast("Profile saved successfully");
+    } catch {
+      toast("Cannot connect to API server.", "error");
+    }
+  };
+
+  const openAvatarPicker = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      toast("Please choose an image file", "error");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const next = String(reader.result ?? "");
+      if (!next) return;
+      setAvatarUrl(next);
+      updateUser({ avatar: next });
+      try {
+        localStorage.setItem(PROFILE_AVATAR_KEY, next);
+      } catch {
+        toast(
+          "Image too large to store locally. Please choose a smaller one.",
+          "error",
+        );
+      }
+    };
+    reader.readAsDataURL(file);
+    e.currentTarget.value = "";
   };
 
   return (
@@ -6612,14 +7348,26 @@ function SettingView() {
         {settingTab === "profile" && (
           <>
             <div className="setting-profile-header">
-              <div className="setting-avatar-wrap">
+              <button
+                type="button"
+                className="setting-avatar-wrap"
+                onClick={openAvatarPicker}
+                aria-label="Change profile image"
+              >
                 <img
-                  src="https://i.pravatar.cc/120?img=12"
-                  alt=""
+                  src={avatarUrl}
+                  alt="Profile avatar"
                   className="setting-avatar"
                 />
                 <span className="setting-avatar-edit">Edit</span>
-              </div>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="sr-only"
+                  onChange={handleAvatarChange}
+                />
+              </button>
             </div>
             <div className="form-grid setting-form">
               <div className="form-group">
@@ -6862,6 +7610,82 @@ function SettingView() {
                   onClick={changePassword}
                 >
                   Update Password
+                </button>
+              </div>
+            </div>
+            <div className="setting-block">
+              <h4 className="setting-block-head">Transfer PIN</h4>
+              <p className="setting-block-desc muted">
+                Every transfer starts with your 6-digit transfer PIN. OTP is
+                only added when AI classifies the risk as medium.
+              </p>
+              <div className="form-grid setting-form">
+                {transferPinEnabledStatus && (
+                  <div className="form-group">
+                    <label>Current transfer PIN</label>
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      maxLength={6}
+                      value={transferPinForm.current}
+                      onChange={(e) =>
+                        setTransferPinForm((prev) => ({
+                          ...prev,
+                          current: e.target.value
+                            .replace(/\D/g, "")
+                            .slice(0, 6),
+                        }))
+                      }
+                    />
+                  </div>
+                )}
+                <div className="form-group">
+                  <label>
+                    {transferPinEnabledStatus
+                      ? "New transfer PIN"
+                      : "Transfer PIN"}
+                  </label>
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={transferPinForm.next}
+                    onChange={(e) =>
+                      setTransferPinForm((prev) => ({
+                        ...prev,
+                        next: e.target.value.replace(/\D/g, "").slice(0, 6),
+                      }))
+                    }
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Confirm transfer PIN</label>
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={transferPinForm.confirm}
+                    onChange={(e) =>
+                      setTransferPinForm((prev) => ({
+                        ...prev,
+                        confirm: e.target.value.replace(/\D/g, "").slice(0, 6),
+                      }))
+                    }
+                  />
+                </div>
+              </div>
+              <div className="setting-actions">
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={saveTransferPin}
+                  disabled={transferPinBusy}
+                >
+                  {transferPinBusy
+                    ? "Saving..."
+                    : transferPinEnabledStatus
+                      ? "Update Transfer PIN"
+                      : "Create Transfer PIN"}
                 </button>
               </div>
             </div>
@@ -8558,6 +9382,9 @@ function AuthShell({
         minute: "2-digit",
       })
     : "Just now";
+  const sessionAlertDevice = summarizeDeviceUserAgent(
+    pendingSessionAlert?.userAgent,
+  );
 
   const renderLoginMonitoring = (monitoring: LoginMonitoring | null) => {
     if (!monitoring) return null;
@@ -9967,7 +10794,10 @@ function AuthShell({
               <div className="session-alert-meta">
                 <span>Time: {sessionAlertIssuedAt}</span>
                 <span>
-                  Device: {pendingSessionAlert.userAgent || "Unknown device"}
+                  Device: {sessionAlertDevice.title}
+                  {sessionAlertDevice.detail
+                    ? ` · ${sessionAlertDevice.detail}`
+                    : ""}
                 </span>
                 <span>
                   IP: {pendingSessionAlert.ipAddress || "Unavailable"}

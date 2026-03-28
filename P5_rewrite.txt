@@ -1,0 +1,73 @@
+5. Communicate Research Outcomes in an Appropriate Manner for the Intended Audience
+
+This section explains what project results need to be communicated and how they should be communicated to each intended audience. In this project, communication is not limited to describing the system. It must also present the evidence gathered from the research, the meaning of the findings, and the practical recommendations that follow from them.
+
+5.1 Results to Be Communicated
+
+The main results of the project that need to be communicated are:
+
+1. The project successfully designed a secure e-wallet model that combines user authentication, data encryption, audit logging, and AI-based anomalous login detection.
+
+2. The research findings show that users place high importance on data protection, early warning of suspicious activity, and security features that do not interrupt normal usage unnecessarily.
+
+3. The survey and analysis indicate that users are generally willing to accept additional security controls, such as OTP verification, account alerts, and adaptive authentication, when these controls are clearly explained and justified.
+
+4. The proposed system architecture demonstrates that cybersecurity controls can be integrated into an e-wallet system in a practical and technically feasible manner.
+
+5. The study also identifies current limitations, including limited access to real banking datasets, the restricted scope of testing, and the need for future improvement in AI model accuracy and real-world validation.
+
+6. Based on the outcomes, the project recommends a layered security approach for e-wallet systems, including encryption, strong authentication, login monitoring, user notifications, and clear security guidance for users.
+
+These are the core outcomes that must be communicated because they show both the value of the project and the evidence that supports the conclusions.
+
+5.2 Intended Audience for the Communication
+
+The project results should be communicated to the following groups:
+
+Cybersecurity experts and researchers:
+This audience requires detailed technical information, including threat analysis, security controls, system logic, and justification for the proposed architecture.
+
+Project stakeholders, supervisors, and development teams:
+This audience needs clear communication about the system design, research findings, feasibility of implementation, and how the outcomes support project decisions.
+
+End users of the e-wallet system:
+This audience needs simple and practical explanations focused on how the system protects their accounts, data, and transactions.
+
+5.3 Methods and Measures Used to Communicate the Results
+
+Different communication methods are used or proposed to ensure that the research outcomes are understandable and useful for each audience.
+
+For cybersecurity experts and researchers, the results are communicated through:
+
+- A formal research report presenting the research problem, methodology, findings, analysis, and conclusions.
+- Technical documentation such as system architecture diagrams, data flow diagrams, and security design descriptions.
+- Tables and charts showing survey findings, security priorities, and analysis of user expectations.
+- A project presentation or academic defence to explain the logic of the proposed secure e-wallet model and answer technical questions.
+
+For project stakeholders, supervisors, and development teams, the results are communicated through:
+
+- Executive summaries that highlight the key findings and their impact on the project.
+- Presentation slides containing diagrams, screenshots, charts, and recommendations.
+- Design documents such as URD, SRS, and HLD to connect the research outcomes to implementation decisions.
+- Review meetings or discussions where the findings can be explained and justified directly.
+
+For end users, the results are communicated through:
+
+- Simple user guidance explaining the purpose of OTP, login alerts, and suspicious activity detection.
+- Interface messages and security notifications that clearly explain why a security action has been triggered.
+- Visual materials such as infographics or screenshots that show how the system protects user data and transactions.
+- Help content or onboarding instructions that encourage safe user behaviour and improve trust in the system.
+
+To improve communication quality, the following measures are applied:
+
+- Use of clear and non-technical language for non-specialist audiences.
+- Use of charts, graphs, screenshots, and diagrams to make complex findings easier to understand.
+- Separation of technical detail and user-focused explanation depending on the audience.
+- Summary of the most important findings before presenting deeper analysis.
+- Consistent linking of findings to evidence from the survey and system design.
+
+5.4 Justification for the Communication Approach
+
+This communication approach is appropriate because the project has more than one audience, and each audience needs different levels of detail. Technical audiences need evidence, justification, and design detail. Stakeholders need practical implications and feasibility. End users need reassurance, trust, and easy-to-understand explanations.
+
+By clearly stating the project results and matching them with suitable communication methods, the project ensures that the research outcomes are not only produced, but also communicated effectively and meaningfully. This directly supports P5 because it identifies the results to be shared and the methods used to share them in an appropriate manner for the intended audience.

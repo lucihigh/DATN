@@ -3,7 +3,7 @@ import os
 import ipaddress
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -116,6 +116,10 @@ def _auth_mode() -> str:
     return "api_key"
 
 
+def _strict_model_only_enabled() -> bool:
+    return bool(str(os.getenv("AI_STRICT_MODEL_ONLY", "1")).strip().lower() in {"1", "true", "yes"})
+
+
 def _verify_api_key(x_ai_api_key: str | None) -> bool:
     expected = os.getenv("AI_API_KEY", "local-dev-key")
     return bool(x_ai_api_key and x_ai_api_key == expected)
@@ -222,6 +226,47 @@ def _camel_case_feature_name(name: str) -> str:
     if not parts:
         return "unknownFeature"
     return parts[0] + "".join(part[:1].upper() + part[1:] for part in parts[1:])
+
+
+def _humanize_feature_name(name: str) -> str:
+    return " ".join([part for part in str(name).split("_") if part]) or "unknown feature"
+
+
+def _build_model_only_reasons(
+    *,
+    features: np.ndarray,
+    feature_mean: np.ndarray | None,
+    feature_std: np.ndarray | None,
+    feature_names: list[str],
+    domain: str,
+    max_reasons: int = 3,
+) -> list[str]:
+    if feature_mean is None or feature_std is None:
+        return [f"Model detected anomaly patterns in {domain} behavior."]
+
+    mean = np.asarray(feature_mean, dtype=float)
+    std = np.asarray(feature_std, dtype=float).copy()
+    std[std == 0] = 1.0
+    values = np.asarray(features, dtype=float)
+    limit = min(len(values), len(mean), len(std), len(feature_names))
+    if limit <= 0:
+        return [f"Model detected anomaly patterns in {domain} behavior."]
+
+    z_scores = np.abs((values[:limit] - mean[:limit]) / std[:limit])
+    ranked = np.argsort(z_scores)[::-1]
+    reasons: list[str] = []
+    for idx in ranked:
+        score = float(z_scores[int(idx)])
+        if score < 1.0:
+            continue
+        feature_name = _humanize_feature_name(feature_names[int(idx)])
+        reasons.append(f"Model observed unusual {feature_name} (z={score:.2f}).")
+        if len(reasons) >= max_reasons:
+            break
+
+    if not reasons:
+        reasons.append(f"Model detected anomaly patterns in {domain} behavior.")
+    return reasons
 
 
 def _feature_vector_to_dict(feature_names: list[str], features: np.ndarray) -> dict[str, float]:
@@ -627,6 +672,209 @@ def _is_private_or_loopback_ip(ip: str) -> bool:
         return parsed.is_private or parsed.is_loopback
     except Exception:
         return False
+
+
+def _get_tx_history_signals(event: TransactionEvent) -> dict[str, Any]:
+    if _postgres_ready():
+        return _get_tx_history_signals_from_postgres(event)
+    if _mongo_ready():
+        return _get_tx_history_signals_from_mongo(event)
+    return {
+        "available": False,
+        "history_count_30d": 0,
+        "failed_tx_24h": int(event.failed_tx_24h),
+        "velocity_1h": int(event.velocity_1h),
+        "today_spend_before": float(event.today_spend_before),
+        "daily_spend_avg_30d": float(event.daily_spend_avg_30d),
+        "projected_daily_spend": float(event.projected_daily_spend),
+        "last_transaction_at": None,
+        "history_source": "none",
+    }
+
+
+def _get_tx_history_signals_from_postgres(event: TransactionEvent) -> dict[str, Any]:
+    event_ts = _as_utc(event.timestamp) or event.timestamp
+    since_30d = event_ts - timedelta(days=30)
+    since_24h = event_ts - timedelta(hours=24)
+    since_1h = event_ts - timedelta(hours=1)
+    rows = _pg_fetchall(
+        """
+        SELECT "amount", "status", "type", "createdAt"
+        FROM "Transaction"
+        WHERE "fromUserId" = %s
+          AND "createdAt" < %s
+          AND "createdAt" >= %s
+        ORDER BY "createdAt" DESC
+        """,
+        (event.user_id, event_ts, since_30d),
+    )
+    signals: dict[str, Any] = {
+        "available": bool(rows),
+        "history_count_30d": len(rows),
+        "failed_tx_24h": 0,
+        "velocity_1h": 0,
+        "today_spend_before": 0.0,
+        "daily_spend_avg_30d": 0.0,
+        "projected_daily_spend": float(max(event.amount, 0.0)),
+        "last_transaction_at": _to_json_value(rows[0]["createdAt"]) if rows else None,
+        "history_source": "postgres",
+    }
+    if not rows:
+        audit_rows = _pg_fetchall(
+            """
+            SELECT "details", "createdAt"
+            FROM "AuditLog"
+            WHERE "userId" = %s
+              AND "actor" = 'ai-service'
+              AND "action" = 'AI_TRANSACTION_SCORE'
+              AND "createdAt" < %s
+              AND "createdAt" >= %s
+            ORDER BY "createdAt" DESC
+            LIMIT 500
+            """,
+            (event.user_id, event_ts, since_30d),
+        )
+        if not audit_rows:
+            return signals
+
+        signals["available"] = True
+        signals["history_count_30d"] = len(audit_rows)
+        signals["history_source"] = "postgres_auditlog"
+        signals["last_transaction_at"] = _to_json_value(audit_rows[0].get("createdAt"))
+
+        event_day = event_ts.date().isoformat()
+        daily_totals: dict[str, float] = {}
+        for row in audit_rows:
+            created_at = _as_utc(row.get("createdAt"))
+            if not isinstance(created_at, datetime):
+                continue
+            details = _normalize_json_field(row.get("details"))
+            input_snapshot = _normalize_json_field(details.get("inputSnapshot"))
+            amount = float(input_snapshot.get("amount") or 0.0)
+            if created_at >= since_1h:
+                signals["velocity_1h"] += 1
+            day_key = created_at.date().isoformat()
+            daily_totals[day_key] = daily_totals.get(day_key, 0.0) + max(amount, 0.0)
+
+        active_day_totals = [value for value in daily_totals.values() if value > 0]
+        today_spend_before = float(daily_totals.get(event_day, 0.0))
+        daily_spend_avg_30d = (
+            float(sum(active_day_totals) / len(active_day_totals)) if active_day_totals else 0.0
+        )
+        signals["today_spend_before"] = today_spend_before
+        signals["daily_spend_avg_30d"] = daily_spend_avg_30d
+        signals["projected_daily_spend"] = today_spend_before + float(max(event.amount, 0.0))
+        return signals
+
+    event_day = event_ts.date().isoformat()
+    daily_totals: dict[str, float] = {}
+    for row in rows:
+        created_at = _as_utc(row.get("createdAt"))
+        if not isinstance(created_at, datetime):
+            continue
+        amount = float(row.get("amount") or 0.0)
+        status = str(row.get("status") or "").upper()
+        tx_type = str(row.get("type") or "").upper()
+        if tx_type != "TRANSFER":
+            continue
+        if created_at >= since_24h and status == "FAILED":
+            signals["failed_tx_24h"] += 1
+        if created_at >= since_1h:
+            signals["velocity_1h"] += 1
+        if status != "COMPLETED":
+            continue
+        day_key = created_at.date().isoformat()
+        daily_totals[day_key] = daily_totals.get(day_key, 0.0) + max(amount, 0.0)
+
+    active_day_totals = [value for value in daily_totals.values() if value > 0]
+    today_spend_before = float(daily_totals.get(event_day, 0.0))
+    daily_spend_avg_30d = (
+        float(sum(active_day_totals) / len(active_day_totals)) if active_day_totals else 0.0
+    )
+    signals["today_spend_before"] = today_spend_before
+    signals["daily_spend_avg_30d"] = daily_spend_avg_30d
+    signals["projected_daily_spend"] = today_spend_before + float(max(event.amount, 0.0))
+    return signals
+
+
+def _get_tx_history_signals_from_mongo(event: TransactionEvent) -> dict[str, Any]:
+    event_ts = _as_utc(event.timestamp) or event.timestamp
+    since_30d = event_ts - timedelta(days=30)
+    since_24h = event_ts - timedelta(hours=24)
+    since_1h = event_ts - timedelta(hours=1)
+    mongo_db = app.state.mongo_db
+    user_oid = _safe_object_id(event.user_id)
+    query: dict[str, Any] = {"createdAt": {"$lt": event_ts, "$gte": since_30d}}
+    if user_oid is not None:
+        query["$or"] = [{"userId": user_oid}, {"userIdRaw": event.user_id}]
+    else:
+        query["userIdRaw"] = event.user_id
+    projection = {"amount": 1, "status": 1, "type": 1, "createdAt": 1}
+    try:
+        rows = list(
+            mongo_db[TRANSACTION_EVENTS_COLLECTION]
+            .find(query, projection=projection)
+            .sort("createdAt", -1)
+            .limit(1000)
+        )
+    except PyMongoError:
+        rows = []
+    signals: dict[str, Any] = {
+        "available": bool(rows),
+        "history_count_30d": len(rows),
+        "failed_tx_24h": 0,
+        "velocity_1h": 0,
+        "today_spend_before": 0.0,
+        "daily_spend_avg_30d": 0.0,
+        "projected_daily_spend": float(max(event.amount, 0.0)),
+        "last_transaction_at": _to_json_value(rows[0]["createdAt"]) if rows else None,
+        "history_source": "mongo",
+    }
+    if not rows:
+        return signals
+
+    event_day = event_ts.date().isoformat()
+    daily_totals: dict[str, float] = {}
+    for row in rows:
+        created_at = _as_utc(row.get("createdAt"))
+        if not isinstance(created_at, datetime):
+            continue
+        amount = float(row.get("amount") or 0.0)
+        status = str(row.get("status") or "COMPLETED").upper()
+        tx_type = str(row.get("type") or "TRANSFER").upper()
+        if tx_type != "TRANSFER":
+            continue
+        if created_at >= since_24h and status == "FAILED":
+            signals["failed_tx_24h"] += 1
+        if created_at >= since_1h:
+            signals["velocity_1h"] += 1
+        if status != "COMPLETED":
+            continue
+        day_key = created_at.date().isoformat()
+        daily_totals[day_key] = daily_totals.get(day_key, 0.0) + max(amount, 0.0)
+
+    active_day_totals = [value for value in daily_totals.values() if value > 0]
+    today_spend_before = float(daily_totals.get(event_day, 0.0))
+    daily_spend_avg_30d = (
+        float(sum(active_day_totals) / len(active_day_totals)) if active_day_totals else 0.0
+    )
+    signals["today_spend_before"] = today_spend_before
+    signals["daily_spend_avg_30d"] = daily_spend_avg_30d
+    signals["projected_daily_spend"] = today_spend_before + float(max(event.amount, 0.0))
+    return signals
+
+
+def _apply_tx_history_signals(event: TransactionEvent, signals: dict[str, Any]) -> TransactionEvent:
+    event.failed_tx_24h = int(max(int(signals.get("failed_tx_24h", event.failed_tx_24h) or 0), 0))
+    event.velocity_1h = int(max(int(signals.get("velocity_1h", event.velocity_1h) or 0), 0))
+    event.today_spend_before = float(max(float(signals.get("today_spend_before", event.today_spend_before) or 0.0), 0.0))
+    event.daily_spend_avg_30d = float(
+        max(float(signals.get("daily_spend_avg_30d", event.daily_spend_avg_30d) or 0.0), 0.0)
+    )
+    event.projected_daily_spend = float(
+        max(float(signals.get("projected_daily_spend", event.projected_daily_spend) or 0.0), 0.0)
+    )
+    return event
 
 
 def _get_history_signals(event: LoginEvent) -> dict[str, Any]:
@@ -2459,9 +2707,18 @@ def score(
         float(app.state.thresholds["score_max"]),
     )
     risk_level_base = _score_to_level(score_value, app.state.thresholds)
-    risk_level = risk_level_base
-    risk_level = _adjust_risk_level(risk_level, event, history_signals)
-    reasons = _build_reasons(event, features, history_signals)
+    if _strict_model_only_enabled():
+        risk_level = risk_level_base
+        reasons = _build_model_only_reasons(
+            features=features,
+            feature_mean=getattr(app.state, "feature_mean", None),
+            feature_std=getattr(app.state, "feature_std", None),
+            feature_names=_active_feature_names(),
+            domain="login",
+        )
+    else:
+        risk_level = _adjust_risk_level(risk_level_base, event, history_signals)
+        reasons = _build_reasons(event, features, history_signals)
     try:
         mongo_persist = _persist_score_to_mongo(
             event=event,
@@ -2613,6 +2870,8 @@ def score_transaction(
 
     event = _normalize_transaction_event(event)
     request_key = _resolve_tx_request_key(event, x_idempotency_key)
+    tx_history_signals = _get_tx_history_signals(event)
+    event = _apply_tx_history_signals(event, tx_history_signals)
     features = _build_tx_features(event)
     score_value = float(app.state.tx_model.decision_function(features.reshape(1, -1))[0])
     anomaly_score = _scaled_score(
@@ -2621,17 +2880,49 @@ def score_transaction(
         float(app.state.tx_thresholds["score_max"]),
     )
     risk_level_base = _score_to_level(score_value, app.state.tx_thresholds)
-    model_adjusted_risk = _adjust_tx_risk_level(risk_level_base, event)
-    model_reasons = _build_tx_reasons(event, features)
-    rule_eval = evaluate_transaction_rules(
-        event,
-        learned_countries=set(getattr(app.state, "tx_countries", set()) or set()),
-    )
-    risk_level = _max_risk_level(model_adjusted_risk, rule_eval.rule_risk_level)
-    reasons = _merge_tx_reasons(
-        model_reasons,
-        [hit.reason for hit in rule_eval.hits],
-    )
+    if _strict_model_only_enabled():
+        model_adjusted_risk = risk_level_base
+        model_reasons = _build_model_only_reasons(
+            features=features,
+            feature_mean=getattr(app.state, "tx_feature_mean", None),
+            feature_std=getattr(app.state, "tx_feature_std", None),
+            feature_names=_active_tx_feature_names(),
+            domain="transaction",
+        )
+        rule_risk_level = "LOW"
+        rule_score = 0
+        rule_hits: list[dict[str, Any]] = []
+        warning_vi = {
+            "title": "Model-only mode",
+            "message": "Risk decision is generated by anomaly model only.",
+            "do_not": [],
+            "must_do": [],
+            "prompt_template_id": "model_only_v1",
+        }
+        risk_level = model_adjusted_risk
+        reasons = model_reasons
+    else:
+        model_adjusted_risk = _adjust_tx_risk_level(risk_level_base, event)
+        model_reasons = _build_tx_reasons(event, features)
+        rule_eval = evaluate_transaction_rules(
+            event,
+            learned_countries=set(getattr(app.state, "tx_countries", set()) or set()),
+        )
+        rule_risk_level = rule_eval.rule_risk_level
+        rule_score = rule_eval.rule_score
+        rule_hits = [hit.to_dict() for hit in rule_eval.hits]
+        warning_vi = {
+            "title": rule_eval.warning_title,
+            "message": rule_eval.warning_message,
+            "do_not": rule_eval.do_not,
+            "must_do": rule_eval.must_do,
+            "prompt_template_id": rule_eval.prompt_template_id,
+        }
+        risk_level = _max_risk_level(model_adjusted_risk, rule_risk_level)
+        reasons = _merge_tx_reasons(
+            model_reasons,
+            [hit["reason"] for hit in rule_hits],
+        )
     try:
         mongo_persist = _persist_tx_score_to_mongo(
             event=event,
@@ -2675,23 +2966,21 @@ def score_transaction(
         "risk_level": risk_level,
         "reasons": reasons,
         "model_risk_level": model_adjusted_risk,
-        "rule_risk_level": rule_eval.rule_risk_level,
-        "rule_score": rule_eval.rule_score,
-        "rule_hit_count": len(rule_eval.hits),
-        "rule_hits": [hit.to_dict() for hit in rule_eval.hits],
-        "warning_vi": {
-            "title": rule_eval.warning_title,
-            "message": rule_eval.warning_message,
-            "do_not": rule_eval.do_not,
-            "must_do": rule_eval.must_do,
-            "prompt_template_id": rule_eval.prompt_template_id,
-        },
+        "rule_risk_level": rule_risk_level,
+        "rule_score": rule_score,
+        "rule_hit_count": len(rule_hits),
+        "rule_hits": rule_hits,
+        "warning_vi": warning_vi,
         "monitoring_only": True,
         "action": AI_TX_ACTION,
         "model_source": app.state.tx_model_source,
         "model_version": getattr(app.state, "tx_model_version", "unknown"),
         "request_key": request_key,
         "analysis_signals": {
+            "history_available": bool(tx_history_signals.get("available")),
+            "history_source": tx_history_signals.get("history_source"),
+            "history_count_30d": int(tx_history_signals.get("history_count_30d", 0)),
+            "last_transaction_at": tx_history_signals.get("last_transaction_at"),
             "amount": float(event.amount),
             "currency": event.currency,
             "country": event.country,
