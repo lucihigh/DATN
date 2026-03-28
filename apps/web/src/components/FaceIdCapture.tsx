@@ -106,9 +106,9 @@ const STEP_COLORS: Record<FaceIdStepId, string> = {
   move_closer: "#f59e0b",
 };
 
-const PROCESS_INTERVAL_MS = 140;
-const REQUIRED_STEP_STREAK = 1;
-const COMPAT_REQUIRED_STEP_STREAK = 2;
+const PROCESS_INTERVAL_MS = 220;
+const REQUIRED_STEP_STREAK = 3;
+const COMPAT_REQUIRED_STEP_STREAK = 4;
 const MEDIAPIPE_WASM_PATH =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.32/wasm";
 const MEDIAPIPE_FACE_MODEL_PATH =
@@ -536,7 +536,7 @@ export function FaceIdCapture({
     "idle" | "loading" | "ready" | "scanning" | "verified" | "error"
   >("idle");
   const [message, setMessage] = useState(
-    "Register a real face scan that is fixed to this account.",
+    "Register your face scan for this account.",
   );
   const [stepIndex, setStepIndex] = useState(0);
   const [completedSteps, setCompletedSteps] = useState<FaceIdStepId[]>([]);
@@ -578,8 +578,8 @@ export function FaceIdCapture({
     setStatus("idle");
     setMessage(
       isVerifyMode
-        ? "Verify with a live face scan before the transfer is approved."
-        : "Register a real face scan that is fixed to this account.",
+        ? "Verify your face scan before the transfer is approved."
+        : "Register your face scan for this account.",
     );
     setStepIndex(0);
     setCompletedSteps([]);
@@ -931,7 +931,7 @@ export function FaceIdCapture({
         setStatus("verified");
         setMessage(
           isVerifyMode
-            ? "Live FaceID verification is ready for this transfer."
+            ? "FaceID verification is ready for this transfer."
             : "FaceID registered. This biometric sample is now linked to the account.",
         );
         setDiagnostic("");
@@ -1122,7 +1122,7 @@ export function FaceIdCapture({
       setCompletedSteps(nextCompletedSteps);
 
       if (stepIndex + 1 >= (challenge?.steps.length ?? 0)) {
-        window.setTimeout(() => finalizeProof(nextCompletedSteps), 160);
+        window.setTimeout(() => finalizeProof(nextCompletedSteps), 420);
         return true;
       }
 
@@ -1167,7 +1167,7 @@ export function FaceIdCapture({
       setCompletedSteps(nextCompletedSteps);
 
       if (stepIndex + 1 >= (challenge?.steps.length ?? 0)) {
-        window.setTimeout(() => finalizeProof(nextCompletedSteps), 220);
+        window.setTimeout(() => finalizeProof(nextCompletedSteps), 520);
         return;
       }
 
@@ -1382,7 +1382,7 @@ export function FaceIdCapture({
         lastBoxRef.current = box;
 
         const totalSteps = challenge?.steps.length ?? 0;
-        const requiredCompatSamples = Math.max(18, totalSteps * 6, 1);
+        const requiredCompatSamples = Math.max(36, totalSteps * 12, 1);
         const frameHasSignal =
           presenceScore >= 0.005 ||
           motionMetric >= 0.002 ||
@@ -1482,7 +1482,7 @@ export function FaceIdCapture({
   const startCapture = useCallback(async () => {
     if (disabled) return;
     setStatus("loading");
-    setMessage("Starting camera and preparing your live face scan...");
+    setMessage("Starting camera and preparing your face scan...");
     onChange(null);
 
     try {
@@ -1676,7 +1676,7 @@ export function FaceIdCapture({
 
   const badgeLabel = useMemo(() => {
     if (status === "verified") return "Ready";
-    if (status === "scanning") return "Live";
+    if (status === "scanning") return "Scanning";
     if (status === "error") return "Retry";
     return "Required";
   }, [status]);
@@ -1764,10 +1764,9 @@ export function FaceIdCapture({
             />
           ) : (
             <div className="faceid-placeholder">
-              <span>Live face scan required</span>
+              <span>Face scan required</span>
               <small>
-                Real user only. Printed images and static frames should fail
-                liveness.
+                Center your face inside the oval and let the scan complete.
               </small>
             </div>
           )}
