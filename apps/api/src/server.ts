@@ -224,9 +224,11 @@ const TRANSFER_SCAM_BLOCK_MAX_REMAINING_BALANCE = Number(
 const TRANSFER_SCAM_BLOCK_SPEND_SURGE_RATIO = Number(
   process.env.TRANSFER_SCAM_BLOCK_SPEND_SURGE_RATIO || "6",
 );
-const TRANSFER_SCAM_HOLD_MINUTES = Number(
-  process.env.TRANSFER_SCAM_HOLD_MINUTES || "30",
-);
+const TRANSFER_SCAM_HOLD_MS = Number.isFinite(
+  Number(process.env.TRANSFER_SCAM_HOLD_SECONDS),
+)
+  ? Number(process.env.TRANSFER_SCAM_HOLD_SECONDS) * 1000
+  : Number(process.env.TRANSFER_SCAM_HOLD_MINUTES || "30") * 60 * 1000;
 const KNOWN_RECIPIENT_LOOKBACK_DAYS = Number(
   process.env.KNOWN_RECIPIENT_LOOKBACK_DAYS || "180",
 );
@@ -293,6 +295,14 @@ const CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES = Number(
 );
 const CONTINUOUS_LARGE_TRANSFER_BLOCK_COUNT = Number(
   process.env.CONTINUOUS_LARGE_TRANSFER_BLOCK_COUNT || "1",
+);
+const TRANSFER_HIGH_RISK_IMMEDIATE_BLOCK = !["0", "false", "no"].includes(
+  String(process.env.TRANSFER_HIGH_RISK_IMMEDIATE_BLOCK || "0")
+    .trim()
+    .toLowerCase(),
+);
+const TRANSFER_MEDIUM_RISK_OTP_MIN_AMOUNT = Number(
+  process.env.TRANSFER_MEDIUM_RISK_OTP_MIN_AMOUNT || "250",
 );
 const MEDIUM_RISK_TRANSFER_LIMIT = Number(
   process.env.MEDIUM_RISK_TRANSFER_LIMIT || "500",
@@ -384,6 +394,14 @@ type TransferRecipientProfile = {
   lastTransferAt: string | null;
 };
 
+type RecentTransferRecipient = {
+  accountNumber: string;
+  holderName: string;
+  userId?: string;
+  lastTransferredAt: string;
+  transferCount: number;
+};
+
 type TransferBehaviorProfile = {
   recentReviewCount30d: number;
   recentBlockedCount30d: number;
@@ -465,6 +483,9 @@ type SessionSecurityState = {
   restrictLargeTransfers?: boolean;
   maxTransferAmount?: number;
 };
+
+const RECENT_TRANSFER_RECIPIENTS_KEY = "recentTransferRecipients";
+const MAX_RECENT_TRANSFER_RECIPIENTS = 8;
 
 type ClientDeviceContext = {
   browser?: string;
@@ -2052,7 +2073,7 @@ const buildTransferSafetyAdvisory = (input: {
 
   if (shouldBlock) {
     const blockedUntil = new Date(
-      Date.now() + TRANSFER_SCAM_HOLD_MINUTES * 60 * 1000,
+      Date.now() + TRANSFER_SCAM_HOLD_MS,
     ).toISOString();
     return buildBlockedTransferAdvisory({
       requestKey: input.requestKey,
@@ -4837,12 +4858,30 @@ const getInternalFaceIdMetadata = (metadata: unknown) => {
     : null;
 };
 
+const getInternalTransferPinMetadata = (metadata: unknown) => {
+  if (!metadata || typeof metadata !== "object") return null;
+  const value = (metadata as Record<string, unknown>).transferSecurity;
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : null;
+};
+
+const hasStoredTransferPin = (metadata: unknown) => {
+  const transferPin = getInternalTransferPinMetadata(metadata);
+  return (
+    transferPin !== null &&
+    typeof transferPin.pinHash === "string" &&
+    transferPin.pinHash.length > 0
+  );
+};
+
 const buildPublicUserMetadata = (metadata: unknown) => {
   const source =
     metadata && typeof metadata === "object"
       ? { ...(metadata as Record<string, unknown>) }
       : {};
   delete source.faceId;
+  delete source.transferSecurity;
   const faceId = getInternalFaceIdMetadata(metadata);
   source.faceIdEnabled =
     faceId && typeof faceId.enabled === "boolean" ? faceId.enabled : false;
@@ -4852,7 +4891,93 @@ const buildPublicUserMetadata = (metadata: unknown) => {
     faceId && typeof faceId.lastVerifiedAt === "string"
       ? faceId.lastVerifiedAt
       : null;
+  source.transferPinEnabled = hasStoredTransferPin(metadata);
   return source;
+};
+
+const normalizeRecentTransferRecipients = (value: unknown) => {
+  if (!Array.isArray(value)) return [] as RecentTransferRecipient[];
+
+  const normalized = value.reduce<RecentTransferRecipient[]>((acc, item) => {
+    const record = normalizeMetadataRecord(item);
+    const accountNumber =
+      typeof record.accountNumber === "string"
+        ? record.accountNumber.replace(/\D/g, "").slice(0, 19)
+        : "";
+    const holderName =
+      typeof record.holderName === "string" ? record.holderName.trim() : "";
+    const userId =
+      typeof record.userId === "string" && record.userId.trim()
+        ? record.userId.trim()
+        : undefined;
+    const lastTransferredAt =
+      typeof record.lastTransferredAt === "string" &&
+      !Number.isNaN(Date.parse(record.lastTransferredAt))
+        ? record.lastTransferredAt
+        : "";
+    const transferCountRaw =
+      typeof record.transferCount === "number"
+        ? record.transferCount
+        : Number(record.transferCount);
+    const transferCount =
+      Number.isFinite(transferCountRaw) && transferCountRaw > 0
+        ? Math.trunc(transferCountRaw)
+        : 1;
+
+    if (!accountNumber || !holderName || !lastTransferredAt) return acc;
+
+    acc.push({
+      accountNumber,
+      holderName,
+      userId,
+      lastTransferredAt,
+      transferCount,
+    });
+    return acc;
+  }, []);
+
+  return normalized
+    .sort(
+      (left, right) =>
+        Date.parse(right.lastTransferredAt) -
+        Date.parse(left.lastTransferredAt),
+    )
+    .slice(0, MAX_RECENT_TRANSFER_RECIPIENTS);
+};
+
+const upsertRecentTransferRecipientMetadata = (
+  metadata: unknown,
+  input: {
+    accountNumber: string;
+    holderName: string;
+    userId?: string;
+    occurredAt: string;
+  },
+) => {
+  const root = normalizeMetadataRecord(metadata);
+  const accountNumber = input.accountNumber.replace(/\D/g, "").slice(0, 19);
+  const holderName = input.holderName.trim();
+  if (!accountNumber || !holderName) return root;
+
+  const existing = normalizeRecentTransferRecipients(
+    root[RECENT_TRANSFER_RECIPIENTS_KEY],
+  );
+  const matched = existing.find((item) => item.accountNumber === accountNumber);
+  const next = [
+    {
+      accountNumber,
+      holderName,
+      userId: input.userId?.trim() || matched?.userId,
+      lastTransferredAt: input.occurredAt,
+      transferCount: (matched?.transferCount || 0) + 1,
+    } satisfies RecentTransferRecipient,
+    ...existing.filter((item) => item.accountNumber !== accountNumber),
+  ].slice(0, MAX_RECENT_TRANSFER_RECIPIENTS);
+
+  return {
+    ...root,
+    [RECENT_TRANSFER_RECIPIENTS_KEY]: next,
+  };
 };
 
 const buildFaceEnrollmentRequiredNotice = (
@@ -5830,6 +5955,264 @@ const executeTransfer = async (input: {
       currency: senderWallet.currency,
     };
   });
+};
+
+const verifyTransferPinForUser = async (
+  user: UserEntity,
+  transferPin: string,
+) => {
+  const normalizedPin = transferPin.replace(/\D/g, "");
+  if (!/^\d{6}$/.test(normalizedPin)) {
+    return false;
+  }
+
+  const transferPinMetadata = getInternalTransferPinMetadata(user.metadata);
+  const storedHash =
+    transferPinMetadata && typeof transferPinMetadata.pinHash === "string"
+      ? transferPinMetadata.pinHash
+      : "";
+  if (!storedHash) {
+    return false;
+  }
+
+  return verifyPassword(normalizedPin, storedHash);
+};
+
+const completeAuthorizedTransfer = async (input: {
+  req: Request;
+  senderUser: UserEntity;
+  senderUserId: string;
+  amount: number;
+  toAccount: string;
+  toUserId: string;
+  note: string;
+  transferAiResult: AnomalyResponse;
+  transferAdvisory: TransferSafetyAdvisory | null;
+  transferSpendProfile?: Record<string, unknown>;
+  verificationMethod: "pin" | "otp";
+  verifiedChallengeId?: string | null;
+  faceIdRequired: boolean;
+  faceIdReason?: string | null;
+  transferFaceEnrollment?: FaceIdEnrollmentSubmission | null;
+}) => {
+  if (!input.amount || (!input.toAccount && !input.toUserId)) {
+    throw new Error("INVALID_TRANSFER_PAYLOAD");
+  }
+
+  if (input.faceIdRequired) {
+    const storedFaceId = getInternalFaceIdMetadata(input.senderUser.metadata);
+    const storedDescriptor =
+      storedFaceId && typeof storedFaceId.descriptor === "string"
+        ? storedFaceId.descriptor
+        : "";
+    const storedDescriptorIsLegacy =
+      !!storedDescriptor &&
+      !storedDescriptor.startsWith(FACE_ID_DESCRIPTOR_V2_PREFIX);
+    if (storedFaceId?.enabled !== true || !storedDescriptor) {
+      throw new Error("TRANSFER_FACE_ID_ENROLLMENT_REQUIRED");
+    }
+    if (!input.transferFaceEnrollment) {
+      throw new Error("TRANSFER_FACE_ID_VERIFICATION_REQUIRED");
+    }
+    try {
+      await verifyFaceIdSubmissionStrict(
+        input.transferFaceEnrollment,
+        storedDescriptor,
+      );
+    } catch (err) {
+      if (err instanceof Error && err.message === "FACE_ID_MISMATCH") {
+        if (storedDescriptorIsLegacy) {
+          throw new Error("TRANSFER_FACE_ID_LEGACY_REENROLL_REQUIRED");
+        }
+      }
+      throw err;
+    }
+  }
+
+  const userRepository = createUserRepository();
+  const context = await resolveTransferContext({
+    senderUserId: input.senderUserId,
+    toUserId: input.toUserId,
+    toAccount: input.toAccount,
+    amount: input.amount,
+    note: input.note,
+  });
+  const receiverUser = await userRepository.findValidatedById(
+    context.resolvedReceiverUserId,
+  );
+  if (!receiverUser) {
+    throw new Error("RECIPIENT_NOT_FOUND");
+  }
+
+  const transferResult = await executeTransfer({
+    senderUserId: input.senderUserId,
+    resolvedReceiverUserId: context.resolvedReceiverUserId,
+    amount: context.amount,
+    note: context.note,
+    senderAccountNumber: context.senderAccountNumber,
+    receiverAccountNumber: context.receiverAccountNumber,
+    receiverWalletByAccount: context.receiverWalletByAccount,
+    aiMonitoring: input.transferAiResult,
+    transferAdvisory: input.transferAdvisory,
+  });
+
+  await logAuditEvent({
+    actor: input.req.user?.email,
+    userId: input.senderUserId,
+    action:
+      input.verificationMethod === "otp"
+        ? "TRANSFER_OTP_VERIFIED"
+        : "TRANSFER_PIN_VERIFIED",
+    details: {
+      challengeId: input.verifiedChallengeId || null,
+      transactionId: transferResult.transaction.id,
+      txRiskLevel: input.transferAiResult.riskLevel,
+      txScore: input.transferAiResult.score,
+      transferAdvisorySeverity: input.transferAdvisory?.severity || null,
+    },
+    metadata: {
+      requestKey:
+        input.transferAiResult.requestKey ||
+        input.transferAdvisory?.requestKey ||
+        null,
+      spendProfile: input.transferSpendProfile,
+      transferAdvisory: input.transferAdvisory || undefined,
+      aiMonitoring: buildStoredAiMonitoring(input.transferAiResult),
+      verificationMethod: input.verificationMethod,
+    },
+    ipAddress: getRequestIp(input.req),
+  });
+
+  await logFundsFlowEvent({
+    actor: input.req.user?.email,
+    userId: input.senderUserId,
+    ipAddress: getRequestIp(input.req),
+    channel: "WALLET_TRANSFER",
+    lifecycle: "COMPLETED",
+    direction: "OUTFLOW",
+    amount: context.amount,
+    currency: transferResult.currency,
+    fromAccount: context.senderAccountNumber,
+    toAccount: context.receiverAccountNumber,
+    fromUserId: input.senderUserId,
+    toUserId: context.resolvedReceiverUserId,
+    transactionId: transferResult.transaction.id,
+    reconciliationId: transferResult.reconciliationId,
+    requestKey:
+      input.transferAiResult.requestKey ||
+      input.transferAdvisory?.requestKey ||
+      null,
+    note: context.note,
+    riskLevel: input.transferAiResult.riskLevel,
+    riskScore: input.transferAiResult.score,
+    transferAdvisory: input.transferAdvisory || null,
+    aiMonitoring: input.transferAiResult,
+    balanceBefore: transferResult.senderBalance + context.amount,
+    balanceAfter: transferResult.senderBalance,
+    sourceLabel:
+      input.verificationMethod === "otp"
+        ? "TRANSFER_CONFIRMED"
+        : "TRANSFER_PIN_CONFIRMED",
+  });
+
+  await logFundsFlowEvent({
+    actor: input.req.user?.email,
+    userId: context.resolvedReceiverUserId,
+    ipAddress: getRequestIp(input.req),
+    channel: "WALLET_TRANSFER",
+    lifecycle: "COMPLETED",
+    direction: "INFLOW",
+    amount: context.amount,
+    currency: transferResult.currency,
+    fromAccount: context.senderAccountNumber,
+    toAccount: context.receiverAccountNumber,
+    fromUserId: input.senderUserId,
+    toUserId: context.resolvedReceiverUserId,
+    transactionId: transferResult.transaction.id,
+    reconciliationId: transferResult.reconciliationId,
+    requestKey:
+      input.transferAiResult.requestKey ||
+      input.transferAdvisory?.requestKey ||
+      null,
+    note: context.note,
+    riskLevel: input.transferAiResult.riskLevel,
+    riskScore: input.transferAiResult.score,
+    transferAdvisory: input.transferAdvisory
+      ? {
+          ...input.transferAdvisory,
+          severity:
+            input.transferAdvisory.severity === "blocked"
+              ? "warning"
+              : input.transferAdvisory.severity,
+        }
+      : null,
+    aiMonitoring: input.transferAiResult,
+    balanceBefore: transferResult.receiverBalance - context.amount,
+    balanceAfter: transferResult.receiverBalance,
+    sourceLabel: "TRANSFER_RECEIVED",
+  });
+
+  notifyBalanceChange({
+    to: input.senderUser.email,
+    recipientName: getRecipientName(input.senderUser),
+    direction: "debit",
+    amount: context.amount,
+    balance: transferResult.senderBalance,
+    currency: transferResult.currency,
+    transactionType: "TRANSFER",
+    description:
+      transferResult.transaction.description ??
+      `Transfer to ${transferResult.receiverAccountNumber}`,
+    occurredAt: transferResult.transaction.createdAt.toISOString(),
+    counterpartyLabel: getRecipientName(receiverUser),
+  });
+
+  await userRepository.updateMetadata(
+    input.senderUserId,
+    upsertRecentTransferRecipientMetadata(input.senderUser.metadata, {
+      accountNumber: context.receiverAccountNumber,
+      holderName: getRecipientName(receiverUser),
+      userId: context.resolvedReceiverUserId,
+      occurredAt: transferResult.transaction.createdAt.toISOString(),
+    }),
+  );
+
+  notifyBalanceChange({
+    to: receiverUser.email,
+    recipientName: getRecipientName(receiverUser),
+    direction: "credit",
+    amount: context.amount,
+    balance: transferResult.receiverBalance,
+    currency: transferResult.currency,
+    transactionType: "TRANSFER",
+    description: context.note || `Receive from ${context.senderAccountNumber}`,
+    occurredAt: transferResult.transaction.createdAt.toISOString(),
+    counterpartyLabel: getRecipientName(input.senderUser),
+  });
+
+  invalidateUserResponseCache(input.senderUserId, [
+    "auth",
+    "wallet",
+    "transactions",
+    "security",
+  ]);
+  invalidateUserResponseCache(context.resolvedReceiverUserId, [
+    "wallet",
+    "transactions",
+  ]);
+
+  return {
+    reconciliationId: transferResult.reconciliationId,
+    anomaly: input.transferAiResult,
+    transaction: {
+      id: transferResult.transaction.id,
+      amount: transferResult.transaction.amount,
+      type: transferResult.transaction.type,
+      description: transferResult.transaction.description ?? undefined,
+      createdAt: transferResult.transaction.createdAt.toISOString(),
+      toAccount: transferResult.receiverAccountNumber,
+    },
+  };
 };
 
 const buildAccountNumber = (userId: string) => {
@@ -7770,6 +8153,88 @@ app.post("/auth/face/enroll", requireAuth, async (req, res) => {
   }
 });
 
+app.post("/security/transfer-pin", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const body = req.body as {
+    currentPin?: unknown;
+    newPin?: unknown;
+  };
+  const currentPin =
+    typeof body.currentPin === "string"
+      ? body.currentPin.replace(/\D/g, "")
+      : "";
+  const newPin =
+    typeof body.newPin === "string" ? body.newPin.replace(/\D/g, "") : "";
+  if (!/^\d{6}$/.test(newPin)) {
+    return res.status(400).json({
+      error: "Transfer password must be exactly 6 digits",
+    });
+  }
+
+  try {
+    const userRepository = createUserRepository();
+    const userDoc = await userRepository.findValidatedById(userId);
+    if (!userDoc) return res.status(404).json({ error: "User not found" });
+    if (userDoc.status !== "ACTIVE") {
+      return res.status(423).json({ error: "Account is not active" });
+    }
+
+    if (hasStoredTransferPin(userDoc.metadata)) {
+      const isCurrentPinValid = await verifyTransferPinForUser(
+        userDoc,
+        currentPin,
+      );
+      if (!isCurrentPinValid) {
+        return res.status(400).json({
+          error: "Current transfer PIN is incorrect",
+        });
+      }
+    }
+
+    const nowIso = new Date().toISOString();
+    const nextMetadata = {
+      ...(userDoc.metadata ?? {}),
+      transferSecurity: {
+        ...(getInternalTransferPinMetadata(userDoc.metadata) ?? {}),
+        enabled: true,
+        pinHash: await hashPassword(newPin),
+        updatedAt: nowIso,
+      },
+    };
+    const updatedUser = await userRepository.updateMetadata(
+      userDoc.id,
+      nextMetadata,
+    );
+
+    await logAuditEvent({
+      actor: req.user?.email,
+      userId: userDoc.id,
+      action: hasStoredTransferPin(userDoc.metadata)
+        ? "TRANSFER_PIN_UPDATED"
+        : "TRANSFER_PIN_CREATED",
+      details: {
+        transferPinEnabled: true,
+      },
+      ipAddress: getRequestIp(req),
+    });
+
+    invalidateUserResponseCache(userId, ["auth", "security"]);
+
+    return res.json({
+      status: "ok",
+      message: hasStoredTransferPin(userDoc.metadata)
+        ? "Transfer PIN updated successfully."
+        : "Transfer PIN created successfully.",
+      metadata: buildPublicUserMetadata(updatedUser.metadata),
+    });
+  } catch (err) {
+    console.error("Failed to update transfer PIN", err);
+    return res.status(500).json({ error: "Failed to update transfer PIN" });
+  }
+});
+
 app.get("/auth/me", requireAuth, async (req, res) => {
   const userId = req.user?.sub;
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
@@ -8315,6 +8780,106 @@ app.post("/card/details/otp/verify", requireAuth, async (req, res) => {
   }
 });
 
+app.post("/card/details/pin/verify", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const body = req.body as {
+    pin?: unknown;
+  };
+  const pin = typeof body.pin === "string" ? body.pin.trim() : "";
+  if (!/^\d{6}$/.test(pin)) {
+    return res
+      .status(400)
+      .json({ error: "6-digit passcode must be exactly 6 digits." });
+  }
+
+  try {
+    const userRepository = createUserRepository();
+    const userDoc = await userRepository.findValidatedById(userId);
+    if (!userDoc) return res.status(404).json({ error: "User not found" });
+    if (!hasStoredTransferPin(userDoc.metadata)) {
+      return res.status(403).json({
+        error:
+          "Create your 6-digit transfer passcode before viewing full card details.",
+      });
+    }
+    if (!(await verifyTransferPinForUser(userDoc, pin))) {
+      return res.status(400).json({ error: "Incorrect 6-digit passcode." });
+    }
+
+    const cards = getStoredCards(userDoc.metadata);
+    const primaryCard = cards.find((card) => card.isPrimary) ?? cards[0];
+    const wallet = await getOrCreateWalletByUserId(userId);
+    const walletMetadata =
+      wallet.metadata && typeof wallet.metadata === "object"
+        ? (wallet.metadata as Record<string, unknown>)
+        : {};
+    const walletAccountNumber =
+      typeof walletMetadata.accountNumber === "string"
+        ? walletMetadata.accountNumber
+        : "";
+
+    const accountSeed = `${userId}:${walletAccountNumber || wallet.id}`;
+    const fullCardDigits =
+      (primaryCard && getStoredCardFullNumber(primaryCard)) ||
+      deriveVirtualCardNumber(accountSeed);
+    const cvv =
+      (primaryCard && getStoredCardCvv(primaryCard)) ||
+      deriveVirtualCardCvv(accountSeed);
+    const cardType = primaryCard
+      ? `${primaryCard.type}${primaryCard.bank ? ` - ${primaryCard.bank}` : ""}`
+      : "Virtual Debit";
+    const expiryYear =
+      primaryCard?.expiryYear || String(new Date().getFullYear() + 3);
+    const expiryMonth = primaryCard?.expiryMonth || "12";
+    const createdAt = primaryCard?.createdAt || wallet.createdAt.toISOString();
+    const updatedAt = primaryCard?.updatedAt || wallet.updatedAt.toISOString();
+
+    await logAuditEvent({
+      actor: req.user?.email,
+      userId,
+      action: "CARD_DETAILS_PIN_VERIFIED",
+      details: {
+        verificationMethod: "transfer_passcode",
+      },
+      ipAddress: getRequestIp(req),
+    });
+
+    return res.json({
+      status: "ok",
+      verified: true,
+      cardDetails: {
+        holder: primaryCard?.holder || userDoc.fullName || userDoc.email,
+        type: cardType,
+        number: formatCardNumberGroups(fullCardDigits),
+        expiry: `${expiryMonth}/${expiryYear.slice(-2)}`,
+        cvv,
+        status:
+          primaryCard?.status === "FROZEN"
+            ? "Frozen"
+            : primaryCard
+              ? "Active"
+              : "Virtual Active",
+        issuedAt: new Date(createdAt).toLocaleDateString("en-US"),
+        linkedAccount:
+          walletAccountNumber || `Wallet ****${wallet.id.slice(-4)}`,
+        dailyLimit: "$25,000",
+        contactless:
+          primaryCard?.status === "FROZEN" ? "Temporarily disabled" : "Enabled",
+        onlinePayment:
+          primaryCard?.status === "FROZEN" ? "Temporarily disabled" : "Enabled",
+        lastActivity: new Date(updatedAt).toLocaleString("en-US"),
+      },
+    });
+  } catch (err) {
+    console.error("Failed to verify card details passcode", err);
+    return res
+      .status(500)
+      .json({ error: "Failed to verify 6-digit passcode." });
+  }
+});
+
 app.get("/wallet/me", requireAuth, async (req, res) => {
   const userId = req.user?.sub;
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
@@ -8506,6 +9071,158 @@ app.post("/wallet/deposit", requireAuth, async (req, res) => {
   }
 });
 
+app.post("/transfer/preview", requireAuth, async (req, res) => {
+  const senderUserId = req.user?.sub;
+  if (!senderUserId) return res.status(401).json({ error: "Unauthorized" });
+
+  const body = req.body as {
+    toUserId?: string;
+    toAccount?: string;
+    amount?: unknown;
+    note?: string;
+  };
+  const amount = toPositiveAmount(body.amount);
+  if (!amount) return res.status(400).json({ error: "Invalid amount" });
+
+  try {
+    const context = await resolveTransferContext({
+      senderUserId,
+      toUserId: body.toUserId,
+      toAccount: body.toAccount,
+      amount,
+      note: body.note,
+    });
+    const userRepository = createUserRepository();
+    const user = await userRepository.findValidatedById(senderUserId);
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const storedFaceId = getInternalFaceIdMetadata(user.metadata);
+    const hasTransferFaceId =
+      storedFaceId?.enabled === true &&
+      typeof storedFaceId.descriptor === "string" &&
+      storedFaceId.descriptor.length > 0;
+    const transferStepUpPolicy = await evaluateTransferStepUpPolicy({
+      userId: senderUserId,
+      amount: context.amount,
+      currency: context.senderWallet.currency,
+    });
+
+    const [
+      failedTx24h,
+      velocity1h,
+      spendProfile,
+      recipientProfile,
+      behaviorProfile,
+    ] = await Promise.all([
+      countRecentFailedTransfers(senderUserId, 24),
+      countRecentTransferVelocity(senderUserId, 1),
+      getTransferSpendProfile(senderUserId, context.amount),
+      getTransferRecipientProfile({
+        userId: senderUserId,
+        toUserId: context.resolvedReceiverUserId,
+        toAccount: context.receiverAccountNumber,
+      }),
+      getTransferBehaviorProfile({
+        userId: senderUserId,
+        toAccount: context.receiverAccountNumber,
+        amount: context.amount,
+      }),
+    ]);
+
+    let aiResult = DEFAULT_AI_RESPONSE;
+    try {
+      const aiResp = await fetch(`${AI_URL}/ai/tx/score`, {
+        method: "POST",
+        headers: buildAiServiceHeaders(),
+        body: JSON.stringify({
+          userId: senderUserId,
+          transactionId: crypto.randomUUID(),
+          timestamp: new Date().toISOString(),
+          amount: context.amount,
+          currency: context.senderWallet.currency,
+          location: getRequestLocation(req),
+          paymentMethod: "wallet_balance",
+          merchantCategory: "p2p_transfer",
+          device:
+            typeof req.headers["user-agent"] === "string"
+              ? req.headers["user-agent"]
+              : "unknown",
+          channel: "web",
+          failedTx24h,
+          velocity1h,
+          dailySpendAvg30d: spendProfile.dailySpendAvg30d,
+          todaySpendBefore: spendProfile.todaySpendBefore,
+          projectedDailySpend: spendProfile.projectedDailySpend,
+          balanceBefore: Number(context.senderWallet.balance),
+          remainingBalance: Math.max(
+            0,
+            Number(context.senderWallet.balance) - context.amount,
+          ),
+        }),
+      });
+      const rawResult = (await aiResp.json().catch(() => null)) as unknown;
+      if (!aiResp.ok) {
+        throw new Error(
+          `AI transaction scoring failed with status ${aiResp.status}`,
+        );
+      }
+      aiResult = normalizeAiResponse(rawResult);
+    } catch (err) {
+      console.warn("AI transaction preview not reachable, using default", err);
+    }
+
+    const transferAdvisory = buildTransferSafetyAdvisory({
+      amount: context.amount,
+      senderBalance: Number(context.senderWallet.balance),
+      currency: context.senderWallet.currency,
+      aiResult,
+      spendProfile,
+      recipientProfile,
+      behaviorProfile,
+      recipientAccount: context.receiverAccountNumber,
+      note: context.note,
+      requestKey: aiResult.requestKey,
+    });
+    const shouldForceFaceIdForHighRisk =
+      aiResult.riskLevel === "high" && hasTransferFaceId;
+    const effectiveFaceIdRequired =
+      transferStepUpPolicy.faceIdRequired || shouldForceFaceIdForHighRisk;
+    const effectiveFaceIdReason =
+      transferStepUpPolicy.faceIdReason ||
+      (shouldForceFaceIdForHighRisk
+        ? "High-risk transfers require FaceID verification before completion."
+        : null);
+
+    return res.json({
+      status: "ok",
+      previewStatus:
+        transferAdvisory?.severity === "blocked"
+          ? "blocked"
+          : transferAdvisory?.severity === "warning"
+            ? "warning"
+            : aiResult.riskLevel,
+      anomaly: aiResult,
+      transferAdvisory,
+      faceIdRequired: effectiveFaceIdRequired,
+      faceIdReason: effectiveFaceIdReason,
+      rollingOutflowAmount: transferStepUpPolicy.rollingOutflowAmount,
+      recipient: {
+        accountNumber: context.receiverAccountNumber,
+        userId: context.resolvedReceiverUserId,
+      },
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === "MISSING_RECIPIENT_ACCOUNT") {
+      return res.status(400).json({ error: "Missing recipient account" });
+    }
+    if (err instanceof Error && err.message === "RECIPIENT_ACCOUNT_NOT_FOUND") {
+      return res.status(404).json({ error: "Recipient account not found" });
+    }
+    console.error("Failed to preview transfer", err);
+    return res.status(500).json({ error: "Failed to preview transfer" });
+  }
+});
+
 app.post("/transfer/otp/send", requireAuth, async (req, res) => {
   const senderUserId = req.user?.sub;
   if (!senderUserId) return res.status(401).json({ error: "Unauthorized" });
@@ -8515,9 +9232,14 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
     toAccount?: string;
     amount?: unknown;
     note?: string;
+    transferPin?: unknown;
     advisoryAcknowledged?: boolean;
     advisoryRequestKey?: string;
   };
+  const transferPin =
+    typeof body.transferPin === "string"
+      ? body.transferPin.replace(/\D/g, "")
+      : "";
   const amount = toPositiveAmount(body.amount);
   if (!amount) return res.status(400).json({ error: "Invalid amount" });
   if (
@@ -8557,6 +9279,17 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
     const userRepository = createUserRepository();
     const user = await userRepository.findValidatedById(senderUserId);
     if (!user) return res.status(404).json({ error: "User not found" });
+    if (!hasStoredTransferPin(user.metadata)) {
+      return res.status(403).json({
+        error:
+          "You must create a 6-digit transfer PIN before making transfers.",
+      });
+    }
+    if (!(await verifyTransferPinForUser(user, transferPin))) {
+      return res.status(400).json({
+        error: "Transfer PIN is incorrect",
+      });
+    }
     const storedFaceId = getInternalFaceIdMetadata(user.metadata);
     const hasTransferFaceId =
       storedFaceId?.enabled === true &&
@@ -8797,20 +9530,30 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       });
     }
 
-    if (transferAdvisory?.severity === "blocked") {
+    const shouldForceFaceIdForHighRisk =
+      aiResult.riskLevel === "high" && hasTransferFaceId;
+    const effectiveFaceIdRequired =
+      transferStepUpPolicy.faceIdRequired || shouldForceFaceIdForHighRisk;
+    const effectiveFaceIdReason =
+      transferStepUpPolicy.faceIdReason ||
+      (shouldForceFaceIdForHighRisk
+        ? "High-risk transfers require FaceID verification before completion."
+        : null);
+    const shouldBlockForHighAiRisk =
+      aiResult.riskLevel === "high" && TRANSFER_HIGH_RISK_IMMEDIATE_BLOCK;
+
+    if (transferAdvisory?.severity === "blocked" || shouldBlockForHighAiRisk) {
       const blockedHold: TransferSafetyHold = {
         toAccount: context.receiverAccountNumber,
         toUserId: context.resolvedReceiverUserId,
         amount: context.amount,
-        requestKey: transferAdvisory.requestKey || null,
+        requestKey: transferAdvisory?.requestKey || aiResult.requestKey || null,
         reason:
-          transferAdvisory.reasons[0] ||
+          transferAdvisory?.reasons[0] ||
           "This transfer matched a high-risk scam pattern.",
         blockedUntil:
-          transferAdvisory.blockedUntil ||
-          new Date(
-            Date.now() + TRANSFER_SCAM_HOLD_MINUTES * 60 * 1000,
-          ).toISOString(),
+          transferAdvisory?.blockedUntil ||
+          new Date(Date.now() + TRANSFER_SCAM_HOLD_MS).toISOString(),
         createdAt: new Date().toISOString(),
       };
       await userRepository.updateMetadata(
@@ -8826,13 +9569,13 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
           toAccount: context.receiverAccountNumber,
           riskLevel: aiResult.riskLevel,
           blockedUntil: blockedHold.blockedUntil,
-          reasons: transferAdvisory.reasons,
+          reasons: transferAdvisory?.reasons || aiResult.reasons || [],
         },
         metadata: {
           requestKey: aiResult.requestKey || null,
           spendProfile,
           recipientProfile,
-          transferAdvisory,
+          transferAdvisory: transferAdvisory || undefined,
           aiMonitoring: buildStoredAiMonitoring(aiResult),
         },
         ipAddress: getRequestIp(req),
@@ -8851,12 +9594,12 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
         toAccount: context.receiverAccountNumber,
         fromUserId: senderUserId,
         toUserId: context.resolvedReceiverUserId,
-        requestKey: transferAdvisory.requestKey || aiResult.requestKey || null,
+        requestKey: transferAdvisory?.requestKey || aiResult.requestKey || null,
         note: context.note,
         recipientKnown: recipientProfile.isKnownRecipient,
         riskLevel: aiResult.riskLevel,
         riskScore: aiResult.score,
-        transferAdvisory,
+        transferAdvisory: transferAdvisory || null,
         aiMonitoring: aiResult,
         balanceBefore: Number(context.senderWallet.balance),
         balanceAfter: Math.max(
@@ -8867,8 +9610,9 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       });
 
       return res.status(423).json({
-        error:
-          "This transfer has been temporarily blocked because it matches a high-risk scam pattern.",
+        error: shouldBlockForHighAiRisk
+          ? "This transfer has been blocked because AI rated it high risk."
+          : "This transfer has been temporarily blocked because it matches a high-risk scam pattern.",
         transferAdvisory,
         anomaly: aiResult,
       });
@@ -8964,6 +9708,41 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       });
     }
 
+    const shouldRequireOtpForMediumRisk =
+      aiResult.riskLevel === "medium" &&
+      (context.amount >= TRANSFER_MEDIUM_RISK_OTP_MIN_AMOUNT ||
+        transferAdvisory?.severity === "warning" ||
+        transferAdvisory?.requiresAcknowledgement === true);
+    const requiresOtp =
+      shouldRequireOtpForMediumRisk ||
+      aiResult.riskLevel === "high" ||
+      effectiveFaceIdRequired;
+    if (!requiresOtp) {
+      const completedTransfer = await completeAuthorizedTransfer({
+        req,
+        senderUser: user,
+        senderUserId,
+        amount: context.amount,
+        toAccount: context.receiverAccountNumber,
+        toUserId: context.resolvedReceiverUserId,
+        note: context.note,
+        transferAiResult: aiResult,
+        transferAdvisory,
+        transferSpendProfile: spendProfile,
+        verificationMethod: "pin",
+        faceIdRequired: false,
+        faceIdReason: null,
+      });
+
+      return res.json({
+        status: "completed",
+        transferPinVerified: true,
+        otpRequired: false,
+        transferAdvisory,
+        ...completedTransfer,
+      });
+    }
+
     const otpChallenge = await createEmailOtpChallenge({
       userId: senderUserId,
       purpose: "TRANSFER",
@@ -8980,8 +9759,8 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
         txSpendProfile: spendProfile,
         txRecipientProfile: recipientProfile,
         transferAdvisory,
-        faceIdRequired: transferStepUpPolicy.faceIdRequired,
-        faceIdReason: transferStepUpPolicy.faceIdReason,
+        faceIdRequired: effectiveFaceIdRequired,
+        faceIdReason: effectiveFaceIdReason,
         rollingOutflowAmount: transferStepUpPolicy.rollingOutflowAmount,
       },
     });
@@ -8998,7 +9777,7 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
     );
 
     if (
-      transferStepUpPolicy.faceIdRequired &&
+      effectiveFaceIdRequired &&
       context.amount <= TRANSFER_FACE_ID_THRESHOLD
     ) {
       runAsyncSideEffect("sendTransferRiskAlertEmail", () =>
@@ -9009,7 +9788,7 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
           currency: context.senderWallet.currency,
           toAccount: context.receiverAccountNumber,
           reason:
-            transferStepUpPolicy.faceIdReason ||
+            effectiveFaceIdReason ||
             `Your total outgoing transfers in the last ${CUMULATIVE_TRANSFER_FACE_ID_WINDOW_MINUTES} minutes require FaceID verification.`,
           totalOutflowWindow: transferStepUpPolicy.rollingOutflowAmount,
           windowLabel: `${CUMULATIVE_TRANSFER_FACE_ID_WINDOW_MINUTES} minutes`,
@@ -9069,15 +9848,17 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
     });
 
     return res.json({
-      status: "ok",
+      status: "otp_required",
+      otpRequired: true,
+      transferPinVerified: true,
       challengeId: otpChallenge.challengeId,
       expiresAt: otpChallenge.expiresAt.toISOString(),
       destination: maskEmail(user.email),
       retryAfterSeconds: otpChallenge.retryAfterSeconds,
       anomaly: aiResult,
       transferAdvisory,
-      faceIdRequired: transferStepUpPolicy.faceIdRequired,
-      faceIdReason: transferStepUpPolicy.faceIdReason,
+      faceIdRequired: effectiveFaceIdRequired,
+      faceIdReason: effectiveFaceIdReason,
       rollingOutflowAmount: transferStepUpPolicy.rollingOutflowAmount,
     });
   } catch (err) {
@@ -9451,211 +10232,31 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
       metadata.faceIdRequired === true || amount > TRANSFER_FACE_ID_THRESHOLD;
     const faceIdReason =
       typeof metadata.faceIdReason === "string" ? metadata.faceIdReason : null;
-    if (faceIdRequired) {
-      const storedFaceId = getInternalFaceIdMetadata(senderUser.metadata);
-      const storedDescriptor =
-        storedFaceId && typeof storedFaceId.descriptor === "string"
-          ? storedFaceId.descriptor
-          : "";
-      const storedDescriptorIsLegacy =
-        !!storedDescriptor &&
-        !storedDescriptor.startsWith(FACE_ID_DESCRIPTOR_V2_PREFIX);
-      if (storedFaceId?.enabled !== true || !storedDescriptor) {
-        return res.status(403).json({
-          error:
-            faceIdReason ||
-            `Transfers above $${TRANSFER_FACE_ID_THRESHOLD.toLocaleString(
-              "en-US",
-            )} require FaceID enrollment on this account.`,
-        });
-      }
-      if (!transferFaceEnrollment) {
-        return res.status(400).json({
-          error:
-            faceIdReason ||
-            `Complete FaceID verification for transfers above $${TRANSFER_FACE_ID_THRESHOLD.toLocaleString(
-              "en-US",
-            )}.`,
-        });
-      }
-      try {
-        await verifyFaceIdSubmissionStrict(
-          transferFaceEnrollment,
-          storedDescriptor,
-        );
-      } catch (err) {
-        if (err instanceof Error && err.message === "FACE_ID_MISMATCH") {
-          if (storedDescriptorIsLegacy) {
-            return res.status(403).json({
-              error:
-                "Your FaceID profile was enrolled with an older sample format. Re-enroll FaceID in account settings once, then try this transfer again.",
-            });
-          }
-        }
-        throw err;
-      }
-    }
-
-    const context = await resolveTransferContext({
+    const completedTransfer = await completeAuthorizedTransfer({
+      req,
+      senderUser,
       senderUserId,
-      toUserId,
-      toAccount,
       amount,
+      toAccount,
+      toUserId,
       note,
-    });
-    const receiverUser = await userRepository.findValidatedById(
-      context.resolvedReceiverUserId,
-    );
-    if (!receiverUser)
-      return res.status(404).json({ error: "Recipient not found" });
-
-    const transferResult = await executeTransfer({
-      senderUserId,
-      resolvedReceiverUserId: context.resolvedReceiverUserId,
-      amount: context.amount,
-      note: context.note,
-      senderAccountNumber: context.senderAccountNumber,
-      receiverAccountNumber: context.receiverAccountNumber,
-      receiverWalletByAccount: context.receiverWalletByAccount,
-      aiMonitoring: transferAiResult,
+      transferAiResult,
       transferAdvisory,
+      transferSpendProfile,
+      verificationMethod: "otp",
+      verifiedChallengeId: challenge.id,
+      faceIdRequired,
+      faceIdReason,
+      transferFaceEnrollment,
     });
 
     await consumeOtpChallenge(challenge.id);
 
-    await logAuditEvent({
-      actor: req.user?.email,
-      userId: senderUserId,
-      action: "TRANSFER_OTP_VERIFIED",
-      details: {
-        challengeId: challenge.id,
-        transactionId: transferResult.transaction.id,
-        txRiskLevel: transferAiResult.riskLevel,
-        txScore: transferAiResult.score,
-        transferAdvisorySeverity: transferAdvisory?.severity || null,
-      },
-      metadata: {
-        requestKey:
-          transferAiResult.requestKey || transferAdvisory?.requestKey || null,
-        spendProfile: transferSpendProfile,
-        transferAdvisory: transferAdvisory || undefined,
-        aiMonitoring: buildStoredAiMonitoring(transferAiResult),
-      },
-      ipAddress: getRequestIp(req),
-    });
-
-    await logFundsFlowEvent({
-      actor: req.user?.email,
-      userId: senderUserId,
-      ipAddress: getRequestIp(req),
-      channel: "WALLET_TRANSFER",
-      lifecycle: "COMPLETED",
-      direction: "OUTFLOW",
-      amount: context.amount,
-      currency: transferResult.currency,
-      fromAccount: context.senderAccountNumber,
-      toAccount: context.receiverAccountNumber,
-      fromUserId: senderUserId,
-      toUserId: context.resolvedReceiverUserId,
-      transactionId: transferResult.transaction.id,
-      reconciliationId: transferResult.reconciliationId,
-      requestKey:
-        transferAiResult.requestKey || transferAdvisory?.requestKey || null,
-      note: context.note,
-      riskLevel: transferAiResult.riskLevel,
-      riskScore: transferAiResult.score,
-      transferAdvisory: transferAdvisory || null,
-      aiMonitoring: transferAiResult,
-      balanceBefore: transferResult.senderBalance + context.amount,
-      balanceAfter: transferResult.senderBalance,
-      sourceLabel: "TRANSFER_CONFIRMED",
-    });
-
-    await logFundsFlowEvent({
-      actor: req.user?.email,
-      userId: context.resolvedReceiverUserId,
-      ipAddress: getRequestIp(req),
-      channel: "WALLET_TRANSFER",
-      lifecycle: "COMPLETED",
-      direction: "INFLOW",
-      amount: context.amount,
-      currency: transferResult.currency,
-      fromAccount: context.senderAccountNumber,
-      toAccount: context.receiverAccountNumber,
-      fromUserId: senderUserId,
-      toUserId: context.resolvedReceiverUserId,
-      transactionId: transferResult.transaction.id,
-      reconciliationId: transferResult.reconciliationId,
-      requestKey:
-        transferAiResult.requestKey || transferAdvisory?.requestKey || null,
-      note: context.note,
-      riskLevel: transferAiResult.riskLevel,
-      riskScore: transferAiResult.score,
-      transferAdvisory: transferAdvisory
-        ? {
-            ...transferAdvisory,
-            severity:
-              transferAdvisory.severity === "blocked"
-                ? "warning"
-                : transferAdvisory.severity,
-          }
-        : null,
-      aiMonitoring: transferAiResult,
-      balanceBefore: transferResult.receiverBalance - context.amount,
-      balanceAfter: transferResult.receiverBalance,
-      sourceLabel: "TRANSFER_RECEIVED",
-    });
-
-    notifyBalanceChange({
-      to: senderUser.email,
-      recipientName: getRecipientName(senderUser),
-      direction: "debit",
-      amount: context.amount,
-      balance: transferResult.senderBalance,
-      currency: transferResult.currency,
-      transactionType: "TRANSFER",
-      description:
-        transferResult.transaction.description ??
-        `Transfer to ${transferResult.receiverAccountNumber}`,
-      occurredAt: transferResult.transaction.createdAt.toISOString(),
-      counterpartyLabel: getRecipientName(receiverUser),
-    });
-    notifyBalanceChange({
-      to: receiverUser.email,
-      recipientName: getRecipientName(receiverUser),
-      direction: "credit",
-      amount: context.amount,
-      balance: transferResult.receiverBalance,
-      currency: transferResult.currency,
-      transactionType: "TRANSFER",
-      description:
-        context.note || `Receive from ${context.senderAccountNumber}`,
-      occurredAt: transferResult.transaction.createdAt.toISOString(),
-      counterpartyLabel: getRecipientName(senderUser),
-    });
-
-    invalidateUserResponseCache(senderUserId, [
-      "wallet",
-      "transactions",
-      "security",
-    ]);
-    invalidateUserResponseCache(context.resolvedReceiverUserId, [
-      "wallet",
-      "transactions",
-    ]);
-
     return res.json({
       status: "ok",
-      reconciliationId: transferResult.reconciliationId,
-      anomaly: transferAiResult,
-      transaction: {
-        id: transferResult.transaction.id,
-        amount: transferResult.transaction.amount,
-        type: transferResult.transaction.type,
-        description: transferResult.transaction.description ?? undefined,
-        createdAt: transferResult.transaction.createdAt.toISOString(),
-        toAccount: transferResult.receiverAccountNumber,
-      },
+      otpRequired: false,
+      transferPinVerified: true,
+      ...completedTransfer,
     });
   } catch (err) {
     if (err instanceof Error && err.message === "OTP_CHALLENGE_NOT_FOUND") {
@@ -9673,6 +10274,11 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
     if (err instanceof Error && err.message === "OTP_INCORRECT") {
       return res.status(400).json({ error: "Incorrect OTP" });
     }
+    if (err instanceof Error && err.message === "INVALID_TRANSFER_PAYLOAD") {
+      return res
+        .status(400)
+        .json({ error: "Stored OTP transfer payload is invalid" });
+    }
     if (err instanceof Error && err.message === "SENDER_WALLET_NOT_FOUND") {
       return res.status(400).json({ error: "Sender wallet not found" });
     }
@@ -9687,6 +10293,32 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
     }
     if (err instanceof Error && err.message === "RECIPIENT_LOCKED") {
       return res.status(423).json({ error: "Recipient account is locked" });
+    }
+    if (
+      err instanceof Error &&
+      err.message === "TRANSFER_FACE_ID_ENROLLMENT_REQUIRED"
+    ) {
+      return res.status(403).json({
+        error:
+          "Transfers above the FaceID threshold require FaceID enrollment on this account.",
+      });
+    }
+    if (
+      err instanceof Error &&
+      err.message === "TRANSFER_FACE_ID_VERIFICATION_REQUIRED"
+    ) {
+      return res.status(400).json({
+        error: "Complete FaceID verification before confirming this transfer.",
+      });
+    }
+    if (
+      err instanceof Error &&
+      err.message === "TRANSFER_FACE_ID_LEGACY_REENROLL_REQUIRED"
+    ) {
+      return res.status(403).json({
+        error:
+          "Your FaceID profile was enrolled with an older sample format. Re-enroll FaceID in account settings once, then try this transfer again.",
+      });
     }
     if (err instanceof Error && err.message === "FACE_ID_EXPIRED") {
       return res
