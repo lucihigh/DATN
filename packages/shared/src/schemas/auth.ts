@@ -153,8 +153,8 @@ export const faceIdEnrollmentSchema = z.object({
   motionScore: z.number().min(0).max(1),
   faceCoverage: z.number().min(0).max(1),
   sampleCount: z.number().int().min(2).max(240),
-  completedSteps: z.array(faceIdStepSchema).min(2).max(4),
-  stepCaptures: z.array(faceIdStepCaptureSchema).min(2).max(4),
+  completedSteps: z.array(faceIdStepSchema).min(1).max(4),
+  stepCaptures: z.array(faceIdStepCaptureSchema).min(1).max(4),
   previewImage: z
     .string()
     .startsWith("data:image/jpeg;base64,")

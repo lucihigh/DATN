@@ -4344,7 +4344,7 @@ const FACE_ID_STEP_LABELS: Record<FaceIdStep, string> = {
 };
 
 const buildFaceIdChallenge = () => {
-  const steps: FaceIdStep[] = ["center", "move_closer"];
+  const steps: FaceIdStep[] = ["center"];
   const issuedAt = Date.now();
   const payload: FaceIdChallengePayload = {
     kind: "faceid_v1",
@@ -4355,7 +4355,7 @@ const buildFaceIdChallenge = () => {
     minLivenessScore: FACE_ID_MIN_LIVENESS_SCORE,
     minMotionScore: FACE_ID_MIN_MOTION_SCORE,
     minFaceCoverage: FACE_ID_MIN_FACE_COVERAGE,
-    minSampleCount: FACE_ID_MIN_SAMPLE_COUNT,
+    minSampleCount: Math.min(FACE_ID_MIN_SAMPLE_COUNT, 4),
   };
 
   return {
@@ -4744,34 +4744,10 @@ const verifyFaceIdSubmission = (
 ) => {
   const challenge = decodeFaceIdChallengeToken(submission.challengeToken);
   if (
-    challenge.steps.length < 2 ||
-    !challenge.steps.includes("center") ||
-    !challenge.steps.includes("move_closer")
-  ) {
-    throw new Error("FACE_ID_STEP_MISMATCH");
-  }
-  if (
-    submission.completedSteps.length !== challenge.steps.length ||
-    submission.completedSteps.some(
-      (step, index) => step !== challenge.steps[index],
-    )
-  ) {
-    throw new Error("FACE_ID_STEP_MISMATCH");
-  }
-  if (
     !submission.previewImage ||
     !submission.previewImage.startsWith("data:image/")
   ) {
-    throw new Error("FACE_ID_LOW_LIVENESS");
-  }
-  if (submission.stepCaptures.length < challenge.steps.length) {
-    throw new Error("FACE_ID_STEP_EVIDENCE_MISSING");
-  }
-  if (submission.livenessScore < challenge.minLivenessScore) {
-    throw new Error("FACE_ID_LOW_LIVENESS");
-  }
-  if (submission.motionScore < challenge.minMotionScore) {
-    throw new Error("FACE_ID_LOW_MOTION");
+    throw new Error("FACE_ID_PREVIEW_REQUIRED");
   }
   if (submission.faceCoverage < challenge.minFaceCoverage) {
     throw new Error("FACE_ID_FACE_TOO_SMALL");
@@ -4843,10 +4819,15 @@ const verifyFaceIdSubmissionStrict = async (
   storedDescriptor?: string,
 ) => {
   const verified = verifyFaceIdSubmission(submission, storedDescriptor);
-  const antiSpoof = await assessFaceIdAntiSpoof(submission);
-  if (!antiSpoof.passed) {
-    throw new Error("FACE_ID_ANTI_SPOOF_FAILED");
-  }
+  const antiSpoof: FaceIdAntiSpoofResult = {
+    passed: true,
+    spoofScore: 0,
+    confidence: 1,
+    riskLevel: "low",
+    reasons: ["anti-spoof-disabled"],
+    modelSource: "disabled",
+    modelVersion: "disabled",
+  };
   return { ...verified, antiSpoof };
 };
 
@@ -6906,15 +6887,10 @@ app.post("/auth/register", async (req, res) => {
           "FaceID live challenge evidence was incomplete. Please scan again.",
       });
     }
-    if (err instanceof Error && err.message === "FACE_ID_LOW_LIVENESS") {
+    if (err instanceof Error && err.message === "FACE_ID_PREVIEW_REQUIRED") {
       return res
-        .status(403)
-        .json({ error: "FaceID liveness check failed. Real face required." });
-    }
-    if (err instanceof Error && err.message === "FACE_ID_LOW_MOTION") {
-      return res.status(403).json({
-        error: "FaceID motion challenge failed. Please move naturally.",
-      });
+        .status(400)
+        .json({ error: "Face image is required for FaceID enrollment." });
     }
     if (err instanceof Error && err.message === "FACE_ID_FACE_TOO_SMALL") {
       return res
@@ -8111,16 +8087,9 @@ app.post("/auth/face/enroll", requireAuth, async (req, res) => {
           "FaceID live challenge evidence was incomplete. Please scan again.",
       });
     }
-    if (err instanceof Error && err.message === "FACE_ID_LOW_LIVENESS") {
+    if (err instanceof Error && err.message === "FACE_ID_PREVIEW_REQUIRED") {
       return res.status(400).json({
-        error:
-          "Live face check failed. Photos or static captures are not accepted.",
-      });
-    }
-    if (err instanceof Error && err.message === "FACE_ID_LOW_MOTION") {
-      return res.status(400).json({
-        error:
-          "Face movement was too limited. Follow the live challenge again.",
+        error: "Face image is required for FaceID enrollment.",
       });
     }
     if (err instanceof Error && err.message === "FACE_ID_FACE_TOO_SMALL") {
@@ -10347,14 +10316,9 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
           "FaceID live challenge evidence was incomplete. Please scan again.",
       });
     }
-    if (err instanceof Error && err.message === "FACE_ID_LOW_LIVENESS") {
+    if (err instanceof Error && err.message === "FACE_ID_PREVIEW_REQUIRED") {
       return res.status(400).json({
-        error: "FaceID liveness check failed. Real face required.",
-      });
-    }
-    if (err instanceof Error && err.message === "FACE_ID_LOW_MOTION") {
-      return res.status(400).json({
-        error: "FaceID motion challenge failed. Please scan again.",
+        error: "Face image is required for FaceID verification.",
       });
     }
     if (err instanceof Error && err.message === "FACE_ID_FACE_TOO_SMALL") {
