@@ -1,0 +1,18 @@
+FROM node:18-bullseye
+
+WORKDIR /app
+RUN corepack enable
+
+ENV NODE_ENV=production
+
+COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
+COPY packages ./packages
+COPY prisma ./prisma
+COPY apps/api ./apps/api
+
+RUN pnpm install --frozen-lockfile=false \
+  && pnpm --filter @secure-wallet/api prisma:generate
+
+EXPOSE 4000
+
+CMD ["pnpm", "--filter", "@secure-wallet/api", "start"]
