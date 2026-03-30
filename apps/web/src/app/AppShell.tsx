@@ -1527,6 +1527,8 @@ function DashboardView({
       ? copilotInsight.riskLevel
       : "low";
   const copilotThreadTitle = activeCopilotSession?.title || "New chat";
+  const copilotIsFreshSession =
+    copilotMessages.length === 1 && copilotMessages[0]?.role === "assistant";
   const normalizedCopilotSearch = copilotSearch.trim().toLowerCase();
   const copilotSessionList = [...copilotSessions]
     .filter((session) => {
@@ -4840,7 +4842,23 @@ function DashboardView({
                 </div>
               </div>
               <div className="ai-copilot-thread" ref={copilotThreadRef}>
+                {copilotIsFreshSession ? (
+                  <div className="ai-copilot-welcome-card">
+                    <div className="ai-copilot-welcome-kicker">
+                      FPIPay Copilot ready
+                    </div>
+                    <h4>Ask one focused finance question to get started.</h4>
+                    <p>{copilotMessages[0]?.content}</p>
+                    <div className="ai-copilot-welcome-tags">
+                      <span>Spending reviews</span>
+                      <span>Monthly statements</span>
+                      <span>Saving plans</span>
+                      <span>Risk checks</span>
+                    </div>
+                  </div>
+                ) : null}
                 {copilotMessages.map((message, index) => (
+                  copilotIsFreshSession && index === 0 ? null : (
                   <div
                     key={`${message.role}-${index}-${message.content.slice(0, 24)}`}
                     className={`ai-copilot-message-row ai-copilot-message-row-${message.role}`}
@@ -4857,6 +4875,7 @@ function DashboardView({
                       {renderCopilotMessageContent(message.content)}
                     </div>
                   </div>
+                  )
                 ))}
                 {copilotBusy && (
                   <div className="ai-copilot-message-row ai-copilot-message-row-assistant">
@@ -5087,12 +5106,13 @@ function DashboardView({
             <tbody>
               {transactionHistory.slice(0, 3).map((tx) => (
                 <tr key={tx.id}>
-                  <td>{tx.entity}</td>
-                  <td>{tx.date}</td>
-                  <td>
+                  <td data-label="Entity">{tx.entity}</td>
+                  <td data-label="Date">{tx.date}</td>
+                  <td data-label="Status">
                     <span className="dashboard-status-pill">{tx.status}</span>
                   </td>
                   <td
+                    data-label="Amount"
                     className={
                       tx.amountTone === "positive"
                         ? "amount-positive"
@@ -5101,7 +5121,7 @@ function DashboardView({
                   >
                     {tx.amount}
                   </td>
-                  <td>
+                  <td data-label="Details" className="dashboard-tx-cell-actions">
                     <button
                       type="button"
                       className="tx-detail-btn"
