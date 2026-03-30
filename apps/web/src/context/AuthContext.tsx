@@ -6,6 +6,7 @@ import {
   useEffect,
   type ReactNode,
 } from "react";
+import { API_BASE } from "../lib/apiBase";
 
 export type User = {
   id: string;
@@ -149,9 +150,6 @@ const TOKEN_STORAGE_KEY = "fpipay_token";
 const TOKEN_EXPIRES_AT_STORAGE_KEY = "fpipay_token_expires_at";
 const SESSION_SECURITY_STORAGE_KEY = "fpipay_session_security";
 const DEFAULT_AVATAR = "https://i.pravatar.cc/80?img=12";
-const API_BASE =
-  (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ||
-  "http://localhost:4000";
 const SESSION_EXPIRED_EVENT = "auth:session-expired";
 const SESSION_VERIFY_INTERVAL_MS = 60000;
 const PUBLIC_IP_CACHE_KEY = "fpipay_public_ip_cache";

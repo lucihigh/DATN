@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { useAuth } from "../context/AuthContext";
+import { API_BASE } from "../lib/apiBase";
 
 import "../index.css";
 
@@ -26,10 +27,6 @@ const MONTH_LABELS = [
   "Nov",
   "Dec",
 ];
-
-const API_BASE =
-  (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ||
-  "http://localhost:4000";
 
 type AdminUser = {
   id: string;

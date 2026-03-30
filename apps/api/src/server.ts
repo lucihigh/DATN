@@ -160,7 +160,6 @@ function invalidateUserResponseCache(
 
 const app = express();
 app.set("trust proxy", true);
-app.use(cors());
 app.use(helmet());
 app.use(morgan("dev"));
 app.use(express.json());
@@ -168,6 +167,8 @@ app.use(applySecurityHeaders);
 app.use(lockoutGuard);
 
 const PORT = Number(process.env.PORT || process.env.PORT_API || 4000);
+const NODE_ENV = process.env.NODE_ENV || "development";
+const IS_PRODUCTION = NODE_ENV === "production";
 const AI_URL = process.env.AI_SERVICE_URL || "http://localhost:8000";
 const AI_API_KEY = process.env.AI_API_KEY || "local-dev-key";
 const OLLAMA_URL = (process.env.OLLAMA_URL || "http://127.0.0.1:11434").replace(
@@ -184,8 +185,16 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
 const OPENAI_REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || "low";
 const APP_TIMEZONE = process.env.APP_TIMEZONE || "Asia/Ho_Chi_Minh";
-const ADMIN_EMAIL = "ledanhdat56@gmail.com";
-const ADMIN_PASSWORD = "Ledanhdat2005@";
+const APP_BASE_URL = (process.env.APP_BASE_URL || "").trim().replace(/\/$/, "");
+const DEFAULT_ADMIN_EMAIL = (process.env.DEFAULT_ADMIN_EMAIL || "")
+  .trim()
+  .toLowerCase();
+const DEFAULT_ADMIN_PASSWORD = process.env.DEFAULT_ADMIN_PASSWORD || "";
+const BOOTSTRAP_DEFAULT_ADMIN = !["0", "false", "no"].includes(
+  String(process.env.BOOTSTRAP_DEFAULT_ADMIN || "0")
+    .trim()
+    .toLowerCase(),
+);
 const TRANSFER_OTP_TTL_MINUTES = Number(
   process.env.TRANSFER_OTP_TTL_MINUTES || "5",
 );
@@ -311,9 +320,93 @@ const HIGH_RISK_LOGIN_BLOCK_MINUTES = Number(
   process.env.HIGH_RISK_LOGIN_BLOCK_MINUTES || "10",
 );
 const AUTO_START_LOCAL_AI_SERVICE = !["0", "false", "no"].includes(
-  String(process.env.AUTO_START_LOCAL_AI_SERVICE || "1")
+  String(process.env.AUTO_START_LOCAL_AI_SERVICE || (IS_PRODUCTION ? "0" : "1"))
     .trim()
     .toLowerCase(),
+);
+
+const parseAllowedOrigins = () => {
+  const configuredOrigins = (process.env.ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((origin) => origin.trim().replace(/\/$/, ""))
+    .filter(Boolean);
+
+  if (APP_BASE_URL) {
+    configuredOrigins.push(APP_BASE_URL);
+  }
+
+  if (!configuredOrigins.length && !IS_PRODUCTION) {
+    configuredOrigins.push(
+      "http://localhost:5173",
+      "http://127.0.0.1:5173",
+      "http://localhost:4173",
+      "http://127.0.0.1:4173",
+    );
+  }
+
+  return new Set(configuredOrigins);
+};
+
+const ALLOWED_ORIGINS = parseAllowedOrigins();
+
+const validateStartupConfiguration = () => {
+  const requiredProductionEnv = [
+    {
+      key: "JWT_SECRET",
+      isInvalid: (value: string) =>
+        !value || value === "changemejwtsecret" || value === "dev-insecure-jwt-secret",
+      message: "Set JWT_SECRET to a long random secret before starting production.",
+    },
+    {
+      key: "ENCRYPTION_KEY",
+      isInvalid: (value: string) =>
+        !value || value === "replace-with-a-real-base64-32-byte-key",
+      message:
+        "Set ENCRYPTION_KEY to a real 32-byte base64 or hex key before starting production.",
+    },
+  ];
+
+  for (const requirement of requiredProductionEnv) {
+    const value = String(process.env[requirement.key] || "").trim();
+    if (IS_PRODUCTION && requirement.isInvalid(value)) {
+      throw new Error(requirement.message);
+    }
+  }
+
+  if (IS_PRODUCTION && !ALLOWED_ORIGINS.size) {
+    throw new Error(
+      "Set APP_BASE_URL or ALLOWED_ORIGINS before starting production so CORS stays restricted.",
+    );
+  }
+
+  if (
+    IS_PRODUCTION &&
+    BOOTSTRAP_DEFAULT_ADMIN &&
+    (!DEFAULT_ADMIN_EMAIL || !DEFAULT_ADMIN_PASSWORD)
+  ) {
+    throw new Error(
+      "BOOTSTRAP_DEFAULT_ADMIN is enabled but DEFAULT_ADMIN_EMAIL / DEFAULT_ADMIN_PASSWORD are missing.",
+    );
+  }
+};
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+
+      const normalizedOrigin = origin.replace(/\/$/, "");
+      if (ALLOWED_ORIGINS.has(normalizedOrigin)) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new Error("CORS origin not allowed."));
+    },
+  }),
 );
 
 const normalizeEmail = (email: string) => email.trim().toLowerCase();
@@ -11398,23 +11491,29 @@ const initializeDatabase = async () => {
     try {
       await prisma.$connect();
       await configureDatabaseTimezone();
-      const adminPasswordHash = await hashPassword(ADMIN_PASSWORD);
-      await prisma.user.upsert({
-        where: { email: ADMIN_EMAIL },
-        update: {
-          passwordHash: adminPasswordHash,
-          role: "ADMIN",
-          status: "ACTIVE",
-        },
-        create: {
-          id: crypto.randomUUID(),
-          email: ADMIN_EMAIL,
-          passwordHash: adminPasswordHash,
-          role: "ADMIN",
-          status: "ACTIVE",
-        },
-      });
-      console.log(`Default admin ready. email=${ADMIN_EMAIL}`);
+      if (BOOTSTRAP_DEFAULT_ADMIN) {
+        const adminPasswordHash = await hashPassword(DEFAULT_ADMIN_PASSWORD);
+        await prisma.user.upsert({
+          where: { email: DEFAULT_ADMIN_EMAIL },
+          update: {
+            passwordHash: adminPasswordHash,
+            role: "ADMIN",
+            status: "ACTIVE",
+          },
+          create: {
+            id: crypto.randomUUID(),
+            email: DEFAULT_ADMIN_EMAIL,
+            passwordHash: adminPasswordHash,
+            role: "ADMIN",
+            status: "ACTIVE",
+          },
+        });
+        console.log(`Bootstrapped admin account. email=${DEFAULT_ADMIN_EMAIL}`);
+      } else {
+        console.log(
+          "Skipping admin bootstrap. Set BOOTSTRAP_DEFAULT_ADMIN=1 to create an initial admin account.",
+        );
+      }
       return;
     } catch (err) {
       console.error(
@@ -11431,6 +11530,7 @@ const initializeDatabase = async () => {
 
 const start = async () => {
   try {
+    validateStartupConfiguration();
     registerShutdownHooks();
     const server = app.listen(PORT, () => {
       console.log(`API listening on http://localhost:${PORT}`);
