@@ -167,7 +167,7 @@ app.use(express.json());
 app.use(applySecurityHeaders);
 app.use(lockoutGuard);
 
-const PORT = process.env.PORT_API || 4000;
+const PORT = Number(process.env.PORT || process.env.PORT_API || 4000);
 const AI_URL = process.env.AI_SERVICE_URL || "http://localhost:8000";
 const AI_API_KEY = process.env.AI_API_KEY || "local-dev-key";
 const OLLAMA_URL = (process.env.OLLAMA_URL || "http://127.0.0.1:11434").replace(
