@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: fpipay-api
+    runtime: node
+    plan: free
+    rootDir: .
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @secure-wallet/api prisma:generate && pnpm --filter @secure-wallet/api build
+    startCommand: node apps/api/dist/apps/api/src/server.js
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: NODE_ENV
+        value: production
+      - key: PORT_API
+        value: 4000
+      - key: AUTO_START_LOCAL_AI_SERVICE
+        value: 0
+      - key: APP_TIMEZONE
+        value: Asia/Ho_Chi_Minh
