@@ -259,6 +259,7 @@ const NAV_ITEMS: {
   children?: { id: string; label: string }[];
 }[] = [
   { id: "Dashboard", label: "Dashboard" },
+  { id: "Copilot", label: "Copilot" },
   { id: "Card Center", label: "Card Center" },
   {
     id: "Support",
@@ -638,7 +639,9 @@ const buildSmartCopilotTitle = (input?: string) => {
 const buildCopilotSessionTitle = (input?: string) => {
   const cleaned = buildSmartCopilotTitle(input).replace(/\s+/g, " ").trim();
   if (!cleaned) return "New chat";
-  return cleaned.length <= 44 ? cleaned : `${cleaned.slice(0, 41).trimEnd()}...`;
+  return cleaned.length <= 44
+    ? cleaned
+    : `${cleaned.slice(0, 41).trimEnd()}...`;
 };
 
 const buildDefaultCopilotSession = (seed?: {
@@ -1093,7 +1096,15 @@ function BarChart({
   );
 }
 
-function DashboardView() {
+function DashboardView({
+  mode = "dashboard",
+  onOpenCopilotWorkspace,
+  onCloseCopilotWorkspace,
+}: {
+  mode?: "dashboard" | "copilot";
+  onOpenCopilotWorkspace?: () => void;
+  onCloseCopilotWorkspace?: () => void;
+}) {
   const { user, token, sessionSecurity } = useAuth();
   const { toast } = useToast();
   const transferQrVideoRef = useRef<HTMLVideoElement>(null);
@@ -1131,12 +1142,10 @@ function DashboardView() {
     lastActivity: string;
   } | null>(null);
   const [transferOpen, setTransferOpen] = useState(false);
-  const [copilotOpen, setCopilotOpen] = useState(false);
   const [copilotBusy, setCopilotBusy] = useState(false);
   const [copilotInput, setCopilotInput] = useState("");
-  const [copilotWorkspace, setCopilotWorkspace] = useState<CopilotWorkspaceState>(
-    buildDefaultCopilotWorkspace,
-  );
+  const [copilotWorkspace, setCopilotWorkspace] =
+    useState<CopilotWorkspaceState>(buildDefaultCopilotWorkspace);
   const [copilotHistoryHydrated, setCopilotHistoryHydrated] = useState(false);
   const [copilotRenameSessionId, setCopilotRenameSessionId] = useState("");
   const [copilotRenameDraft, setCopilotRenameDraft] = useState("");
@@ -1200,7 +1209,9 @@ function DashboardView() {
     useState<number | null>(null);
   const [transferOtpResendAt, setTransferOtpResendAt] = useState(0);
   const [transferOtpClock, setTransferOtpClock] = useState(Date.now());
-  const [transferAdvisoryClock, setTransferAdvisoryClock] = useState(Date.now());
+  const [transferAdvisoryClock, setTransferAdvisoryClock] = useState(
+    Date.now(),
+  );
   const [transferMonitoring, setTransferMonitoring] =
     useState<AiMonitoringSummary | null>(null);
   const [transferPreviewBusy, setTransferPreviewBusy] = useState(false);
@@ -1490,7 +1501,9 @@ function DashboardView() {
   const activeCopilotSession =
     copilotSessions.find(
       (session) => session.id === copilotWorkspace.activeSessionId,
-    ) || copilotSessions[0] || null;
+    ) ||
+    copilotSessions[0] ||
+    null;
   const copilotMessages =
     activeCopilotSession?.messages || buildDefaultCopilotMessages();
   const copilotInsight =
@@ -2253,7 +2266,9 @@ function DashboardView() {
     !Number.isNaN(transferBlockedUntilMs) &&
     transferBlockedUntilMs > transferAdvisoryClock;
   const transferHoldRemainingLabel = isTransferHoldActive
-    ? formatTransferHoldCountdown(transferBlockedUntilMs - transferAdvisoryClock)
+    ? formatTransferHoldCountdown(
+        transferBlockedUntilMs - transferAdvisoryClock,
+      )
     : "";
 
   useEffect(() => {
@@ -2824,14 +2839,14 @@ function DashboardView() {
   };
 
   useEffect(() => {
-    if (!copilotOpen) return;
+    if (mode !== "copilot") return;
     const thread = copilotThreadRef.current;
     if (!thread) return;
     thread.scrollTo({
       top: thread.scrollHeight,
       behavior: "smooth",
     });
-  }, [copilotMessages, copilotBusy, copilotOpen]);
+  }, [mode, copilotMessages, copilotBusy]);
 
   useEffect(() => {
     if (!copilotStorageKey) {
@@ -3025,12 +3040,7 @@ function DashboardView() {
         copilotPersistTimerRef.current = null;
       }
     };
-  }, [
-    copilotHistoryHydrated,
-    copilotStorageKey,
-    copilotWorkspace,
-    token,
-  ]);
+  }, [copilotHistoryHydrated, copilotStorageKey, copilotWorkspace, token]);
 
   const resetCopilotConversation = useCallback(() => {
     const nextSession = buildDefaultCopilotSession();
@@ -3066,7 +3076,11 @@ function DashboardView() {
       ...current,
       sessions: current.sessions.map((session) =>
         session.id === copilotRenameSessionId
-          ? { ...session, title: nextTitle, updatedAt: new Date().toISOString() }
+          ? {
+              ...session,
+              title: nextTitle,
+              updatedAt: new Date().toISOString(),
+            }
           : session,
       ),
     }));
@@ -4628,6 +4642,297 @@ function DashboardView() {
     }
   }, [submitTransferConfirmation, transferFaceProof]);
 
+  const openCopilotWorkspace = () => {
+    onOpenCopilotWorkspace?.();
+  };
+  const closeCopilotWorkspace = () => {
+    onCloseCopilotWorkspace?.();
+  };
+  const copilotWorkspacePanel = (
+    <section className="ai-copilot-page">
+      <div className="ai-copilot-page-shell">
+        <aside className="ai-copilot-page-sidebar">
+          <div className="ai-copilot-page-profile">
+            <div className="ai-copilot-page-profile-row">
+              <img
+                className="ai-copilot-page-profile-avatar"
+                src={user?.avatar}
+                alt=""
+              />
+              <div className="ai-copilot-page-profile-copy">
+                <strong>{user?.name || "FPIPay User"}</strong>
+                <span>FPIPay Copilot workspace</span>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="pill ai-copilot-page-new"
+              onClick={resetCopilotConversation}
+              disabled={copilotBusy}
+            >
+              + New chat
+            </button>
+          </div>
+
+          <div className="ai-copilot-page-history">
+            <div className="ai-copilot-page-section-head">
+              <strong>Recent conversations</strong>
+              <span>{copilotSessionList.length} chats</span>
+            </div>
+            <input
+              className="ai-copilot-session-search"
+              value={copilotSearch}
+              onChange={(e) => setCopilotSearch(e.target.value)}
+              placeholder="Search chats..."
+            />
+            <div className="ai-copilot-session-list ai-copilot-page-session-list">
+              {copilotSessionList.map((session) => {
+                const isActive = session.id === copilotWorkspace.activeSessionId;
+                const isRenaming = session.id === copilotRenameSessionId;
+                const preview =
+                  session.messages[session.messages.length - 1]?.content ||
+                  session.messages[0]?.content ||
+                  "Empty chat";
+
+                return (
+                  <div
+                    key={session.id}
+                    className={`ai-copilot-session-card${isActive ? " active" : ""}`}
+                  >
+                    {isRenaming ? (
+                      <input
+                        className="ai-copilot-session-rename"
+                        value={copilotRenameDraft}
+                        autoFocus
+                        maxLength={120}
+                        onChange={(e) => setCopilotRenameDraft(e.target.value)}
+                        onBlur={commitCopilotRename}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            commitCopilotRename();
+                          }
+                          if (e.key === "Escape") {
+                            setCopilotRenameSessionId("");
+                            setCopilotRenameDraft("");
+                          }
+                        }}
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        className="ai-copilot-session-main"
+                        onClick={() => selectCopilotSession(session.id)}
+                      >
+                        <strong>
+                          {session.pinned ? "Pinned · " : ""}
+                          {session.title}
+                        </strong>
+                        <span>{truncateNotificationCopy(preview, 84)}</span>
+                        <small>
+                          {new Date(session.updatedAt).toLocaleString("en-US", {
+                            month: "short",
+                            day: "2-digit",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}
+                        </small>
+                      </button>
+                    )}
+                    <div className="ai-copilot-session-actions">
+                      <button
+                        type="button"
+                        className="pill ai-copilot-session-btn"
+                        onClick={() => toggleCopilotSessionPin(session.id)}
+                        disabled={copilotBusy}
+                      >
+                        {session.pinned ? "Unpin" : "Pin"}
+                      </button>
+                      <button
+                        type="button"
+                        className="pill ai-copilot-session-btn"
+                        onClick={() => startCopilotRename(session)}
+                        disabled={copilotBusy}
+                      >
+                        Rename
+                      </button>
+                      <button
+                        type="button"
+                        className="pill ai-copilot-session-btn danger"
+                        onClick={() => deleteCopilotSession(session.id)}
+                        disabled={copilotBusy}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+              {!copilotSessionList.length ? (
+                <div className="ai-copilot-session-empty">
+                  No chats match your search.
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="ai-copilot-page-security">
+            <div className="ai-copilot-page-section-head">
+              <strong>Account health</strong>
+              <span>
+                {sessionSecurity.restrictLargeTransfers
+                  ? "Protected"
+                  : "Monitoring"}
+              </span>
+            </div>
+            <p>
+              {sessionSecurity.restrictLargeTransfers
+                ? "Live transfer rules and wallet protections are active for this workspace."
+                : "Copilot can still help, but advanced safety rules are not fully active right now."}
+            </p>
+            <div className="ai-copilot-page-health-meta">
+              <span>{transactionHistory.length} ledger entries</span>
+              <span>{copilotSessions.length} saved sessions</span>
+            </div>
+          </div>
+        </aside>
+
+        <div className="ai-copilot-page-main">
+          <div className="ai-copilot-page-main-frame">
+            <div className="ai-copilot-head ai-copilot-head-page">
+              <div className="ai-copilot-head-copy">
+                <div className="ai-copilot-kicker">FPIPay Copilot</div>
+                <h3>Financial Assistant</h3>
+                <div className="ai-agent-copy">
+                  Wallet-aware chat for spending, savings, transfers, market
+                  context, and financial planning.
+                </div>
+              </div>
+              <div className="ai-copilot-head-actions">
+                <div className="ai-copilot-status">
+                  <span className="ai-copilot-status-dot" />
+                  {copilotBusy ? "Thinking" : "Active session"}
+                </div>
+                <button
+                  type="button"
+                  className="pill ai-copilot-secondary"
+                  onClick={resetCopilotConversation}
+                  disabled={copilotBusy}
+                >
+                  New chat
+                </button>
+                <button
+                  type="button"
+                  className="card-details-close ai-copilot-close"
+                  onClick={closeCopilotWorkspace}
+                  aria-label="Close AI Copilot workspace"
+                >
+                  x
+                </button>
+              </div>
+            </div>
+
+            <div className="ai-copilot-thread-wrap ai-copilot-thread-wrap-page">
+              <div className="ai-copilot-thread-bar">
+                <div className="ai-copilot-thread-meta">
+                  <span className="ai-copilot-thread-badge">Active session</span>
+                  {copilotThreadTitle}
+                </div>
+              </div>
+              <div className="ai-copilot-thread" ref={copilotThreadRef}>
+                {copilotMessages.map((message, index) => (
+                  <div
+                    key={`${message.role}-${index}-${message.content.slice(0, 24)}`}
+                    className={`ai-copilot-message-row ai-copilot-message-row-${message.role}`}
+                  >
+                    {message.role === "assistant" ? (
+                      <div className="ai-copilot-avatar">AI</div>
+                    ) : null}
+                    <div
+                      className={`ai-copilot-message-card ai-copilot-message-card-${message.role}`}
+                    >
+                      <span className="ai-copilot-message-label">
+                        {message.role === "assistant" ? "FPIPay Copilot" : "You"}
+                      </span>
+                      {renderCopilotMessageContent(message.content)}
+                    </div>
+                  </div>
+                ))}
+                {copilotBusy && (
+                  <div className="ai-copilot-message-row ai-copilot-message-row-assistant">
+                    <div className="ai-copilot-avatar">AI</div>
+                    <div className="ai-copilot-message-card ai-copilot-message-card-assistant ai-copilot-bubble-thinking">
+                      <span className="ai-copilot-message-label">
+                        FPIPay Copilot
+                      </span>
+                      <div className="ai-copilot-typing" aria-hidden="true">
+                        <span />
+                        <span />
+                        <span />
+                      </div>
+                      <p>Analyzing your financial context...</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {copilotHasInsight ? (
+              <div className="ai-copilot-summary ai-copilot-summary-page">
+                <div className="ai-copilot-summary-meta">
+                  <strong>{copilotInsight.topic || "Conversation context"}</strong>
+                  <div className="ai-copilot-summary-badges">
+                    <span className={`ai-copilot-risk-pill ${copilotRiskTone}`}>
+                      {copilotInsight.riskLevel} risk
+                    </span>
+                    <span className="ai-copilot-summary-badge">
+                      {Math.round(copilotInsight.confidence * 100)}% confidence
+                    </span>
+                  </div>
+                </div>
+                {copilotSummaryText ? (
+                  <p className="ai-copilot-summary-text">{copilotSummaryText}</p>
+                ) : null}
+              </div>
+            ) : null}
+
+            <div className="ai-copilot-compose ai-copilot-compose-page">
+              <textarea
+                value={copilotInput}
+                onChange={(e) => setCopilotInput(e.target.value)}
+                placeholder="Ask about spending, savings, statements, transfers, market context, or any finance question..."
+                rows={3}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    void sendCopilotMessage();
+                  }
+                }}
+              />
+              <div className="ai-copilot-compose-hint">
+                Enter to send. Shift+Enter for a new line.
+              </div>
+              <div className="ai-copilot-compose-actions">
+                <button
+                  type="button"
+                  className="btn-primary ai-copilot-primary"
+                  disabled={copilotBusy || !copilotInput.trim()}
+                  onClick={() => void sendCopilotMessage()}
+                >
+                  {copilotBusy ? "Thinking..." : "Send Message"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+
+  if (mode === "copilot") {
+    return copilotWorkspacePanel;
+  }
+
   return (
     <section className="dashboard-v2">
       <div className="dashboard-v2-top">
@@ -4707,7 +5012,7 @@ function DashboardView() {
                     if (action.id === "transfer") {
                       openTransferModal();
                     } else if (action.id === "copilot") {
-                      setCopilotOpen(true);
+                      openCopilotWorkspace();
                     }
                   }}
                 >
@@ -4724,7 +5029,7 @@ function DashboardView() {
             type="button"
             className="dashboard-all-actions"
             onClick={() => {
-              setCopilotOpen(true);
+              openCopilotWorkspace();
             }}
           >
             Open AI workspace
@@ -5634,12 +5939,12 @@ function DashboardView() {
                         {isTransferHoldActive
                           ? `Retry in ${transferHoldRemainingLabel}`
                           : transferOtpRequired
-                          ? transferOtpVerifyBusy
-                            ? "Verifying OTP..."
-                            : "Confirm Transfer"
-                          : transferOtpBusy
-                            ? "Checking risk..."
-                            : "Authorize Transfer"}
+                            ? transferOtpVerifyBusy
+                              ? "Verifying OTP..."
+                              : "Confirm Transfer"
+                            : transferOtpBusy
+                              ? "Checking risk..."
+                              : "Authorize Transfer"}
                       </button>
                     </div>
                   </div>
@@ -5968,267 +6273,6 @@ function DashboardView() {
         </div>
       )}
 
-      {copilotOpen && (
-        <div
-          className="modal-overlay"
-          onClick={() => {
-            if (copilotBusy) return;
-            setCopilotOpen(false);
-          }}
-        >
-          <div
-            className="modal-card ai-copilot-modal"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="ai-copilot-head">
-              <div className="ai-copilot-head-copy">
-                <div className="ai-copilot-kicker">FPIPay Copilot</div>
-                <h3>Financial Assistant</h3>
-                <div className="ai-agent-copy">
-                  Wallet-aware chat for spending, savings, transfers, and live
-                  market context.
-                </div>
-              </div>
-              <div className="ai-copilot-head-actions">
-                <div className="ai-copilot-status">
-                  <span className="ai-copilot-status-dot" />
-                  {copilotBusy ? "Thinking" : "Ready"}
-                </div>
-                <button
-                  type="button"
-                  className="pill ai-copilot-secondary"
-                  onClick={resetCopilotConversation}
-                  disabled={copilotBusy}
-                >
-                  New chat
-                </button>
-              </div>
-              <button
-                type="button"
-                className="card-details-close ai-copilot-close"
-                onClick={() => setCopilotOpen(false)}
-                aria-label="Close AI Copilot"
-              >
-                x
-              </button>
-            </div>
-
-            <div className="ai-copilot-body">
-              <aside className="ai-copilot-sidebar">
-                <div className="ai-copilot-sidebar-head">
-                  <div className="ai-copilot-sidebar-head-copy">
-                    <strong>Chat history</strong>
-                    <span>{copilotSessionList.length} chats</span>
-                  </div>
-                  <input
-                    className="ai-copilot-session-search"
-                    value={copilotSearch}
-                    onChange={(e) => setCopilotSearch(e.target.value)}
-                    placeholder="Search chats"
-                  />
-                </div>
-                <div className="ai-copilot-session-list">
-                  {copilotSessionList.map((session) => {
-                    const isActive =
-                      session.id === copilotWorkspace.activeSessionId;
-                    const isRenaming = session.id === copilotRenameSessionId;
-                    const preview =
-                      session.messages[session.messages.length - 1]?.content ||
-                      session.messages[0]?.content ||
-                      "Empty chat";
-
-                    return (
-                      <div
-                        key={session.id}
-                        className={`ai-copilot-session-card${isActive ? " active" : ""}`}
-                      >
-                        {isRenaming ? (
-                          <input
-                            className="ai-copilot-session-rename"
-                            value={copilotRenameDraft}
-                            autoFocus
-                            maxLength={120}
-                            onChange={(e) =>
-                              setCopilotRenameDraft(e.target.value)
-                            }
-                            onBlur={commitCopilotRename}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") {
-                                e.preventDefault();
-                                commitCopilotRename();
-                              }
-                              if (e.key === "Escape") {
-                                setCopilotRenameSessionId("");
-                                setCopilotRenameDraft("");
-                              }
-                            }}
-                          />
-                        ) : (
-                          <button
-                            type="button"
-                            className="ai-copilot-session-main"
-                            onClick={() => selectCopilotSession(session.id)}
-                          >
-                            <strong>
-                              {session.pinned ? "Pinned · " : ""}
-                              {session.title}
-                            </strong>
-                            <span>{truncateNotificationCopy(preview, 72)}</span>
-                            <small>
-                              {new Date(session.updatedAt).toLocaleString(
-                                "en-US",
-                                {
-                                  month: "short",
-                                  day: "2-digit",
-                                  hour: "2-digit",
-                                  minute: "2-digit",
-                                },
-                              )}
-                            </small>
-                          </button>
-                        )}
-                        <div className="ai-copilot-session-actions">
-                          <button
-                            type="button"
-                            className="pill ai-copilot-session-btn"
-                            onClick={() => toggleCopilotSessionPin(session.id)}
-                            disabled={copilotBusy}
-                          >
-                            {session.pinned ? "Unpin" : "Pin"}
-                          </button>
-                          <button
-                            type="button"
-                            className="pill ai-copilot-session-btn"
-                            onClick={() => startCopilotRename(session)}
-                            disabled={copilotBusy}
-                          >
-                            Rename
-                          </button>
-                          <button
-                            type="button"
-                            className="pill ai-copilot-session-btn danger"
-                            onClick={() => deleteCopilotSession(session.id)}
-                            disabled={copilotBusy}
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                  {!copilotSessionList.length ? (
-                    <div className="ai-copilot-session-empty">
-                      No chats match your search.
-                    </div>
-                  ) : null}
-                </div>
-              </aside>
-
-              <div className="ai-copilot-main">
-                <div className="ai-copilot-thread-wrap">
-                  <div className="ai-copilot-thread-bar">
-                    <div className="ai-copilot-thread-meta">
-                      {copilotThreadTitle}
-                    </div>
-                  </div>
-                  <div className="ai-copilot-thread" ref={copilotThreadRef}>
-                    {copilotMessages.map((message, index) => (
-                      <div
-                        key={`${message.role}-${index}-${message.content.slice(0, 24)}`}
-                        className={`ai-copilot-message-row ai-copilot-message-row-${message.role}`}
-                      >
-                        {message.role === "assistant" ? (
-                          <div className="ai-copilot-avatar">AI</div>
-                        ) : null}
-                        <div
-                          className={`ai-copilot-message-card ai-copilot-message-card-${message.role}`}
-                        >
-                          <span className="ai-copilot-message-label">
-                            {message.role === "assistant"
-                              ? "FPIPay Copilot"
-                              : "You"}
-                          </span>
-                          {renderCopilotMessageContent(message.content)}
-                        </div>
-                      </div>
-                    ))}
-                    {copilotBusy && (
-                      <div className="ai-copilot-message-row ai-copilot-message-row-assistant">
-                        <div className="ai-copilot-avatar">AI</div>
-                        <div className="ai-copilot-message-card ai-copilot-message-card-assistant ai-copilot-bubble-thinking">
-                          <span className="ai-copilot-message-label">
-                            FPIPay Copilot
-                          </span>
-                          <div className="ai-copilot-typing" aria-hidden="true">
-                            <span />
-                            <span />
-                            <span />
-                          </div>
-                          <p>Thinking...</p>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {copilotHasInsight ? (
-                  <div className="ai-copilot-summary">
-                    <div className="ai-copilot-summary-meta">
-                      <strong>
-                        {copilotInsight.topic || "Conversation context"}
-                      </strong>
-                      <div className="ai-copilot-summary-badges">
-                        <span
-                          className={`ai-copilot-risk-pill ${copilotRiskTone}`}
-                        >
-                          {copilotInsight.riskLevel} risk
-                        </span>
-                        <span className="ai-copilot-summary-badge">
-                          {Math.round(copilotInsight.confidence * 100)}%
-                          confidence
-                        </span>
-                      </div>
-                    </div>
-                    {copilotSummaryText ? (
-                      <p className="ai-copilot-summary-text">
-                        {copilotSummaryText}
-                      </p>
-                    ) : null}
-                  </div>
-                ) : null}
-
-                <div className="ai-copilot-compose">
-                  <textarea
-                    value={copilotInput}
-                    onChange={(e) => setCopilotInput(e.target.value)}
-                    placeholder="Ask about spending, savings, statements, transfers, market context, or any finance question..."
-                    rows={3}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !e.shiftKey) {
-                        e.preventDefault();
-                        void sendCopilotMessage();
-                      }
-                    }}
-                  />
-                  <div className="ai-copilot-compose-hint">
-                    Enter to send. Shift+Enter for a new line.
-                  </div>
-                  <div className="ai-copilot-compose-actions">
-                    <button
-                      type="button"
-                      className="btn-primary ai-copilot-primary"
-                      disabled={copilotBusy || !copilotInput.trim()}
-                      onClick={() => void sendCopilotMessage()}
-                    >
-                      {copilotBusy ? "Thinking..." : "Send Message"}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
     </section>
   );
 }
@@ -9181,7 +9225,6 @@ function App() {
     if (item.id === "Invoices") setInvoicesExpanded(!invoicesExpandedShow);
     if (item.id === "Support") setUtilitiesExpanded(!utilitiesExpandedShow);
   };
-
   return (
     <div className="shell">
       <aside className="sidebar">
@@ -9546,7 +9589,30 @@ function App() {
             </section>
           }
         >
-          {activeTab === "Dashboard" && <DashboardView />}
+          {activeTab === "Dashboard" && (
+            <DashboardView
+              mode="dashboard"
+              onOpenCopilotWorkspace={() => {
+                setActiveTab("Copilot");
+                setUtilitiesExpanded(false);
+                setShowNotifications(false);
+                setUserMenuOpen(false);
+              }}
+              onCloseCopilotWorkspace={() => setActiveTab("Dashboard")}
+            />
+          )}
+          {activeTab === "Copilot" && (
+            <DashboardView
+              mode="copilot"
+              onOpenCopilotWorkspace={() => {
+                setActiveTab("Copilot");
+                setUtilitiesExpanded(false);
+                setShowNotifications(false);
+                setUserMenuOpen(false);
+              }}
+              onCloseCopilotWorkspace={() => setActiveTab("Dashboard")}
+            />
+          )}
           {activeTab === "Invoice List" && <LazyInvoiceListView />}
           {activeTab === "Create Invoices" && <LazyCreateInvoicesView />}
           {activeTab === "Card Center" && <CardCenterView />}
@@ -9572,6 +9638,7 @@ function App() {
           {activeTab === "KYC Verification" && <LazyKycView />}
           {![
             "Dashboard",
+            "Copilot",
             "Invoice List",
             "Create Invoices",
             "Card Center",
@@ -10041,9 +10108,6 @@ function AuthShell({
       strength.totalChecks > 0
         ? `${Math.max(8, (strength.passedChecks / strength.totalChecks) * 100)}%`
         : "8%";
-    const unmetChecks = strength.checks.filter((check) => !check.met);
-    const visibleChecks = strength.meetsPolicy ? strength.checks : unmetChecks;
-
     return (
       <div
         className={`auth-password-strength auth-password-strength-${strength.level}`}
@@ -10063,7 +10127,7 @@ function AuthShell({
         </div>
         <p className="auth-password-strength-message">{strength.message}</p>
         <div className="auth-password-checks">
-          {visibleChecks.map((check) => (
+          {strength.checks.map((check) => (
             <span
               key={check.id}
               className={
