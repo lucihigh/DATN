@@ -26,6 +26,7 @@ import type { SliderCaptchaValue } from "../components/SliderCaptcha";
 import { useToast } from "../context/ToastContext";
 import { useTheme } from "../context/ThemeContext";
 import { useActivityNotifications } from "./hooks/useActivityNotifications";
+import { API_BASE } from "../lib/apiBase";
 import "../index.css";
 
 const LazyInvoiceListView = lazy(() => import("./views/InvoiceListView"));
@@ -42,9 +43,6 @@ const LazySliderCaptcha = lazy(async () => {
   return { default: mod.SliderCaptcha };
 });
 
-const API_BASE =
-  (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ||
-  "http://localhost:4000";
 const SESSION_REPLACEMENT_ALERT_STORAGE_KEY =
   "fpipay_session_replacement_alert";
 const NOTIFICATION_READ_STORAGE_PREFIX = "fpipay_notification_reads";
