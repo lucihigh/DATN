@@ -61,7 +61,8 @@ const sumDebitsInRange = (
     if (Number.isNaN(createdAt.getTime())) return sum;
     if (createdAt < startInclusive || createdAt >= endExclusive) return sum;
     const isCredit =
-      transaction.type === "DEPOSIT" || transaction.metadata?.entry === "CREDIT";
+      transaction.type === "DEPOSIT" ||
+      transaction.metadata?.entry === "CREDIT";
     return sum + (isCredit ? 0 : Math.max(0, Number(transaction.amount || 0)));
   }, 0);
 
@@ -102,11 +103,23 @@ const buildDailyDigestNotification = (
   prevMonthEnd.setHours(now.getHours(), now.getMinutes(), now.getSeconds(), 0);
 
   const todaySpend = sumDebitsInRange(transactions, todayStart, now);
-  const yesterdaySpend = sumDebitsInRange(transactions, yesterdayStart, todayStart);
+  const yesterdaySpend = sumDebitsInRange(
+    transactions,
+    yesterdayStart,
+    todayStart,
+  );
   const thisWeekSpend = sumDebitsInRange(transactions, weekStart, now);
-  const lastWeekSpend = sumDebitsInRange(transactions, prevWeekStart, prevWeekEnd);
+  const lastWeekSpend = sumDebitsInRange(
+    transactions,
+    prevWeekStart,
+    prevWeekEnd,
+  );
   const thisMonthSpend = sumDebitsInRange(transactions, monthStart, now);
-  const lastMonthSpend = sumDebitsInRange(transactions, prevMonthStart, prevMonthEnd);
+  const lastMonthSpend = sumDebitsInRange(
+    transactions,
+    prevMonthStart,
+    prevMonthEnd,
+  );
 
   const message = [
     `Today ${todaySpend >= yesterdaySpend ? "is above" : "is below"} yesterday by ${formatSignedDelta(todaySpend - yesterdaySpend)}.`,
@@ -274,7 +287,10 @@ export function useActivityNotifications({
               }),
           );
 
-          const digestNotification = buildDailyDigestNotification(txs, new Date());
+          const digestNotification = buildDailyDigestNotification(
+            txs,
+            new Date(),
+          );
           if (digestNotification) {
             nextNotifications.push(digestNotification);
           }

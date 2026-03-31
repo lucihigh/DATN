@@ -108,6 +108,72 @@ function runAsyncSideEffect(label: string, work: () => Promise<unknown>) {
   });
 }
 
+const SAFE_AVATAR_MIME_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+]);
+const MAX_AVATAR_BINARY_BYTES = 900 * 1024;
+
+function hasMagicBytes(buffer: Buffer, signature: number[], offset = 0) {
+  if (buffer.length < offset + signature.length) return false;
+  return signature.every((byte, index) => buffer[offset + index] === byte);
+}
+
+function isSafeAvatarBuffer(buffer: Buffer, mimeType: string) {
+  if (mimeType === "image/jpeg") {
+    return hasMagicBytes(buffer, [0xff, 0xd8, 0xff]);
+  }
+  if (mimeType === "image/png") {
+    return hasMagicBytes(
+      buffer,
+      [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+    );
+  }
+  if (mimeType === "image/webp") {
+    return (
+      hasMagicBytes(buffer, [0x52, 0x49, 0x46, 0x46]) &&
+      hasMagicBytes(buffer, [0x57, 0x45, 0x42, 0x50], 8)
+    );
+  }
+  return false;
+}
+
+function parseSafeAvatarDataUrl(input: unknown) {
+  if (typeof input !== "string") return undefined;
+  const value = input.trim();
+  if (!value) return undefined;
+  if (value.length > 2_000_000) {
+    throw new Error("AVATAR_TOO_LARGE");
+  }
+
+  const match = value.match(
+    /^data:([a-z0-9.+-]+\/[a-z0-9.+-]+);base64,([a-z0-9+/=]+)$/i,
+  );
+  if (!match) {
+    throw new Error("AVATAR_INVALID_FORMAT");
+  }
+
+  const mimeType = match[1].toLowerCase();
+  if (!SAFE_AVATAR_MIME_TYPES.has(mimeType)) {
+    throw new Error("AVATAR_UNSUPPORTED_TYPE");
+  }
+
+  const base64Payload = match[2];
+  const buffer = Buffer.from(base64Payload, "base64");
+  if (!buffer.length) {
+    throw new Error("AVATAR_INVALID_FORMAT");
+  }
+  if (buffer.byteLength > MAX_AVATAR_BINARY_BYTES) {
+    throw new Error("AVATAR_TOO_LARGE");
+  }
+  if (!isSafeAvatarBuffer(buffer, mimeType)) {
+    throw new Error("AVATAR_CONTENT_MISMATCH");
+  }
+
+  return `data:${mimeType};base64,${buffer.toString("base64")}`;
+}
+
 type UserCacheScope = "auth" | "wallet" | "transactions" | "security";
 
 const USER_RESPONSE_CACHE_TTL_MS = Number(
@@ -354,8 +420,11 @@ const validateStartupConfiguration = () => {
     {
       key: "JWT_SECRET",
       isInvalid: (value: string) =>
-        !value || value === "changemejwtsecret" || value === "dev-insecure-jwt-secret",
-      message: "Set JWT_SECRET to a long random secret before starting production.",
+        !value ||
+        value === "changemejwtsecret" ||
+        value === "dev-insecure-jwt-secret",
+      message:
+        "Set JWT_SECRET to a long random secret before starting production.",
     },
     {
       key: "ENCRYPTION_KEY",
@@ -1507,29 +1576,26 @@ type OllamaCopilotResult =
       message: string;
     };
 
-const isPlainObject = (
-  value: unknown,
-): value is Record<string, unknown> =>
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
-const buildDefaultStoredCopilotSession =
-  (): StoredCopilotSessionState => ({
-    messages: [
-      {
-        role: "assistant",
-        content:
-          "Ask me anything about spending, savings, transfers, statements, scams, or market decisions. I will use your wallet context when it helps.",
-      },
-    ],
-    insight: {
-      topic: "",
-      suggestedActions: [],
-      suggestedDepositAmount: null,
-      riskLevel: "low",
-      confidence: 0,
-      followUpQuestion: null,
+const buildDefaultStoredCopilotSession = (): StoredCopilotSessionState => ({
+  messages: [
+    {
+      role: "assistant",
+      content:
+        "Ask me anything about spending, savings, transfers, statements, scams, or market decisions. I will use your wallet context when it helps.",
     },
-  });
+  ],
+  insight: {
+    topic: "",
+    suggestedActions: [],
+    suggestedDepositAmount: null,
+    riskLevel: "low",
+    confidence: 0,
+    followUpQuestion: null,
+  },
+});
 
 const buildDefaultStoredCopilotConversation = (): StoredCopilotConversation => {
   const now = new Date().toISOString();
@@ -1543,14 +1609,13 @@ const buildDefaultStoredCopilotConversation = (): StoredCopilotConversation => {
   };
 };
 
-const buildDefaultStoredCopilotWorkspace =
-  (): StoredCopilotWorkspaceState => {
-    const session = buildDefaultStoredCopilotConversation();
-    return {
-      activeSessionId: session.id,
-      sessions: [session],
-    };
+const buildDefaultStoredCopilotWorkspace = (): StoredCopilotWorkspaceState => {
+  const session = buildDefaultStoredCopilotConversation();
+  return {
+    activeSessionId: session.id,
+    sessions: [session],
   };
+};
 
 const sanitizeStoredCopilotMessages = (value: unknown) => {
   const messages = Array.isArray(value)
@@ -1565,12 +1630,10 @@ const sanitizeStoredCopilotMessages = (value: unknown) => {
       )
     : [];
 
-  return messages
-    .slice(-40)
-    .map((message) => ({
-      role: message.role,
-      content: message.content.trim().slice(0, 8000),
-    }));
+  return messages.slice(-40).map((message) => ({
+    role: message.role,
+    content: message.content.trim().slice(0, 8000),
+  }));
 };
 
 const sanitizeStoredCopilotInsight = (
@@ -1586,8 +1649,7 @@ const sanitizeStoredCopilotInsight = (
     : [];
 
   return {
-    topic:
-      typeof raw.topic === "string" ? raw.topic.trim().slice(0, 120) : "",
+    topic: typeof raw.topic === "string" ? raw.topic.trim().slice(0, 120) : "",
     suggestedActions,
     suggestedDepositAmount:
       typeof raw.suggestedDepositAmount === "number" &&
@@ -1597,8 +1659,7 @@ const sanitizeStoredCopilotInsight = (
     riskLevel: normalizeCopilotRiskLevel(raw.riskLevel),
     confidence: clamp(Number(raw.confidence || 0), 0, 1),
     followUpQuestion:
-      typeof raw.followUpQuestion === "string" &&
-      raw.followUpQuestion.trim()
+      typeof raw.followUpQuestion === "string" && raw.followUpQuestion.trim()
         ? raw.followUpQuestion.trim().slice(0, 240)
         : null,
   };
@@ -3880,7 +3941,12 @@ const buildHeuristicStockEducationResponse = (input: {
     const horizonTable = buildCopilotMarkdownTable(
       input.language === "vi"
         ? ["Khung nam giu", "Trong tam", "Dieu kien de tham gia", "Can tranh"]
-        : ["Holding horizon", "Primary focus", "Reasonable entry condition", "Avoid"],
+        : [
+            "Holding horizon",
+            "Primary focus",
+            "Reasonable entry condition",
+            "Avoid",
+          ],
       [
         input.language === "vi"
           ? [
@@ -4209,11 +4275,11 @@ const buildHeuristicCopilotResponse = (input: {
     })();
     const safeMonthlySave =
       netCashFlow > 0 ? roundMoney(Math.max(0, netCashFlow * 0.4)) : 0;
-    const projectedBalance = roundMoney(balance + safeMonthlySave * horizonMonths);
+    const projectedBalance = roundMoney(
+      balance + safeMonthlySave * horizonMonths,
+    );
     const planTable = buildCopilotMarkdownTable(
-      language === "vi"
-        ? ["Hang muc", "Gia tri"]
-        : ["Item", "Value"],
+      language === "vi" ? ["Hang muc", "Gia tri"] : ["Item", "Value"],
       [
         [
           language === "vi" ? "So du hien tai" : "Current balance",
@@ -4224,15 +4290,21 @@ const buildHeuristicCopilotResponse = (input: {
           formatCopilotSignedMoney(input.currency, netCashFlow),
         ],
         [
-          language === "vi" ? "Muc tiet kiem goi y / thang" : "Suggested monthly saving",
+          language === "vi"
+            ? "Muc tiet kiem goi y / thang"
+            : "Suggested monthly saving",
           formatCopilotMoney(input.currency, safeMonthlySave),
         ],
         [
           language === "vi" ? "Khung thoi gian" : "Horizon",
-          language === "vi" ? `${horizonMonths} thang` : `${horizonMonths} months`,
+          language === "vi"
+            ? `${horizonMonths} thang`
+            : `${horizonMonths} months`,
         ],
         [
-          language === "vi" ? "So du uoc tinh cuoi ky" : "Projected balance at horizon",
+          language === "vi"
+            ? "So du uoc tinh cuoi ky"
+            : "Projected balance at horizon",
           formatCopilotMoney(input.currency, projectedBalance),
         ],
       ],
@@ -5088,15 +5160,27 @@ const buildSpendingComparisonResponse = async (input: {
   });
 
   const compareWeekEnd = new Date(prevWeekStart);
-  compareWeekEnd.setDate(compareWeekEnd.getDate() + (Math.floor((todayStart.getTime() - weekStart.getTime()) / 86400000) + 1));
+  compareWeekEnd.setDate(
+    compareWeekEnd.getDate() +
+      (Math.floor((todayStart.getTime() - weekStart.getTime()) / 86400000) + 1),
+  );
   const compareMonthEnd = new Date(prevMonthStart);
   compareMonthEnd.setDate(
     Math.min(
       compareMonthEnd.getDate() + now.getDate() - 1,
-      new Date(prevMonthStart.getFullYear(), prevMonthStart.getMonth() + 1, 0).getDate(),
+      new Date(
+        prevMonthStart.getFullYear(),
+        prevMonthStart.getMonth() + 1,
+        0,
+      ).getDate(),
     ),
   );
-  compareMonthEnd.setHours(now.getHours(), now.getMinutes(), now.getSeconds(), now.getMilliseconds());
+  compareMonthEnd.setHours(
+    now.getHours(),
+    now.getMinutes(),
+    now.getSeconds(),
+    now.getMilliseconds(),
+  );
 
   const spendToday = sumDebitAmount(
     transactions.filter(
@@ -5140,7 +5224,14 @@ const buildSpendingComparisonResponse = async (input: {
 
   const comparisonTable = buildCopilotMarkdownTable(
     input.language === "vi"
-      ? ["Ky hien tai", "Chi tieu", "Ky doi chieu", "Chi tieu", "Chenh lech", "%"]
+      ? [
+          "Ky hien tai",
+          "Chi tieu",
+          "Ky doi chieu",
+          "Chi tieu",
+          "Chenh lech",
+          "%",
+        ]
       : ["Current period", "Spend", "Comparison period", "Spend", "Delta", "%"],
     [
       buildComparisonRow({
@@ -5154,7 +5245,9 @@ const buildSpendingComparisonResponse = async (input: {
       buildComparisonRow({
         currentLabel: input.language === "vi" ? "Tuan nay" : "This week",
         previousLabel:
-          input.language === "vi" ? "Tuan truoc cung nhip" : "Last week same pace",
+          input.language === "vi"
+            ? "Tuan truoc cung nhip"
+            : "Last week same pace",
         current: spendThisWeek,
         previous: spendLastWeek,
         currency: input.currency,
@@ -5163,7 +5256,9 @@ const buildSpendingComparisonResponse = async (input: {
       buildComparisonRow({
         currentLabel: input.language === "vi" ? "Thang nay" : "This month",
         previousLabel:
-          input.language === "vi" ? "Thang truoc cung nhip" : "Last month same pace",
+          input.language === "vi"
+            ? "Thang truoc cung nhip"
+            : "Last month same pace",
         current: spendThisMonth,
         previous: spendLastMonth,
         currency: input.currency,
@@ -5192,7 +5287,9 @@ const buildSpendingComparisonResponse = async (input: {
           ],
     suggestedDepositAmount: null,
     riskLevel:
-      spendToday > spendYesterday || spendThisWeek > spendLastWeek ? "medium" : "low",
+      spendToday > spendYesterday || spendThisWeek > spendLastWeek
+        ? "medium"
+        : "low",
     confidence: 0.98,
     followUpQuestion: localizeCopilotText(
       input.language,
@@ -7615,10 +7712,7 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
     return res.json(monthlyReport);
   }
 
-  if (
-    req.user?.sub &&
-    isSpendingComparisonIntent(latestUserMessage.content)
-  ) {
+  if (req.user?.sub && isSpendingComparisonIntent(latestUserMessage.content)) {
     const spendingComparison = await buildSpendingComparisonResponse({
       userId: req.user.sub,
       currency,
@@ -9328,12 +9422,28 @@ app.patch("/auth/me", requireAuth, async (req, res) => {
     body.metadata && typeof body.metadata === "object"
       ? (body.metadata as Record<string, unknown>)
       : {};
-  const avatar =
-    typeof metadata.avatar === "string" &&
-    metadata.avatar.length > 0 &&
-    metadata.avatar.length <= 2_000_000
-      ? metadata.avatar
-      : undefined;
+  let avatar: string | undefined;
+  try {
+    avatar = parseSafeAvatarDataUrl(metadata.avatar);
+  } catch (err) {
+    if (err instanceof Error) {
+      if (err.message === "AVATAR_TOO_LARGE") {
+        return res.status(400).json({
+          error: "Avatar image is too large. Please choose a smaller image.",
+        });
+      }
+      if (err.message === "AVATAR_UNSUPPORTED_TYPE") {
+        return res
+          .status(400)
+          .json({ error: "Avatar must be a JPG, PNG, or WebP image." });
+      }
+      return res.status(400).json({
+        error:
+          "Avatar content is invalid. Please upload a real JPG, PNG, or WebP image.",
+      });
+    }
+    return res.status(400).json({ error: "Invalid avatar payload." });
+  }
   const safeMetadata = {
     ...metadata,
     ...(avatar ? { avatar } : {}),

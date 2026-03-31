@@ -46,10 +46,25 @@ const LazySliderCaptcha = lazy(async () => {
 const SESSION_REPLACEMENT_ALERT_STORAGE_KEY =
   "fpipay_session_replacement_alert";
 const NOTIFICATION_READ_STORAGE_PREFIX = "fpipay_notification_reads";
+const SIGNUP_TEST_BALANCE_STORAGE_KEY = "fpipay_signup_test_balance_v1";
 const COPILOT_REQUEST_TIMEOUT_MS = 90000;
 const PROFESSIONAL_PASSWORD_MIN_LENGTH = 12;
 const TRANSFER_FACE_ID_THRESHOLD = 1000;
 const FORCE_AUTH_HERO_MOTION_CLASS = "force-auth-hero-motion";
+const SIGNUP_TEST_BALANCE_AMOUNT = 99999;
+
+const getSignupTestBalanceBonus = (userId?: string | null) => {
+  if (!userId || typeof window === "undefined") return 0;
+  try {
+    const raw = window.localStorage.getItem(SIGNUP_TEST_BALANCE_STORAGE_KEY);
+    if (!raw) return 0;
+    const parsed = JSON.parse(raw) as Record<string, number>;
+    const bonus = Number(parsed?.[userId] || 0);
+    return Number.isFinite(bonus) ? bonus : 0;
+  } catch {
+    return 0;
+  }
+};
 
 function DeferredFaceIdCapture(props: {
   apiBase: string;
@@ -279,10 +294,10 @@ const dashboardQuickActions = [
     icon: "DEP",
   },
   {
-    id: "copilot",
-    title: "AI Copilot",
-    detail: "Ask about budget, savings, and market context",
-    icon: "AI",
+    id: "sign-in-activity",
+    title: "View Sign-In Activity",
+    detail: "Review trusted devices and recent sign-ins",
+    icon: "SH",
   },
   {
     id: "transfer",
@@ -355,6 +370,20 @@ type TransactionHistoryItem = {
   amount: string;
   amountTone: "positive" | "negative";
   receipt: TransactionReceipt;
+};
+
+const getTransactionHistoryTimeLabel = (value: string) => {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  const dateLabel = parsed.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+  });
+  const timeLabel = parsed.toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  return `${dateLabel} • ${timeLabel}`;
 };
 
 type SavedTransferRecipient = {
@@ -625,6 +654,39 @@ const buildSmartCopilotTitle = (input?: string) => {
     .replace(/[!?.,;:]+$/g, "")
     .trim();
   if (!cleaned) return "New chat";
+  const lowered = cleaned.toLowerCase();
+  const topicRules: Array<{ pattern: RegExp; title: string }> = [
+    {
+      pattern: /\bfpt\b.*\bcổ phiếu\b|\bcổ phiếu\b.*\bfpt\b|\bfpt\b.*\bstock\b/,
+      title: "Cổ phiếu FPT",
+    },
+    {
+      pattern: /\botp\b|\blừa đảo\b|\bscam\b|\bgian lận\b|\bđiều tra\b/,
+      title: "Kiểm tra OTP và lừa đảo",
+    },
+    {
+      pattern: /\bchuyển tiền\b|\btransfer\b|\bchuyển khoản\b/,
+      title: "Tư vấn chuyển tiền",
+    },
+    {
+      pattern: /\btiết kiệm\b|\bsaving\b|\bgửi tiết kiệm\b/,
+      title: "Kế hoạch tiết kiệm",
+    },
+    {
+      pattern: /\bđầu tư\b|\binvest\b|\bcổ phiếu\b|\bquỹ\b/,
+      title: "Tư vấn đầu tư",
+    },
+    {
+      pattern: /\bbảo mật\b|\bsecurity\b|\btài khoản\b/,
+      title: "Bảo mật tài khoản",
+    },
+    {
+      pattern: /\bchi tiêu\b|\bspending\b|\bngân sách\b/,
+      title: "Phân tích chi tiêu",
+    },
+  ];
+  const matchedTopic = topicRules.find((rule) => rule.pattern.test(lowered));
+  if (matchedTopic) return matchedTopic.title;
   const significantWords = cleaned
     .split(" ")
     .map((word) => word.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}%/.-]+$/gu, ""))
@@ -633,7 +695,8 @@ const buildSmartCopilotTitle = (input?: string) => {
       (word, index) =>
         index === 0 || !COPILOT_TITLE_STOP_WORDS.has(word.toLowerCase()),
     );
-  return significantWords.slice(0, 7).join(" ").trim() || cleaned;
+  const compact = significantWords.slice(0, 5).join(" ").trim();
+  return compact || cleaned;
 };
 
 const buildCopilotSessionTitle = (input?: string) => {
@@ -1112,6 +1175,7 @@ function DashboardView({
   const transferQrScanTimerRef = useRef<number | null>(null);
   const copilotThreadRef = useRef<HTMLDivElement>(null);
   const copilotPersistTimerRef = useRef<number | null>(null);
+  const copilotFreshOnOpenAppliedRef = useRef(false);
   const walletRefreshInFlightRef = useRef(false);
   const [wallet, setWallet] = useState<{
     id: string;
@@ -1146,10 +1210,16 @@ function DashboardView({
   const [copilotInput, setCopilotInput] = useState("");
   const [copilotWorkspace, setCopilotWorkspace] =
     useState<CopilotWorkspaceState>(buildDefaultCopilotWorkspace);
+  const [copilotDraftSession, setCopilotDraftSession] =
+    useState<CopilotSessionState | null>(null);
   const [copilotHistoryHydrated, setCopilotHistoryHydrated] = useState(false);
   const [copilotRenameSessionId, setCopilotRenameSessionId] = useState("");
   const [copilotRenameDraft, setCopilotRenameDraft] = useState("");
-  const [copilotSearch, setCopilotSearch] = useState("");
+  const [copilotSessionMenuId, setCopilotSessionMenuId] = useState("");
+  const [copilotSessionMenuPlacement, setCopilotSessionMenuPlacement] =
+    useState<"up" | "down">("down");
+  const [copilotMobileHistoryOpen, setCopilotMobileHistoryOpen] =
+    useState(false);
   const [transferStep, setTransferStep] = useState<1 | 2 | 3 | 4>(1);
   const [transferStepDirection, setTransferStepDirection] = useState<
     "forward" | "backward"
@@ -1498,14 +1568,17 @@ function DashboardView({
     ? `${COPILOT_HISTORY_STORAGE_PREFIX}_${user.id}`
     : "";
   const copilotSessions = copilotWorkspace.sessions;
+  const activeCommittedCopilotSession = copilotWorkspace.activeSessionId
+    ? copilotSessions.find(
+        (session) => session.id === copilotWorkspace.activeSessionId,
+      ) || null
+    : null;
   const activeCopilotSession =
-    copilotSessions.find(
-      (session) => session.id === copilotWorkspace.activeSessionId,
-    ) ||
-    copilotSessions[0] ||
-    null;
+    activeCommittedCopilotSession || copilotDraftSession;
   const copilotMessages =
     activeCopilotSession?.messages || buildDefaultCopilotMessages();
+  const copilotDefaultGreeting =
+    buildDefaultCopilotMessages()[0]?.content || "";
   const copilotInsight =
     activeCopilotSession?.insight || buildDefaultCopilotInsight();
   const copilotHasInsight = Boolean(
@@ -1529,24 +1602,13 @@ function DashboardView({
   const copilotThreadTitle = activeCopilotSession?.title || "New chat";
   const copilotIsFreshSession =
     copilotMessages.length === 1 && copilotMessages[0]?.role === "assistant";
-  const normalizedCopilotSearch = copilotSearch.trim().toLowerCase();
-  const copilotSessionList = [...copilotSessions]
-    .filter((session) => {
-      if (!normalizedCopilotSearch) return true;
-      const searchText = [
-        session.title,
-        ...session.messages.slice(-6).map((message) => message.content),
-      ]
-        .join(" ")
-        .toLowerCase();
-      return searchText.includes(normalizedCopilotSearch);
-    })
-    .sort((a, b) => {
-      if (a.pinned !== b.pinned) {
-        return a.pinned ? -1 : 1;
-      }
-      return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
-    });
+  const copilotSessionList = [...copilotSessions].sort((a, b) => {
+    if (a.pinned !== b.pinned) {
+      return a.pinned ? -1 : 1;
+    }
+    return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+  });
+  const transactionHistoryPreview = transactionHistory.slice(0, 3);
 
   const buildTransactionReceipt = useCallback(
     (tx: {
@@ -2559,7 +2621,11 @@ function DashboardView({
             qrPayload?: string;
             qrImageUrl?: string;
           };
-          setWallet(w);
+          const signupTestBonus = getSignupTestBalanceBonus(user?.id);
+          setWallet({
+            ...w,
+            balance: Number(w.balance || 0) + signupTestBonus,
+          });
         }
 
         if (txResp.ok) {
@@ -2620,7 +2686,7 @@ function DashboardView({
         walletRefreshInFlightRef.current = false;
       }
     },
-    [buildTransactionReceipt, token],
+    [buildTransactionReceipt, token, user?.id],
   );
 
   const handleDownloadOwnQr = useCallback(async () => {
@@ -2726,6 +2792,10 @@ function DashboardView({
       return;
     }
 
+    const isDraftSession =
+      !copilotWorkspace.activeSessionId &&
+      Boolean(copilotDraftSession) &&
+      activeCopilotSession.id === copilotDraftSession.id;
     const nextMessages: CopilotMessage[] = [
       ...activeCopilotSession.messages,
       { role: "user", content },
@@ -2736,19 +2806,36 @@ function DashboardView({
         ? buildCopilotSessionTitle(content)
         : activeCopilotSession.title;
     const nextUpdatedAt = new Date().toISOString();
-    setCopilotWorkspace((current) => ({
-      ...current,
-      sessions: current.sessions.map((session) =>
-        session.id === activeCopilotSession.id
-          ? {
-              ...session,
-              title: nextTitle,
-              updatedAt: nextUpdatedAt,
-              messages: nextMessages,
-            }
-          : session,
-      ),
-    }));
+    const targetSessionId = activeCopilotSession.id;
+    if (isDraftSession) {
+      setCopilotWorkspace((current) => ({
+        activeSessionId: targetSessionId,
+        sessions: [
+          {
+            ...activeCopilotSession,
+            title: nextTitle,
+            updatedAt: nextUpdatedAt,
+            messages: nextMessages,
+          },
+          ...current.sessions,
+        ].slice(0, 20),
+      }));
+      setCopilotDraftSession(null);
+    } else {
+      setCopilotWorkspace((current) => ({
+        ...current,
+        sessions: current.sessions.map((session) =>
+          session.id === targetSessionId
+            ? {
+                ...session,
+                title: nextTitle,
+                updatedAt: nextUpdatedAt,
+                messages: nextMessages,
+              }
+            : session,
+        ),
+      }));
+    }
     setCopilotInput("");
     setCopilotBusy(true);
 
@@ -2799,7 +2886,7 @@ function DashboardView({
       setCopilotWorkspace((current) => ({
         ...current,
         sessions: current.sessions.map((session) =>
-          session.id === activeCopilotSession.id
+          session.id === targetSessionId
             ? {
                 ...session,
                 title: nextTitle,
@@ -2849,6 +2936,17 @@ function DashboardView({
       behavior: "smooth",
     });
   }, [mode, copilotMessages, copilotBusy]);
+
+  useEffect(() => {
+    if (!copilotSessionMenuId) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest(".ai-copilot-session-menu-wrap")) return;
+      setCopilotSessionMenuId("");
+    };
+    window.addEventListener("mousedown", handlePointerDown);
+    return () => window.removeEventListener("mousedown", handlePointerDown);
+  }, [copilotSessionMenuId]);
 
   useEffect(() => {
     if (!copilotStorageKey) {
@@ -3044,14 +3142,37 @@ function DashboardView({
     };
   }, [copilotHistoryHydrated, copilotStorageKey, copilotWorkspace, token]);
 
+  useEffect(() => {
+    if (mode !== "copilot") {
+      copilotFreshOnOpenAppliedRef.current = false;
+      return;
+    }
+    if (!copilotHistoryHydrated || copilotFreshOnOpenAppliedRef.current) {
+      return;
+    }
+    copilotFreshOnOpenAppliedRef.current = true;
+    const nextSession = buildDefaultCopilotSession();
+    setCopilotWorkspace((current) => ({
+      ...current,
+      activeSessionId: "",
+    }));
+    setCopilotDraftSession(nextSession);
+    setCopilotInput("");
+    setCopilotSessionMenuId("");
+    setCopilotRenameSessionId("");
+    setCopilotRenameDraft("");
+  }, [mode, copilotHistoryHydrated]);
+
   const resetCopilotConversation = useCallback(() => {
     const nextSession = buildDefaultCopilotSession();
     setCopilotWorkspace((current) => ({
-      activeSessionId: nextSession.id,
-      sessions: [nextSession, ...current.sessions].slice(0, 20),
+      ...current,
+      activeSessionId: "",
     }));
+    setCopilotDraftSession(nextSession);
     setCopilotRenameSessionId("");
     setCopilotRenameDraft("");
+    setCopilotSessionMenuId("");
     setCopilotInput("");
   }, []);
 
@@ -3061,14 +3182,17 @@ function DashboardView({
         ? { ...current, activeSessionId: sessionId }
         : current,
     );
+    setCopilotDraftSession(null);
     setCopilotRenameSessionId("");
     setCopilotRenameDraft("");
+    setCopilotSessionMenuId("");
     setCopilotInput("");
   }, []);
 
   const startCopilotRename = useCallback((session: CopilotSessionState) => {
     setCopilotRenameSessionId(session.id);
     setCopilotRenameDraft(session.title);
+    setCopilotSessionMenuId("");
   }, []);
 
   const commitCopilotRename = useCallback(() => {
@@ -3088,6 +3212,7 @@ function DashboardView({
     }));
     setCopilotRenameSessionId("");
     setCopilotRenameDraft("");
+    setCopilotSessionMenuId("");
   }, [copilotRenameDraft, copilotRenameSessionId]);
 
   const toggleCopilotSessionPin = useCallback((sessionId: string) => {
@@ -3103,6 +3228,7 @@ function DashboardView({
           : session,
       ),
     }));
+    setCopilotSessionMenuId("");
   }, []);
 
   const deleteCopilotSession = useCallback(
@@ -3112,10 +3238,9 @@ function DashboardView({
           (session) => session.id !== sessionId,
         );
         if (!remaining.length) {
-          const replacement = buildDefaultCopilotSession();
           return {
-            activeSessionId: replacement.id,
-            sessions: [replacement],
+            activeSessionId: "",
+            sessions: [],
           };
         }
         const nextActiveId =
@@ -3127,10 +3252,16 @@ function DashboardView({
           sessions: remaining,
         };
       });
+      // Keep a draft conversation ready so the user can type immediately
+      // without forcing a persisted "New chat" item in history.
+      setCopilotDraftSession((current) =>
+        current ? current : buildDefaultCopilotSession(),
+      );
       if (copilotRenameSessionId === sessionId) {
         setCopilotRenameSessionId("");
         setCopilotRenameDraft("");
       }
+      setCopilotSessionMenuId("");
     },
     [copilotRenameSessionId],
   );
@@ -4644,239 +4775,314 @@ function DashboardView({
     }
   }, [submitTransferConfirmation, transferFaceProof]);
 
+  useEffect(() => {
+    if (mode !== "copilot") {
+      setCopilotMobileHistoryOpen(false);
+      return;
+    }
+    const syncMobileDrawer = () => {
+      if (window.innerWidth > 960) {
+        setCopilotMobileHistoryOpen(false);
+      }
+    };
+    syncMobileDrawer();
+    window.addEventListener("resize", syncMobileDrawer);
+    const toggleFromHeader = () => {
+      setCopilotMobileHistoryOpen((current) => !current);
+    };
+    window.addEventListener(
+      "fpipay-copilot-toggle-history",
+      toggleFromHeader as EventListener,
+    );
+    return () => {
+      window.removeEventListener("resize", syncMobileDrawer);
+      window.removeEventListener(
+        "fpipay-copilot-toggle-history",
+        toggleFromHeader as EventListener,
+      );
+    };
+  }, [mode]);
+
+  useEffect(() => {
+    if (mode !== "copilot") {
+      document.documentElement.style.removeProperty("--fpipay-app-height");
+      document.documentElement.style.removeProperty("--fpipay-keyboard-inset");
+      return;
+    }
+
+    const syncViewportMetrics = () => {
+      const viewport = window.visualViewport;
+      const appHeight = Math.round(viewport?.height ?? window.innerHeight);
+      const keyboardInset = Math.max(
+        0,
+        Math.round(
+          window.innerHeight -
+            ((viewport?.height ?? window.innerHeight) +
+              (viewport?.offsetTop ?? 0)),
+        ),
+      );
+
+      document.documentElement.style.setProperty(
+        "--fpipay-app-height",
+        `${appHeight}px`,
+      );
+      document.documentElement.style.setProperty(
+        "--fpipay-keyboard-inset",
+        `${keyboardInset}px`,
+      );
+    };
+
+    syncViewportMetrics();
+
+    const viewport = window.visualViewport;
+    window.addEventListener("resize", syncViewportMetrics);
+    viewport?.addEventListener("resize", syncViewportMetrics);
+    viewport?.addEventListener("scroll", syncViewportMetrics);
+
+    return () => {
+      window.removeEventListener("resize", syncViewportMetrics);
+      viewport?.removeEventListener("resize", syncViewportMetrics);
+      viewport?.removeEventListener("scroll", syncViewportMetrics);
+      document.documentElement.style.removeProperty("--fpipay-app-height");
+      document.documentElement.style.removeProperty("--fpipay-keyboard-inset");
+    };
+  }, [mode]);
+
   const openCopilotWorkspace = () => {
     onOpenCopilotWorkspace?.();
   };
-  const closeCopilotWorkspace = () => {
-    onCloseCopilotWorkspace?.();
-  };
   const copilotWorkspacePanel = (
     <section className="ai-copilot-page">
+      <button
+        type="button"
+        className={`ai-copilot-mobile-history-backdrop${copilotMobileHistoryOpen ? " open" : ""}`}
+        aria-label="Close chat history"
+        onClick={() => setCopilotMobileHistoryOpen(false)}
+      />
       <div className="ai-copilot-page-shell">
-        <aside className="ai-copilot-page-sidebar">
-          <div className="ai-copilot-page-profile">
-            <div className="ai-copilot-page-profile-row">
-              <img
-                className="ai-copilot-page-profile-avatar"
-                src={user?.avatar}
-                alt=""
-              />
-              <div className="ai-copilot-page-profile-copy">
-                <strong>{user?.name || "FPIPay User"}</strong>
-                <span>FPIPay Copilot workspace</span>
-              </div>
-            </div>
-            <button
-              type="button"
-              className="pill ai-copilot-page-new"
-              onClick={resetCopilotConversation}
-              disabled={copilotBusy}
-            >
-              + New chat
-            </button>
-          </div>
-
-          <div className="ai-copilot-page-history">
-            <div className="ai-copilot-page-section-head">
-              <strong>Recent conversations</strong>
-              <span>{copilotSessionList.length} chats</span>
-            </div>
-            <input
-              className="ai-copilot-session-search"
-              value={copilotSearch}
-              onChange={(e) => setCopilotSearch(e.target.value)}
-              placeholder="Search chats..."
-            />
-            <div className="ai-copilot-session-list ai-copilot-page-session-list">
-              {copilotSessionList.map((session) => {
-                const isActive = session.id === copilotWorkspace.activeSessionId;
-                const isRenaming = session.id === copilotRenameSessionId;
-                const preview =
-                  session.messages[session.messages.length - 1]?.content ||
-                  session.messages[0]?.content ||
-                  "Empty chat";
-
-                return (
-                  <div
-                    key={session.id}
-                    className={`ai-copilot-session-card${isActive ? " active" : ""}`}
-                  >
-                    {isRenaming ? (
-                      <input
-                        className="ai-copilot-session-rename"
-                        value={copilotRenameDraft}
-                        autoFocus
-                        maxLength={120}
-                        onChange={(e) => setCopilotRenameDraft(e.target.value)}
-                        onBlur={commitCopilotRename}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            e.preventDefault();
-                            commitCopilotRename();
-                          }
-                          if (e.key === "Escape") {
-                            setCopilotRenameSessionId("");
-                            setCopilotRenameDraft("");
-                          }
-                        }}
-                      />
-                    ) : (
-                      <button
-                        type="button"
-                        className="ai-copilot-session-main"
-                        onClick={() => selectCopilotSession(session.id)}
-                      >
-                        <strong>
-                          {session.pinned ? "Pinned · " : ""}
-                          {session.title}
-                        </strong>
-                        <span>{truncateNotificationCopy(preview, 84)}</span>
-                        <small>
-                          {new Date(session.updatedAt).toLocaleString("en-US", {
-                            month: "short",
-                            day: "2-digit",
-                            hour: "2-digit",
-                            minute: "2-digit",
-                          })}
-                        </small>
-                      </button>
-                    )}
-                    <div className="ai-copilot-session-actions">
-                      <button
-                        type="button"
-                        className="pill ai-copilot-session-btn"
-                        onClick={() => toggleCopilotSessionPin(session.id)}
-                        disabled={copilotBusy}
-                      >
-                        {session.pinned ? "Unpin" : "Pin"}
-                      </button>
-                      <button
-                        type="button"
-                        className="pill ai-copilot-session-btn"
-                        onClick={() => startCopilotRename(session)}
-                        disabled={copilotBusy}
-                      >
-                        Rename
-                      </button>
-                      <button
-                        type="button"
-                        className="pill ai-copilot-session-btn danger"
-                        onClick={() => deleteCopilotSession(session.id)}
-                        disabled={copilotBusy}
-                      >
-                        Delete
-                      </button>
-                    </div>
+        <aside
+          className={`ai-copilot-page-sidebar${copilotMobileHistoryOpen ? " open" : ""}`}
+        >
+          <div className="ai-copilot-page-sidebar-panel">
+            <div className="ai-copilot-page-profile ai-copilot-page-profile-minimal">
+              <div className="ai-copilot-page-profile-row">
+                <img
+                  className="ai-copilot-page-profile-avatar"
+                  src={user?.avatar}
+                  alt=""
+                />
+                <div className="ai-copilot-page-profile-copy">
+                  <div className="ai-copilot-page-profile-head">
+                    <strong className="ai-copilot-page-profile-name">
+                      {user?.name || "FPIPay User"}
+                    </strong>
+                    <span className="ai-copilot-page-profile-status">
+                      <span className="ai-copilot-page-profile-status-dot" />
+                      {copilotBusy ? "Thinking" : "Active session"}
+                    </span>
                   </div>
-                );
-              })}
-              {!copilotSessionList.length ? (
-                <div className="ai-copilot-session-empty">
-                  No chats match your search.
+                  <span className="ai-copilot-page-profile-subtitle">
+                    FPIPay Copilot workspace
+                  </span>
                 </div>
-              ) : null}
+              </div>
+              <button
+                type="button"
+                className="pill ai-copilot-page-new"
+                onClick={() => {
+                  resetCopilotConversation();
+                  setCopilotMobileHistoryOpen(false);
+                }}
+                disabled={copilotBusy}
+              >
+                + New chat
+              </button>
             </div>
-          </div>
 
-          <div className="ai-copilot-page-security">
-            <div className="ai-copilot-page-section-head">
-              <strong>Account health</strong>
-              <span>
-                {sessionSecurity.restrictLargeTransfers
-                  ? "Protected"
-                  : "Monitoring"}
-              </span>
-            </div>
-            <p>
-              {sessionSecurity.restrictLargeTransfers
-                ? "Live transfer rules and wallet protections are active for this workspace."
-                : "Copilot can still help, but advanced safety rules are not fully active right now."}
-            </p>
-            <div className="ai-copilot-page-health-meta">
-              <span>{transactionHistory.length} ledger entries</span>
-              <span>{copilotSessions.length} saved sessions</span>
+            <div className="ai-copilot-page-history">
+              <div className="ai-copilot-sidebar-title-wrap">
+                <div className="ai-copilot-sidebar-title">History chat</div>
+              </div>
+              <div className="ai-copilot-session-list ai-copilot-page-session-list">
+                {copilotSessionList.map((session) => {
+                  const isActive =
+                    session.id === copilotWorkspace.activeSessionId;
+                  const isRenaming = session.id === copilotRenameSessionId;
+                  const isMenuOpen = session.id === copilotSessionMenuId;
+
+                  return (
+                    <div
+                      key={session.id}
+                      className={`ai-copilot-session-card${isActive ? " active" : ""}${isMenuOpen ? " menu-open" : ""}`}
+                    >
+                      {isRenaming ? (
+                        <input
+                          className="ai-copilot-session-rename"
+                          value={copilotRenameDraft}
+                          autoFocus
+                          maxLength={120}
+                          onChange={(e) =>
+                            setCopilotRenameDraft(e.target.value)
+                          }
+                          onBlur={commitCopilotRename}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              commitCopilotRename();
+                            }
+                            if (e.key === "Escape") {
+                              setCopilotRenameSessionId("");
+                              setCopilotRenameDraft("");
+                            }
+                          }}
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          className="ai-copilot-session-main"
+                          onClick={() => {
+                            selectCopilotSession(session.id);
+                            setCopilotMobileHistoryOpen(false);
+                          }}
+                        >
+                          <strong>{session.title}</strong>
+                        </button>
+                      )}
+                      <div className="ai-copilot-session-menu-wrap">
+                        <button
+                          type="button"
+                          className="ai-copilot-session-menu-trigger"
+                          aria-label="Conversation options"
+                          aria-expanded={isMenuOpen}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            const currentTarget = event.currentTarget;
+                            setCopilotSessionMenuId((current) => {
+                              if (current === session.id) return "";
+                              const rect =
+                                currentTarget.getBoundingClientRect();
+                              const listRect = currentTarget
+                                .closest(".ai-copilot-page-session-list")
+                                ?.getBoundingClientRect();
+                              const estimatedMenuHeight = 128;
+                              const spaceBelow = listRect
+                                ? listRect.bottom - rect.bottom
+                                : window.innerHeight - rect.bottom;
+                              const spaceAbove = listRect
+                                ? rect.top - listRect.top
+                                : rect.top;
+                              const placement =
+                                spaceBelow < estimatedMenuHeight &&
+                                spaceAbove > spaceBelow
+                                  ? "up"
+                                  : "down";
+                              setCopilotSessionMenuPlacement(placement);
+                              return session.id;
+                            });
+                          }}
+                        >
+                          ...
+                        </button>
+                        {isMenuOpen ? (
+                          <div
+                            className={`ai-copilot-session-menu ${
+                              copilotSessionMenuPlacement === "up"
+                                ? "open-up"
+                                : "open-down"
+                            }`}
+                          >
+                            <button
+                              type="button"
+                              className="ai-copilot-session-menu-item"
+                              onClick={() =>
+                                toggleCopilotSessionPin(session.id)
+                              }
+                              disabled={copilotBusy}
+                            >
+                              {session.pinned ? "Unpin" : "Pin"}
+                            </button>
+                            <button
+                              type="button"
+                              className="ai-copilot-session-menu-item"
+                              onClick={() => startCopilotRename(session)}
+                              disabled={copilotBusy}
+                            >
+                              Rename
+                            </button>
+                            <button
+                              type="button"
+                              className="ai-copilot-session-menu-item danger"
+                              onClick={() => deleteCopilotSession(session.id)}
+                              disabled={copilotBusy}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  );
+                })}
+                {!copilotSessionList.length ? (
+                  <div className="ai-copilot-session-empty">
+                    No chats match your search.
+                  </div>
+                ) : null}
+              </div>
             </div>
           </div>
         </aside>
 
         <div className="ai-copilot-page-main">
           <div className="ai-copilot-page-main-frame">
-            <div className="ai-copilot-head ai-copilot-head-page">
-              <div className="ai-copilot-head-copy">
-                <div className="ai-copilot-kicker">FPIPay Copilot</div>
-                <h3>Financial Assistant</h3>
-                <div className="ai-agent-copy">
-                  Wallet-aware chat for spending, savings, transfers, market
-                  context, and financial planning.
-                </div>
-              </div>
-              <div className="ai-copilot-head-actions">
-                <div className="ai-copilot-status">
-                  <span className="ai-copilot-status-dot" />
-                  {copilotBusy ? "Thinking" : "Active session"}
-                </div>
-                <button
-                  type="button"
-                  className="pill ai-copilot-secondary"
-                  onClick={resetCopilotConversation}
-                  disabled={copilotBusy}
-                >
-                  New chat
-                </button>
-                <button
-                  type="button"
-                  className="card-details-close ai-copilot-close"
-                  onClick={closeCopilotWorkspace}
-                  aria-label="Close AI Copilot workspace"
-                >
-                  x
-                </button>
-              </div>
-            </div>
-
             <div className="ai-copilot-thread-wrap ai-copilot-thread-wrap-page">
-              <div className="ai-copilot-thread-bar">
-                <div className="ai-copilot-thread-meta">
-                  <span className="ai-copilot-thread-badge">Active session</span>
-                  {copilotThreadTitle}
-                </div>
-              </div>
-              <div className="ai-copilot-thread" ref={copilotThreadRef}>
+              <div
+                className={`ai-copilot-thread${copilotIsFreshSession ? " is-fresh" : ""}`}
+                ref={copilotThreadRef}
+              >
                 {copilotIsFreshSession ? (
-                  <div className="ai-copilot-welcome-card">
+                  <div className="ai-copilot-welcome-overlay">
                     <div className="ai-copilot-welcome-kicker">
                       FPIPay Copilot ready
                     </div>
                     <h4>Ask one focused finance question to get started.</h4>
                     <p>{copilotMessages[0]?.content}</p>
-                    <div className="ai-copilot-welcome-tags">
-                      <span>Spending reviews</span>
-                      <span>Monthly statements</span>
-                      <span>Saving plans</span>
-                      <span>Risk checks</span>
-                    </div>
                   </div>
                 ) : null}
-                {copilotMessages.map((message, index) => (
-                  copilotIsFreshSession && index === 0 ? null : (
-                  <div
-                    key={`${message.role}-${index}-${message.content.slice(0, 24)}`}
-                    className={`ai-copilot-message-row ai-copilot-message-row-${message.role}`}
-                  >
-                    {message.role === "assistant" ? (
-                      <div className="ai-copilot-avatar">AI</div>
-                    ) : null}
+                {copilotMessages.map((message, index) =>
+                  index === 0 &&
+                  message.role === "assistant" &&
+                  message.content.trim() ===
+                    copilotDefaultGreeting.trim() ? null : (
                     <div
-                      className={`ai-copilot-message-card ai-copilot-message-card-${message.role}`}
+                      key={`${message.role}-${index}-${message.content.slice(0, 24)}`}
+                      className={`ai-copilot-message-row ai-copilot-message-row-${message.role}`}
                     >
-                      <span className="ai-copilot-message-label">
-                        {message.role === "assistant" ? "FPIPay Copilot" : "You"}
-                      </span>
-                      {renderCopilotMessageContent(message.content)}
+                      {message.role === "assistant" ? (
+                        <div className="ai-copilot-avatar">AI</div>
+                      ) : null}
+                      <div
+                        className={`ai-copilot-message-card ai-copilot-message-card-${message.role}`}
+                      >
+                        <span className="ai-copilot-message-label">
+                          {message.role === "assistant"
+                            ? "FPIPay Copilot"
+                            : "You"}
+                        </span>
+                        {renderCopilotMessageContent(message.content)}
+                      </div>
+                      {message.role === "user" ? (
+                        <div className="ai-copilot-avatar ai-copilot-avatar-user">
+                          {user?.avatar ? (
+                            <img src={user.avatar} alt={user?.name || "You"} />
+                          ) : (
+                            user?.name?.trim().charAt(0).toUpperCase() || "U"
+                          )}
+                        </div>
+                      ) : null}
                     </div>
-                  </div>
-                  )
-                ))}
+                  ),
+                )}
                 {copilotBusy && (
                   <div className="ai-copilot-message-row ai-copilot-message-row-assistant">
                     <div className="ai-copilot-avatar">AI</div>
@@ -4896,41 +5102,20 @@ function DashboardView({
               </div>
             </div>
 
-            {copilotHasInsight ? (
-              <div className="ai-copilot-summary ai-copilot-summary-page">
-                <div className="ai-copilot-summary-meta">
-                  <strong>{copilotInsight.topic || "Conversation context"}</strong>
-                  <div className="ai-copilot-summary-badges">
-                    <span className={`ai-copilot-risk-pill ${copilotRiskTone}`}>
-                      {copilotInsight.riskLevel} risk
-                    </span>
-                    <span className="ai-copilot-summary-badge">
-                      {Math.round(copilotInsight.confidence * 100)}% confidence
-                    </span>
-                  </div>
-                </div>
-                {copilotSummaryText ? (
-                  <p className="ai-copilot-summary-text">{copilotSummaryText}</p>
-                ) : null}
-              </div>
-            ) : null}
-
             <div className="ai-copilot-compose ai-copilot-compose-page">
-              <textarea
+              <input
+                type="text"
+                className="ai-copilot-inline-input"
                 value={copilotInput}
                 onChange={(e) => setCopilotInput(e.target.value)}
                 placeholder="Ask about spending, savings, statements, transfers, market context, or any finance question..."
-                rows={3}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
+                  if (e.key === "Enter") {
                     e.preventDefault();
                     void sendCopilotMessage();
                   }
                 }}
               />
-              <div className="ai-copilot-compose-hint">
-                Enter to send. Shift+Enter for a new line.
-              </div>
               <div className="ai-copilot-compose-actions">
                 <button
                   type="button"
@@ -4938,7 +5123,7 @@ function DashboardView({
                   disabled={copilotBusy || !copilotInput.trim()}
                   onClick={() => void sendCopilotMessage()}
                 >
-                  {copilotBusy ? "Thinking..." : "Send Message"}
+                  {copilotBusy ? "..." : "Send"}
                 </button>
               </div>
             </div>
@@ -5003,7 +5188,54 @@ function DashboardView({
                     showWalletId ? "Hide account number" : "Show account number"
                   }
                 >
-                  {showWalletId ? "Hide" : "Show"}
+                  <svg
+                    viewBox="0 0 24 24"
+                    aria-hidden="true"
+                    focusable="false"
+                    fill="none"
+                  >
+                    {showWalletId ? (
+                      <>
+                        <path
+                          d="M3 3l18 18"
+                          stroke="currentColor"
+                          strokeWidth="1.7"
+                          strokeLinecap="round"
+                        />
+                        <path
+                          d="M10.58 10.58a2 2 0 0 0 2.84 2.84"
+                          stroke="currentColor"
+                          strokeWidth="1.7"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                        <path
+                          d="M9.88 5.08A10.94 10.94 0 0 1 12 4.9c4.78 0 8.73 2.88 10 6.85a1 1 0 0 1 0 .5 11.47 11.47 0 0 1-4.09 5.71M6.61 6.6A11.42 11.42 0 0 0 2 11.75a1 1 0 0 0 0 .5C3.27 16.22 7.22 19.1 12 19.1c1.79 0 3.47-.4 4.95-1.1"
+                          stroke="currentColor"
+                          strokeWidth="1.7"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </>
+                    ) : (
+                      <>
+                        <path
+                          d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"
+                          stroke="currentColor"
+                          strokeWidth="1.7"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                        <circle
+                          cx="12"
+                          cy="12"
+                          r="3"
+                          stroke="currentColor"
+                          strokeWidth="1.7"
+                        />
+                      </>
+                    )}
+                  </svg>
                 </button>
               </div>
             </div>
@@ -5030,6 +5262,9 @@ function DashboardView({
                   onClick={() => {
                     if (action.id === "transfer") {
                       openTransferModal();
+                    } else if (action.id === "sign-in-activity") {
+                      setSecurityAlertsModalOpen(true);
+                      void refreshSecurityAlerts();
                     } else if (action.id === "copilot") {
                       openCopilotWorkspace();
                     }
@@ -5058,31 +5293,6 @@ function DashboardView({
 
       <section className="dashboard-block">
         <div className="dashboard-block-head">
-          <h3>Security Alerts</h3>
-          <span className="dashboard-tag">{securityRecentLogins.length}</span>
-          <button
-            type="button"
-            className="dashboard-link"
-            onClick={() => {
-              setSecurityAlertsModalOpen(true);
-              void refreshSecurityAlerts();
-            }}
-          >
-            {securityAlertsBusy ? "Loading..." : "View Sign-In Activity"}
-          </button>
-        </div>
-        {renderSecurityRecentLoginList(securityRecentLogins, {
-          limit: 3,
-          keyPrefix: "preview",
-          className: "security-alerts-preview-list",
-        })}
-        {securityAlertsError ? (
-          <div className="dashboard-inline-note">{securityAlertsError}</div>
-        ) : null}
-      </section>
-
-      <section className="dashboard-block">
-        <div className="dashboard-block-head">
           <h3>Transaction History</h3>
           <button
             type="button"
@@ -5093,47 +5303,37 @@ function DashboardView({
           </button>
         </div>
         <div className="dashboard-tx-wrap">
-          <table className="dashboard-tx-table">
-            <thead>
-              <tr>
-                <th>Entity</th>
-                <th>Date</th>
-                <th>Status</th>
-                <th>Amount</th>
-                <th>Details</th>
-              </tr>
-            </thead>
-            <tbody>
-              {transactionHistory.slice(0, 3).map((tx) => (
-                <tr key={tx.id}>
-                  <td data-label="Entity">{tx.entity}</td>
-                  <td data-label="Date">{tx.date}</td>
-                  <td data-label="Status">
-                    <span className="dashboard-status-pill">{tx.status}</span>
-                  </td>
-                  <td
-                    data-label="Amount"
-                    className={
-                      tx.amountTone === "positive"
-                        ? "amount-positive"
-                        : "amount-negative"
-                    }
+          <div className="transaction-history-list">
+            <div className="transaction-history-group-items">
+              {transactionHistoryPreview.map((tx) => (
+                <button
+                  key={tx.id}
+                  type="button"
+                  className="transaction-history-item"
+                  onClick={() => setSelectedTransactionReceipt(tx.receipt)}
+                >
+                  <span
+                    className={`transaction-history-item-icon ${tx.amountTone}`}
+                    aria-hidden="true"
+                  >
+                    {tx.amountTone === "positive" ? "IN" : "OUT"}
+                  </span>
+                  <span className="transaction-history-item-main">
+                    <strong>{tx.entity}</strong>
+                    <small>{tx.receipt.note || tx.status}</small>
+                  </span>
+                  <span
+                    className={`transaction-history-item-amount ${tx.amountTone}`}
                   >
                     {tx.amount}
-                  </td>
-                  <td data-label="Details" className="dashboard-tx-cell-actions">
-                    <button
-                      type="button"
-                      className="tx-detail-btn"
-                      onClick={() => setSelectedTransactionReceipt(tx.receipt)}
-                    >
-                      Details
-                    </button>
-                  </td>
-                </tr>
+                  </span>
+                  <span className="transaction-history-item-time">
+                    {getTransactionHistoryTimeLabel(tx.date)}
+                  </span>
+                </button>
               ))}
-            </tbody>
-          </table>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -5148,24 +5348,26 @@ function DashboardView({
           >
             <div className="card-details-head">
               <h3>Sign-In Activity</h3>
-              <button
-                type="button"
-                className="card-details-close"
-                onClick={() => setSecurityAlertsModalOpen(false)}
-              >
-                x
-              </button>
             </div>
             <div className="security-alerts-toolbar">
               <span className="dashboard-tag">LIVE</span>
-              <button
-                type="button"
-                className="pill"
-                disabled={securityAlertsBusy}
-                onClick={() => void refreshSecurityAlerts()}
-              >
-                {securityAlertsBusy ? "Refreshing..." : "Refresh"}
-              </button>
+              <div className="security-alerts-head-actions">
+                <button
+                  type="button"
+                  className="pill"
+                  disabled={securityAlertsBusy}
+                  onClick={() => void refreshSecurityAlerts()}
+                >
+                  {securityAlertsBusy ? "Refreshing..." : "Refresh"}
+                </button>
+                <button
+                  type="button"
+                  className="card-details-close"
+                  onClick={() => setSecurityAlertsModalOpen(false)}
+                >
+                  x
+                </button>
+              </div>
             </div>
             {securityAlertsError ? (
               <div className="dashboard-inline-note">{securityAlertsError}</div>
@@ -5207,50 +5409,37 @@ function DashboardView({
               </button>
             </div>
             <div className="dashboard-tx-wrap">
-              <table className="dashboard-tx-table">
-                <thead>
-                  <tr>
-                    <th>Entity</th>
-                    <th>Date</th>
-                    <th>Status</th>
-                    <th>Amount</th>
-                    <th>Details</th>
-                  </tr>
-                </thead>
-                <tbody>
+              <div className="transaction-history-list transaction-history-list-modal">
+                <div className="transaction-history-group-items">
                   {transactionHistory.map((tx) => (
-                    <tr key={`modal-${tx.id}`}>
-                      <td>{tx.entity}</td>
-                      <td>{tx.date}</td>
-                      <td>
-                        <span className="dashboard-status-pill">
-                          {tx.status}
-                        </span>
-                      </td>
-                      <td
-                        className={
-                          tx.amountTone === "positive"
-                            ? "amount-positive"
-                            : "amount-negative"
-                        }
+                    <button
+                      key={`modal-${tx.id}`}
+                      type="button"
+                      className="transaction-history-item"
+                      onClick={() => setSelectedTransactionReceipt(tx.receipt)}
+                    >
+                      <span
+                        className={`transaction-history-item-icon ${tx.amountTone}`}
+                        aria-hidden="true"
+                      >
+                        {tx.amountTone === "positive" ? "IN" : "OUT"}
+                      </span>
+                      <span className="transaction-history-item-main">
+                        <strong>{tx.entity}</strong>
+                        <small>{tx.receipt.note || tx.status}</small>
+                      </span>
+                      <span
+                        className={`transaction-history-item-amount ${tx.amountTone}`}
                       >
                         {tx.amount}
-                      </td>
-                      <td>
-                        <button
-                          type="button"
-                          className="tx-detail-btn"
-                          onClick={() =>
-                            setSelectedTransactionReceipt(tx.receipt)
-                          }
-                        >
-                          Details
-                        </button>
-                      </td>
-                    </tr>
+                      </span>
+                      <span className="transaction-history-item-time">
+                        {getTransactionHistoryTimeLabel(tx.date)}
+                      </span>
+                    </button>
                   ))}
-                </tbody>
-              </table>
+                </div>
+              </div>
             </div>
             <div className="transfer-actions" style={{ marginTop: 12 }}>
               <button
@@ -5851,24 +6040,30 @@ function DashboardView({
                         </small>
                       </div>
                     )}
-                    <label className="form-group">
-                      <span>Enter transfer PIN</span>
-                      <input
-                        type="password"
-                        inputMode="numeric"
-                        maxLength={6}
-                        disabled={transferOtpBusy || transferOtpVerifyBusy}
-                        value={transferPinInput}
-                        onChange={(e) =>
-                          setTransferPinInput(
-                            e.target.value.replace(/\D/g, "").slice(0, 6),
-                          )
-                        }
-                        placeholder="6-digit transfer PIN"
-                      />
-                    </label>
-                    {transferPinError && (
-                      <div className="card-otp-error">{transferPinError}</div>
+                    {!transferOtpRequired && (
+                      <>
+                        <label className="form-group">
+                          <span>Enter transfer PIN</span>
+                          <input
+                            type="password"
+                            inputMode="numeric"
+                            maxLength={6}
+                            disabled={transferOtpBusy || transferOtpVerifyBusy}
+                            value={transferPinInput}
+                            onChange={(e) =>
+                              setTransferPinInput(
+                                e.target.value.replace(/\D/g, "").slice(0, 6),
+                              )
+                            }
+                            placeholder="6-digit transfer PIN"
+                          />
+                        </label>
+                        {transferPinError && (
+                          <div className="card-otp-error">
+                            {transferPinError}
+                          </div>
+                        )}
+                      </>
                     )}
                     {transferOtpRequired && transferOtpDestination && (
                       <div className="transfer-summary">
@@ -6292,7 +6487,6 @@ function DashboardView({
           </div>
         </div>
       )}
-
     </section>
   );
 }
@@ -6859,7 +7053,9 @@ function CardCenterView() {
       }
 
       setCardList(cardsData.cards);
-      setWalletBalance(Number(walletData?.balance || 0));
+      setWalletBalance(
+        Number(walletData?.balance || 0) + getSignupTestBalanceBonus(user?.id),
+      );
       setWalletCurrency(walletData?.currency || "USD");
       setRecentCardActivity(
         txData.slice(0, 6).map((tx) => {
@@ -7591,6 +7787,99 @@ function AccountsView() {
 const SETTING_PROFILE_KEY = "fpipay_profile";
 const PROFILE_AVATAR_KEY = "fpipay_profile_avatar";
 const SETTING_SECURITY_KEY = "fpipay_security";
+const DEFAULT_PROFILE_AVATAR = "https://i.pravatar.cc/120?img=12";
+const MAX_PROFILE_AVATAR_FILE_SIZE = 6 * 1024 * 1024;
+const MAX_PROFILE_AVATAR_OUTPUT_BYTES = 900 * 1024;
+const PROFILE_AVATAR_MAX_DIMENSION = 640;
+
+const getProfileAvatarStorageKey = (userId?: string | null) =>
+  userId ? `${PROFILE_AVATAR_KEY}:${userId}` : PROFILE_AVATAR_KEY;
+
+const readStoredProfileAvatar = (
+  user?: { id?: string | null; avatar?: string | null } | null,
+) => {
+  try {
+    return (
+      user?.avatar ??
+      localStorage.getItem(getProfileAvatarStorageKey(user?.id)) ??
+      DEFAULT_PROFILE_AVATAR
+    );
+  } catch {
+    return user?.avatar ?? DEFAULT_PROFILE_AVATAR;
+  }
+};
+
+const writeStoredProfileAvatar = (
+  userId: string | null | undefined,
+  avatar: string,
+) => {
+  try {
+    localStorage.setItem(getProfileAvatarStorageKey(userId), avatar);
+  } catch {
+    // Ignore storage quota issues here; the server remains the source of truth.
+  }
+};
+
+const loadImageElement = (src: string) =>
+  new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("IMAGE_LOAD_FAILED"));
+    image.src = src;
+  });
+
+const compressProfileAvatar = async (file: File) => {
+  if (!file.type.startsWith("image/")) {
+    throw new Error("Please choose an image file");
+  }
+  if (file.size > MAX_PROFILE_AVATAR_FILE_SIZE) {
+    throw new Error("Please choose an image smaller than 6MB");
+  }
+
+  const fileDataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result ?? "");
+      if (!result) {
+        reject(new Error("IMAGE_READ_FAILED"));
+        return;
+      }
+      resolve(result);
+    };
+    reader.onerror = () => reject(new Error("IMAGE_READ_FAILED"));
+    reader.readAsDataURL(file);
+  });
+
+  const image = await loadImageElement(fileDataUrl);
+  const longestEdge = Math.max(image.width, image.height, 1);
+  const scale = Math.min(1, PROFILE_AVATAR_MAX_DIMENSION / longestEdge);
+  const targetWidth = Math.max(1, Math.round(image.width * scale));
+  const targetHeight = Math.max(1, Math.round(image.height * scale));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+  const context = canvas.getContext("2d");
+  if (!context) {
+    throw new Error("IMAGE_PROCESSING_UNAVAILABLE");
+  }
+
+  context.drawImage(image, 0, 0, targetWidth, targetHeight);
+
+  let quality = 0.9;
+  let output = canvas.toDataURL("image/jpeg", quality);
+  while (output.length > MAX_PROFILE_AVATAR_OUTPUT_BYTES && quality > 0.45) {
+    quality -= 0.1;
+    output = canvas.toDataURL("image/jpeg", quality);
+  }
+
+  if (output.length > MAX_PROFILE_AVATAR_OUTPUT_BYTES) {
+    throw new Error("Please choose a smaller image");
+  }
+
+  return output;
+};
+
 type ProfileForm = {
   name: string;
   userName: string;
@@ -7782,16 +8071,12 @@ function SettingView() {
     }
   });
   const [avatarUrl, setAvatarUrl] = useState(() => {
-    try {
-      return (
-        localStorage.getItem(PROFILE_AVATAR_KEY) ??
-        user?.avatar ??
-        "https://i.pravatar.cc/120?img=12"
-      );
-    } catch {
-      return user?.avatar ?? "https://i.pravatar.cc/120?img=12";
-    }
+    return readStoredProfileAvatar(user);
   });
+
+  useEffect(() => {
+    setAvatarUrl(readStoredProfileAvatar(user));
+  }, [user?.avatar, user?.id]);
 
   const persistSecurity = (next: typeof security) => {
     setSecurity(next);
@@ -7948,7 +8233,7 @@ function SettingView() {
       }
 
       localStorage.setItem(SETTING_PROFILE_KEY, JSON.stringify(profile));
-      localStorage.setItem(PROFILE_AVATAR_KEY, avatarUrl);
+      writeStoredProfileAvatar(user?.id, avatarUrl);
       updateUser({
         name: data?.fullName || profile.name,
         email: data?.email || profile.email,
@@ -7964,29 +8249,83 @@ function SettingView() {
     fileInputRef.current?.click();
   };
 
+  const persistAvatar = async (next: string, fallbackAvatar: string) => {
+    if (!token) {
+      toast("Session expired. Please sign in again.", "error");
+      setAvatarUrl(fallbackAvatar);
+      writeStoredProfileAvatar(user?.id, fallbackAvatar);
+      updateUser({ avatar: fallbackAvatar });
+      return false;
+    }
+
+    try {
+      const resp = await fetch(`${API_BASE}/auth/me`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          metadata: {
+            avatar: next,
+          },
+        }),
+      });
+      const data = (await resp.json().catch(() => null)) as {
+        error?: string;
+        avatar?: string;
+        metadata?: Record<string, unknown>;
+      } | null;
+      if (!resp.ok) {
+        if (isAuthExpired(resp.status, data?.error)) {
+          toast("Session expired. Please sign in again.", "error");
+          logout();
+          return false;
+        }
+        setAvatarUrl(fallbackAvatar);
+        writeStoredProfileAvatar(user?.id, fallbackAvatar);
+        updateUser({ avatar: fallbackAvatar });
+        toast(data?.error || "Failed to update avatar", "error");
+        return false;
+      }
+
+      const persistedAvatar =
+        (typeof data?.avatar === "string" && data.avatar) ||
+        (typeof data?.metadata?.avatar === "string" && data.metadata.avatar) ||
+        next;
+
+      setAvatarUrl(persistedAvatar);
+      writeStoredProfileAvatar(user?.id, persistedAvatar);
+      updateUser({ avatar: persistedAvatar });
+      toast("Profile image updated");
+      return true;
+    } catch {
+      setAvatarUrl(fallbackAvatar);
+      writeStoredProfileAvatar(user?.id, fallbackAvatar);
+      updateUser({ avatar: fallbackAvatar });
+      toast("Cannot connect to API server.", "error");
+      return false;
+    }
+  };
+
   const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      toast("Please choose an image file", "error");
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const next = String(reader.result ?? "");
-      if (!next) return;
-      setAvatarUrl(next);
-      updateUser({ avatar: next });
-      try {
-        localStorage.setItem(PROFILE_AVATAR_KEY, next);
-      } catch {
-        toast(
-          "Image too large to store locally. Please choose a smaller one.",
-          "error",
-        );
-      }
-    };
-    reader.readAsDataURL(file);
+    const previousAvatar = avatarUrl;
+    void compressProfileAvatar(file)
+      .then((next) => {
+        setAvatarUrl(next);
+        updateUser({ avatar: next });
+        writeStoredProfileAvatar(user?.id, next);
+        return persistAvatar(next, previousAvatar);
+      })
+      .catch((err) => {
+        const message =
+          err instanceof Error && err.message
+            ? err.message
+            : "Failed to process image";
+        toast(message, "error");
+      });
     e.currentTarget.value = "";
   };
 
@@ -8441,16 +8780,12 @@ function MyProfileView({
       : baseProfile;
   });
   const [avatarUrl, setAvatarUrl] = useState(() => {
-    try {
-      return (
-        localStorage.getItem(PROFILE_AVATAR_KEY) ??
-        user?.avatar ??
-        "https://i.pravatar.cc/120?img=12"
-      );
-    } catch {
-      return user?.avatar ?? "https://i.pravatar.cc/120?img=12";
-    }
+    return readStoredProfileAvatar(user);
   });
+
+  useEffect(() => {
+    setAvatarUrl(readStoredProfileAvatar(user));
+  }, [user?.avatar, user?.id]);
 
   useEffect(() => {
     if (!token) return;
@@ -8496,6 +8831,7 @@ function MyProfileView({
           "";
         if (nextAvatar) {
           setAvatarUrl(nextAvatar);
+          writeStoredProfileAvatar(user?.id, nextAvatar);
           updateUser({ avatar: nextAvatar });
         }
         const walletResp = await fetch(`${API_BASE}/wallet/me`, {
@@ -8565,6 +8901,7 @@ function MyProfileView({
       }
 
       localStorage.setItem(SETTING_PROFILE_KEY, JSON.stringify(profile));
+      writeStoredProfileAvatar(user?.id, avatarUrl);
       updateUser({
         name: data?.fullName || profile.name,
         email: data?.email || profile.email,
@@ -8580,32 +8917,83 @@ function MyProfileView({
     fileInputRef.current?.click();
   };
 
+  const persistAvatar = async (next: string, fallbackAvatar: string) => {
+    if (!token) {
+      toast("Session expired. Please sign in again.", "error");
+      setAvatarUrl(fallbackAvatar);
+      writeStoredProfileAvatar(user?.id, fallbackAvatar);
+      updateUser({ avatar: fallbackAvatar });
+      return false;
+    }
+
+    try {
+      const resp = await fetch(`${API_BASE}/auth/me`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          metadata: {
+            avatar: next,
+          },
+        }),
+      });
+      const data = (await resp.json().catch(() => null)) as {
+        error?: string;
+        avatar?: string;
+        metadata?: Record<string, unknown>;
+      } | null;
+      if (!resp.ok) {
+        if (isAuthExpired(resp.status, data?.error)) {
+          toast("Session expired. Please sign in again.", "error");
+          logout();
+          return false;
+        }
+        setAvatarUrl(fallbackAvatar);
+        writeStoredProfileAvatar(user?.id, fallbackAvatar);
+        updateUser({ avatar: fallbackAvatar });
+        toast(data?.error || "Failed to update avatar", "error");
+        return false;
+      }
+
+      const persistedAvatar =
+        (typeof data?.avatar === "string" && data.avatar) ||
+        (typeof data?.metadata?.avatar === "string" && data.metadata.avatar) ||
+        next;
+
+      setAvatarUrl(persistedAvatar);
+      writeStoredProfileAvatar(user?.id, persistedAvatar);
+      updateUser({ avatar: persistedAvatar });
+      toast("Profile image updated");
+      return true;
+    } catch {
+      setAvatarUrl(fallbackAvatar);
+      writeStoredProfileAvatar(user?.id, fallbackAvatar);
+      updateUser({ avatar: fallbackAvatar });
+      toast("Cannot connect to API server.", "error");
+      return false;
+    }
+  };
+
   const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      toast("Please choose an image file", "error");
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const next = String(reader.result ?? "");
-      if (!next) return;
-      setAvatarUrl(next);
-      try {
-        localStorage.setItem(PROFILE_AVATAR_KEY, next);
-      } catch (err) {
-        console.error(err);
-        toast(
-          "Image too large to store locally. Please choose a smaller one.",
-          "error",
-        );
-        return;
-      }
-      updateUser({ avatar: next });
-      toast("Profile image updated");
-    };
-    reader.readAsDataURL(file);
+    const previousAvatar = avatarUrl;
+    void compressProfileAvatar(file)
+      .then((next) => {
+        setAvatarUrl(next);
+        updateUser({ avatar: next });
+        writeStoredProfileAvatar(user?.id, next);
+        return persistAvatar(next, previousAvatar);
+      })
+      .catch((err) => {
+        const message =
+          err instanceof Error && err.message
+            ? err.message
+            : "Failed to process image";
+        toast(message, "error");
+      });
     e.currentTarget.value = "";
   };
 
@@ -8772,6 +9160,7 @@ function App() {
   >("all");
   const [showAllNotificationsInDropdown, setShowAllNotificationsInDropdown] =
     useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
   const userMenuDropdownRef = useRef<HTMLDivElement>(null);
@@ -8882,6 +9271,8 @@ function App() {
     const close = (event: MouseEvent | TouchEvent) => {
       const target = event.target as Node | null;
       if (!target) return;
+      const targetElement =
+        target instanceof Element ? target : target.parentElement;
       const clickedNotificationTrigger =
         !!notificationMenuRef.current &&
         notificationMenuRef.current.contains(target);
@@ -8908,6 +9299,17 @@ function App() {
       if (!clickedSupportTrigger && !clickedSupportDropdown) {
         setUtilitiesExpanded(false);
       }
+      const clickedMobileNavToggle =
+        targetElement instanceof Element
+          ? Boolean(targetElement.closest(".mobile-nav-toggle"))
+          : false;
+      const clickedMobileNavPanel =
+        targetElement instanceof Element
+          ? Boolean(targetElement.closest(".sidebar-menu-area"))
+          : false;
+      if (!clickedMobileNavToggle && !clickedMobileNavPanel) {
+        setMobileNavOpen(false);
+      }
     };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -8915,6 +9317,7 @@ function App() {
         setShowAllNotificationsInDropdown(false);
         setUserMenuOpen(false);
         setUtilitiesExpanded(false);
+        setMobileNavOpen(false);
       }
     };
     document.addEventListener("mousedown", close);
@@ -8933,6 +9336,10 @@ function App() {
       setPendingSessionAlert(null);
     }
   }, [user?.id]);
+
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [activeTab]);
 
   useEffect(() => {
     if (!user || !token) {
@@ -9056,21 +9463,26 @@ function App() {
 
       const maxWidth = 540;
       const minPadding = 12;
+      const isMobileViewport = window.innerWidth <= 720;
       const width = Math.min(maxWidth, window.innerWidth - minPadding * 2);
-      const left = Math.min(
-        Math.max(minPadding, triggerRect.right - width),
-        window.innerWidth - width - minPadding,
-      );
+      const mobileWidth = window.innerWidth - minPadding * 2;
+      const left = isMobileViewport
+        ? minPadding
+        : Math.min(
+            Math.max(minPadding, triggerRect.right - width),
+            window.innerWidth - width - minPadding,
+          );
       const top = Math.min(
         window.innerHeight - minPadding,
-        triggerRect.bottom + 10,
+        triggerRect.bottom + (isMobileViewport ? 12 : 10),
       );
+      const resolvedWidth = isMobileViewport ? mobileWidth : width;
 
       setNotificationDropdownStyle({
         position: "fixed",
         top,
         left,
-        width,
+        width: resolvedWidth,
         maxHeight: Math.min(window.innerHeight - top - minPadding, 760),
       });
     };
@@ -9248,134 +9660,19 @@ function App() {
   return (
     <div className="shell">
       <aside className="sidebar">
+        <button
+          type="button"
+          className={`mobile-history-toggle ${activeTab === "Copilot" ? "show" : ""}`}
+          aria-label="Toggle chat history"
+          onClick={() =>
+            window.dispatchEvent(new Event("fpipay-copilot-toggle-history"))
+          }
+        >
+          ☰
+        </button>
         <div className="logo">FPIPay</div>
-        <nav>
-          {NAV_ITEMS.map((item) => {
-            if (item.children) {
-              const isExpanded = expanded(item);
-              return (
-                <div
-                  key={item.id}
-                  className="nav-group"
-                  ref={item.id === "Support" ? supportMenuRef : undefined}
-                >
-                  <div
-                    className={`nav-item nav-item-parent ${activeTab === item.id ? "active" : ""} ${isExpanded ? "expanded" : ""}`}
-                    ref={
-                      item.id === "Support" ? supportMenuTriggerRef : undefined
-                    }
-                    onClick={() => {
-                      if (item.id === "Support") {
-                        setUtilitiesExpanded((current) => {
-                          const next = !current;
-                          if (next) {
-                            updateSupportMenuDropdownPosition();
-                          }
-                          return next;
-                        });
-                        return;
-                      }
-                      toggleExpanded(item);
-                    }}
-                    onKeyDown={(e) =>
-                      e.key === "Enter" &&
-                      (() => {
-                        if (item.id === "Support") {
-                          setUtilitiesExpanded((current) => {
-                            const next = !current;
-                            if (next) {
-                              updateSupportMenuDropdownPosition();
-                            }
-                            return next;
-                          });
-                          return;
-                        }
-                        toggleExpanded(item);
-                      })()
-                    }
-                    role="button"
-                    tabIndex={0}
-                  >
-                    <span className="nav-dot" /> {item.label}
-                    <span className="nav-chevron">
-                      {isExpanded ? "v" : ">"}
-                    </span>
-                  </div>
-                  {isExpanded &&
-                    item.id === "Support" &&
-                    createPortal(
-                      <div
-                        className="support-dropdown support-dropdown-premium"
-                        ref={supportMenuDropdownRef}
-                        style={supportMenuDropdownStyle || undefined}
-                      >
-                        {item.children.map((child) => (
-                          <button
-                            key={child.id}
-                            type="button"
-                            className={`support-dropdown-item ${activeTab === child.id ? "active" : ""}`}
-                            onClick={() => {
-                              setActiveTab(child.id);
-                              setUtilitiesExpanded(false);
-                            }}
-                          >
-                            <span className="nav-dot" /> {child.label}
-                          </button>
-                        ))}
-                      </div>,
-                      document.body,
-                    )}
-                  {isExpanded &&
-                    item.id !== "Support" &&
-                    item.children.map((child) => (
-                      <div
-                        key={child.id}
-                        className={`nav-item nav-item-child ${activeTab === child.id ? "active" : ""}`}
-                        onClick={() => {
-                          setActiveTab(child.id);
-                          setUtilitiesExpanded(false);
-                        }}
-                        onKeyDown={(e) =>
-                          e.key === "Enter" &&
-                          (() => {
-                            setActiveTab(child.id);
-                            setUtilitiesExpanded(false);
-                          })()
-                        }
-                        role="button"
-                        tabIndex={0}
-                      >
-                        <span className="nav-dot" /> {child.label}
-                      </div>
-                    ))}
-                </div>
-              );
-            }
-            return (
-              <div
-                key={item.id}
-                className={`nav-item ${activeTab === item.id ? "active" : ""}`}
-                onClick={() => {
-                  setActiveTab(item.id);
-                  setUtilitiesExpanded(false);
-                }}
-                onKeyDown={(e) =>
-                  e.key === "Enter" &&
-                  (() => {
-                    setActiveTab(item.id);
-                    setUtilitiesExpanded(false);
-                  })()
-                }
-                role="button"
-                tabIndex={0}
-              >
-                <span className="nav-dot" /> {item.label}
-              </div>
-            );
-          })}
-        </nav>
-        <div className="top-actions top-actions-inline">
-          <div className="bell-wrap" ref={notificationMenuRef}>
+        <div className="mobile-header-actions">
+          <div className="bell-wrap mobile-bell-wrap" ref={notificationMenuRef}>
             <button
               type="button"
               className="bell"
@@ -9527,7 +9824,10 @@ function App() {
                 document.body,
               )}
           </div>
-          <div className="user-menu-wrap" ref={userMenuRef}>
+          <div
+            className="user-menu-wrap mobile-user-menu-wrap"
+            ref={userMenuRef}
+          >
             <button
               type="button"
               className="user-menu-trigger"
@@ -9569,6 +9869,7 @@ function App() {
                     onClick={() => {
                       setActiveTab("My Profile");
                       setUserMenuOpen(false);
+                      setMobileNavOpen(false);
                     }}
                   >
                     My profile
@@ -9578,6 +9879,7 @@ function App() {
                     onClick={() => {
                       setActiveTab("Setting");
                       setUserMenuOpen(false);
+                      setMobileNavOpen(false);
                     }}
                   >
                     Setting
@@ -9596,6 +9898,150 @@ function App() {
                 document.body,
               )}
           </div>
+          <button
+            type="button"
+            className="mobile-nav-toggle"
+            aria-label="Toggle navigation menu"
+            aria-expanded={mobileNavOpen}
+            onClick={() => setMobileNavOpen((current) => !current)}
+          >
+            ☰
+          </button>
+        </div>
+        <div className={`sidebar-menu-area ${mobileNavOpen ? "open" : ""}`}>
+          <nav>
+            {NAV_ITEMS.map((item) => {
+              if (item.children) {
+                const isExpanded = expanded(item);
+                return (
+                  <div
+                    key={item.id}
+                    className="nav-group"
+                    ref={item.id === "Support" ? supportMenuRef : undefined}
+                  >
+                    <div
+                      className={`nav-item nav-item-parent ${activeTab === item.id ? "active" : ""} ${isExpanded ? "expanded" : ""}`}
+                      ref={
+                        item.id === "Support"
+                          ? supportMenuTriggerRef
+                          : undefined
+                      }
+                      onClick={() => {
+                        if (item.id === "Support") {
+                          setUtilitiesExpanded((current) => {
+                            const next = !current;
+                            if (next) {
+                              updateSupportMenuDropdownPosition();
+                            }
+                            return next;
+                          });
+                          return;
+                        }
+                        toggleExpanded(item);
+                      }}
+                      onKeyDown={(e) =>
+                        e.key === "Enter" &&
+                        (() => {
+                          if (item.id === "Support") {
+                            setUtilitiesExpanded((current) => {
+                              const next = !current;
+                              if (next) {
+                                updateSupportMenuDropdownPosition();
+                              }
+                              return next;
+                            });
+                            return;
+                          }
+                          toggleExpanded(item);
+                        })()
+                      }
+                      role="button"
+                      tabIndex={0}
+                    >
+                      <span className="nav-dot" /> {item.label}
+                      <span className="nav-chevron">
+                        {isExpanded ? "v" : ">"}
+                      </span>
+                    </div>
+                    {isExpanded &&
+                      item.id === "Support" &&
+                      createPortal(
+                        <div
+                          className="support-dropdown support-dropdown-premium"
+                          ref={supportMenuDropdownRef}
+                          style={supportMenuDropdownStyle || undefined}
+                        >
+                          {item.children.map((child) => (
+                            <button
+                              key={child.id}
+                              type="button"
+                              className={`support-dropdown-item ${activeTab === child.id ? "active" : ""}`}
+                              onClick={() => {
+                                setActiveTab(child.id);
+                                setUtilitiesExpanded(false);
+                                setMobileNavOpen(false);
+                              }}
+                            >
+                              <span className="nav-dot" /> {child.label}
+                            </button>
+                          ))}
+                        </div>,
+                        document.body,
+                      )}
+                    {isExpanded &&
+                      item.id !== "Support" &&
+                      item.children.map((child) => (
+                        <div
+                          key={child.id}
+                          className={`nav-item nav-item-child ${activeTab === child.id ? "active" : ""}`}
+                          onClick={() => {
+                            setActiveTab(child.id);
+                            setUtilitiesExpanded(false);
+                            setMobileNavOpen(false);
+                          }}
+                          onKeyDown={(e) =>
+                            e.key === "Enter" &&
+                            (() => {
+                              setActiveTab(child.id);
+                              setUtilitiesExpanded(false);
+                              setMobileNavOpen(false);
+                            })()
+                          }
+                          role="button"
+                          tabIndex={0}
+                        >
+                          <span className="nav-dot" /> {child.label}
+                        </div>
+                      ))}
+                  </div>
+                );
+              }
+              return (
+                <div
+                  key={item.id}
+                  className={`nav-item ${activeTab === item.id ? "active" : ""}`}
+                  onClick={() => {
+                    setActiveTab(item.id);
+                    setUtilitiesExpanded(false);
+                    setMobileNavOpen(false);
+                  }}
+                  onKeyDown={(e) =>
+                    e.key === "Enter" &&
+                    (() => {
+                      setActiveTab(item.id);
+                      setUtilitiesExpanded(false);
+                      setMobileNavOpen(false);
+                    })()
+                  }
+                  role="button"
+                  tabIndex={0}
+                >
+                  <span className="nav-dot" /> {item.label}
+                </div>
+              );
+            })}
+          </nav>
+          <div className="top-actions top-actions-inline" />
         </div>
       </aside>
 
