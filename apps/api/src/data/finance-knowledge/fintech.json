@@ -1,0 +1,12 @@
+[
+  { "canonical": "Momo", "sector": "payments", "kind": "fintech", "aliases": ["vi momo", "mo mo"] },
+  { "canonical": "ZaloPay", "sector": "payments", "kind": "fintech", "aliases": ["zalo pay"] },
+  { "canonical": "VNPay", "sector": "payments", "kind": "fintech", "aliases": ["vn pay"] },
+  { "canonical": "ShopeePay", "sector": "payments", "kind": "fintech", "aliases": ["shopee pay", "airpay"] },
+  { "canonical": "Payoo", "sector": "payments", "kind": "fintech" },
+  { "canonical": "Moca", "sector": "payments", "kind": "fintech", "aliases": ["grab moca"] },
+  { "canonical": "Viettel Money", "sector": "payments", "kind": "fintech", "aliases": ["viettelpay", "viettel pay"] },
+  { "canonical": "Timo", "sector": "digital-banking", "kind": "fintech" },
+  { "canonical": "Cake", "sector": "digital-banking", "kind": "fintech", "aliases": ["cake by vpbank"] },
+  { "canonical": "Trusting Social", "sector": "fintech-infrastructure", "kind": "fintech" }
+]

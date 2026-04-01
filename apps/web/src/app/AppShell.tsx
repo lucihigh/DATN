@@ -450,6 +450,9 @@ type TransferSafetyAdvisory = {
   severity: "caution" | "warning" | "blocked";
   title: string;
   message: string;
+  archetype?: string | null;
+  timeline?: string[];
+  recommendedActions?: string[];
   confirmationLabel: string;
   reasons: string[];
   requiresAcknowledgement: boolean;
@@ -648,41 +651,113 @@ const COPILOT_TITLE_STOP_WORDS = new Set([
   "and",
 ]);
 
+const COPILOT_DEFAULT_TITLE = "New Conversation";
+
+const COPILOT_MARKET_ENTITY_RULES: Array<{
+  pattern: RegExp;
+  ticker: string;
+}> = [
+  { pattern: /\bfpt\b|fpt telecom|fpt shop/i, ticker: "FPT" },
+  {
+    pattern: /\btcb\b|techcombank/i,
+    ticker: "TCB",
+  },
+  { pattern: /\bvcb\b|vietcombank/i, ticker: "VCB" },
+  { pattern: /\bbid\b|bidv/i, ticker: "BID" },
+  { pattern: /\bctg\b|vietinbank/i, ticker: "CTG" },
+  { pattern: /\bvpb\b|vpbank/i, ticker: "VPB" },
+  { pattern: /\bmbb\b|mbbank/i, ticker: "MBB" },
+  { pattern: /\bacb\b|asia commercial bank/i, ticker: "ACB" },
+  { pattern: /\bstb\b|sacombank/i, ticker: "STB" },
+  { pattern: /\bhdb\b|hdbank/i, ticker: "HDB" },
+  { pattern: /\bvnm\b|vinamilk/i, ticker: "VNM" },
+  { pattern: /\bhpg\b|hoa phat|hòa phát/i, ticker: "HPG" },
+  { pattern: /\bvhm\b|vinhomes/i, ticker: "VHM" },
+  { pattern: /\bvic\b|vingroup/i, ticker: "VIC" },
+  {
+    pattern: /\bmwg\b|the gioi di dong|thế giới di động/i,
+    ticker: "MWG",
+  },
+  { pattern: /\bmsn\b|masan/i, ticker: "MSN" },
+  { pattern: /\bpnj\b|phu nhuan jewelry/i, ticker: "PNJ" },
+  { pattern: /\bssi\b|ssi securities/i, ticker: "SSI" },
+  { pattern: /\bhcm\b|hsc|ho chi minh securities/i, ticker: "HCM" },
+  { pattern: /\bvci\b|vietcap|ban viet/i, ticker: "VCI" },
+  { pattern: /\bvnd\b|vndirect/i, ticker: "VND" },
+  { pattern: /\bfts\b|fpts|fpt securities/i, ticker: "FTS" },
+  { pattern: /\bbvh\b|bao viet/i, ticker: "BVH" },
+];
+
+const toHeadlineCase = (value: string) =>
+  value
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => {
+      if (/^[A-Z0-9]{2,8}$/.test(word)) return word;
+      return word.charAt(0).toLocaleUpperCase("vi-VN") + word.slice(1);
+    })
+    .join(" ");
+
+const getCopilotMarketEntity = (input: string) =>
+  COPILOT_MARKET_ENTITY_RULES.find((rule) => rule.pattern.test(input));
+
 const buildSmartCopilotTitle = (input?: string) => {
   const cleaned = (input || "")
     .replace(/\s+/g, " ")
     .replace(/[!?.,;:]+$/g, "")
     .trim();
-  if (!cleaned) return "New chat";
+  if (!cleaned) return COPILOT_DEFAULT_TITLE;
   const lowered = cleaned.toLowerCase();
+
+  const marketEntity = getCopilotMarketEntity(lowered);
+  if (
+    /\bcổ phiếu\b|\bstock\b|\bmã\b|\bmarket\b|\bgiá\b|\bprice\b/i.test(lowered)
+  ) {
+    if (
+      /\bso sánh\b|\bcompare\b|\bversus\b|\bvs\b|\bkhác nhau\b/i.test(lowered)
+    ) {
+      return marketEntity
+        ? `So Sánh Cổ Phiếu ${marketEntity.ticker}`
+        : "So Sánh Cổ Phiếu";
+    }
+    if (
+      /\bgiá\b|\bprice\b|\bbao nhiêu\b|\bthế nào\b|\bdiễn biến\b|\bhôm nay\b/i.test(
+        lowered,
+      )
+    ) {
+      return marketEntity
+        ? `Theo Dõi Cổ Phiếu ${marketEntity.ticker}`
+        : "Theo Dõi Giá Cổ Phiếu";
+    }
+    return marketEntity
+      ? `Phân Tích Cổ Phiếu ${marketEntity.ticker}`
+      : "Phân Tích Cổ Phiếu";
+  }
+
   const topicRules: Array<{ pattern: RegExp; title: string }> = [
     {
-      pattern: /\bfpt\b.*\bcổ phiếu\b|\bcổ phiếu\b.*\bfpt\b|\bfpt\b.*\bstock\b/,
-      title: "Cổ phiếu FPT",
-    },
-    {
       pattern: /\botp\b|\blừa đảo\b|\bscam\b|\bgian lận\b|\bđiều tra\b/,
-      title: "Kiểm tra OTP và lừa đảo",
+      title: "Rà Soát Rủi Ro Gian Lận",
     },
     {
       pattern: /\bchuyển tiền\b|\btransfer\b|\bchuyển khoản\b/,
-      title: "Tư vấn chuyển tiền",
+      title: "Tư Vấn Chuyển Tiền",
     },
     {
       pattern: /\btiết kiệm\b|\bsaving\b|\bgửi tiết kiệm\b/,
-      title: "Kế hoạch tiết kiệm",
+      title: "Tư Vấn Tiết Kiệm",
     },
     {
-      pattern: /\bđầu tư\b|\binvest\b|\bcổ phiếu\b|\bquỹ\b/,
-      title: "Tư vấn đầu tư",
+      pattern: /\bđầu tư\b|\binvest\b|\bquỹ\b|\bdanh mục\b|\bportfolio\b/,
+      title: "Tư Vấn Chiến Lược Đầu Tư",
     },
     {
       pattern: /\bbảo mật\b|\bsecurity\b|\btài khoản\b/,
-      title: "Bảo mật tài khoản",
+      title: "Rà Soát Bảo Mật Tài Khoản",
     },
     {
       pattern: /\bchi tiêu\b|\bspending\b|\bngân sách\b/,
-      title: "Phân tích chi tiêu",
+      title: "Phân Tích Chi Tiêu",
     },
   ];
   const matchedTopic = topicRules.find((rule) => rule.pattern.test(lowered));
@@ -696,12 +771,12 @@ const buildSmartCopilotTitle = (input?: string) => {
         index === 0 || !COPILOT_TITLE_STOP_WORDS.has(word.toLowerCase()),
     );
   const compact = significantWords.slice(0, 5).join(" ").trim();
-  return compact || cleaned;
+  return toHeadlineCase(compact || cleaned);
 };
 
 const buildCopilotSessionTitle = (input?: string) => {
   const cleaned = buildSmartCopilotTitle(input).replace(/\s+/g, " ").trim();
-  if (!cleaned) return "New chat";
+  if (!cleaned) return COPILOT_DEFAULT_TITLE;
   return cleaned.length <= 44
     ? cleaned
     : `${cleaned.slice(0, 41).trimEnd()}...`;
@@ -720,7 +795,7 @@ const buildDefaultCopilotSession = (seed?: {
       (typeof crypto !== "undefined" && "randomUUID" in crypto
         ? crypto.randomUUID()
         : `copilot-${Date.now()}`),
-    title: seed?.title || "New chat",
+    title: seed?.title || COPILOT_DEFAULT_TITLE,
     pinned: false,
     createdAt: seed?.createdAt || now,
     updatedAt: seed?.updatedAt || now,
@@ -916,6 +991,12 @@ type AiMonitoringSummary = {
   score: number;
   riskLevel: string;
   reasons: string[];
+  archetype?: string | null;
+  timeline?: string[];
+  headline?: string | null;
+  summary?: string | null;
+  nextStep?: string | null;
+  recommendedActions?: string[];
   monitoringOnly: boolean;
   action?: string;
   modelSource?: string | null;
@@ -1599,7 +1680,8 @@ function DashboardView({
     copilotInsight.riskLevel === "high" || copilotInsight.riskLevel === "medium"
       ? copilotInsight.riskLevel
       : "low";
-  const copilotThreadTitle = activeCopilotSession?.title || "New chat";
+  const copilotThreadTitle =
+    activeCopilotSession?.title || COPILOT_DEFAULT_TITLE;
   const copilotIsFreshSession =
     copilotMessages.length === 1 && copilotMessages[0]?.role === "assistant";
   const copilotSessionList = [...copilotSessions].sort((a, b) => {
@@ -1886,6 +1968,29 @@ function DashboardView({
               ? data.risk_level
               : "low",
         reasons: asStringList(data.reasons),
+        archetype: typeof data.archetype === "string" ? data.archetype : null,
+        timeline: Array.isArray(data.timeline)
+          ? data.timeline.filter(
+              (item): item is string => typeof item === "string",
+            )
+          : [],
+        headline: typeof data.headline === "string" ? data.headline : null,
+        summary: typeof data.summary === "string" ? data.summary : null,
+        nextStep:
+          typeof data.nextStep === "string"
+            ? data.nextStep
+            : typeof data.next_step === "string"
+              ? data.next_step
+              : null,
+        recommendedActions: Array.isArray(data.recommendedActions)
+          ? data.recommendedActions.filter(
+              (item): item is string => typeof item === "string",
+            )
+          : Array.isArray(data.recommended_actions)
+            ? data.recommended_actions.filter(
+                (item): item is string => typeof item === "string",
+              )
+            : [],
         monitoringOnly: Boolean(
           data.monitoringOnly ?? data.monitoring_only ?? true,
         ),
@@ -1974,6 +2079,17 @@ function DashboardView({
         severity,
         title: data.title,
         message: data.message,
+        archetype: typeof data.archetype === "string" ? data.archetype : null,
+        timeline: Array.isArray(data.timeline)
+          ? data.timeline.filter(
+              (item): item is string => typeof item === "string",
+            )
+          : [],
+        recommendedActions: Array.isArray(data.recommendedActions)
+          ? data.recommendedActions.filter(
+              (item): item is string => typeof item === "string",
+            )
+          : [],
         confirmationLabel: data.confirmationLabel,
         reasons: Array.isArray(data.reasons)
           ? data.reasons.filter(
@@ -2213,6 +2329,21 @@ function DashboardView({
         .map((item) => item.replace(/\s+/g, " ").trim())
         .filter((item, index, arr) => item && arr.indexOf(item) === index)
         .slice(0, 4);
+      const recommendedActions = [
+        ...(advisory?.recommendedActions || []),
+        ...(monitoring?.recommendedActions || []),
+      ]
+        .map((item) => item.replace(/\s+/g, " ").trim())
+        .filter((item, index, arr) => item && arr.indexOf(item) === index)
+        .slice(0, 3);
+      const timeline = [
+        ...(advisory?.timeline || []),
+        ...(monitoring?.timeline || []),
+      ]
+        .map((item) => item.replace(/\s+/g, " ").trim())
+        .filter((item, index, arr) => item && arr.indexOf(item) === index)
+        .slice(0, 4);
+      const archetype = advisory?.archetype || monitoring?.archetype || "";
 
       return (
         <aside
@@ -2247,6 +2378,9 @@ function DashboardView({
             </div>
           </div>
           <strong>{title}</strong>
+          {archetype ? (
+            <p className="transfer-ai-amount-archetype">Pattern: {archetype}</p>
+          ) : null}
           <p>{message}</p>
           {advisory?.blockedUntil ? (
             <div className="transfer-advisory-hold-banner" role="status">
@@ -2283,6 +2417,20 @@ function DashboardView({
             <ul>
               {reasons.map((reason) => (
                 <li key={reason}>{reason}</li>
+              ))}
+            </ul>
+          ) : null}
+          {recommendedActions.length > 0 ? (
+            <ul>
+              {recommendedActions.map((action) => (
+                <li key={action}>{action}</li>
+              ))}
+            </ul>
+          ) : null}
+          {timeline.length > 0 ? (
+            <ul>
+              {timeline.map((step) => (
+                <li key={step}>{step}</li>
               ))}
             </ul>
           ) : null}
@@ -2795,14 +2943,14 @@ function DashboardView({
     const isDraftSession =
       !copilotWorkspace.activeSessionId &&
       Boolean(copilotDraftSession) &&
-      activeCopilotSession.id === copilotDraftSession.id;
+      activeCopilotSession.id === copilotDraftSession?.id;
     const nextMessages: CopilotMessage[] = [
       ...activeCopilotSession.messages,
       { role: "user", content },
     ];
     const nextTitle =
       activeCopilotSession.messages.length <= 1 &&
-      activeCopilotSession.title === "New chat"
+      activeCopilotSession.title === COPILOT_DEFAULT_TITLE
         ? buildCopilotSessionTitle(content)
         : activeCopilotSession.title;
     const nextUpdatedAt = new Date().toISOString();
@@ -2974,7 +3122,7 @@ function DashboardView({
             )
             .map((session) => ({
               id: session.id,
-              title: session.title || "New chat",
+              title: session.title || COPILOT_DEFAULT_TITLE,
               pinned: Boolean(session.pinned),
               createdAt: session.createdAt || new Date().toISOString(),
               updatedAt: session.updatedAt || new Date().toISOString(),
@@ -3054,7 +3202,7 @@ function DashboardView({
           )
           .map((session) => ({
             id: session.id,
-            title: session.title || "New chat",
+            title: session.title || COPILOT_DEFAULT_TITLE,
             pinned: Boolean(session.pinned),
             createdAt: session.createdAt || new Date().toISOString(),
             updatedAt: session.updatedAt || new Date().toISOString(),
@@ -3253,7 +3401,7 @@ function DashboardView({
         };
       });
       // Keep a draft conversation ready so the user can type immediately
-      // without forcing a persisted "New chat" item in history.
+      // without forcing a persisted default conversation into history.
       setCopilotDraftSession((current) =>
         current ? current : buildDefaultCopilotSession(),
       );
@@ -4895,13 +5043,15 @@ function DashboardView({
                 }}
                 disabled={copilotBusy}
               >
-                + New chat
+                + New Conversation
               </button>
             </div>
 
             <div className="ai-copilot-page-history">
               <div className="ai-copilot-sidebar-title-wrap">
-                <div className="ai-copilot-sidebar-title">History chat</div>
+                <div className="ai-copilot-sidebar-title">
+                  Conversation History
+                </div>
               </div>
               <div className="ai-copilot-session-list ai-copilot-page-session-list">
                 {copilotSessionList.map((session) => {
@@ -10537,17 +10687,43 @@ function AuthShell({
         : normalizedRisk === "medium"
           ? "Medium risk"
           : "Low risk";
+    const confidence = Math.max(
+      1,
+      Math.min(99, Math.round((monitoring.score || 0) * 100)),
+    );
+    const headline =
+      monitoring.headline ||
+      (monitoring.requireOtp
+        ? "AI requested a step-up verification for this sign-in"
+        : "AI detected an unusual sign-in pattern");
+    const summary =
+      monitoring.summary ||
+      "This sign-in differs from your normal pattern enough to trigger extra review.";
+    const nextStep =
+      monitoring.nextStep ||
+      (monitoring.requireOtp
+        ? "Complete the verification challenge before access is granted."
+        : "Review the signals and continue only if the activity is yours.");
+    const recommendedActions = (monitoring.recommendedActions || []).slice(
+      0,
+      3,
+    );
+    const timeline = (monitoring.timeline || []).slice(0, 3);
 
     return (
       <div className={`auth-ai-monitor auth-ai-monitor-${normalizedRisk}`}>
         <div className="auth-ai-monitor-head">
-          <strong>Security Review</strong>
+          <strong>AI Security Analyst</strong>
           <span className={`auth-ai-badge auth-ai-badge-${normalizedRisk}`}>
             {riskLabel}
           </span>
         </div>
-        <p className="auth-ai-copy">
-          Additional security checks were triggered for this sign-in attempt.
+        <p className="auth-ai-copy">{headline}</p>
+        {monitoring.archetype ? (
+          <p className="auth-ai-signal">Pattern: {monitoring.archetype}</p>
+        ) : null}
+        <p className="auth-ai-signal">
+          Confidence {confidence}%. {summary}
         </p>
         {monitoring.requireOtp && (
           <p className="auth-ai-signal">
@@ -10556,10 +10732,25 @@ function AuthShell({
             {monitoring.otpReason ? ` ${monitoring.otpReason}` : ""}
           </p>
         )}
+        <p className="auth-ai-signal">{nextStep}</p>
         {filteredReasons.length > 0 && (
           <ul className="auth-ai-reasons">
             {filteredReasons.map((reason) => (
               <li key={reason}>{reason}</li>
+            ))}
+          </ul>
+        )}
+        {recommendedActions.length > 0 && (
+          <ul className="auth-ai-reasons">
+            {recommendedActions.map((action) => (
+              <li key={action}>{action}</li>
+            ))}
+          </ul>
+        )}
+        {timeline.length > 0 && (
+          <ul className="auth-ai-reasons">
+            {timeline.map((step) => (
+              <li key={step}>{step}</li>
             ))}
           </ul>
         )}

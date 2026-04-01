@@ -1,0 +1,13 @@
+[
+  { "canonical": "SSI Securities", "symbol": "SSI.VN", "label": "SSI", "sector": "brokerage", "kind": "broker", "aliases": ["cong ty chung khoan ssi"] },
+  { "canonical": "HSC", "symbol": "HCM.VN", "sector": "brokerage", "kind": "broker", "aliases": ["ho chi minh securities"] },
+  { "canonical": "Vietcap", "symbol": "VCI.VN", "sector": "brokerage", "kind": "broker", "aliases": ["ban viet"] },
+  { "canonical": "VNDirect", "symbol": "VND.VN", "sector": "brokerage", "kind": "broker", "aliases": ["vndirect securities"] },
+  { "canonical": "FPT Securities", "symbol": "FTS.VN", "label": "FPTS", "sector": "brokerage", "kind": "broker" },
+  { "canonical": "MBS", "symbol": "MBS.VN", "sector": "brokerage", "kind": "broker", "aliases": ["mb securities"] },
+  { "canonical": "VietinBank Securities", "symbol": "CTS.VN", "label": "CTS", "sector": "brokerage", "kind": "broker" },
+  { "canonical": "SHS", "symbol": "SHS.VN", "sector": "brokerage", "kind": "broker", "aliases": ["saigon hanoi securities"] },
+  { "canonical": "BIDV Securities", "symbol": "BSI.VN", "label": "BSI", "sector": "brokerage", "kind": "broker" },
+  { "canonical": "Agriseco", "symbol": "AGR.VN", "sector": "brokerage", "kind": "broker", "aliases": ["agribank securities"] },
+  { "canonical": "Tien Phong Securities", "symbol": "ORS.VN", "label": "ORS", "sector": "brokerage", "kind": "broker" }
+]

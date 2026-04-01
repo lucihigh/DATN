@@ -1,0 +1,10 @@
+[
+  { "canonical": "FE Credit", "sector": "consumer-finance", "kind": "finance-company" },
+  { "canonical": "Home Credit", "sector": "consumer-finance", "kind": "finance-company" },
+  { "canonical": "HD SAISON", "sector": "consumer-finance", "kind": "finance-company" },
+  { "canonical": "Mcredit", "sector": "consumer-finance", "kind": "finance-company" },
+  { "canonical": "Mirae Asset Finance", "sector": "consumer-finance", "kind": "finance-company" },
+  { "canonical": "Shinhan Finance", "sector": "consumer-finance", "kind": "finance-company" },
+  { "canonical": "Easy Credit", "sector": "consumer-finance", "kind": "finance-company" },
+  { "canonical": "JACCS", "sector": "consumer-finance", "kind": "finance-company" }
+]

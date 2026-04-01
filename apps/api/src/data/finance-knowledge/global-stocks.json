@@ -1,0 +1,18 @@
+[
+  { "canonical": "Apple", "symbol": "AAPL", "sector": "technology", "kind": "stock" },
+  { "canonical": "Tesla", "symbol": "TSLA", "sector": "automotive", "kind": "stock" },
+  { "canonical": "NVIDIA", "symbol": "NVDA", "sector": "semiconductor", "kind": "stock" },
+  { "canonical": "Microsoft", "symbol": "MSFT", "sector": "technology", "kind": "stock" },
+  { "canonical": "Alphabet", "symbol": "GOOGL", "sector": "technology", "kind": "stock", "aliases": ["google"] },
+  { "canonical": "Amazon", "symbol": "AMZN", "sector": "consumer-tech", "kind": "stock" },
+  { "canonical": "Meta", "symbol": "META", "sector": "technology", "kind": "stock", "aliases": ["facebook"] },
+  { "canonical": "Netflix", "symbol": "NFLX", "sector": "media", "kind": "stock" },
+  { "canonical": "AMD", "symbol": "AMD", "sector": "semiconductor", "kind": "stock" },
+  { "canonical": "Broadcom", "symbol": "AVGO", "sector": "semiconductor", "kind": "stock" },
+  { "canonical": "JPMorgan Chase", "symbol": "JPM", "sector": "banking", "kind": "bank", "aliases": ["jpmorgan"] },
+  { "canonical": "Bank of America", "symbol": "BAC", "sector": "banking", "kind": "bank" },
+  { "canonical": "Goldman Sachs", "symbol": "GS", "sector": "banking", "kind": "bank" },
+  { "canonical": "Visa", "symbol": "V", "sector": "payments", "kind": "stock" },
+  { "canonical": "Mastercard", "symbol": "MA", "sector": "payments", "kind": "stock" },
+  { "canonical": "Berkshire Hathaway", "symbol": "BRK.B", "sector": "conglomerate", "kind": "stock", "aliases": ["berkshire"] }
+]

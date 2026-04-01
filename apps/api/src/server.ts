@@ -20,6 +20,13 @@ import {
 } from "@secure-wallet/shared";
 import type { components } from "@secure-wallet/shared/api-client/types";
 
+import {
+  COPILOT_FINANCE_KNOWLEDGE,
+  COPILOT_COMMON_MARKET_SYMBOLS,
+  COPILOT_COMPANY_ALIASES,
+  COPILOT_INDEX_ALIASES,
+  type MarketIntent,
+} from "./data/financeKnowledge";
 import { prisma } from "./db/prisma";
 import {
   createAuditLogRepository,
@@ -498,6 +505,12 @@ type AnomalyResponse = {
   score: number;
   riskLevel: "low" | "medium" | "high";
   reasons: string[];
+  archetype?: string | null;
+  timeline?: string[];
+  headline?: string | null;
+  summary?: string | null;
+  nextStep?: string | null;
+  recommendedActions?: string[];
   monitoringOnly: boolean;
   action?: string;
   requireOtp: boolean;
@@ -531,6 +544,9 @@ type TransferSafetyAdvisory = {
   severity: "caution" | "warning" | "blocked";
   title: string;
   message: string;
+  archetype?: string | null;
+  timeline?: string[];
+  recommendedActions?: string[];
   confirmationLabel: string;
   reasons: string[];
   requiresAcknowledgement: boolean;
@@ -778,15 +794,35 @@ const buildHeuristicLoginAiResponse = (input: {
 
   score = clamp(score, 0.05, 0.98);
 
+  const riskLevel = score >= 0.7 ? "high" : score >= 0.4 ? "medium" : "low";
+  const requireOtp = !input.wasTrustedIp;
+  const otpChannel = requireOtp ? "email" : null;
+  const otpReason = requireOtp
+    ? "the sign-in came from a new or untrusted IP"
+    : null;
+  const guidance = buildAnomalyGuidance({
+    riskLevel,
+    reasons,
+    requireOtp,
+    otpChannel,
+    otpReason,
+  });
+
   return {
     score,
-    riskLevel: score >= 0.7 ? "high" : score >= 0.4 ? "medium" : "low",
+    riskLevel,
     reasons,
+    archetype: guidance.archetype,
+    timeline: guidance.timeline,
+    headline: guidance.headline,
+    summary: guidance.summary,
+    nextStep: guidance.nextStep,
+    recommendedActions: guidance.recommendedActions,
     monitoringOnly: false,
     action: "NOTIFY_ADMIN_ONLY",
-    requireOtp: !input.wasTrustedIp,
-    otpChannel: !input.wasTrustedIp ? "email" : null,
-    otpReason: !input.wasTrustedIp ? "New IP sign-in verification" : null,
+    requireOtp,
+    otpChannel,
+    otpReason,
     modelSource: "api-heuristic-fallback",
     modelVersion: "login-risk-v1",
     requestKey: null,
@@ -864,27 +900,74 @@ const normalizeRuleHits = (value: unknown): AnomalyResponse["ruleHits"] => {
 const normalizeAiResponse = (value: unknown): AnomalyResponse => {
   if (!value || typeof value !== "object") return DEFAULT_AI_RESPONSE;
   const data = value as Record<string, unknown>;
+  const riskLevel = normalizeRiskLevel(data.risk_level ?? data.riskLevel);
+  const reasons = toStringList(data.reasons);
+  const requireOtp = Boolean(data.require_otp_sms ?? data.requireOtp);
+  const otpChannel =
+    typeof data.otp_channel === "string"
+      ? data.otp_channel
+      : typeof data.otpChannel === "string"
+        ? data.otpChannel
+        : null;
+  const otpReason =
+    typeof data.otp_reason === "string"
+      ? data.otp_reason
+      : typeof data.otpReason === "string"
+        ? data.otpReason
+        : null;
+  const warning = normalizeWarningPayload(data.warning_vi ?? data.warning);
+  const guidance = buildAnomalyGuidance({
+    riskLevel,
+    reasons,
+    requireOtp,
+    otpChannel,
+    otpReason,
+    warning,
+  });
+
   return {
     score: toAnomalyScore(data.anomaly_score ?? data.score),
-    riskLevel: normalizeRiskLevel(data.risk_level ?? data.riskLevel),
-    reasons: toStringList(data.reasons),
+    riskLevel,
+    reasons,
+    archetype:
+      typeof data.archetype === "string" ? data.archetype : guidance.archetype,
+    timeline: dedupeStringList([
+      ...(Array.isArray(data.timeline)
+        ? data.timeline.filter(
+            (item): item is string => typeof item === "string",
+          )
+        : []),
+      ...guidance.timeline,
+    ]).slice(0, 4),
+    headline:
+      typeof data.headline === "string" ? data.headline : guidance.headline,
+    summary: typeof data.summary === "string" ? data.summary : guidance.summary,
+    nextStep:
+      typeof data.next_step === "string"
+        ? data.next_step
+        : typeof data.nextStep === "string"
+          ? data.nextStep
+          : guidance.nextStep,
+    recommendedActions: dedupeStringList([
+      ...(Array.isArray(data.recommended_actions)
+        ? data.recommended_actions.filter(
+            (item): item is string => typeof item === "string",
+          )
+        : []),
+      ...(Array.isArray(data.recommendedActions)
+        ? data.recommendedActions.filter(
+            (item): item is string => typeof item === "string",
+          )
+        : []),
+      ...guidance.recommendedActions,
+    ]).slice(0, 4),
     monitoringOnly: Boolean(
       data.monitoring_only ?? data.monitoringOnly ?? true,
     ),
     action: typeof data.action === "string" ? data.action : undefined,
-    requireOtp: Boolean(data.require_otp_sms ?? data.requireOtp),
-    otpChannel:
-      typeof data.otp_channel === "string"
-        ? data.otp_channel
-        : typeof data.otpChannel === "string"
-          ? data.otpChannel
-          : null,
-    otpReason:
-      typeof data.otp_reason === "string"
-        ? data.otp_reason
-        : typeof data.otpReason === "string"
-          ? data.otpReason
-          : null,
+    requireOtp,
+    otpChannel,
+    otpReason,
     modelSource:
       typeof data.model_source === "string"
         ? data.model_source
@@ -925,7 +1008,7 @@ const normalizeAiResponse = (value: unknown): AnomalyResponse => {
           ? data.ruleHitCount
           : undefined,
     ruleHits: normalizeRuleHits(data.rule_hits ?? data.ruleHits),
-    warning: normalizeWarningPayload(data.warning_vi ?? data.warning),
+    warning,
   };
 };
 
@@ -1532,13 +1615,6 @@ type StoredCopilotWorkspaceState = {
   sessions: StoredCopilotConversation[];
 };
 
-type MarketIntent = {
-  assetClass: "fx" | "crypto" | "commodity" | "stock" | "index";
-  symbol: string;
-  label: string;
-  quoteHint?: string | null;
-};
-
 type MarketQuoteSnapshot = {
   symbol: string;
   label: string;
@@ -1601,7 +1677,7 @@ const buildDefaultStoredCopilotConversation = (): StoredCopilotConversation => {
   const now = new Date().toISOString();
   return {
     id: crypto.randomUUID(),
-    title: "New chat",
+    title: "New Conversation",
     pinned: false,
     createdAt: now,
     updatedAt: now,
@@ -1692,7 +1768,7 @@ const sanitizeStoredCopilotConversation = (
   const title =
     typeof raw.title === "string" && raw.title.trim()
       ? raw.title.trim().slice(0, 120)
-      : "New chat";
+      : "New Conversation";
   const pinned = Boolean(raw.pinned);
   const createdAt =
     typeof raw.createdAt === "string" && raw.createdAt.trim()
@@ -1726,7 +1802,7 @@ const sanitizeStoredCopilotWorkspace = (
   ) {
     const legacySession = sanitizeStoredCopilotConversation({
       id: crypto.randomUUID(),
-      title: "Recovered chat",
+      title: "Recovered Conversation",
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       messages: raw.messages,
@@ -2176,6 +2252,9 @@ const buildBlockedTransferAdvisory = (input: {
   currency: string;
   senderBalance: number;
   reasons: string[];
+  archetype?: string | null;
+  timeline?: string[];
+  recommendedActions?: string[];
   blockedUntil: string;
   title?: string;
   message?: string;
@@ -2194,6 +2273,17 @@ const buildBlockedTransferAdvisory = (input: {
       ).toLocaleString(
         "en-US",
       )} so you have time to verify the recipient through a trusted channel.`,
+    archetype: input.archetype || "Known Scam Pattern",
+    timeline: dedupeStringList([
+      ...(input.timeline || []),
+      "The transfer entered a temporary safety hold while high-risk signals are reviewed.",
+    ]).slice(0, 4),
+    recommendedActions: dedupeStringList([
+      ...(input.recommendedActions || []),
+      "Verify the recipient through a trusted channel you initiate yourself.",
+      "Do not continue if anyone is pressuring you to act urgently.",
+      "Retry only after you confirm the payment purpose and recipient identity.",
+    ]).slice(0, 4),
     confirmationLabel: "Blocked for safety review",
     reasons: input.reasons,
     requiresAcknowledgement: false,
@@ -2263,8 +2353,20 @@ const buildTransferSafetyAdvisory = (input: {
       input.spendProfile.spendSurgeRatio >= 8) ||
     (noteRiskReasons.length > 0 &&
       amount >= Math.max(500, LARGE_TRANSFER_ADVISORY_AMOUNT * 0.5));
+  let archetype: string | null = null;
+  const recommendedActions: string[] = [];
+  const addRecommendedAction = (action: string) => {
+    if (
+      !recommendedActions.some(
+        (entry) => entry.toLowerCase() === action.toLowerCase(),
+      )
+    ) {
+      recommendedActions.push(action);
+    }
+  };
 
   if (hasMaterialDrainAmount && transferRatio >= BALANCE_DRAIN_ADVISORY_RATIO) {
+    archetype = archetype || "Balance Drain Risk";
     addReason(
       `This transfer uses ${Math.round(transferRatio * 100)}% of your available wallet balance.`,
     );
@@ -2296,8 +2398,12 @@ const buildTransferSafetyAdvisory = (input: {
   }
 
   if (!input.recipientProfile.isKnownRecipient) {
+    archetype = archetype || "New Recipient Risk";
     addReason(
       `${recipientLabel} has not appeared in your completed transfer history yet.`,
+    );
+    addRecommendedAction(
+      "Confirm the recipient using a trusted phone number or verified channel before sending.",
     );
     if (qualifiesForRedWarning) {
       severity = "warning";
@@ -2378,7 +2484,13 @@ const buildTransferSafetyAdvisory = (input: {
   }
 
   for (const noteReason of noteRiskReasons) {
+    archetype = archetype || "Scam Script Language";
     addReason(noteReason);
+  }
+  if (noteRiskReasons.length > 0) {
+    addRecommendedAction(
+      "Pause if this transfer was requested over chat, phone, or a link you did not verify independently.",
+    );
   }
   if (
     noteRiskReasons.length > 0 &&
@@ -2391,6 +2503,9 @@ const buildTransferSafetyAdvisory = (input: {
   if (noteIsGeneric && amount >= LARGE_TRANSFER_ADVISORY_AMOUNT) {
     addReason(
       `The transfer note is too generic for a payment of ${formatMoneyAmount(input.currency, amount)}.`,
+    );
+    addRecommendedAction(
+      "Add a specific payment purpose before continuing so the transfer is easier to verify later.",
     );
   }
 
@@ -2416,16 +2531,24 @@ const buildTransferSafetyAdvisory = (input: {
   }
 
   if (input.aiResult.riskLevel === "medium") {
+    archetype = archetype || "Behavior Drift";
     addReason(
       "AI sees this transfer as less typical than your recent completed behavior.",
     );
+    addRecommendedAction(
+      "Review the amount, recipient, and purpose once more before approving OTP.",
+    );
   }
   if (input.aiResult.riskLevel === "high") {
+    archetype = archetype || "Known Scam Pattern";
     if (qualifiesForRedWarning && hasStrongWarningSignal) {
       severity = "warning";
     }
     addReason(
       "AI found multiple scam-like signals around this recipient, amount, and transfer pattern.",
+    );
+    addRecommendedAction(
+      "Do not approve this transfer until you independently verify the request is legitimate.",
     );
   }
 
@@ -2460,13 +2583,28 @@ const buildTransferSafetyAdvisory = (input: {
     const blockedUntil = new Date(
       Date.now() + TRANSFER_SCAM_HOLD_MS,
     ).toISOString();
+    const timeline = dedupeStringList([
+      !input.recipientProfile.isKnownRecipient
+        ? "The recipient was not found in your completed transfer history."
+        : null,
+      noteRiskReasons.length > 0
+        ? "The payment note matched language often used in scam instructions."
+        : null,
+      hasMaterialDrainAmount && transferRatio >= BALANCE_DRAIN_ADVISORY_RATIO
+        ? `The amount would consume ${Math.round(transferRatio * 100)}% of your current balance.`
+        : null,
+      "The risk engine combined these signals and placed the transfer on hold.",
+    ]).slice(0, 4);
     return buildBlockedTransferAdvisory({
       requestKey: input.requestKey,
       amount,
       currency: input.currency,
       senderBalance,
       blockedUntil,
+      archetype: archetype || "Known Scam Pattern",
+      timeline,
       reasons: advisoryReasons,
+      recommendedActions,
       message: `This transfer is temporarily blocked until ${new Date(
         blockedUntil,
       ).toLocaleString(
@@ -2529,12 +2667,44 @@ const buildTransferSafetyAdvisory = (input: {
           .join(" ")}`;
 
   const requiresAcknowledgement = severity === "warning";
+  const timeline = dedupeStringList([
+    !input.recipientProfile.isKnownRecipient
+      ? "The recipient is new relative to your completed transfer history."
+      : null,
+    hasMaterialDrainAmount && transferRatio >= BALANCE_DRAIN_ADVISORY_RATIO
+      ? `The amount would use ${Math.round(transferRatio * 100)}% of your balance.`
+      : null,
+    noteRiskReasons.length > 0
+      ? "The payment note contains language commonly seen in scam or pressure-based requests."
+      : null,
+    input.aiResult.riskLevel === "high"
+      ? "AI combined recipient, amount, and behavior signals into a high-risk pattern."
+      : input.aiResult.riskLevel === "medium"
+        ? "AI found this transfer less typical than your recent completed behavior."
+        : "AI recorded only light advisory signals for this transfer.",
+    severity === "warning"
+      ? "The transfer can continue only after you actively review and acknowledge the warning."
+      : "The transfer can continue, but the system recommends a manual check first.",
+  ]).slice(0, 5);
 
   return {
     requestKey: input.requestKey || null,
     severity,
     title,
     message: `${messageLead} ${messageTail}`,
+    archetype:
+      archetype ||
+      (severity === "warning" ? "Step-Up Review" : "Light Advisory Signal"),
+    timeline,
+    recommendedActions: dedupeStringList([
+      ...recommendedActions,
+      severity === "warning"
+        ? "Verify the recipient and purpose before you continue to OTP."
+        : "Continue only if the recipient, amount, and note all match your intent.",
+      qualifiesForRedWarning
+        ? "Expect stronger verification on larger transfers."
+        : null,
+    ]).slice(0, 4),
     confirmationLabel:
       severity === "warning"
         ? "I reviewed the warning, continue to OTP"
@@ -2583,6 +2753,15 @@ const normalizeTransferSafetyAdvisory = (value: unknown) => {
     severity,
     title: data.title,
     message: data.message,
+    archetype: typeof data.archetype === "string" ? data.archetype : null,
+    timeline: Array.isArray(data.timeline)
+      ? data.timeline.filter((item): item is string => typeof item === "string")
+      : [],
+    recommendedActions: Array.isArray(data.recommendedActions)
+      ? data.recommendedActions.filter(
+          (item): item is string => typeof item === "string",
+        )
+      : [],
     confirmationLabel: data.confirmationLabel,
     reasons: Array.isArray(data.reasons)
       ? data.reasons.filter((item): item is string => typeof item === "string")
@@ -2610,6 +2789,22 @@ const formatCopilotMoney = (currency: string, amount: number) =>
 
 const formatCopilotSignedMoney = (currency: string, amount: number) =>
   `${amount >= 0 ? "+" : "-"}${formatCopilotMoney(currency, Math.abs(amount))}`;
+
+const dedupeStringList = (items: Array<string | null | undefined>) => {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of items) {
+    const cleaned = String(item || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!cleaned) continue;
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(cleaned);
+  }
+  return result;
+};
 
 const escapeCopilotMarkdownCell = (value: string | number) =>
   String(value).replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
@@ -2661,12 +2856,139 @@ const normalizeCopilotRiskLevel = (value: unknown) => {
   return normalized === "high" || normalized === "medium" ? normalized : "low";
 };
 
+const buildAnomalyGuidance = (input: {
+  riskLevel: "low" | "medium" | "high";
+  reasons: string[];
+  requireOtp: boolean;
+  otpChannel?: string | null;
+  otpReason?: string | null;
+  warning?: AnomalyResponse["warning"];
+}) => {
+  const joinedSignals = [
+    ...input.reasons,
+    input.otpReason || "",
+    input.warning?.title || "",
+    input.warning?.message || "",
+  ]
+    .join(" ")
+    .toLowerCase();
+  const primaryReason =
+    dedupeStringList([
+      input.warning?.message,
+      ...input.reasons,
+      input.otpReason,
+    ])[0] || "The activity differs from your normal pattern.";
+
+  const archetype = /credential|failed attempt|password/i.test(joinedSignals)
+    ? "Credential Abuse Pattern"
+    : /new or untrusted ip|different ip|different device|new device|vpn/i.test(
+          joinedSignals,
+        ) || input.requireOtp
+      ? "New Device / Network Shift"
+      : input.riskLevel === "high"
+        ? "High-Risk Session Change"
+        : input.riskLevel === "medium"
+          ? "Behavior Drift"
+          : "Low-Severity Deviation";
+
+  const headline =
+    input.warning?.title ||
+    (input.requireOtp
+      ? input.riskLevel === "high"
+        ? "AI security review escalated this activity"
+        : "AI requested an extra identity check"
+      : input.riskLevel === "high"
+        ? "AI detected a high-risk security pattern"
+        : input.riskLevel === "medium"
+          ? "AI detected an unusual security pattern"
+          : "AI observed a low-severity deviation");
+
+  const summary = input.requireOtp
+    ? `${primaryReason} Extra verification was triggered${input.otpChannel ? ` via ${input.otpChannel}` : ""}${input.otpReason ? ` because ${input.otpReason.toLowerCase()}` : ""}.`
+    : input.riskLevel === "high"
+      ? `${primaryReason} Treat this as a high-risk event until you verify it was expected.`
+      : input.riskLevel === "medium"
+        ? `${primaryReason} The behavior is unusual enough to justify a closer review.`
+        : `${primaryReason} The signal is mild, but the system still recorded it for protection.`;
+
+  const nextStep = input.requireOtp
+    ? `Complete the ${input.otpChannel || "additional"} verification before continuing.`
+    : input.riskLevel === "high"
+      ? "Pause and verify the activity before you continue."
+      : input.riskLevel === "medium"
+        ? "Review the signals before you approve the action."
+        : "Continue only if the activity looks expected to you.";
+
+  const recommendedActions = dedupeStringList([
+    ...(input.warning?.mustDo || []),
+    input.requireOtp
+      ? `Finish the ${input.otpChannel || "step-up"} check on this session.`
+      : null,
+    "Verify the device, IP, and timing match your own activity.",
+    input.riskLevel === "high"
+      ? "If this was not you, stop immediately and reset credentials."
+      : "If anything looks unfamiliar, do not approve the action yet.",
+    ...(input.warning?.doNot || []).map((item) => `Do not ${item}`),
+  ]).slice(0, 4);
+  const timeline = dedupeStringList([
+    "Signal captured from device, IP, and recent authentication history.",
+    /failed attempt|credential/i.test(joinedSignals)
+      ? "Recent failed or mismatched credential activity increased the risk score."
+      : null,
+    /new or untrusted ip|different ip|different device|new device|vpn/i.test(
+      joinedSignals,
+    ) || input.requireOtp
+      ? "The session did not match a trusted sign-in profile."
+      : null,
+    input.requireOtp
+      ? `Step-up verification was triggered${input.otpChannel ? ` via ${input.otpChannel}` : ""}.`
+      : input.riskLevel === "high"
+        ? "The session is treated as high risk until verified."
+        : input.riskLevel === "medium"
+          ? "The session should be reviewed before it is trusted."
+          : "The event was logged as a low-severity deviation for future comparison.",
+  ]).slice(0, 4);
+
+  return {
+    archetype,
+    headline,
+    summary,
+    nextStep,
+    recommendedActions,
+    timeline,
+  };
+};
+
 const sanitizeCopilotText = (value: string) =>
   value
     .replace(/^```json\s*/i, "")
     .replace(/^```\s*/i, "")
     .replace(/\s*```$/i, "")
     .trim();
+
+const polishCopilotReplyText = (value: string) =>
+  value
+    .replace(/^Bạn có muốn tôi[^?]*\?\s*/iu, "")
+    .replace(/^Ban co muon toi[^?]*\?\s*/iu, "")
+    .replace(/^Would you like me[^?]*\?\s*/iu, "")
+    .replace(/^Do you want me to[^?]*\?\s*/iu, "")
+    .replace(/^Tôi có thể giúp[^.?!]*[.?!]\s*/iu, "")
+    .replace(/^Toi co the giup[^.?!]*[.?!]\s*/iu, "")
+    .replace(/^I can help[^.?!]*[.?!]\s*/iu, "")
+    .trim();
+
+const polishCopilotFollowUpQuestion = (value: string | null | undefined) => {
+  const cleaned = String(value || "").trim();
+  if (!cleaned) return null;
+  if (
+    /^(Bạn có muốn tôi cung cấp thêm thông tin nào khác không\??|Ban co muon toi cung cap them thong tin nao khac khong\??|Would you like more information\??|Do you want more information\??)$/iu.test(
+      cleaned,
+    )
+  ) {
+    return null;
+  }
+  return cleaned;
+};
 
 const parseOpenAiCopilotPayload = (
   value: string,
@@ -2685,8 +3007,11 @@ const parseOpenAiCopilotPayload = (
         )
       : [];
 
+    const reply = polishCopilotReplyText(parsed.reply.trim());
+    if (!reply) return null;
+
     return {
-      reply: parsed.reply.trim(),
+      reply,
       topic:
         typeof parsed.topic === "string" && parsed.topic.trim()
           ? parsed.topic.trim()
@@ -2699,11 +3024,12 @@ const parseOpenAiCopilotPayload = (
           : null,
       riskLevel: normalizeCopilotRiskLevel(parsed.riskLevel),
       confidence: clamp(Number(parsed.confidence || 0.72), 0.4, 0.99),
-      followUpQuestion:
+      followUpQuestion: polishCopilotFollowUpQuestion(
         typeof parsed.followUpQuestion === "string" &&
-        parsed.followUpQuestion.trim()
+          parsed.followUpQuestion.trim()
           ? parsed.followUpQuestion.trim()
           : null,
+      ),
     };
   } catch {
     return null;
@@ -2740,6 +3066,43 @@ const summarizeCopilotTransactions = (
     })
     .join("\n");
 
+const normalizeCopilotKnowledgeText = (value: string) =>
+  value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+
+const buildRelevantFinanceKnowledgeSummary = (
+  messages: CopilotMessagePayload[],
+) => {
+  const latestUserMessage =
+    [...messages].reverse().find((message) => message.role === "user")
+      ?.content || "";
+  const normalizedMessage = normalizeCopilotKnowledgeText(latestUserMessage);
+  if (!normalizedMessage.trim()) {
+    return "No directly matched finance entities.";
+  }
+
+  const matchedEntries = COPILOT_FINANCE_KNOWLEDGE.filter((entry) =>
+    entry.aliases.some((alias) => normalizedMessage.includes(alias)),
+  ).slice(0, 8);
+
+  if (!matchedEntries.length) {
+    return "No directly matched finance entities.";
+  }
+
+  return matchedEntries
+    .map((entry) =>
+      [
+        entry.canonical,
+        `kind=${entry.kind}`,
+        `sector=${entry.sector || "n/a"}`,
+        `symbol=${entry.market?.symbol || "n/a"}`,
+      ].join(" | "),
+    )
+    .join("\n");
+};
+
 const buildOpenAiCopilotInput = (input: {
   currency: string;
   currentBalance: number;
@@ -2755,6 +3118,12 @@ const buildOpenAiCopilotInput = (input: {
     input.currency,
   );
   const conversationSummary = summarizeCopilotConversation(input.messages);
+  const latestUserMessage =
+    [...input.messages].reverse().find((message) => message.role === "user")
+      ?.content || "";
+  const financeKnowledgeSummary = buildRelevantFinanceKnowledgeSummary(
+    input.messages,
+  );
 
   return [
     `Current time: ${now}`,
@@ -2771,6 +3140,10 @@ const buildOpenAiCopilotInput = (input: {
     )}`,
     "Recent wallet transactions:",
     transactionSummary || "No recent transactions available.",
+    "Latest user message:",
+    latestUserMessage || "No latest message available.",
+    "Recognized finance entities:",
+    financeKnowledgeSummary,
     "Conversation transcript:",
     conversationSummary,
   ].join("\n\n");
@@ -2782,6 +3155,14 @@ const buildCopilotSystemInstructions = (language: CopilotLanguage) =>
     "Answer as a practical financial assistant for a wallet app.",
     "Use the wallet context and transaction context provided.",
     `Reply in ${language === "vi" ? "Vietnamese" : "English"} and keep the same language as the user's latest message.`,
+    "Start with the answer immediately. The first sentence must address the user's question directly.",
+    "Do not begin with permission-seeking, throat-clearing, generic offers to help, or by repeating the user's question.",
+    "Never start the reply with lines such as 'Do you want me to help', 'I can help', or equivalent Vietnamese phrasing.",
+    "Sound sharp, premium, and insight-driven, not like a helpdesk bot.",
+    "For short finance questions, prefer a compact structure: direct takeaway first, then 2-4 high-signal points.",
+    "If data is unavailable, say that in one sentence, then still give the most useful next-best analysis instead of a generic refusal.",
+    "Only ask a follow-up question after you have already delivered a useful answer.",
+    "Use followUpQuestion sparingly; set it to null unless it materially deepens the discussion.",
     "Prioritize user safety over convenience when the message contains signs of fraud, impersonation, urgency, OTP harvesting, remote-access setup, fake refunds, fake investment schemes, or account-takeover attempts.",
     "If a message looks like a scam, clearly say so, tell the user not to send money or codes, and recommend official verification steps.",
     "You can answer broad personal-finance questions even when they are not tied to a live wallet action, including budgeting, debt payoff, emergency funds, savings habits, cash-flow tradeoffs, statement interpretation, and financial planning.",
@@ -3003,57 +3384,6 @@ const callOpenAiCopilot = async (input: {
 const COPILOT_MARKET_TIMEOUT_MS = Number(
   process.env.COPILOT_MARKET_TIMEOUT_MS || "7000",
 );
-const COPILOT_COMPANY_ALIASES: Record<string, MarketIntent> = {
-  apple: { assetClass: "stock", symbol: "AAPL", label: "Apple" },
-  tesla: { assetClass: "stock", symbol: "TSLA", label: "Tesla" },
-  nvidia: { assetClass: "stock", symbol: "NVDA", label: "NVIDIA" },
-  microsoft: { assetClass: "stock", symbol: "MSFT", label: "Microsoft" },
-  google: { assetClass: "stock", symbol: "GOOGL", label: "Alphabet" },
-  alphabet: { assetClass: "stock", symbol: "GOOGL", label: "Alphabet" },
-  amazon: { assetClass: "stock", symbol: "AMZN", label: "Amazon" },
-  meta: { assetClass: "stock", symbol: "META", label: "Meta" },
-  netflix: { assetClass: "stock", symbol: "NFLX", label: "Netflix" },
-  fpt: { assetClass: "stock", symbol: "FPT.VN", label: "FPT" },
-  vnm: { assetClass: "stock", symbol: "VNM.VN", label: "Vinamilk" },
-  hpg: { assetClass: "stock", symbol: "HPG.VN", label: "Hoa Phat" },
-  vcb: { assetClass: "stock", symbol: "VCB.VN", label: "Vietcombank" },
-  vic: { assetClass: "stock", symbol: "VIC.VN", label: "Vingroup" },
-  vhm: { assetClass: "stock", symbol: "VHM.VN", label: "Vinhomes" },
-  mwg: { assetClass: "stock", symbol: "MWG.VN", label: "Mobile World" },
-};
-const COPILOT_INDEX_ALIASES: Record<string, MarketIntent> = {
-  sp500: { assetClass: "index", symbol: "^GSPC", label: "S&P 500" },
-  "s&p500": { assetClass: "index", symbol: "^GSPC", label: "S&P 500" },
-  "s&p 500": { assetClass: "index", symbol: "^GSPC", label: "S&P 500" },
-  nasdaq: { assetClass: "index", symbol: "^IXIC", label: "NASDAQ Composite" },
-  dowjones: { assetClass: "index", symbol: "^DJI", label: "Dow Jones" },
-  "dow jones": { assetClass: "index", symbol: "^DJI", label: "Dow Jones" },
-  vnindex: { assetClass: "index", symbol: "^VNINDEX", label: "VN-Index" },
-  "vn-index": { assetClass: "index", symbol: "^VNINDEX", label: "VN-Index" },
-};
-const COPILOT_COMMON_MARKET_SYMBOLS = new Set([
-  "AAPL",
-  "AMZN",
-  "BTC",
-  "DJI",
-  "ETH",
-  "EUR",
-  "FPT",
-  "GC",
-  "GOOGL",
-  "META",
-  "MSFT",
-  "NASDAQ",
-  "NVDA",
-  "S&P",
-  "SPY",
-  "TSLA",
-  "USD",
-  "VND",
-  "VNINDEX",
-  "VNM",
-  "XAU",
-]);
 
 const normalizeCopilotText = (value: string) =>
   value
@@ -6220,6 +6550,17 @@ const countRecentFailedAttempts = async (email: string, minutes: number) => {
   return loginEventRepository.countRecentFailures(email, effectiveWindowStart);
 };
 
+const buildLoginFailureMessage = (input: {
+  remainingAttempts: number;
+  lockoutMinutes: number;
+}) => {
+  if (input.remainingAttempts <= 0) {
+    return `Incorrect password. Your account has been temporarily locked for ${input.lockoutMinutes} minute${input.lockoutMinutes === 1 ? "" : "s"} after repeated failed attempts.`;
+  }
+
+  return `Incorrect password. ${input.remainingAttempts} attempt${input.remainingAttempts === 1 ? "" : "s"} remaining before a temporary ${input.lockoutMinutes}-minute lock.`;
+};
+
 const countRecentFailedTransfers = async (userId: string, hours: number) =>
   prisma.transaction.count({
     where: {
@@ -8327,9 +8668,12 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
             : {}),
         },
       });
-      return res
-        .status(423)
-        .json({ error: "Account temporarily locked due to repeated failures" });
+      return res.status(423).json({
+        error: `Too many incorrect password attempts. Your account has been temporarily locked for ${policy.lockoutMinutes} minute${policy.lockoutMinutes === 1 ? "" : "s"}.`,
+        attemptsRemaining: 0,
+        maxAttempts: policy.maxLoginAttempts,
+        lockoutMinutes: policy.lockoutMinutes,
+      });
     }
 
     await loginEventRepository.createLoginEvent({
@@ -8376,8 +8720,31 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
           getRequestIp(req),
         );
         return res.status(423).json({
-          error: "Account locked after repeated failed attempts",
+          error: buildLoginFailureMessage({
+            remainingAttempts: 0,
+            lockoutMinutes: policy.lockoutMinutes,
+          }),
           anomaly: aiResult,
+          attemptsRemaining: 0,
+          maxAttempts: policy.maxLoginAttempts,
+          lockoutMinutes: policy.lockoutMinutes,
+        });
+      }
+
+      if (userDoc?.id && !isPasswordValid) {
+        const attemptsRemaining = Math.max(
+          policy.maxLoginAttempts - failedAttempts,
+          0,
+        );
+        return res.status(401).json({
+          error: buildLoginFailureMessage({
+            remainingAttempts: attemptsRemaining,
+            lockoutMinutes: policy.lockoutMinutes,
+          }),
+          anomaly: aiResult,
+          attemptsRemaining,
+          maxAttempts: policy.maxLoginAttempts,
+          lockoutMinutes: policy.lockoutMinutes,
         });
       }
 

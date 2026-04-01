@@ -1,0 +1,22 @@
+[
+  { "canonical": "Techcombank", "symbol": "TCB.VN", "sector": "banking", "kind": "bank" },
+  { "canonical": "Vietcombank", "symbol": "VCB.VN", "sector": "banking", "kind": "bank" },
+  { "canonical": "BIDV", "symbol": "BID.VN", "sector": "banking", "kind": "bank" },
+  { "canonical": "VietinBank", "symbol": "CTG.VN", "sector": "banking", "kind": "bank" },
+  { "canonical": "VPBank", "symbol": "VPB.VN", "sector": "banking", "kind": "bank" },
+  { "canonical": "MBBank", "symbol": "MBB.VN", "sector": "banking", "kind": "bank", "aliases": ["mb bank"] },
+  { "canonical": "ACB", "symbol": "ACB.VN", "sector": "banking", "kind": "bank", "aliases": ["asia commercial bank"] },
+  { "canonical": "Sacombank", "symbol": "STB.VN", "sector": "banking", "kind": "bank" },
+  { "canonical": "HDBank", "symbol": "HDB.VN", "sector": "banking", "kind": "bank" },
+  { "canonical": "TPBank", "symbol": "TPB.VN", "sector": "banking", "kind": "bank" },
+  { "canonical": "VIB", "symbol": "VIB.VN", "sector": "banking", "kind": "bank", "aliases": ["vietnam international bank"] },
+  { "canonical": "OCB", "symbol": "OCB.VN", "sector": "banking", "kind": "bank", "aliases": ["orient commercial bank"] },
+  { "canonical": "SHB", "symbol": "SHB.VN", "sector": "banking", "kind": "bank", "aliases": ["saigon hanoi bank"] },
+  { "canonical": "LPBank", "symbol": "LPB.VN", "sector": "banking", "kind": "bank", "aliases": ["lienvietpostbank", "lien viet post bank"] },
+  { "canonical": "Eximbank", "symbol": "EIB.VN", "sector": "banking", "kind": "bank" },
+  { "canonical": "SeABank", "symbol": "SSB.VN", "sector": "banking", "kind": "bank", "aliases": ["sea bank"] },
+  { "canonical": "ABBank", "symbol": "ABB.VN", "sector": "banking", "kind": "bank", "aliases": ["an binh bank"] },
+  { "canonical": "Nam A Bank", "symbol": "NAB.VN", "sector": "banking", "kind": "bank", "aliases": ["namabank"] },
+  { "canonical": "PGBank", "symbol": "PGB.VN", "sector": "banking", "kind": "bank", "aliases": ["petrolimex bank"] },
+  { "canonical": "Bac A Bank", "symbol": "BAB.VN", "sector": "banking", "kind": "bank", "aliases": ["bacabank"] }
+]

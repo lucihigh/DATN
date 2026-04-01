@@ -138,6 +138,12 @@ export type LoginMonitoring = {
   score: number;
   riskLevel: string;
   reasons: string[];
+  archetype?: string | null;
+  timeline?: string[];
+  headline?: string | null;
+  summary?: string | null;
+  nextStep?: string | null;
+  recommendedActions?: string[];
   monitoringOnly: boolean;
   action?: string;
   requireOtp: boolean;
@@ -330,6 +336,27 @@ const parseLoginMonitoring = (value: unknown): LoginMonitoring | null => {
           ? data.risk_level
           : "low",
     reasons: toStringArray(data.reasons),
+    archetype: typeof data.archetype === "string" ? data.archetype : null,
+    timeline: Array.isArray(data.timeline)
+      ? data.timeline.filter((item): item is string => typeof item === "string")
+      : [],
+    headline: typeof data.headline === "string" ? data.headline : null,
+    summary: typeof data.summary === "string" ? data.summary : null,
+    nextStep:
+      typeof data.nextStep === "string"
+        ? data.nextStep
+        : typeof data.next_step === "string"
+          ? data.next_step
+          : null,
+    recommendedActions: Array.isArray(data.recommendedActions)
+      ? data.recommendedActions.filter(
+          (item): item is string => typeof item === "string",
+        )
+      : Array.isArray(data.recommended_actions)
+        ? data.recommended_actions.filter(
+            (item): item is string => typeof item === "string",
+          )
+        : [],
     monitoringOnly: Boolean(
       data.monitoringOnly ?? data.monitoring_only ?? true,
     ),
