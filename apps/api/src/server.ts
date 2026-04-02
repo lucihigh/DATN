@@ -255,6 +255,13 @@ const OLLAMA_FALLBACK_MODEL = process.env.OLLAMA_FALLBACK_MODEL || "";
 const OLLAMA_FALLBACK_TIMEOUT_MS = Number(
   process.env.OLLAMA_FALLBACK_TIMEOUT_MS || "20000",
 );
+const OLLAMA_TEMPERATURE = Number(process.env.OLLAMA_TEMPERATURE || "0.25");
+const OLLAMA_TOP_P = Number(process.env.OLLAMA_TOP_P || "0.9");
+const OLLAMA_REPEAT_PENALTY = Number(
+  process.env.OLLAMA_REPEAT_PENALTY || "1.08",
+);
+const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX || "4096");
+const OLLAMA_NUM_PREDICT = Number(process.env.OLLAMA_NUM_PREDICT || "768");
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
 const OPENAI_REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || "low";
@@ -311,6 +318,18 @@ const TRANSFER_PROBE_SMALL_AMOUNT_MAX = Number(
 );
 const TRANSFER_PROBE_BURST_COUNT_24H = Number(
   process.env.TRANSFER_PROBE_BURST_COUNT_24H || "3",
+);
+const SMALL_TRANSFER_BURST_WINDOW_MINUTES = Number(
+  process.env.SMALL_TRANSFER_BURST_WINDOW_MINUTES || "5",
+);
+const SMALL_TRANSFER_BURST_COUNT = Number(
+  process.env.SMALL_TRANSFER_BURST_COUNT || "5",
+);
+const SMALL_TRANSFER_BURST_SAME_RECIPIENT_COUNT = Number(
+  process.env.SMALL_TRANSFER_BURST_SAME_RECIPIENT_COUNT || "3",
+);
+const SMALL_TRANSFER_BURST_BLOCK_MINUTES = Number(
+  process.env.SMALL_TRANSFER_BURST_BLOCK_MINUTES || "10",
 );
 const TRANSFER_PROBE_LARGE_ESCALATION_MIN_AMOUNT = Number(
   process.env.TRANSFER_PROBE_LARGE_ESCALATION_MIN_AMOUNT ||
@@ -651,6 +670,9 @@ type TransferStepUpPolicy = {
   rollingOutflowAmount: number;
   recentLargeCompletedCount: number;
   shouldBlockContinuousLargeTransfer: boolean;
+  shouldBlockSmallTransferBurst: boolean;
+  recentSmallTransferCount: number;
+  recentSmallTransferSameRecipientCount: number;
   blockReason: string | null;
   blockedUntil: string | null;
   retryAfterSeconds: number | null;
@@ -3995,11 +4017,55 @@ const polishCopilotFollowUpQuestion = (value: string | null | undefined) => {
   return cleaned;
 };
 
+const extractCopilotJsonCandidate = (value: string) => {
+  const sanitized = sanitizeCopilotText(value);
+  if (!sanitized) return "";
+  if (sanitized.startsWith("{") && sanitized.endsWith("}")) {
+    return sanitized;
+  }
+
+  const firstBrace = sanitized.indexOf("{");
+  const lastBrace = sanitized.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    return sanitized.slice(firstBrace, lastBrace + 1).trim();
+  }
+
+  return sanitized;
+};
+
+const buildFallbackCopilotPayload = (
+  value: string,
+): CopilotResponsePayload | null => {
+  const cleaned = polishCopilotReplyText(sanitizeCopilotText(value));
+  if (!cleaned) return null;
+
+  const normalized = normalizeCopilotText(cleaned);
+  const highRisk =
+    /\b(scam|fraud|otp|pin|password|faceid|remote access|screen share|lua dao|ma otp|mat khau|pin)\b/.test(
+      normalized,
+    );
+  const mediumRisk =
+    highRisk ||
+    /\b(risk|volatile|drawdown|debt|loan|margin|rui ro|bien dong|no vay)\b/.test(
+      normalized,
+    );
+
+  return {
+    reply: cleaned,
+    topic: "copilot-chat",
+    suggestedActions: [],
+    suggestedDepositAmount: null,
+    riskLevel: highRisk ? "high" : mediumRisk ? "medium" : "low",
+    confidence: 0.58,
+    followUpQuestion: null,
+  };
+};
+
 const parseOpenAiCopilotPayload = (
   value: string,
 ): CopilotResponsePayload | null => {
   try {
-    const parsed = JSON.parse(sanitizeCopilotText(value)) as Record<
+    const parsed = JSON.parse(extractCopilotJsonCandidate(value)) as Record<
       string,
       unknown
     >;
@@ -4037,13 +4103,13 @@ const parseOpenAiCopilotPayload = (
       ),
     };
   } catch {
-    return null;
+    return buildFallbackCopilotPayload(value);
   }
 };
 
 const summarizeCopilotConversation = (messages: CopilotMessagePayload[]) =>
   messages
-    .slice(-8)
+    .slice(-12)
     .map(
       (message) =>
         `${message.role === "assistant" ? "Assistant" : message.role === "system" ? "System" : "User"}: ${message.content.trim()}`,
@@ -4157,17 +4223,22 @@ const buildOpenAiCopilotInput = (input: {
 const buildCopilotSystemInstructions = (language: CopilotLanguage) =>
   [
     "You are FPIPay Financial Copilot.",
-    "Answer as a practical financial assistant for a wallet app.",
+    "Answer like a polished, thoughtful conversational assistant, not like a rigid template engine.",
+    "Act as a strong finance-native chat assistant inside a wallet app.",
     "Use the wallet context and transaction context provided.",
     `Reply in ${language === "vi" ? "Vietnamese" : "English"} and keep the same language as the user's latest message.`,
+    "Maintain continuity with the conversation transcript and resolve references like 'that', 'this', 'last one', or 'in the past week' using recent context.",
     "Start with the answer immediately. The first sentence must address the user's question directly.",
     "Do not begin with permission-seeking, throat-clearing, generic offers to help, or by repeating the user's question.",
     "Never start the reply with lines such as 'Do you want me to help', 'I can help', or equivalent Vietnamese phrasing.",
-    "Sound sharp, premium, and insight-driven, not like a helpdesk bot.",
-    "For short finance questions, prefer a compact structure: direct takeaway first, then 2-4 high-signal points.",
+    "Sound sharp, premium, natural, and insight-driven, not like a helpdesk bot.",
+    "Prefer natural paragraphs first. Use bullets only when they genuinely improve clarity.",
+    "Use Markdown tables only when numeric comparisons materially benefit from a table. Do not force tables for every answer.",
+    "For short questions, answer compactly and naturally. For complex questions, organize the answer cleanly without sounding robotic.",
     "If data is unavailable, say that in one sentence, then still give the most useful next-best analysis instead of a generic refusal.",
     "Only ask a follow-up question after you have already delivered a useful answer.",
-    "Use followUpQuestion sparingly; set it to null unless it materially deepens the discussion.",
+    "Use followUpQuestion very sparingly; set it to null unless it materially deepens the discussion.",
+    "Keep suggestedActions empty unless there are truly useful concrete next steps.",
     "Prioritize user safety over convenience when the message contains signs of fraud, impersonation, urgency, OTP harvesting, remote-access setup, fake refunds, fake investment schemes, or account-takeover attempts.",
     "If a message looks like a scam, clearly say so, tell the user not to send money or codes, and recommend official verification steps.",
     "You can answer broad personal-finance questions even when they are not tied to a live wallet action, including budgeting, debt payoff, emergency funds, savings habits, cash-flow tradeoffs, statement interpretation, and financial planning.",
@@ -4178,12 +4249,13 @@ const buildCopilotSystemInstructions = (language: CopilotLanguage) =>
     "You can also help build long-term saving plans and summarize spending across daily, weekly, and monthly periods using wallet context.",
     "When the user asks for a statement or spending comparison, explicitly compare today vs yesterday, this week vs last week, and this month vs last month when relevant.",
     "If the user asks a general finance question and wallet context is not needed, still answer helpfully with practical education, decision frameworks, and clear caveats instead of refusing.",
+    "If the user asks a conversational follow-up, answer that follow-up directly instead of resetting to a generic wallet introduction.",
     "Do not claim real-time market prices unless they were already provided by another tool in the app context.",
     "If the user asks for exact live market prices and no live quote is present, say that live quote support should be used.",
     "Return valid JSON only with these keys:",
     "reply, topic, suggestedActions, suggestedDepositAmount, riskLevel, confidence, followUpQuestion",
-    "The reply field may contain Markdown tables.",
-    "When presenting amounts, prices, rates, percentages, counts, dates, or other numeric comparisons, format the numeric section as a compact Markdown table.",
+    "The reply field may contain Markdown.",
+    "suggestedActions may be an empty array.",
     "riskLevel must be one of: low, medium, high.",
     "confidence must be a number between 0 and 1.",
     "suggestedActions must be an array of short strings.",
@@ -4220,7 +4292,11 @@ const callOllamaCopilotWithModel = async (
         format: "json",
         stream: false,
         options: {
-          temperature: 0.2,
+          temperature: OLLAMA_TEMPERATURE,
+          top_p: OLLAMA_TOP_P,
+          repeat_penalty: OLLAMA_REPEAT_PENALTY,
+          num_ctx: OLLAMA_NUM_CTX,
+          num_predict: OLLAMA_NUM_PREDICT,
         },
       }),
     });
@@ -5894,7 +5970,10 @@ const isTodayTransactionReportIntent = (message: string) => {
     /\b(report|summary|summarize|list|bao cao|tong hop|liet ke|thong ke|sao ke|statement)\b/.test(
       normalized,
     ) ||
-    /giao dich hom nay|transactions today|today transaction/.test(normalized);
+    /giao dich hom nay|transactions today|today transaction/.test(normalized) ||
+    (asksForToday &&
+      asksForTransactions &&
+      /\b(xem|cho toi|cua toi|my|show|review|giup|di)\b/.test(normalized));
 
   return asksForToday && asksForTransactions && asksForReport;
 };
@@ -5915,7 +5994,13 @@ const isWeeklyTransactionReportIntent = (message: string) => {
   const asksForReport =
     /\b(report|summary|summarize|list|bao cao|tong hop|liet ke|thong ke|sao ke|statement)\b/.test(
       normalized,
-    ) || /giao dich tuan|weekly transaction|week transaction/.test(normalized);
+    ) ||
+    /giao dich tuan|weekly transaction|week transaction/.test(normalized) ||
+    (asksForWeek &&
+      asksForTransactions &&
+      /\b(xem|cho toi|cua toi|my|show|review|giup|di|trong)\b/.test(
+        normalized,
+      ));
 
   return asksForWeek && asksForTransactions && asksForReport;
 };
@@ -5933,7 +6018,12 @@ const isMonthlyTransactionReportIntent = (message: string) => {
   const asksForReport =
     /\b(report|summary|summarize|list|bao cao|tong hop|liet ke|thong ke|sao ke|statement)\b/.test(
       normalized,
-    );
+    ) ||
+    (asksForMonth &&
+      asksForTransactions &&
+      /\b(xem|cho toi|cua toi|my|show|review|giup|di|trong)\b/.test(
+        normalized,
+      ));
 
   return asksForMonth && asksForTransactions && asksForReport;
 };
@@ -8170,6 +8260,288 @@ const resolveUserAccountSegment = (metadata: unknown) => {
   return buildResolvedAccountProfile(metadata).segment;
 };
 
+type AccountProfileTransferThresholds = {
+  mediumAmount: number;
+  highAmount: number;
+  newRecipientAmount: number;
+  extremeMultiplier: number;
+};
+
+const ACCOUNT_PROFILE_TRANSFER_THRESHOLDS: Record<
+  ResolvedAccountProfile["profileCode"],
+  AccountProfileTransferThresholds
+> = {
+  PERSONAL_BASIC: {
+    mediumAmount: 1500,
+    highAmount: 5000,
+    newRecipientAmount: 1000,
+    extremeMultiplier: 8,
+  },
+  PERSONAL_STANDARD: {
+    mediumAmount: 3000,
+    highAmount: 10000,
+    newRecipientAmount: 2000,
+    extremeMultiplier: 8,
+  },
+  PERSONAL_PREMIUM: {
+    mediumAmount: 7000,
+    highAmount: 25000,
+    newRecipientAmount: 5000,
+    extremeMultiplier: 7,
+  },
+  BUSINESS_SMALL_BUSINESS: {
+    mediumAmount: 10000,
+    highAmount: 35000,
+    newRecipientAmount: 7000,
+    extremeMultiplier: 6,
+  },
+  BUSINESS_MEDIUM_BUSINESS: {
+    mediumAmount: 25000,
+    highAmount: 100000,
+    newRecipientAmount: 15000,
+    extremeMultiplier: 5,
+  },
+  BUSINESS_ENTERPRISE: {
+    mediumAmount: 50000,
+    highAmount: 250000,
+    newRecipientAmount: 30000,
+    extremeMultiplier: 4,
+  },
+};
+
+const getAccountProfileTransferThresholds = (
+  accountProfile: ResolvedAccountProfile,
+): AccountProfileTransferThresholds =>
+  ACCOUNT_PROFILE_TRANSFER_THRESHOLDS[accountProfile.profileCode];
+
+const TRANSFER_ACTION_ORDER: NonNullable<AnomalyResponse["finalAction"]>[] = [
+  "ALLOW",
+  "ALLOW_WITH_WARNING",
+  "REQUIRE_OTP",
+  "REQUIRE_OTP_FACE_ID",
+  "HOLD_REVIEW",
+];
+
+const rankTransferFinalAction = (
+  value: AnomalyResponse["finalAction"] | null | undefined,
+) => {
+  const normalized = value || "ALLOW";
+  const index = TRANSFER_ACTION_ORDER.indexOf(normalized);
+  return index >= 0 ? index : 0;
+};
+
+const promoteTransferRiskLevel = (
+  current: AnomalyResponse["riskLevel"],
+  target: AnomalyResponse["riskLevel"],
+): AnomalyResponse["riskLevel"] => {
+  const order: Record<AnomalyResponse["riskLevel"], number> = {
+    low: 0,
+    medium: 1,
+    high: 2,
+  };
+  return order[target] > order[current] ? target : current;
+};
+
+const hardenTransferAiResultForAccountProfile = (input: {
+  aiResult: AnomalyResponse;
+  amount: number;
+  senderBalance: number;
+  accountProfile: ResolvedAccountProfile;
+  recipientKnown: boolean;
+  faceIdRequired: boolean;
+  sessionRestrictLargeTransfers: boolean;
+  spendProfile: TransferSpendProfile;
+}): AnomalyResponse => {
+  const amount = Math.max(0, Number(input.amount) || 0);
+  if (amount <= 0) return input.aiResult;
+
+  const thresholds = getAccountProfileTransferThresholds(input.accountProfile);
+  const senderBalance = Math.max(0, Number(input.senderBalance) || 0);
+  const drainRatio = amount / Math.max(senderBalance, 1);
+  const amountVsAverage =
+    input.spendProfile.dailySpendAvg30d > 0
+      ? amount / Math.max(input.spendProfile.dailySpendAvg30d, 1)
+      : null;
+  const aiUnavailable =
+    input.aiResult.modelSource === "fallback" ||
+    input.aiResult.modelSource === "api-profile-guard-fallback" ||
+    input.aiResult.reasons.some((reason) =>
+      /ai monitoring unavailable/i.test(reason),
+    );
+  const exceedsMediumBand = amount >= thresholds.mediumAmount;
+  const exceedsHighBand = amount >= thresholds.highAmount;
+  const exceedsExtremeBand =
+    amount >= thresholds.highAmount * thresholds.extremeMultiplier;
+  const isLargeNewRecipientTransfer =
+    !input.recipientKnown && amount >= thresholds.newRecipientAmount;
+  const isStrictPersonalTier =
+    input.accountProfile.category === "PERSONAL" &&
+    input.accountProfile.tier === "BASIC";
+  const hasStrongSpendBreak =
+    amountVsAverage !== null &&
+    amountVsAverage >=
+      (isStrictPersonalTier
+        ? 8
+        : input.accountProfile.reviewBias === "balanced"
+          ? 10
+          : 12);
+  const shouldForceHardReview =
+    exceedsExtremeBand ||
+    (isStrictPersonalTier &&
+      exceedsHighBand &&
+      (!input.recipientKnown || drainRatio >= 0.75)) ||
+    (aiUnavailable &&
+      exceedsHighBand &&
+      (!input.recipientKnown || drainRatio >= 0.75)) ||
+    (exceedsHighBand && drainRatio >= 0.9);
+
+  if (
+    !exceedsMediumBand &&
+    !isLargeNewRecipientTransfer &&
+    !hasStrongSpendBreak &&
+    !shouldForceHardReview
+  ) {
+    return input.aiResult;
+  }
+
+  let riskLevel = input.aiResult.riskLevel;
+  let finalAction = input.aiResult.finalAction || "ALLOW";
+  let finalScore =
+    typeof input.aiResult.finalScore === "number"
+      ? input.aiResult.finalScore
+      : 0;
+  let baseScore =
+    typeof input.aiResult.baseScore === "number"
+      ? input.aiResult.baseScore
+      : finalScore;
+
+  const reasons = dedupeStringList([
+    ...input.aiResult.reasons,
+    exceedsHighBand
+      ? `Amount exceeds the normal high-value band for a ${input.accountProfile.label.toLowerCase()} account.`
+      : exceedsMediumBand
+        ? `Amount is elevated for a ${input.accountProfile.label.toLowerCase()} account and should not pass under passive monitoring.`
+        : null,
+    isLargeNewRecipientTransfer
+      ? "Large transfer is being sent to a recipient outside the user's established completed-transfer history."
+      : null,
+    drainRatio >= 0.75
+      ? `This payment would consume ${Math.round(drainRatio * 100)}% of the current wallet balance.`
+      : null,
+    hasStrongSpendBreak
+      ? "Transfer amount is materially above the user's recent clean spending baseline."
+      : null,
+    aiUnavailable
+      ? "AI scoring was unavailable, so the platform applied strict account-tier protection instead of silently allowing the transfer."
+      : null,
+  ]).slice(0, 6);
+
+  if (shouldForceHardReview) {
+    riskLevel = "high";
+    finalAction = "HOLD_REVIEW";
+    finalScore = Math.max(finalScore, 92);
+    baseScore = Math.max(baseScore, 92);
+  } else if (
+    exceedsHighBand ||
+    isLargeNewRecipientTransfer ||
+    hasStrongSpendBreak
+  ) {
+    riskLevel = promoteTransferRiskLevel(riskLevel, "high");
+    finalAction =
+      rankTransferFinalAction(finalAction) >=
+      rankTransferFinalAction("REQUIRE_OTP_FACE_ID")
+        ? finalAction
+        : input.faceIdRequired || amount >= thresholds.highAmount
+          ? "REQUIRE_OTP_FACE_ID"
+          : "REQUIRE_OTP";
+    finalScore = Math.max(finalScore, 78);
+    baseScore = Math.max(baseScore, 78);
+  } else if (exceedsMediumBand) {
+    riskLevel = promoteTransferRiskLevel(riskLevel, "medium");
+    finalAction =
+      rankTransferFinalAction(finalAction) >=
+      rankTransferFinalAction("REQUIRE_OTP")
+        ? finalAction
+        : "REQUIRE_OTP";
+    finalScore = Math.max(finalScore, 58);
+    baseScore = Math.max(baseScore, 58);
+  }
+
+  const mitigationScore =
+    typeof input.aiResult.mitigationScore === "number"
+      ? input.aiResult.mitigationScore
+      : Math.max(0, baseScore - finalScore);
+
+  return {
+    ...input.aiResult,
+    riskLevel,
+    reasons,
+    modelSource: aiUnavailable
+      ? "api-profile-guard-fallback"
+      : input.aiResult.modelSource || "api-profile-guard",
+    monitoringOnly: false,
+    requireOtp:
+      finalAction === "REQUIRE_OTP" ||
+      finalAction === "REQUIRE_OTP_FACE_ID" ||
+      finalAction === "HOLD_REVIEW",
+    otpChannel: input.aiResult.otpChannel || "email",
+    otpReason:
+      finalAction === "REQUIRE_OTP" || finalAction === "REQUIRE_OTP_FACE_ID"
+        ? `the transfer exceeds the protection band for a ${input.accountProfile.label.toLowerCase()} account`
+        : input.aiResult.otpReason,
+    headline: shouldForceHardReview
+      ? `Transfer exceeds the safe operating band for ${input.accountProfile.label}`
+      : exceedsHighBand
+        ? `${input.accountProfile.label} account requires step-up for this amount`
+        : input.aiResult.headline,
+    summary: shouldForceHardReview
+      ? "The transfer is too large for the current account tier to pass automatically and must be reviewed before completion."
+      : exceedsHighBand
+        ? "The transfer materially exceeds the current account tier baseline, so passive AI monitoring is not enough."
+        : input.aiResult.summary,
+    nextStep:
+      finalAction === "HOLD_REVIEW"
+        ? "Place the transfer on hold and require admin review before any funds leave the wallet."
+        : finalAction === "REQUIRE_OTP_FACE_ID"
+          ? "Require OTP and FaceID, then re-check the recipient and amount before completion."
+          : finalAction === "REQUIRE_OTP"
+            ? "Require OTP and review the recipient, amount, and note again before sending."
+            : input.aiResult.nextStep,
+    recommendedActions: dedupeStringList([
+      ...input.aiResult.recommendedActions,
+      "Confirm the recipient and payment purpose independently before continuing.",
+      shouldForceHardReview
+        ? "Do not release this transfer automatically while the account remains on the current tier."
+        : "Escalate the transfer with stronger verification because it sits outside the normal tier baseline.",
+    ]).slice(0, 4),
+    finalAction,
+    finalScore,
+    baseScore,
+    mitigationScore,
+    stepUpLevel:
+      finalAction === "HOLD_REVIEW"
+        ? "manual_review"
+        : finalAction === "REQUIRE_OTP_FACE_ID"
+          ? "otp_faceid"
+          : finalAction === "REQUIRE_OTP"
+            ? "otp"
+            : input.aiResult.stepUpLevel,
+    analysisSignals: {
+      ...(input.aiResult.analysisSignals || {}),
+      accountProfileGuardTriggered: true,
+      accountProfileCode: input.accountProfile.profileCode,
+      accountProfileLabel: input.accountProfile.label,
+      profileThresholds: thresholds,
+      amountVsTierMedium: roundMoney(
+        amount / Math.max(thresholds.mediumAmount, 1),
+      ),
+      amountVsTierHigh: roundMoney(amount / Math.max(thresholds.highAmount, 1)),
+      aiUnavailable,
+      balanceDrainRatio: Number(drainRatio.toFixed(3)),
+    },
+  };
+};
+
 const normalizeRecentTransferRecipients = (value: unknown) => {
   if (!Array.isArray(value)) return [] as RecentTransferRecipient[];
 
@@ -8740,9 +9112,11 @@ const evaluateTransferStepUpPolicy = async (input: {
   userId: string;
   amount: number;
   currency: string;
+  toAccount?: string | null;
 }) => {
   const now = Date.now();
   const fundsFlowWindowMinutes = Math.max(
+    SMALL_TRANSFER_BURST_WINDOW_MINUTES,
     CUMULATIVE_TRANSFER_FACE_ID_WINDOW_MINUTES,
     CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES,
   );
@@ -8759,8 +9133,14 @@ const evaluateTransferStepUpPolicy = async (input: {
   let completedOutflowWindow = 0;
   let recentLargeCompletedCount = 0;
   let latestLargeCompletedAt: Date | null = null;
+  let recentSmallTransferCount = 0;
+  let recentSmallTransferSameRecipientCount = 0;
+  let latestSmallTransferAt: Date | null = null;
   const largeTransferSince = new Date(
     now - CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES * 60 * 1000,
+  ).getTime();
+  const smallTransferBurstSince = new Date(
+    now - SMALL_TRANSFER_BURST_WINDOW_MINUTES * 60 * 1000,
   ).getTime();
 
   for (const row of rows) {
@@ -8776,6 +9156,12 @@ const evaluateTransferStepUpPolicy = async (input: {
     }
 
     const txAmount = Number(event.amount || 0);
+    const isSmallTransfer =
+      txAmount > 0 && txAmount <= TRANSFER_PROBE_SMALL_AMOUNT_MAX;
+    const sameRecipient =
+      Boolean(input.toAccount) &&
+      Boolean(event.toAccount) &&
+      event.toAccount === input.toAccount;
     completedOutflowWindow += txAmount;
     if (
       txAmount > TRANSFER_FACE_ID_THRESHOLD &&
@@ -8787,6 +9173,26 @@ const evaluateTransferStepUpPolicy = async (input: {
         row.createdAt.getTime() > latestLargeCompletedAt.getTime()
       ) {
         latestLargeCompletedAt = row.createdAt;
+      }
+    }
+    if (
+      row.createdAt.getTime() >= smallTransferBurstSince &&
+      isSmallTransfer &&
+      (event.lifecycle === "COMPLETED" ||
+        event.lifecycle === "PENDING_OTP" ||
+        event.lifecycle === "OTP_VERIFIED" ||
+        event.lifecycle === "REVIEW_REQUIRED" ||
+        event.lifecycle === "BLOCKED")
+    ) {
+      recentSmallTransferCount += 1;
+      if (sameRecipient) {
+        recentSmallTransferSameRecipientCount += 1;
+      }
+      if (
+        !latestSmallTransferAt ||
+        row.createdAt.getTime() > latestSmallTransferAt.getTime()
+      ) {
+        latestSmallTransferAt = row.createdAt;
       }
     }
   }
@@ -8816,13 +9222,24 @@ const evaluateTransferStepUpPolicy = async (input: {
   const shouldBlockContinuousLargeTransfer =
     input.amount > TRANSFER_FACE_ID_THRESHOLD &&
     recentLargeCompletedCount >= CONTINUOUS_LARGE_TRANSFER_BLOCK_COUNT;
+  const shouldBlockSmallTransferBurst =
+    input.amount > 0 &&
+    input.amount <= TRANSFER_PROBE_SMALL_AMOUNT_MAX &&
+    (recentSmallTransferCount >= SMALL_TRANSFER_BURST_COUNT ||
+      recentSmallTransferSameRecipientCount >=
+        SMALL_TRANSFER_BURST_SAME_RECIPIENT_COUNT);
   const blockedUntilDate =
     shouldBlockContinuousLargeTransfer && latestLargeCompletedAt
       ? new Date(
           latestLargeCompletedAt.getTime() +
             CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES * 60 * 1000,
         )
-      : null;
+      : shouldBlockSmallTransferBurst && latestSmallTransferAt
+        ? new Date(
+            latestSmallTransferAt.getTime() +
+              SMALL_TRANSFER_BURST_BLOCK_MINUTES * 60 * 1000,
+          )
+        : null;
   const retryAfterSeconds = blockedUntilDate
     ? Math.max(1, Math.ceil((blockedUntilDate.getTime() - Date.now()) / 1000))
     : null;
@@ -8834,7 +9251,11 @@ const evaluateTransferStepUpPolicy = async (input: {
         retryAfterSeconds ??
           CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES * 60,
       )} before sending another high-value transfer.`
-    : null;
+    : shouldBlockSmallTransferBurst
+      ? `Too many small transfers were attempted in the last ${SMALL_TRANSFER_BURST_WINDOW_MINUTES} minutes. Please wait ${formatRetryWait(
+          retryAfterSeconds ?? SMALL_TRANSFER_BURST_BLOCK_MINUTES * 60,
+        )} before sending another small transfer.`
+      : null;
 
   return {
     faceIdRequired,
@@ -8842,6 +9263,9 @@ const evaluateTransferStepUpPolicy = async (input: {
     rollingOutflowAmount: projectedOutflowWindow,
     recentLargeCompletedCount,
     shouldBlockContinuousLargeTransfer,
+    shouldBlockSmallTransferBurst,
+    recentSmallTransferCount,
+    recentSmallTransferSameRecipientCount,
     blockReason,
     blockedUntil: blockedUntilDate?.toISOString() || null,
     retryAfterSeconds,
@@ -9370,7 +9794,21 @@ const completeAuthorizedTransfer = async (input: {
     throw new Error("INVALID_TRANSFER_PAYLOAD");
   }
 
-  if (input.faceIdRequired) {
+  const effectiveFinalAction = input.transferAiResult.finalAction || "ALLOW";
+  if (effectiveFinalAction === "HOLD_REVIEW") {
+    throw new Error("TRANSFER_MANUAL_REVIEW_REQUIRED");
+  }
+  if (
+    input.verificationMethod === "pin" &&
+    (effectiveFinalAction === "REQUIRE_OTP" ||
+      effectiveFinalAction === "REQUIRE_OTP_FACE_ID")
+  ) {
+    throw new Error("TRANSFER_OTP_VERIFICATION_REQUIRED");
+  }
+
+  const effectiveFaceIdRequired =
+    input.faceIdRequired || effectiveFinalAction === "REQUIRE_OTP_FACE_ID";
+  if (effectiveFaceIdRequired) {
     const storedFaceId = getInternalFaceIdMetadata(input.senderUser.metadata);
     const storedDescriptor =
       storedFaceId && typeof storedFaceId.descriptor === "string"
@@ -12680,7 +13118,67 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
       userId: senderUserId,
       amount: context.amount,
       currency: context.senderWallet.currency,
+      toAccount: context.receiverAccountNumber,
     });
+    if (transferStepUpPolicy.shouldBlockSmallTransferBurst) {
+      const blockedUntil =
+        transferStepUpPolicy.blockedUntil ||
+        new Date(
+          Date.now() + SMALL_TRANSFER_BURST_BLOCK_MINUTES * 60 * 1000,
+        ).toISOString();
+      const transferAdvisory = buildBlockedTransferAdvisory({
+        amount: context.amount,
+        currency: context.senderWallet.currency,
+        senderBalance: Number(context.senderWallet.balance),
+        blockedUntil,
+        archetype: "Small Transfer Burst",
+        reasons: [
+          `You already attempted ${transferStepUpPolicy.recentSmallTransferCount} small transfers in the last ${SMALL_TRANSFER_BURST_WINDOW_MINUTES} minutes.`,
+          transferStepUpPolicy.recentSmallTransferSameRecipientCount > 0
+            ? `${transferStepUpPolicy.recentSmallTransferSameRecipientCount} of those small transfers targeted this same recipient.`
+            : `FPIPay applies a cooldown when small transfers are repeated too quickly.`,
+        ],
+        timeline: [
+          "Repeated low-value transfers were detected in a short time window.",
+          "This pattern is commonly used to test account reachability before larger transfers.",
+        ],
+        recommendedActions: [
+          "Wait for the cooldown to finish before trying another low-value transfer.",
+          "Only retry sooner if you can explain the burst pattern during manual review.",
+        ],
+        title: "Small-transfer burst is temporarily blocked",
+        message:
+          transferStepUpPolicy.blockReason ||
+          "Too many low-value transfers were attempted in a short period, so FPIPay applied a temporary cooldown.",
+      });
+      return res.status(423).json({
+        error:
+          transferStepUpPolicy.blockReason ||
+          "Too many small transfers were attempted in a short period.",
+        previewStatus: "blocked",
+        anomaly: {
+          ...DEFAULT_AI_RESPONSE,
+          requestKey: null,
+          riskLevel: "high",
+          finalAction: "HOLD_REVIEW",
+          finalScore: 92,
+          reasons: transferAdvisory.reasons,
+          archetype: transferAdvisory.archetype,
+          headline: transferAdvisory.title,
+          summary: transferAdvisory.message,
+          nextStep:
+            "Wait for the cooldown to finish before starting another low-value transfer.",
+        } satisfies AnomalyResponse,
+        transferAdvisory,
+        faceIdRequired: false,
+        faceIdReason: null,
+        rollingOutflowAmount: transferStepUpPolicy.rollingOutflowAmount,
+        recipient: {
+          accountNumber: context.receiverAccountNumber,
+          userId: context.resolvedReceiverUserId,
+        },
+      });
+    }
     const transferNoteLlmPromise = analyzeTransferNoteWithLlm({
       note: context.note,
       amount: context.amount,
@@ -12795,6 +13293,18 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
       ),
       faceIdRequired: transferStepUpPolicy.faceIdRequired,
       behaviorProfile,
+    });
+    aiResult = hardenTransferAiResultForAccountProfile({
+      aiResult,
+      amount: context.amount,
+      senderBalance: Number(context.senderWallet.balance),
+      accountProfile,
+      recipientKnown: recipientProfile.isKnownRecipient,
+      faceIdRequired: transferStepUpPolicy.faceIdRequired,
+      sessionRestrictLargeTransfers: Boolean(
+        req.sessionSecurity?.restrictLargeTransfers,
+      ),
+      spendProfile,
     });
 
     const transferAdvisory = buildTransferSafetyAdvisory({
@@ -12929,7 +13439,37 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       userId: senderUserId,
       amount: context.amount,
       currency: context.senderWallet.currency,
+      toAccount: context.receiverAccountNumber,
     });
+    if (transferStepUpPolicy.shouldBlockSmallTransferBurst) {
+      await logFundsFlowEvent({
+        actor: req.user?.email,
+        userId: senderUserId,
+        ipAddress: getRequestIp(req),
+        channel: "WALLET_TRANSFER",
+        lifecycle: "BLOCKED",
+        direction: "OUTFLOW",
+        amount: context.amount,
+        currency: context.senderWallet.currency,
+        fromAccount: context.senderAccountNumber,
+        toAccount: context.receiverAccountNumber,
+        fromUserId: senderUserId,
+        toUserId: context.resolvedReceiverUserId,
+        balanceBefore: Number(context.senderWallet.balance),
+        balanceAfter: Math.max(
+          0,
+          Number(context.senderWallet.balance) - context.amount,
+        ),
+        sourceLabel: "SMALL_TRANSFER_BURST_BLOCK",
+      });
+      return res.status(423).json({
+        error:
+          transferStepUpPolicy.blockReason ||
+          "Too many small transfers were attempted in a short period.",
+        blockedUntil: transferStepUpPolicy.blockedUntil,
+        retryAfterSeconds: transferStepUpPolicy.retryAfterSeconds,
+      });
+    }
     if (transferStepUpPolicy.shouldBlockContinuousLargeTransfer) {
       await logFundsFlowEvent({
         actor: req.user?.email,
@@ -13159,6 +13699,18 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       ),
       faceIdRequired: transferStepUpPolicy.faceIdRequired,
       behaviorProfile,
+    });
+    aiResult = hardenTransferAiResultForAccountProfile({
+      aiResult,
+      amount: context.amount,
+      senderBalance: Number(context.senderWallet.balance),
+      accountProfile,
+      recipientKnown: recipientProfile.isKnownRecipient,
+      faceIdRequired: transferStepUpPolicy.faceIdRequired,
+      sessionRestrictLargeTransfers: Boolean(
+        req.sessionSecurity?.restrictLargeTransfers,
+      ),
+      spendProfile,
     });
 
     const transferAdvisory = buildTransferSafetyAdvisory({
@@ -13403,6 +13955,9 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       crypto.randomUUID();
     const requiresOtp =
       shouldRequireOtpForMediumRisk ||
+      aiResult.finalAction === "REQUIRE_OTP" ||
+      aiResult.finalAction === "REQUIRE_OTP_FACE_ID" ||
+      aiResult.finalAction === "HOLD_REVIEW" ||
       aiResult.riskLevel === "high" ||
       effectiveFaceIdRequired;
     if (!requiresOtp) {
@@ -13562,6 +14117,18 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       });
     }
     if (err instanceof Error) {
+      if (err.message === "TRANSFER_MANUAL_REVIEW_REQUIRED") {
+        return res.status(423).json({
+          error:
+            "This transfer exceeds the safe operating band for the current account tier and must be reviewed manually.",
+        });
+      }
+      if (err.message === "TRANSFER_OTP_VERIFICATION_REQUIRED") {
+        return res.status(409).json({
+          error:
+            "This transfer now requires OTP verification because it falls outside the normal account-tier baseline.",
+        });
+      }
       if (err.message === "MISSING_RECIPIENT_ACCOUNT") {
         return res.status(400).json({ error: "Missing recipient account" });
       }
@@ -13770,7 +14337,9 @@ app.post("/transfer/otp/verify", requireAuth, async (req, res) => {
         .json({ error: "Stored OTP transfer payload is invalid" });
     }
     const faceIdRequired =
-      metadata.faceIdRequired === true || amount > TRANSFER_FACE_ID_THRESHOLD;
+      metadata.faceIdRequired === true ||
+      transferAiResult.finalAction === "REQUIRE_OTP_FACE_ID" ||
+      amount > TRANSFER_FACE_ID_THRESHOLD;
     const faceIdReason =
       typeof metadata.faceIdReason === "string" ? metadata.faceIdReason : null;
     const rollingOutflowAmount =
@@ -13922,7 +14491,9 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
         .json({ error: "Stored OTP transfer payload is invalid" });
     }
     const faceIdRequired =
-      metadata.faceIdRequired === true || amount > TRANSFER_FACE_ID_THRESHOLD;
+      metadata.faceIdRequired === true ||
+      transferAiResult.finalAction === "REQUIRE_OTP_FACE_ID" ||
+      amount > TRANSFER_FACE_ID_THRESHOLD;
     const faceIdReason =
       typeof metadata.faceIdReason === "string" ? metadata.faceIdReason : null;
     const transferRequestKey =
@@ -13982,6 +14553,24 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
       return res
         .status(400)
         .json({ error: "Stored OTP transfer payload is invalid" });
+    }
+    if (
+      err instanceof Error &&
+      err.message === "TRANSFER_MANUAL_REVIEW_REQUIRED"
+    ) {
+      return res.status(423).json({
+        error:
+          "This transfer exceeds the safe operating band for the current account tier and must be reviewed manually.",
+      });
+    }
+    if (
+      err instanceof Error &&
+      err.message === "TRANSFER_OTP_VERIFICATION_REQUIRED"
+    ) {
+      return res.status(409).json({
+        error:
+          "This transfer now requires OTP verification because it falls outside the normal account-tier baseline.",
+      });
     }
     if (err instanceof Error && err.message === "SENDER_WALLET_NOT_FOUND") {
       return res.status(400).json({ error: "Sender wallet not found" });
