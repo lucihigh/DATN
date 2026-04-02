@@ -302,6 +302,27 @@ class TransactionEvent(BaseModel):
             "recentPendingOtpCount7d",
         ),
     )
+    recent_inbound_amount_24h: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices(
+            "recent_inbound_amount_24h",
+            "recentInboundAmount24h",
+        ),
+    )
+    recent_admin_topup_amount_24h: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices(
+            "recent_admin_topup_amount_24h",
+            "recentAdminTopUpAmount24h",
+        ),
+    )
+    recent_self_deposit_amount_24h: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices(
+            "recent_self_deposit_amount_24h",
+            "recentSelfDepositAmount24h",
+        ),
+    )
     small_probe_count_24h: int = Field(
         default=0,
         validation_alias=AliasChoices("small_probe_count_24h", "smallProbeCount24h"),
@@ -336,6 +357,13 @@ class TransactionEvent(BaseModel):
         validation_alias=AliasChoices(
             "probe_then_large_risk_score",
             "probeThenLargeRiskScore",
+        ),
+    )
+    rapid_cash_out_risk_score: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices(
+            "rapid_cash_out_risk_score",
+            "rapidCashOutRiskScore",
         ),
     )
     llm_note_risk_level: str = Field(
@@ -749,6 +777,17 @@ def adjust_tx_risk_level(base_risk: str, event: TransactionEvent, feedback_profi
         risk = _max_risk_level(risk, "MEDIUM")
 
     if (
+        event.rapid_cash_out_risk_score >= 0.75
+        and event.amount >= max(1000.0, thresholds["medium_amount"] * 0.5)
+    ):
+        risk = _max_risk_level(risk, "HIGH")
+    elif (
+        event.rapid_cash_out_risk_score >= 0.45
+        and event.amount >= max(750.0, thresholds["medium_amount"] * 0.35)
+    ):
+        risk = _max_risk_level(risk, "MEDIUM")
+
+    if (
         event.small_probe_count_24h >= 3
         and not event.recipient_known
         and event.amount >= max(500.0, thresholds["medium_amount"] * 0.5)
@@ -880,6 +919,16 @@ def build_tx_reasons(
         reasons.append("Recent small-value probes targeted new recipients")
     if event.amount >= probe_escalation_amount_floor and event.probe_then_large_risk_score >= 0.65:
         reasons.append("Behavior resembles a probe-then-escalate fraud pattern")
+    if (
+        event.rapid_cash_out_risk_score >= 0.45
+        and event.amount >= max(750.0, thresholds["medium_amount"] * 0.35)
+    ):
+        reasons.append("Funds recently entered the wallet and are being moved back out unusually quickly")
+    if (
+        event.recent_admin_topup_amount_24h > 0
+        and event.amount >= max(1000.0, event.recent_admin_topup_amount_24h * 0.75)
+    ):
+        reasons.append("Recent admin top-up is being cashed out unusually quickly")
     if event.account_profile_status == "PENDING_REVIEW":
         reasons.append("Account profile change is pending review, so large-value behavior is treated more cautiously")
     elif event.account_profile_status == "REQUIRES_REVIEW":

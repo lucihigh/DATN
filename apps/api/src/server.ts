@@ -647,12 +647,16 @@ type TransferBehaviorProfile = {
   maxCompletedOutflow90d: number;
   similarFlaggedAmountCount90d: number;
   sameRecipientFlaggedCount90d: number;
+  recentInboundAmount24h: number;
+  recentAdminTopUpAmount24h: number;
+  recentSelfDepositAmount24h: number;
   smallProbeCount24h: number;
   smallProbeTotal24h: number;
   distinctSmallProbeRecipients24h: number;
   sameRecipientSmallProbeCount24h: number;
   newRecipientSmallProbeCount24h: number;
   probeThenLargeRiskScore: number;
+  rapidCashOutRiskScore: number;
 };
 
 type TransferNoteLlmAnalysis = {
@@ -8351,6 +8355,7 @@ const hardenTransferAiResultForAccountProfile = (input: {
   faceIdRequired: boolean;
   sessionRestrictLargeTransfers: boolean;
   spendProfile: TransferSpendProfile;
+  behaviorProfile: TransferBehaviorProfile;
 }): AnomalyResponse => {
   const amount = Math.max(0, Number(input.amount) || 0);
   if (amount <= 0) return input.aiResult;
@@ -8385,6 +8390,18 @@ const hardenTransferAiResultForAccountProfile = (input: {
         : input.accountProfile.reviewBias === "balanced"
           ? 10
           : 12);
+  const rapidCashOutSignal =
+    input.behaviorProfile.rapidCashOutRiskScore >= 0.7 &&
+    amount >= Math.max(1000, thresholds.mediumAmount * 0.5);
+  const recentTopUpCashOutSignal =
+    (input.behaviorProfile.recentAdminTopUpAmount24h > 0 ||
+      input.behaviorProfile.recentSelfDepositAmount24h > 0) &&
+    amount >=
+      Math.max(
+        1000,
+        input.behaviorProfile.recentInboundAmount24h * 0.75,
+        thresholds.mediumAmount * 0.5,
+      );
   const shouldForceHardReview =
     exceedsExtremeBand ||
     (isStrictPersonalTier &&
@@ -8393,7 +8410,9 @@ const hardenTransferAiResultForAccountProfile = (input: {
     (aiUnavailable &&
       exceedsHighBand &&
       (!input.recipientKnown || drainRatio >= 0.75)) ||
-    (exceedsHighBand && drainRatio >= 0.9);
+    (exceedsHighBand && drainRatio >= 0.9) ||
+    rapidCashOutSignal ||
+    recentTopUpCashOutSignal;
 
   if (
     !exceedsMediumBand &&
@@ -8430,6 +8449,13 @@ const hardenTransferAiResultForAccountProfile = (input: {
       : null,
     hasStrongSpendBreak
       ? "Transfer amount is materially above the user's recent clean spending baseline."
+      : null,
+    rapidCashOutSignal
+      ? "A large amount of funds entered this wallet recently and the current transfer would move most of it back out quickly."
+      : null,
+    input.behaviorProfile.recentAdminTopUpAmount24h > 0 &&
+    recentTopUpCashOutSignal
+      ? "Recent admin top-up is being cashed out unusually quickly, which matches a source-in/source-out laundering pattern."
       : null,
     aiUnavailable
       ? "AI scoring was unavailable, so the platform applied strict account-tier protection instead of silently allowing the transfer."
@@ -8538,6 +8564,12 @@ const hardenTransferAiResultForAccountProfile = (input: {
       amountVsTierHigh: roundMoney(amount / Math.max(thresholds.highAmount, 1)),
       aiUnavailable,
       balanceDrainRatio: Number(drainRatio.toFixed(3)),
+      recentInboundAmount24h: input.behaviorProfile.recentInboundAmount24h,
+      recentAdminTopUpAmount24h:
+        input.behaviorProfile.recentAdminTopUpAmount24h,
+      recentSelfDepositAmount24h:
+        input.behaviorProfile.recentSelfDepositAmount24h,
+      rapidCashOutRiskScore: input.behaviorProfile.rapidCashOutRiskScore,
     },
   };
 };
@@ -8997,6 +9029,9 @@ const getTransferBehaviorProfile = async (input: {
   let maxCompletedOutflow90d = 0;
   let similarFlaggedAmountCount90d = 0;
   let sameRecipientFlaggedCount90d = 0;
+  let recentInboundAmount24h = 0;
+  let recentAdminTopUpAmount24h = 0;
+  let recentSelfDepositAmount24h = 0;
   let smallProbeCount24h = 0;
   let smallProbeTotal24h = 0;
   let sameRecipientSmallProbeCount24h = 0;
@@ -9008,13 +9043,32 @@ const getTransferBehaviorProfile = async (input: {
     const event = toFundsFlowDatasetRow(row);
     if (
       !event ||
-      event.channel !== "WALLET_TRANSFER" ||
-      event.direction !== "OUTFLOW"
+      (event.channel !== "WALLET_TRANSFER" &&
+        event.channel !== "WALLET_DEPOSIT" &&
+        event.channel !== "ADMIN_TOPUP")
     ) {
       continue;
     }
 
     const createdAtMs = new Date(event.createdAt).getTime();
+    if (
+      createdAtMs >= since24hMs &&
+      event.lifecycle === "COMPLETED" &&
+      event.direction === "INFLOW"
+    ) {
+      recentInboundAmount24h += event.amount;
+      if (event.sourceLabel === "ADMIN_TOPUP") {
+        recentAdminTopUpAmount24h += event.amount;
+      }
+      if (event.sourceLabel === "SELF_DEPOSIT") {
+        recentSelfDepositAmount24h += event.amount;
+      }
+    }
+
+    if (event.channel !== "WALLET_TRANSFER" || event.direction !== "OUTFLOW") {
+      continue;
+    }
+
     const amountDelta = Math.abs(event.amount - input.amount);
     const sameRecipient =
       Boolean(input.toAccount) &&
@@ -9087,6 +9141,26 @@ const getTransferBehaviorProfile = async (input: {
     0,
     0.99,
   );
+  const rapidCashOutRiskScore = clamp(
+    (recentInboundAmount24h > 0 &&
+    input.amount >= Math.max(500, recentInboundAmount24h * 0.7)
+      ? 0.45
+      : 0) +
+      (recentInboundAmount24h > 0 &&
+      input.amount >= Math.max(1000, recentInboundAmount24h * 0.9)
+        ? 0.2
+        : 0) +
+      (recentAdminTopUpAmount24h > 0 &&
+      input.amount >= Math.max(1000, recentAdminTopUpAmount24h * 0.75)
+        ? 0.25
+        : 0) +
+      (recentSelfDepositAmount24h > 0 &&
+      input.amount >= Math.max(1000, recentSelfDepositAmount24h * 0.85)
+        ? 0.15
+        : 0),
+    0,
+    0.99,
+  );
 
   return {
     recentReviewCount30d,
@@ -9099,12 +9173,16 @@ const getTransferBehaviorProfile = async (input: {
     maxCompletedOutflow90d: roundMoney(maxCompletedOutflow90d),
     similarFlaggedAmountCount90d,
     sameRecipientFlaggedCount90d,
+    recentInboundAmount24h: roundMoney(recentInboundAmount24h),
+    recentAdminTopUpAmount24h: roundMoney(recentAdminTopUpAmount24h),
+    recentSelfDepositAmount24h: roundMoney(recentSelfDepositAmount24h),
     smallProbeCount24h,
     smallProbeTotal24h: roundMoney(smallProbeTotal24h),
     distinctSmallProbeRecipients24h: distinctSmallProbeRecipients24h.size,
     sameRecipientSmallProbeCount24h,
     newRecipientSmallProbeCount24h,
     probeThenLargeRiskScore: Number(probeThenLargeRiskScore.toFixed(3)),
+    rapidCashOutRiskScore: Number(rapidCashOutRiskScore.toFixed(3)),
   };
 };
 
@@ -13259,6 +13337,10 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
           recentReviewCount30d: behaviorProfile.recentReviewCount30d,
           recentBlockedCount30d: behaviorProfile.recentBlockedCount30d,
           recentPendingOtpCount7d: behaviorProfile.recentPendingOtpCount7d,
+          recentInboundAmount24h: behaviorProfile.recentInboundAmount24h,
+          recentAdminTopUpAmount24h: behaviorProfile.recentAdminTopUpAmount24h,
+          recentSelfDepositAmount24h:
+            behaviorProfile.recentSelfDepositAmount24h,
           smallProbeCount24h: behaviorProfile.smallProbeCount24h,
           smallProbeTotal24h: behaviorProfile.smallProbeTotal24h,
           distinctSmallProbeRecipients24h:
@@ -13268,6 +13350,7 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
           newRecipientSmallProbeCount24h:
             behaviorProfile.newRecipientSmallProbeCount24h,
           probeThenLargeRiskScore: behaviorProfile.probeThenLargeRiskScore,
+          rapidCashOutRiskScore: behaviorProfile.rapidCashOutRiskScore,
         }),
       });
       const rawResult = (await aiResp.json().catch(() => null)) as unknown;
@@ -13305,6 +13388,7 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
         req.sessionSecurity?.restrictLargeTransfers,
       ),
       spendProfile,
+      behaviorProfile,
     });
 
     const transferAdvisory = buildTransferSafetyAdvisory({
@@ -13661,6 +13745,10 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
           recentReviewCount30d: behaviorProfile.recentReviewCount30d,
           recentBlockedCount30d: behaviorProfile.recentBlockedCount30d,
           recentPendingOtpCount7d: behaviorProfile.recentPendingOtpCount7d,
+          recentInboundAmount24h: behaviorProfile.recentInboundAmount24h,
+          recentAdminTopUpAmount24h: behaviorProfile.recentAdminTopUpAmount24h,
+          recentSelfDepositAmount24h:
+            behaviorProfile.recentSelfDepositAmount24h,
           smallProbeCount24h: behaviorProfile.smallProbeCount24h,
           smallProbeTotal24h: behaviorProfile.smallProbeTotal24h,
           distinctSmallProbeRecipients24h:
@@ -13670,6 +13758,7 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
           newRecipientSmallProbeCount24h:
             behaviorProfile.newRecipientSmallProbeCount24h,
           probeThenLargeRiskScore: behaviorProfile.probeThenLargeRiskScore,
+          rapidCashOutRiskScore: behaviorProfile.rapidCashOutRiskScore,
         }),
       });
       const rawResult = (await aiResp.json().catch(() => null)) as unknown;
@@ -13711,6 +13800,7 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
         req.sessionSecurity?.restrictLargeTransfers,
       ),
       spendProfile,
+      behaviorProfile,
     });
 
     const transferAdvisory = buildTransferSafetyAdvisory({
