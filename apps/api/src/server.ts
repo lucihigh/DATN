@@ -2044,6 +2044,12 @@ type MarketQuoteSnapshot = {
   source: string;
 };
 
+type MarketAnalysisSnapshot = MarketQuoteSnapshot & {
+  oneYearStartPrice: number | null;
+  oneYearChange: number | null;
+  oneYearChangePercent: number | null;
+};
+
 const openaiClient = OPENAI_API_KEY
   ? new OpenAI({ apiKey: OPENAI_API_KEY })
   : null;
@@ -5485,6 +5491,225 @@ const fetchMarketQuote = async (
   }
 };
 
+const fetchMarketAnalysisSnapshot = async (
+  intent: MarketIntent,
+): Promise<MarketAnalysisSnapshot | null> => {
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    COPILOT_MARKET_TIMEOUT_MS,
+  );
+
+  try {
+    const response = await fetch(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+        intent.symbol,
+      )}?interval=1d&range=1y&includePrePost=false`,
+      {
+        headers: {
+          "User-Agent": "Mozilla/5.0 FPIPay/1.0",
+          Accept: "application/json",
+        },
+        signal: controller.signal,
+      },
+    );
+    if (!response.ok) return null;
+
+    const payload = (await response.json().catch(() => null)) as unknown;
+    const chart = normalizeRecord(payload);
+    const chartBody = normalizeRecord(chart.chart);
+    const result = Array.isArray(chartBody.result)
+      ? normalizeRecord(chartBody.result[0])
+      : {};
+    const meta = normalizeRecord(result.meta);
+    const timestamps = Array.isArray(result.timestamp)
+      ? result.timestamp.filter(
+          (item): item is number =>
+            typeof item === "number" && Number.isFinite(item),
+        )
+      : [];
+    const indicators = normalizeRecord(result.indicators);
+    const quoteGroup = Array.isArray(indicators.quote)
+      ? normalizeRecord(indicators.quote[0])
+      : {};
+    const closes = Array.isArray(quoteGroup.close)
+      ? quoteGroup.close.filter(
+          (item): item is number =>
+            typeof item === "number" && Number.isFinite(item),
+        )
+      : [];
+
+    const price =
+      asNumberOrNull(meta.regularMarketPrice) ??
+      asNumberOrNull(closes.length ? closes[closes.length - 1] : null) ??
+      null;
+    const previousClose =
+      asNumberOrNull(meta.previousClose) ??
+      asNumberOrNull(meta.chartPreviousClose) ??
+      null;
+    const marketTime =
+      asNumberOrNull(meta.regularMarketTime) ??
+      asNumberOrNull(
+        timestamps.length ? timestamps[timestamps.length - 1] : null,
+      ) ??
+      null;
+    const currency = asStringOrNull(meta.currency) ?? intent.quoteHint ?? "USD";
+    if (price === null || marketTime === null) return null;
+
+    const firstClose = closes.length ? closes[0] : null;
+    const oneYearStartPrice =
+      firstClose !== null && Number.isFinite(firstClose)
+        ? roundMoney(firstClose)
+        : null;
+    const oneYearChange =
+      oneYearStartPrice !== null ? roundMoney(price - oneYearStartPrice) : null;
+    const oneYearChangePercent =
+      oneYearStartPrice !== null && oneYearStartPrice !== 0
+        ? roundMoney(((price - oneYearStartPrice) / oneYearStartPrice) * 100)
+        : null;
+
+    return {
+      symbol: intent.symbol,
+      label: intent.label,
+      assetClass: intent.assetClass,
+      price,
+      currency,
+      previousClose,
+      change:
+        previousClose !== null && Number.isFinite(previousClose)
+          ? roundMoney(price - previousClose)
+          : null,
+      changePercent:
+        previousClose && Number.isFinite(previousClose) && previousClose !== 0
+          ? roundMoney(((price - previousClose) / previousClose) * 100)
+          : null,
+      exchangeName: asStringOrNull(meta.exchangeName),
+      marketState: asStringOrNull(meta.marketState),
+      asOf: new Date(marketTime * 1000),
+      source: "Yahoo Finance",
+      oneYearStartPrice,
+      oneYearChange,
+      oneYearChangePercent,
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+const formatCopilotPercent = (value: number | null, digits = 2) =>
+  value === null || !Number.isFinite(value)
+    ? "Unavailable"
+    : `${value >= 0 ? "+" : ""}${value.toFixed(digits)}%`;
+
+const buildPortfolioAnalysisWithLiveDataResponse = async (input: {
+  latestMessage: string;
+  language: CopilotLanguage;
+}): Promise<CopilotResponsePayload | null> => {
+  const intents = collectMarketIntents(input.latestMessage).filter(
+    (intent) => intent.assetClass === "stock" || intent.assetClass === "index",
+  );
+  if (!intents.length) return null;
+
+  const snapshots = (
+    await Promise.all(
+      intents.slice(0, 4).map((intent) => fetchMarketAnalysisSnapshot(intent)),
+    )
+  ).filter((item): item is MarketAnalysisSnapshot => Boolean(item));
+
+  if (!snapshots.length) {
+    return null;
+  }
+
+  const latest = normalizeCopilotText(input.latestMessage);
+  const asksCompare =
+    snapshots.length >= 2 ||
+    /\b(compare|comparison|vs|versus|so sanh|khac nhau)\b/.test(latest);
+  const asksOneYear = /\b(1 nam|1 year|one year|12 thang|12 months)\b/.test(
+    latest,
+  );
+
+  if (asksCompare) {
+    const comparisonTable = buildCopilotMarkdownTable(
+      input.language === "vi"
+        ? ["Ma", "Gia gan nhat", "1D", asksOneYear ? "1Y" : "Xu huong 1Y"]
+        : ["Symbol", "Latest price", "1D", asksOneYear ? "1Y" : "1Y trend"],
+      snapshots.map((snapshot) => [
+        snapshot.symbol,
+        `${snapshot.currency} ${formatMarketPrice(snapshot.price)}`,
+        formatCopilotPercent(snapshot.changePercent),
+        formatCopilotPercent(snapshot.oneYearChangePercent),
+      ]),
+    );
+
+    const facts = localizeCopilotText(
+      input.language,
+      `Duoi day la so sanh dua tren du lieu thi truong lay duoc tu ${snapshots[0]?.source || "market provider"} tai ${formatMarketTimestamp(snapshots[0].asOf)}. Neu hang nao hien "Unavailable" thi provider khong tra ve day du du lieu cho chi so do.`,
+      `Below is a comparison using market data returned by ${snapshots[0]?.source || "the market provider"} as of ${formatMarketTimestamp(snapshots[0].asOf)}. If any row shows "Unavailable", the provider did not return enough data for that metric.`,
+    );
+
+    return {
+      reply:
+        input.language === "vi"
+          ? `Facts:\n${facts}\n\n${comparisonTable}\n\nCalculations:\n- "1D" la bien dong so voi previous close.\n- "1Y" la thay doi tu muc dong cua diem dau tien co san trong chart 1 nam.\n\nSuggestions:\n- Dung bang nay de nhin tuong quan gia va dong luong, nhung van can xem them ROE, chat luong loi nhuan, va dinh gia truoc khi ket luan.`
+          : `Facts:\n${facts}\n\n${comparisonTable}\n\nCalculations:\n- "1D" is measured versus the previous close.\n- "1Y" is measured from the earliest available close in the one-year chart window.\n\nSuggestions:\n- Use this table for relative price context, then add ROE, earnings quality, and valuation before drawing a conclusion.`,
+      topic: "portfolio-analysis-live-compare",
+      suggestedActions:
+        input.language === "vi"
+          ? [
+              "Toi co the so sanh tiep theo ROE, dinh gia, va rui ro drawdown cua cac ma nay.",
+              "Neu ban muon, toi se tach rieng phan facts, calculations, va suggestions cho tung ma.",
+            ]
+          : [
+              "I can compare ROE, valuation, and drawdown risk for these symbols next.",
+              "If you want, I can break the analysis into separate facts, calculations, and suggestions for each symbol.",
+            ],
+      suggestedDepositAmount: null,
+      riskLevel: "medium",
+      confidence: 0.84,
+      followUpQuestion: localizeCopilotText(
+        input.language,
+        "Ban muon toi dao sau hon vao dinh gia hay vao do on dinh loi nhuan?",
+        "Do you want me to go deeper on valuation or on earnings stability?",
+      ),
+    };
+  }
+
+  const snapshot = snapshots[0];
+  const facts = [
+    `${snapshot.label}: ${snapshot.currency} ${formatMarketPrice(snapshot.price)}`,
+    `${input.language === "vi" ? "Bien dong 1D" : "1D move"}: ${formatCopilotPercent(snapshot.changePercent)}`,
+    `${input.language === "vi" ? "Bien dong 1Y" : "1Y move"}: ${formatCopilotPercent(snapshot.oneYearChangePercent)}`,
+  ].join("\n");
+
+  return {
+    reply:
+      input.language === "vi"
+        ? `Facts:\n${facts}\n\nCalculations:\n- Gia gan nhat duoc lay tu ${snapshot.source} tai ${formatMarketTimestamp(snapshot.asOf)}.\n- Neu "1Y" la unavailable, dieu do co nghia provider khong tra du chart de tinh bien dong 1 nam.\n\nSuggestions:\n- Toi co the dung bo so lieu nay de danh gia do on dinh gia, nhung de ket luan co "on dinh" hay khong van nen xem them drawdown, chat luong loi nhuan, va dinh gia.`
+        : `Facts:\n${facts}\n\nCalculations:\n- The latest price was pulled from ${snapshot.source} at ${formatMarketTimestamp(snapshot.asOf)}.\n- If "1Y" is unavailable, the provider did not return enough chart data to calculate a one-year move.\n\nSuggestions:\n- I can use this data to discuss price stability, but a true stability view should still include drawdown, earnings quality, and valuation.`,
+    topic: "portfolio-analysis-live-single",
+    suggestedActions:
+      input.language === "vi"
+        ? [
+            "Toi co the phan tich tiep theo do on dinh 1 nam cua ma nay dua tren 1D/1Y va framework drawdown.",
+            "Neu ban muon, toi co the so sanh ma nay voi mot ngan hang khac ngay bay gio.",
+          ]
+        : [
+            "I can continue with a one-year stability read using 1D/1Y and a drawdown framework.",
+            "If you want, I can compare this symbol with another bank right now.",
+          ],
+    suggestedDepositAmount: null,
+    riskLevel: "medium",
+    confidence: 0.82,
+    followUpQuestion: localizeCopilotText(
+      input.language,
+      "Ban muon toi so sanh tiep voi ma nao?",
+      "Which symbol do you want me to compare it with next?",
+    ),
+  };
+};
+
 const buildLiveMarketCopilotResponse = async (
   latestMessage: string,
 ): Promise<CopilotResponsePayload | null> => {
@@ -6303,6 +6528,108 @@ const buildHeuristicScamProtectionResponse = (input: {
       input.language,
       "Ban muon toi kiem tra nhanh tinh huong nay theo checklist anti-scam 30 giay khong?",
       "Do you want me to walk through a 30-second anti-scam checklist for this situation?",
+    ),
+  };
+};
+
+const buildDeterministicPortfolioAnalysisResponse = (input: {
+  latestMessage: string;
+  language: CopilotLanguage;
+}): CopilotResponsePayload | null => {
+  const intents = collectMarketIntents(input.latestMessage);
+  const intent = detectMarketIntent(input.latestMessage);
+  if (!intents.length && !intent) {
+    return null;
+  }
+
+  const baseResponse = buildHeuristicStockEducationResponse({
+    latestMessage: input.latestMessage,
+    language: input.language,
+    intent,
+    intents,
+  });
+
+  const disclaimer = localizeCopilotText(
+    input.language,
+    "Toi hien khong co du lieu gia hoac lich su thi truong da xac thuc trong route nay, nen toi se khong neu gia, % tang giam, hay hieu suat 1 nam nhu mot su that da kiem chung. Ben duoi la khung phan tich an toan de ban danh gia co phieu.",
+    "I do not have verified market-price or historical market data in this route right now, so I will not state prices, percentage moves, or one-year performance as confirmed facts. Below is a safe analysis framework instead.",
+  );
+
+  if (baseResponse) {
+    return {
+      ...baseResponse,
+      reply: `${disclaimer}\n\n${baseResponse.reply}`,
+      confidence: Math.min(baseResponse.confidence, 0.74),
+      followUpQuestion: localizeCopilotText(
+        input.language,
+        "Neu ban muon, toi co the tiep tuc so sanh theo chat luong loi nhuan, dinh gia, va rui ro drawdown thay vi gia thi truong.",
+        "If you want, I can continue by comparing profitability quality, valuation, and drawdown risk instead of market-price moves.",
+      ),
+    };
+  }
+
+  const mentionedLabels = intents.map((item) => item.label).slice(0, 4);
+  const focusLabel =
+    mentionedLabels.length > 0
+      ? mentionedLabels.join(" vs ")
+      : localizeCopilotText(
+          input.language,
+          "co phieu dang duoc hoi",
+          "the stocks you mentioned",
+        );
+  const frameworkTable = buildCopilotMarkdownTable(
+    input.language === "vi"
+      ? ["Goc nhin", "Can xem gi"]
+      : ["Lens", "What to review"],
+    input.language === "vi"
+      ? [
+          [
+            "Chat luong loi nhuan",
+            "ROE, NIM/bien loi nhuan, chat luong tai san",
+          ],
+          ["Dinh gia", "P/B, P/E, tang truong loi nhuan so voi peers"],
+          ["Rui ro", "Drawdown, chu ky nganh, no xau/that thoat dong tien"],
+          [
+            "Phu hop voi ban",
+            "Thoi gian nam giu, muc chiu bien dong, kich thuoc vi the",
+          ],
+        ]
+      : [
+          ["Profit quality", "ROE, margin/NIM, and asset quality"],
+          ["Valuation", "P/B, P/E, and earnings growth versus peers"],
+          ["Risk", "Drawdown, sector cycle, and credit/cash-flow stress"],
+          [
+            "Fit for you",
+            "Time horizon, volatility tolerance, and position size",
+          ],
+        ],
+  );
+
+  return {
+    reply:
+      input.language === "vi"
+        ? `${disclaimer}\n\nNeu ban muon danh gia ${focusLabel} ma khong co data gia xac thuc, cach an toan nhat la so sanh theo 4 nhom sau:\n\n${frameworkTable}`
+        : `${disclaimer}\n\nIf you want to assess ${focusLabel} without verified price data, the safest approach is to compare them across these four lenses:\n\n${frameworkTable}`,
+    topic: "portfolio-analysis-framework",
+    suggestedActions:
+      input.language === "vi"
+        ? [
+            "Neu ban co ticker ho tro quote song, toi co the tra lai phan gia rieng.",
+            "Toi co the so sanh tiep theo ROE, dinh gia, va rui ro drawdown.",
+            "Khong nen xem bat ky con so gia nao khong co nguon xac thuc la co so mua ban.",
+          ]
+        : [
+            "If you have a supported live-quote ticker, I can revisit the price section.",
+            "I can compare ROE, valuation, and drawdown risk next.",
+            "Do not treat any unsupported price number as a basis for a buy or sell decision.",
+          ],
+    suggestedDepositAmount: null,
+    riskLevel: "medium",
+    confidence: 0.7,
+    followUpQuestion: localizeCopilotText(
+      input.language,
+      "Ban muon toi tiep tuc theo huong nao: dinh gia, chat luong loi nhuan, hay rui ro giam sau?",
+      "Which lens do you want next: valuation, profit quality, or downside risk?",
     ),
   };
 };
@@ -11586,6 +11913,27 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
 
   if (intentClassification.intent === "unsupported") {
     return res.json(buildUnsupportedCopilotResponse({ language }));
+  }
+
+  if (intentClassification.intent === "portfolio_analysis") {
+    const liveMarketAnalysis = await buildPortfolioAnalysisWithLiveDataResponse(
+      {
+        latestMessage: latestUserMessage.content,
+        language,
+      },
+    );
+    if (liveMarketAnalysis) {
+      return res.json(liveMarketAnalysis);
+    }
+
+    const deterministicMarketAnalysis =
+      buildDeterministicPortfolioAnalysisResponse({
+        latestMessage: latestUserMessage.content,
+        language,
+      });
+    if (deterministicMarketAnalysis) {
+      return res.json(deterministicMarketAnalysis);
+    }
   }
 
   const copilotInput = {
