@@ -255,6 +255,13 @@ const OLLAMA_FALLBACK_MODEL = process.env.OLLAMA_FALLBACK_MODEL || "";
 const OLLAMA_FALLBACK_TIMEOUT_MS = Number(
   process.env.OLLAMA_FALLBACK_TIMEOUT_MS || "20000",
 );
+const OLLAMA_TEMPERATURE = Number(process.env.OLLAMA_TEMPERATURE || "0.25");
+const OLLAMA_TOP_P = Number(process.env.OLLAMA_TOP_P || "0.9");
+const OLLAMA_REPEAT_PENALTY = Number(
+  process.env.OLLAMA_REPEAT_PENALTY || "1.08",
+);
+const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX || "4096");
+const OLLAMA_NUM_PREDICT = Number(process.env.OLLAMA_NUM_PREDICT || "768");
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
 const OPENAI_REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || "low";
@@ -3995,11 +4002,55 @@ const polishCopilotFollowUpQuestion = (value: string | null | undefined) => {
   return cleaned;
 };
 
+const extractCopilotJsonCandidate = (value: string) => {
+  const sanitized = sanitizeCopilotText(value);
+  if (!sanitized) return "";
+  if (sanitized.startsWith("{") && sanitized.endsWith("}")) {
+    return sanitized;
+  }
+
+  const firstBrace = sanitized.indexOf("{");
+  const lastBrace = sanitized.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    return sanitized.slice(firstBrace, lastBrace + 1).trim();
+  }
+
+  return sanitized;
+};
+
+const buildFallbackCopilotPayload = (
+  value: string,
+): CopilotResponsePayload | null => {
+  const cleaned = polishCopilotReplyText(sanitizeCopilotText(value));
+  if (!cleaned) return null;
+
+  const normalized = normalizeCopilotText(cleaned);
+  const highRisk =
+    /\b(scam|fraud|otp|pin|password|faceid|remote access|screen share|lua dao|ma otp|mat khau|pin)\b/.test(
+      normalized,
+    );
+  const mediumRisk =
+    highRisk ||
+    /\b(risk|volatile|drawdown|debt|loan|margin|rui ro|bien dong|no vay)\b/.test(
+      normalized,
+    );
+
+  return {
+    reply: cleaned,
+    topic: "copilot-chat",
+    suggestedActions: [],
+    suggestedDepositAmount: null,
+    riskLevel: highRisk ? "high" : mediumRisk ? "medium" : "low",
+    confidence: 0.58,
+    followUpQuestion: null,
+  };
+};
+
 const parseOpenAiCopilotPayload = (
   value: string,
 ): CopilotResponsePayload | null => {
   try {
-    const parsed = JSON.parse(sanitizeCopilotText(value)) as Record<
+    const parsed = JSON.parse(extractCopilotJsonCandidate(value)) as Record<
       string,
       unknown
     >;
@@ -4037,13 +4088,13 @@ const parseOpenAiCopilotPayload = (
       ),
     };
   } catch {
-    return null;
+    return buildFallbackCopilotPayload(value);
   }
 };
 
 const summarizeCopilotConversation = (messages: CopilotMessagePayload[]) =>
   messages
-    .slice(-8)
+    .slice(-12)
     .map(
       (message) =>
         `${message.role === "assistant" ? "Assistant" : message.role === "system" ? "System" : "User"}: ${message.content.trim()}`,
@@ -4157,17 +4208,22 @@ const buildOpenAiCopilotInput = (input: {
 const buildCopilotSystemInstructions = (language: CopilotLanguage) =>
   [
     "You are FPIPay Financial Copilot.",
-    "Answer as a practical financial assistant for a wallet app.",
+    "Answer like a polished, thoughtful conversational assistant, not like a rigid template engine.",
+    "Act as a strong finance-native chat assistant inside a wallet app.",
     "Use the wallet context and transaction context provided.",
     `Reply in ${language === "vi" ? "Vietnamese" : "English"} and keep the same language as the user's latest message.`,
+    "Maintain continuity with the conversation transcript and resolve references like 'that', 'this', 'last one', or 'in the past week' using recent context.",
     "Start with the answer immediately. The first sentence must address the user's question directly.",
     "Do not begin with permission-seeking, throat-clearing, generic offers to help, or by repeating the user's question.",
     "Never start the reply with lines such as 'Do you want me to help', 'I can help', or equivalent Vietnamese phrasing.",
-    "Sound sharp, premium, and insight-driven, not like a helpdesk bot.",
-    "For short finance questions, prefer a compact structure: direct takeaway first, then 2-4 high-signal points.",
+    "Sound sharp, premium, natural, and insight-driven, not like a helpdesk bot.",
+    "Prefer natural paragraphs first. Use bullets only when they genuinely improve clarity.",
+    "Use Markdown tables only when numeric comparisons materially benefit from a table. Do not force tables for every answer.",
+    "For short questions, answer compactly and naturally. For complex questions, organize the answer cleanly without sounding robotic.",
     "If data is unavailable, say that in one sentence, then still give the most useful next-best analysis instead of a generic refusal.",
     "Only ask a follow-up question after you have already delivered a useful answer.",
-    "Use followUpQuestion sparingly; set it to null unless it materially deepens the discussion.",
+    "Use followUpQuestion very sparingly; set it to null unless it materially deepens the discussion.",
+    "Keep suggestedActions empty unless there are truly useful concrete next steps.",
     "Prioritize user safety over convenience when the message contains signs of fraud, impersonation, urgency, OTP harvesting, remote-access setup, fake refunds, fake investment schemes, or account-takeover attempts.",
     "If a message looks like a scam, clearly say so, tell the user not to send money or codes, and recommend official verification steps.",
     "You can answer broad personal-finance questions even when they are not tied to a live wallet action, including budgeting, debt payoff, emergency funds, savings habits, cash-flow tradeoffs, statement interpretation, and financial planning.",
@@ -4178,12 +4234,13 @@ const buildCopilotSystemInstructions = (language: CopilotLanguage) =>
     "You can also help build long-term saving plans and summarize spending across daily, weekly, and monthly periods using wallet context.",
     "When the user asks for a statement or spending comparison, explicitly compare today vs yesterday, this week vs last week, and this month vs last month when relevant.",
     "If the user asks a general finance question and wallet context is not needed, still answer helpfully with practical education, decision frameworks, and clear caveats instead of refusing.",
+    "If the user asks a conversational follow-up, answer that follow-up directly instead of resetting to a generic wallet introduction.",
     "Do not claim real-time market prices unless they were already provided by another tool in the app context.",
     "If the user asks for exact live market prices and no live quote is present, say that live quote support should be used.",
     "Return valid JSON only with these keys:",
     "reply, topic, suggestedActions, suggestedDepositAmount, riskLevel, confidence, followUpQuestion",
-    "The reply field may contain Markdown tables.",
-    "When presenting amounts, prices, rates, percentages, counts, dates, or other numeric comparisons, format the numeric section as a compact Markdown table.",
+    "The reply field may contain Markdown.",
+    "suggestedActions may be an empty array.",
     "riskLevel must be one of: low, medium, high.",
     "confidence must be a number between 0 and 1.",
     "suggestedActions must be an array of short strings.",
@@ -4220,7 +4277,11 @@ const callOllamaCopilotWithModel = async (
         format: "json",
         stream: false,
         options: {
-          temperature: 0.2,
+          temperature: OLLAMA_TEMPERATURE,
+          top_p: OLLAMA_TOP_P,
+          repeat_penalty: OLLAMA_REPEAT_PENALTY,
+          num_ctx: OLLAMA_NUM_CTX,
+          num_predict: OLLAMA_NUM_PREDICT,
         },
       }),
     });
