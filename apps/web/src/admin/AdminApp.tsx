@@ -176,6 +176,10 @@ type AdminAlertApi = {
   sameRecipientSmallProbeCount24h?: number | null;
   newRecipientSmallProbeCount24h?: number | null;
   probeThenLargeRiskScore?: number | null;
+  recentInboundAmount24h?: number | null;
+  recentAdminTopUpAmount24h?: number | null;
+  recentSelfDepositAmount24h?: number | null;
+  rapidCashOutRiskScore?: number | null;
   analysisSignals?: Record<string, unknown> | null;
 };
 
@@ -3342,61 +3346,66 @@ function AdminApp() {
             <h1>{activePageMeta.title}</h1>
             <p>{activePageMeta.description}</p>
           </div>
-          <div className="ops-quick-actions">
-            <button
-              type="button"
-              className="ops-quick-btn"
-              onClick={() => setActive("alerts")}
-            >
-              Review queue
-            </button>
-            <button
-              type="button"
-              className="ops-quick-btn"
-              onClick={() => setActive("users")}
-            >
-              User review
-            </button>
-            <button
-              type="button"
-              className="ops-quick-btn"
-              onClick={() => setActive("audit")}
-            >
-              Audit trail
-            </button>
-          </div>
+          {active === "dashboard" ? (
+            <div className="ops-quick-actions">
+              <button
+                type="button"
+                className="ops-quick-btn"
+                onClick={() => setActive("alerts")}
+              >
+                Review queue
+              </button>
+              <button
+                type="button"
+                className="ops-quick-btn"
+                onClick={() => setActive("users")}
+              >
+                User review
+              </button>
+              <button
+                type="button"
+                className="ops-quick-btn"
+                onClick={() => setActive("audit")}
+              >
+                Audit trail
+              </button>
+            </div>
+          ) : null}
         </section>
-        <section className="ops-summary-strip">
-          <div className="ops-summary-card">
-            <span className="ops-summary-label">Pending alerts</span>
-            <strong>{securitySummary.pendingAlerts}</strong>
-            <span className="ops-summary-note">
-              Analyst queue waiting for review decisions.
-            </span>
-          </div>
-          <div className="ops-summary-card">
-            <span className="ops-summary-label">High-risk cases</span>
-            <strong>{securitySummary.highRiskAlerts}</strong>
-            <span className="ops-summary-note">
-              Includes {securitySummary.highRiskTransactions} transaction cases.
-            </span>
-          </div>
-          <div className="ops-summary-card">
-            <span className="ops-summary-label">Locked accounts</span>
-            <strong>{securitySummary.lockedAccounts}</strong>
-            <span className="ops-summary-note">
-              Accounts currently restricted by admins or policy.
-            </span>
-          </div>
-          <div className="ops-summary-card">
-            <span className="ops-summary-label">Review backlog</span>
-            <strong>{securitySummary.pendingProfiles}</strong>
-            <span className="ops-summary-note">
-              Profile reviews pending, audit failures{" "}
-              {securitySummary.auditFailures}.
-            </span>
-          </div>
-        </section>
+        {active === "dashboard" ? (
+          <section className="ops-summary-strip">
+            <div className="ops-summary-card">
+              <span className="ops-summary-label">Pending alerts</span>
+              <strong>{securitySummary.pendingAlerts}</strong>
+              <span className="ops-summary-note">
+                Analyst queue waiting for review decisions.
+              </span>
+            </div>
+            <div className="ops-summary-card">
+              <span className="ops-summary-label">High-risk cases</span>
+              <strong>{securitySummary.highRiskAlerts}</strong>
+              <span className="ops-summary-note">
+                Includes {securitySummary.highRiskTransactions} transaction
+                cases.
+              </span>
+            </div>
+            <div className="ops-summary-card">
+              <span className="ops-summary-label">Locked accounts</span>
+              <strong>{securitySummary.lockedAccounts}</strong>
+              <span className="ops-summary-note">
+                Accounts currently restricted by admins or policy.
+              </span>
+            </div>
+            <div className="ops-summary-card">
+              <span className="ops-summary-label">Review backlog</span>
+              <strong>{securitySummary.pendingProfiles}</strong>
+              <span className="ops-summary-note">
+                Profile reviews pending, audit failures{" "}
+                {securitySummary.auditFailures}.
+              </span>
+            </div>
+          </section>
+        ) : null}
         {active === "dashboard" && (
           <>
             <header className="ana-header">
@@ -4159,6 +4168,37 @@ function AdminApp() {
                                       )}
                                     </span>
                                   </div>
+                                  {alert.rapidCashOutRiskScore != null &&
+                                  alert.rapidCashOutRiskScore >= 0.45 ? (
+                                    <div
+                                      className="alerts-signal"
+                                      data-tone="warn"
+                                    >
+                                      <strong>AML pattern</strong>
+                                      <span>
+                                        Rapid cash-out after fresh funding
+                                      </span>
+                                    </div>
+                                  ) : null}
+                                  {alert.recentInboundAmount24h != null &&
+                                  alert.recentInboundAmount24h > 0 ? (
+                                    <div
+                                      className="alerts-signal"
+                                      data-tone={
+                                        alert.recentInboundAmount24h >= 1000
+                                          ? "warn"
+                                          : "info"
+                                      }
+                                    >
+                                      <strong>Fresh inflow 24h</strong>
+                                      <span>
+                                        {formatUsdAmount(
+                                          alert.recentInboundAmount24h,
+                                          alert.currency,
+                                        )}
+                                      </span>
+                                    </div>
+                                  ) : null}
                                 </div>
                               </div>
 
@@ -4291,6 +4331,15 @@ function AdminApp() {
                                   {alert.probeThenLargeRiskScore != null
                                     ? `Score ${Math.round(alert.probeThenLargeRiskScore * 100)}%, small probes ${alert.smallProbeCount24h || 0}, distinct recipients ${alert.distinctSmallProbeRecipients24h || 0}, same recipient tests ${alert.sameRecipientSmallProbeCount24h || 0}`
                                     : "No probe-escalation signal recorded"}
+                                </span>
+                              </div>
+                              <div>
+                                <strong>Rapid cash-out / AML</strong>
+                                <span>
+                                  {alert.rapidCashOutRiskScore != null &&
+                                  alert.rapidCashOutRiskScore >= 0.45
+                                    ? `Score ${Math.round(alert.rapidCashOutRiskScore * 100)}%, fresh inflow ${formatUsdAmount(alert.recentInboundAmount24h, alert.currency)}, admin top-up ${formatUsdAmount(alert.recentAdminTopUpAmount24h, alert.currency)}, self deposit ${formatUsdAmount(alert.recentSelfDepositAmount24h, alert.currency)}`
+                                    : "No rapid cash-out laundering signal recorded"}
                                 </span>
                               </div>
                             </div>
