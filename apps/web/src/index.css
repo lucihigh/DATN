@@ -2601,8 +2601,16 @@ h3 {
   border: 1px solid rgba(78, 119, 214, 0.22);
   border-radius: 28px;
   background:
-    radial-gradient(circle at top left, rgba(14, 165, 233, 0.1), transparent 24%),
-    radial-gradient(circle at top right, rgba(43, 132, 255, 0.12), transparent 30%),
+    radial-gradient(
+      circle at top left,
+      rgba(14, 165, 233, 0.1),
+      transparent 24%
+    ),
+    radial-gradient(
+      circle at top right,
+      rgba(43, 132, 255, 0.12),
+      transparent 30%
+    ),
     linear-gradient(180deg, rgba(7, 17, 41, 0.98), rgba(6, 13, 33, 0.99));
   box-shadow:
     0 28px 70px rgba(2, 6, 23, 0.2),
@@ -2615,8 +2623,16 @@ h3 {
   border: 1px solid rgba(78, 119, 214, 0.22);
   border-radius: 28px;
   background:
-    radial-gradient(circle at top left, rgba(14, 165, 233, 0.1), transparent 24%),
-    radial-gradient(circle at top right, rgba(43, 132, 255, 0.12), transparent 30%),
+    radial-gradient(
+      circle at top left,
+      rgba(14, 165, 233, 0.1),
+      transparent 24%
+    ),
+    radial-gradient(
+      circle at top right,
+      rgba(43, 132, 255, 0.12),
+      transparent 30%
+    ),
     linear-gradient(180deg, rgba(7, 17, 41, 0.98), rgba(6, 13, 33, 0.99));
   box-shadow:
     0 28px 70px rgba(2, 6, 23, 0.2),
@@ -2798,13 +2814,21 @@ h3 {
   border-radius: 18px;
 }
 .ai-copilot-page .ai-copilot-message-card-assistant {
-  background: linear-gradient(180deg, rgba(18, 30, 60, 0.96), rgba(12, 24, 50, 0.94));
+  background: linear-gradient(
+    180deg,
+    rgba(18, 30, 60, 0.96),
+    rgba(12, 24, 50, 0.94)
+  );
   border: 1px solid rgba(96, 165, 250, 0.12);
   color: #eef4ff;
 }
 .ai-copilot-page .ai-copilot-message-card-user {
   max-width: min(72%, 540px);
-  background: linear-gradient(135deg, rgba(18, 72, 115, 0.96), rgba(38, 138, 122, 0.94));
+  background: linear-gradient(
+    135deg,
+    rgba(18, 72, 115, 0.96),
+    rgba(38, 138, 122, 0.94)
+  );
 }
 .ai-copilot-page .ai-copilot-message-label {
   margin-bottom: 8px;
@@ -2865,7 +2889,11 @@ h3 {
   max-width: 680px;
   padding: 18px 18px 16px;
   border-radius: 20px;
-  background: linear-gradient(180deg, rgba(20, 33, 64, 0.96), rgba(12, 25, 54, 0.92));
+  background: linear-gradient(
+    180deg,
+    rgba(20, 33, 64, 0.96),
+    rgba(12, 25, 54, 0.92)
+  );
   border: 1px solid rgba(96, 165, 250, 0.16);
 }
 .ai-copilot-welcome-kicker {
@@ -10553,8 +10581,11 @@ body::before {
   bottom: 0;
   margin: 0;
   padding: 12px 20px calc(12px + env(safe-area-inset-bottom, 0px));
-  background:
-    linear-gradient(180deg, rgba(8, 20, 46, 0.96) 0%, rgba(6, 16, 38, 0.98) 100%);
+  background: linear-gradient(
+    180deg,
+    rgba(8, 20, 46, 0.96) 0%,
+    rgba(6, 16, 38, 0.98) 100%
+  );
   box-shadow:
     0 -10px 28px rgba(1, 6, 18, 0.34),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
@@ -14699,11 +14730,9 @@ body.theme-dark .security-alerts-modal .security-activity-grid {
     grid-template-columns: 1fr auto;
     align-items: center;
     gap: 10px 12px;
-    padding:
-      calc(10px + env(safe-area-inset-top, 0)) max(
-        14px,
-        env(safe-area-inset-right, 14px)
-      ) 12px max(14px, env(safe-area-inset-left, 14px));
+    padding: calc(10px + env(safe-area-inset-top, 0))
+      max(14px, env(safe-area-inset-right, 14px)) 12px
+      max(14px, env(safe-area-inset-left, 14px));
     background: rgba(4, 10, 26, 0.9);
     backdrop-filter: blur(18px);
     -webkit-backdrop-filter: blur(18px);
@@ -14758,8 +14787,7 @@ body.theme-dark .security-alerts-modal .security-activity-grid {
   }
 
   .content {
-    padding:
-      12px max(12px, env(safe-area-inset-right, 12px))
+    padding: 12px max(12px, env(safe-area-inset-right, 12px))
       calc(32px + env(safe-area-inset-bottom, 0))
       max(12px, env(safe-area-inset-left, 12px)) !important;
     gap: 14px;
@@ -14776,14 +14804,16 @@ body.theme-dark .security-alerts-modal .security-activity-grid {
     right: 0;
     bottom: 0;
     min-height: 58px;
-    padding:
-      12px max(16px, env(safe-area-inset-right, 16px))
+    padding: 12px max(16px, env(safe-area-inset-right, 16px))
       calc(14px + env(safe-area-inset-bottom, 0))
       max(16px, env(safe-area-inset-left, 16px));
     border-top: 1px solid rgba(92, 122, 178, 0.22);
     border-radius: 18px 18px 0 0;
-    background:
-      linear-gradient(180deg, rgba(9, 21, 49, 0.96) 0%, rgba(6, 16, 38, 0.98) 100%);
+    background: linear-gradient(
+      180deg,
+      rgba(9, 21, 49, 0.96) 0%,
+      rgba(6, 16, 38, 0.98) 100%
+    );
     box-shadow:
       0 -12px 30px rgba(2, 8, 23, 0.36),
       inset 0 1px 0 rgba(255, 255, 255, 0.05);
@@ -15092,8 +15122,7 @@ body.theme-dark .security-alerts-modal .security-activity-grid {
   }
 
   .content {
-    padding:
-      10px max(10px, env(safe-area-inset-right, 10px))
+    padding: 10px max(10px, env(safe-area-inset-right, 10px))
       calc(24px + env(safe-area-inset-bottom, 0))
       max(10px, env(safe-area-inset-left, 10px)) !important;
   }
@@ -15842,7 +15871,11 @@ body.theme-dark .security-alerts-modal .security-activity-grid {
   padding: 12px !important;
   border: 1px solid rgba(148, 163, 184, 0.18) !important;
   border-radius: 14px !important;
-  background: linear-gradient(180deg, rgba(12, 18, 32, 0.96), rgba(10, 15, 27, 0.98)) !important;
+  background: linear-gradient(
+    180deg,
+    rgba(12, 18, 32, 0.96),
+    rgba(10, 15, 27, 0.98)
+  ) !important;
   box-shadow: 0 10px 24px rgba(2, 6, 23, 0.18) !important;
 }
 
@@ -16260,8 +16293,12 @@ body.theme-dark .security-alerts-modal .security-activity-grid {
   opacity: 0;
 }
 
-.ai-copilot-page .ai-copilot-session-card.active .ai-copilot-session-menu-trigger,
-.ai-copilot-page .ai-copilot-session-card:hover .ai-copilot-session-menu-trigger,
+.ai-copilot-page
+  .ai-copilot-session-card.active
+  .ai-copilot-session-menu-trigger,
+.ai-copilot-page
+  .ai-copilot-session-card:hover
+  .ai-copilot-session-menu-trigger,
 .ai-copilot-session-menu-trigger[aria-expanded="true"] {
   opacity: 1;
   background: rgba(255, 255, 255, 0.08);
@@ -16300,8 +16337,16 @@ body.theme-dark .security-alerts-modal .security-activity-grid {
   height: 240px;
   pointer-events: none;
   background:
-    radial-gradient(42% 60% at 18% 22%, rgba(45, 212, 191, 0.12), transparent 72%),
-    radial-gradient(34% 54% at 82% 18%, rgba(59, 130, 246, 0.16), transparent 76%);
+    radial-gradient(
+      42% 60% at 18% 22%,
+      rgba(45, 212, 191, 0.12),
+      transparent 72%
+    ),
+    radial-gradient(
+      34% 54% at 82% 18%,
+      rgba(59, 130, 246, 0.16),
+      transparent 76%
+    );
   filter: blur(18px);
   opacity: 0.95;
 }
@@ -16325,7 +16370,11 @@ body.theme-dark .security-alerts-modal .security-activity-grid {
 .ai-copilot-page-main-frame {
   border-radius: 20px;
   border: 1px solid rgba(114, 153, 224, 0.14);
-  background: linear-gradient(180deg, rgba(8, 18, 40, 0.96) 0%, rgba(7, 15, 33, 0.98) 100%);
+  background: linear-gradient(
+    180deg,
+    rgba(8, 18, 40, 0.96) 0%,
+    rgba(7, 15, 33, 0.98) 100%
+  );
   box-shadow: 0 10px 28px rgba(2, 8, 23, 0.12);
 }
 
@@ -16467,8 +16516,12 @@ body.theme-dark .security-alerts-modal .security-activity-grid {
 }
 
 .ai-copilot-session-menu-trigger:hover,
-.ai-copilot-page .ai-copilot-session-card.active .ai-copilot-session-menu-trigger,
-.ai-copilot-page .ai-copilot-session-card:hover .ai-copilot-session-menu-trigger {
+.ai-copilot-page
+  .ai-copilot-session-card.active
+  .ai-copilot-session-menu-trigger,
+.ai-copilot-page
+  .ai-copilot-session-card:hover
+  .ai-copilot-session-menu-trigger {
   background: rgba(255, 255, 255, 0.06);
   color: #eef5ff;
   opacity: 1;
@@ -16635,7 +16688,11 @@ body.theme-dark .security-alerts-modal .security-activity-grid {
   padding: 24px;
   border-radius: 22px;
   background:
-    radial-gradient(circle at top right, rgba(45, 212, 191, 0.12), transparent 32%),
+    radial-gradient(
+      circle at top right,
+      rgba(45, 212, 191, 0.12),
+      transparent 32%
+    ),
     linear-gradient(180deg, rgba(18, 31, 61, 0.98), rgba(11, 22, 46, 0.96));
 }
 
@@ -16663,8 +16720,11 @@ body.theme-dark .security-alerts-modal .security-activity-grid {
   position: relative;
   padding: 12px 14px 14px;
   border-radius: 22px;
-  background:
-    linear-gradient(180deg, rgba(10, 24, 52, 0.96), rgba(7, 17, 39, 0.98));
+  background: linear-gradient(
+    180deg,
+    rgba(10, 24, 52, 0.96),
+    rgba(7, 17, 39, 0.98)
+  );
 }
 
 .ai-copilot-page .ai-copilot-compose textarea {
@@ -16998,13 +17058,11 @@ body:has(.ai-copilot-page) .ai-copilot-page-main-frame {
   position: relative;
   z-index: 1;
   border: 1px solid rgba(148, 163, 184, 0.24) !important;
-  background:
-    linear-gradient(
-      145deg,
-      rgba(15, 31, 62, 0.68) 0%,
-      rgba(9, 21, 47, 0.62) 100%
-    )
-    !important;
+  background: linear-gradient(
+    145deg,
+    rgba(15, 31, 62, 0.68) 0%,
+    rgba(9, 21, 47, 0.62) 100%
+  ) !important;
   backdrop-filter: blur(18px) saturate(130%) !important;
   -webkit-backdrop-filter: blur(18px) saturate(130%) !important;
   box-shadow:
@@ -17040,11 +17098,10 @@ body:has(.ai-copilot-page) .ai-copilot-page .ai-copilot-thread-wrap {
 body:has(.ai-copilot-page) .ai-copilot-inline-input {
   border: 1px solid rgba(148, 163, 184, 0.28) !important;
   background: linear-gradient(
-      145deg,
-      rgba(30, 41, 59, 0.5),
-      rgba(15, 23, 42, 0.38)
-    )
-    !important;
+    145deg,
+    rgba(30, 41, 59, 0.5),
+    rgba(15, 23, 42, 0.38)
+  ) !important;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.08),
     0 6px 20px rgba(2, 6, 23, 0.18) !important;
@@ -17052,11 +17109,10 @@ body:has(.ai-copilot-page) .ai-copilot-inline-input {
 
 body:has(.ai-copilot-page) .ai-copilot-primary {
   background: linear-gradient(
-      120deg,
-      rgba(56, 189, 248, 0.78),
-      rgba(34, 197, 94, 0.78)
-    )
-    !important;
+    120deg,
+    rgba(56, 189, 248, 0.78),
+    rgba(34, 197, 94, 0.78)
+  ) !important;
   color: #062025 !important;
   box-shadow:
     0 8px 22px rgba(34, 197, 94, 0.24),
@@ -17066,11 +17122,10 @@ body:has(.ai-copilot-page) .ai-copilot-primary {
 body:has(.ai-copilot-page) .ai-copilot-page .ai-copilot-session-card.active,
 body:has(.ai-copilot-page) .ai-copilot-page .ai-copilot-session-card:hover {
   background: linear-gradient(
-      135deg,
-      rgba(148, 163, 184, 0.22),
-      rgba(148, 163, 184, 0.1)
-    )
-    !important;
+    135deg,
+    rgba(148, 163, 184, 0.22),
+    rgba(148, 163, 184, 0.1)
+  ) !important;
   border-color: rgba(148, 163, 184, 0.28) !important;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.12),
@@ -17240,12 +17295,11 @@ body:has(.ai-copilot-page) .ai-copilot-page .ai-copilot-session-card:hover {
     padding: 10px;
     border-radius: 12px;
     border: 1px solid rgba(148, 163, 184, 0.22);
-    background:
-      linear-gradient(
-        145deg,
-        rgba(15, 31, 62, 0.88) 0%,
-        rgba(9, 21, 47, 0.84) 100%
-      );
+    background: linear-gradient(
+      145deg,
+      rgba(15, 31, 62, 0.88) 0%,
+      rgba(9, 21, 47, 0.84) 100%
+    );
     backdrop-filter: blur(12px);
     box-shadow: 0 16px 34px rgba(2, 6, 23, 0.34);
   }
@@ -17457,11 +17511,15 @@ body:has(.ai-copilot-page) .ai-copilot-page .ai-copilot-session-card:hover {
     z-index: 100 !important;
   }
 
-  .ai-copilot-page .ai-copilot-session-card.menu-open .ai-copilot-session-menu-wrap {
+  .ai-copilot-page
+    .ai-copilot-session-card.menu-open
+    .ai-copilot-session-menu-wrap {
     z-index: 120 !important;
   }
 
-  .ai-copilot-page .ai-copilot-session-card:not(.menu-open) .ai-copilot-session-menu-trigger {
+  .ai-copilot-page
+    .ai-copilot-session-card:not(.menu-open)
+    .ai-copilot-session-menu-trigger {
     z-index: 1 !important;
   }
 }
@@ -17486,7 +17544,9 @@ body:has(.ai-copilot-page) .ai-copilot-message-row-user {
   align-items: flex-start !important;
 }
 
-body:has(.ai-copilot-page) .ai-copilot-message-row-user .ai-copilot-message-card {
+body:has(.ai-copilot-page)
+  .ai-copilot-message-row-user
+  .ai-copilot-message-card {
   justify-self: end !important;
 }
 
@@ -18244,7 +18304,11 @@ body:has(.ai-copilot-page) .ai-copilot-avatar-user img {
   padding: 18px;
   border-radius: 18px;
   border: 1px solid rgba(15, 23, 42, 0.08);
-  background: linear-gradient(180deg, rgba(247, 250, 252, 0.96), rgba(255, 255, 255, 0.98));
+  background: linear-gradient(
+    180deg,
+    rgba(247, 250, 252, 0.96),
+    rgba(255, 255, 255, 0.98)
+  );
   display: grid;
   gap: 14px;
 }
@@ -18272,6 +18336,35 @@ body:has(.ai-copilot-page) .ai-copilot-avatar-user img {
   flex-wrap: wrap;
 }
 
+.account-profile-meta-row {
+  display: flex;
+  gap: 10px 16px;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 4px 0 2px;
+}
+
+.account-profile-meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: rgba(15, 23, 42, 0.74);
+  font-size: 13px;
+}
+
+.account-profile-meta-item strong {
+  font-size: 12px;
+  color: rgba(15, 23, 42, 0.58);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.account-profile-meta-item em {
+  color: var(--text);
+  font-style: normal;
+  font-weight: 600;
+}
+
 .account-profile-badge,
 .account-profile-pending {
   padding: 7px 11px;
@@ -18289,6 +18382,12 @@ body:has(.ai-copilot-page) .ai-copilot-avatar-user img {
 .account-profile-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.account-profile-compact-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
   gap: 12px;
 }
 
@@ -18325,6 +18424,18 @@ body:has(.ai-copilot-page) .ai-copilot-avatar-user img {
 .theme-dark .account-profile-head p,
 .theme-dark .account-profile-actions span {
   color: #a3b1d6;
+}
+
+.theme-dark .account-profile-meta-item {
+  color: #a3b1d6;
+}
+
+.theme-dark .account-profile-meta-item strong {
+  color: #7f8bad;
+}
+
+.theme-dark .account-profile-meta-item em {
+  color: #e7ecff;
 }
 
 .theme-dark .account-profile-badge,
@@ -18408,6 +18519,11 @@ body:has(.ai-copilot-page) .ai-copilot-avatar-user img {
   line-height: 1.55;
 }
 
+.profile-review-context.compact p,
+.profile-review-card small {
+  line-height: 1.45;
+}
+
 .theme-dark .profile-review-modal {
   background: linear-gradient(180deg, #0f172d 0%, #0b1224 100%);
   border: 1px solid #1b2748;
@@ -18450,6 +18566,7 @@ body:has(.ai-copilot-page) .ai-copilot-avatar-user img {
 
 @media (max-width: 900px) {
   .account-profile-grid,
+  .account-profile-compact-grid,
   .profile-review-grid,
   .profile-review-form {
     grid-template-columns: 1fr;

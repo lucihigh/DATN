@@ -10069,30 +10069,23 @@ function MyProfileView({
           </div>
         </div>
 
-        <div className="account-profile-grid">
-          <div className="user-profile-cell">
+        <div className="account-profile-meta-row">
+          <span className="account-profile-meta-item">
             <strong>Current tier</strong>
-            <span>
+            <em>
               {formatAccountProfileLabel(
                 accountProfile.category,
                 accountProfile.tier,
               )}
-            </span>
-          </div>
-          <div className="user-profile-cell">
-            <strong>Review status</strong>
-            <span>{formatAccountProfileStatus(accountProfile.status)}</span>
-          </div>
-          <div className="user-profile-cell">
-            <strong>Completed activity</strong>
-            <span>
-              {accountProfile.automation?.stats.completedCount ?? 0} completed
-              transactions
-            </span>
-          </div>
-          <div className="user-profile-cell">
-            <strong>Total monthly volume</strong>
-            <span>
+            </em>
+          </span>
+          <span className="account-profile-meta-item">
+            <strong>Status</strong>
+            <em>{formatAccountProfileStatus(accountProfile.status)}</em>
+          </span>
+          <span className="account-profile-meta-item">
+            <strong>30d volume</strong>
+            <em>
               $
               {(
                 accountProfile.automation?.stats.totalVolume ?? 0
@@ -10100,41 +10093,31 @@ function MyProfileView({
                 minimumFractionDigits: 2,
                 maximumFractionDigits: 2,
               })}
-            </span>
-          </div>
-          <div className="user-profile-cell">
-            <strong>Source-of-funds coverage</strong>
-            <span>
-              {Math.round(
-                (accountProfile.automation?.stats.sourceCoverageRatio ?? 0) *
-                  100,
-              )}
-              %
-            </span>
-          </div>
-          <div className="user-profile-cell">
-            <strong>Clean activity ratio</strong>
-            <span>
+            </em>
+          </span>
+          <span className="account-profile-meta-item">
+            <strong>Clean ratio</strong>
+            <em>
               {Math.round(
                 (accountProfile.automation?.stats.cleanActivityRatio ?? 1) *
                   100,
               )}
               %
-            </span>
-          </div>
+            </em>
+          </span>
         </div>
 
-        <div className="profile-review-grid">
+        <div className="account-profile-compact-grid">
           <div className="profile-review-card">
             <strong>Automatic review result</strong>
             <small>
               {accountProfile.automation?.autoUpgradeApplied
-                ? "Your personal tier was upgraded automatically after the latest monthly review."
+                ? "Your tier was upgraded automatically after the latest monthly review."
                 : accountProfile.automation?.eligibleForUpgrade
                   ? "You already meet the next upgrade conditions and the baseline is ready to widen automatically."
                   : accountProfile.automation?.mode === "ADMIN_CONTROLLED"
-                    ? "This account stays under admin-controlled tiering for business/demo scenarios."
-                    : "FPIPay is still collecting enough clean monthly behavior before the next tier upgrade."}
+                    ? "This account stays under admin-controlled tiering for demo and business review."
+                    : "FPIPay is still collecting enough clean monthly behavior before widening your baseline."}
             </small>
             <small>
               Recommended baseline:{" "}
@@ -10155,31 +10138,16 @@ function MyProfileView({
               </small>
             ) : null}
           </div>
-          <div className="profile-review-context">
-            <strong>Why AI trusts this tier</strong>
-            {accountProfile.automation?.rationale?.length ? (
-              <>
-                {accountProfile.automation.rationale.slice(0, 3).map((item) => (
-                  <p key={item}>{item}</p>
-                ))}
-              </>
-            ) : (
-              <p>
-                Automatic tiering is waiting for enough clean monthly behavior
-                to justify a broader risk baseline.
-              </p>
-            )}
-          </div>
-        </div>
 
-        {accountProfile.automation?.milestones?.length ? (
-          <div className="profile-review-context">
-            <strong>What helps the next automatic upgrade</strong>
-            {accountProfile.automation.milestones.slice(0, 4).map((item) => (
-              <p key={item}>{item}</p>
-            ))}
-          </div>
-        ) : null}
+          {accountProfile.automation?.milestones?.length ? (
+            <div className="profile-review-context compact">
+              <strong>Next upgrade</strong>
+              {accountProfile.automation.milestones.slice(0, 3).map((item) => (
+                <p key={item}>{item}</p>
+              ))}
+            </div>
+          ) : null}
+        </div>
       </section>
 
       <section className="card faceid-banner">
