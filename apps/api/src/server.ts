@@ -7013,6 +7013,20 @@ const buildCopilotSourceTruthContext = async (input: {
   };
 };
 
+const buildFallbackCopilotSourceTruthContext = (input: {
+  preferredCurrency?: string | null;
+}) => ({
+  currency:
+    typeof input.preferredCurrency === "string" &&
+    input.preferredCurrency.trim().length
+      ? input.preferredCurrency.trim().toUpperCase()
+      : "USD",
+  currentBalance: 0,
+  monthlyIncome: 0,
+  monthlyExpenses: 0,
+  recentTransactions: [] as CopilotTransactionPayload[],
+});
+
 const sumDebitAmount = (
   transactions: Array<{ amount: number; direction: "credit" | "debit" }>,
 ) =>
@@ -11457,10 +11471,20 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
     typeof body.currency === "string" && body.currency.trim()
       ? body.currency.trim().toUpperCase()
       : "USD";
-  const sourceTruth = await buildCopilotSourceTruthContext({
-    userId,
+  let sourceTruth = buildFallbackCopilotSourceTruthContext({
     preferredCurrency: currency,
   });
+  try {
+    sourceTruth = await buildCopilotSourceTruthContext({
+      userId,
+      preferredCurrency: currency,
+    });
+  } catch (err) {
+    console.warn("Copilot source-truth context failed, using empty fallback", {
+      userId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
   const effectiveCurrency = sourceTruth.currency;
 
   const copilotBaseInput = {
@@ -11677,11 +11701,11 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
   }
 
   const response = buildHeuristicCopilotResponse({
-    currency,
-    currentBalance: Number(body.currentBalance || 0),
-    monthlyIncome: Number(body.monthlyIncome || 0),
-    monthlyExpenses: Number(body.monthlyExpenses || 0),
-    recentTransactions,
+    currency: effectiveCurrency,
+    currentBalance: sourceTruth.currentBalance,
+    monthlyIncome: sourceTruth.monthlyIncome,
+    monthlyExpenses: sourceTruth.monthlyExpenses,
+    recentTransactions: sourceTruth.recentTransactions,
     latestMessage: latestUserMessage.content,
   });
 
