@@ -1,0 +1,8 @@
+[
+  { "canonical": "Bao Viet Holdings", "symbol": "BVH.VN", "sector": "insurance", "kind": "insurer", "aliases": ["bao viet"] },
+  { "canonical": "BIC", "symbol": "BIC.VN", "sector": "insurance", "kind": "insurer", "aliases": ["bidv insurance"] },
+  { "canonical": "PVI", "symbol": "PVI.VN", "sector": "insurance", "kind": "insurer", "aliases": ["pvi insurance"] },
+  { "canonical": "Bao Minh", "symbol": "BMI.VN", "sector": "insurance", "kind": "insurer" },
+  { "canonical": "MIC", "symbol": "MIG.VN", "sector": "insurance", "kind": "insurer", "aliases": ["military insurance"] },
+  { "canonical": "PJICO", "symbol": "PGI.VN", "sector": "insurance", "kind": "insurer" }
+]

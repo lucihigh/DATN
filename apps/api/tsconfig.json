@@ -2,7 +2,8 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "dist",
-    "module": "CommonJS",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "baseUrl": ".",
     "paths": {
       "@secure-wallet/shared": ["../../packages/shared/src/index.ts"],
