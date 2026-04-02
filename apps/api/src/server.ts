@@ -319,6 +319,18 @@ const TRANSFER_PROBE_SMALL_AMOUNT_MAX = Number(
 const TRANSFER_PROBE_BURST_COUNT_24H = Number(
   process.env.TRANSFER_PROBE_BURST_COUNT_24H || "3",
 );
+const SMALL_TRANSFER_BURST_WINDOW_MINUTES = Number(
+  process.env.SMALL_TRANSFER_BURST_WINDOW_MINUTES || "5",
+);
+const SMALL_TRANSFER_BURST_COUNT = Number(
+  process.env.SMALL_TRANSFER_BURST_COUNT || "5",
+);
+const SMALL_TRANSFER_BURST_SAME_RECIPIENT_COUNT = Number(
+  process.env.SMALL_TRANSFER_BURST_SAME_RECIPIENT_COUNT || "3",
+);
+const SMALL_TRANSFER_BURST_BLOCK_MINUTES = Number(
+  process.env.SMALL_TRANSFER_BURST_BLOCK_MINUTES || "10",
+);
 const TRANSFER_PROBE_LARGE_ESCALATION_MIN_AMOUNT = Number(
   process.env.TRANSFER_PROBE_LARGE_ESCALATION_MIN_AMOUNT ||
     HIGH_TRANSFER_ADVISORY_AMOUNT,
@@ -658,6 +670,9 @@ type TransferStepUpPolicy = {
   rollingOutflowAmount: number;
   recentLargeCompletedCount: number;
   shouldBlockContinuousLargeTransfer: boolean;
+  shouldBlockSmallTransferBurst: boolean;
+  recentSmallTransferCount: number;
+  recentSmallTransferSameRecipientCount: number;
   blockReason: string | null;
   blockedUntil: string | null;
   retryAfterSeconds: number | null;
@@ -8815,9 +8830,11 @@ const evaluateTransferStepUpPolicy = async (input: {
   userId: string;
   amount: number;
   currency: string;
+  toAccount?: string | null;
 }) => {
   const now = Date.now();
   const fundsFlowWindowMinutes = Math.max(
+    SMALL_TRANSFER_BURST_WINDOW_MINUTES,
     CUMULATIVE_TRANSFER_FACE_ID_WINDOW_MINUTES,
     CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES,
   );
@@ -8834,8 +8851,14 @@ const evaluateTransferStepUpPolicy = async (input: {
   let completedOutflowWindow = 0;
   let recentLargeCompletedCount = 0;
   let latestLargeCompletedAt: Date | null = null;
+  let recentSmallTransferCount = 0;
+  let recentSmallTransferSameRecipientCount = 0;
+  let latestSmallTransferAt: Date | null = null;
   const largeTransferSince = new Date(
     now - CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES * 60 * 1000,
+  ).getTime();
+  const smallTransferBurstSince = new Date(
+    now - SMALL_TRANSFER_BURST_WINDOW_MINUTES * 60 * 1000,
   ).getTime();
 
   for (const row of rows) {
@@ -8851,6 +8874,12 @@ const evaluateTransferStepUpPolicy = async (input: {
     }
 
     const txAmount = Number(event.amount || 0);
+    const isSmallTransfer =
+      txAmount > 0 && txAmount <= TRANSFER_PROBE_SMALL_AMOUNT_MAX;
+    const sameRecipient =
+      Boolean(input.toAccount) &&
+      Boolean(event.toAccount) &&
+      event.toAccount === input.toAccount;
     completedOutflowWindow += txAmount;
     if (
       txAmount > TRANSFER_FACE_ID_THRESHOLD &&
@@ -8862,6 +8891,26 @@ const evaluateTransferStepUpPolicy = async (input: {
         row.createdAt.getTime() > latestLargeCompletedAt.getTime()
       ) {
         latestLargeCompletedAt = row.createdAt;
+      }
+    }
+    if (
+      row.createdAt.getTime() >= smallTransferBurstSince &&
+      isSmallTransfer &&
+      (event.lifecycle === "COMPLETED" ||
+        event.lifecycle === "PENDING_OTP" ||
+        event.lifecycle === "OTP_VERIFIED" ||
+        event.lifecycle === "REVIEW_REQUIRED" ||
+        event.lifecycle === "BLOCKED")
+    ) {
+      recentSmallTransferCount += 1;
+      if (sameRecipient) {
+        recentSmallTransferSameRecipientCount += 1;
+      }
+      if (
+        !latestSmallTransferAt ||
+        row.createdAt.getTime() > latestSmallTransferAt.getTime()
+      ) {
+        latestSmallTransferAt = row.createdAt;
       }
     }
   }
@@ -8891,13 +8940,24 @@ const evaluateTransferStepUpPolicy = async (input: {
   const shouldBlockContinuousLargeTransfer =
     input.amount > TRANSFER_FACE_ID_THRESHOLD &&
     recentLargeCompletedCount >= CONTINUOUS_LARGE_TRANSFER_BLOCK_COUNT;
+  const shouldBlockSmallTransferBurst =
+    input.amount > 0 &&
+    input.amount <= TRANSFER_PROBE_SMALL_AMOUNT_MAX &&
+    (recentSmallTransferCount >= SMALL_TRANSFER_BURST_COUNT ||
+      recentSmallTransferSameRecipientCount >=
+        SMALL_TRANSFER_BURST_SAME_RECIPIENT_COUNT);
   const blockedUntilDate =
     shouldBlockContinuousLargeTransfer && latestLargeCompletedAt
       ? new Date(
           latestLargeCompletedAt.getTime() +
             CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES * 60 * 1000,
         )
-      : null;
+      : shouldBlockSmallTransferBurst && latestSmallTransferAt
+        ? new Date(
+            latestSmallTransferAt.getTime() +
+              SMALL_TRANSFER_BURST_BLOCK_MINUTES * 60 * 1000,
+          )
+        : null;
   const retryAfterSeconds = blockedUntilDate
     ? Math.max(1, Math.ceil((blockedUntilDate.getTime() - Date.now()) / 1000))
     : null;
@@ -8909,7 +8969,11 @@ const evaluateTransferStepUpPolicy = async (input: {
         retryAfterSeconds ??
           CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES * 60,
       )} before sending another high-value transfer.`
-    : null;
+    : shouldBlockSmallTransferBurst
+      ? `Too many small transfers were attempted in the last ${SMALL_TRANSFER_BURST_WINDOW_MINUTES} minutes. Please wait ${formatRetryWait(
+          retryAfterSeconds ?? SMALL_TRANSFER_BURST_BLOCK_MINUTES * 60,
+        )} before sending another small transfer.`
+      : null;
 
   return {
     faceIdRequired,
@@ -8917,6 +8981,9 @@ const evaluateTransferStepUpPolicy = async (input: {
     rollingOutflowAmount: projectedOutflowWindow,
     recentLargeCompletedCount,
     shouldBlockContinuousLargeTransfer,
+    shouldBlockSmallTransferBurst,
+    recentSmallTransferCount,
+    recentSmallTransferSameRecipientCount,
     blockReason,
     blockedUntil: blockedUntilDate?.toISOString() || null,
     retryAfterSeconds,
@@ -12755,7 +12822,67 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
       userId: senderUserId,
       amount: context.amount,
       currency: context.senderWallet.currency,
+      toAccount: context.receiverAccountNumber,
     });
+    if (transferStepUpPolicy.shouldBlockSmallTransferBurst) {
+      const blockedUntil =
+        transferStepUpPolicy.blockedUntil ||
+        new Date(
+          Date.now() + SMALL_TRANSFER_BURST_BLOCK_MINUTES * 60 * 1000,
+        ).toISOString();
+      const transferAdvisory = buildBlockedTransferAdvisory({
+        amount: context.amount,
+        currency: context.senderWallet.currency,
+        senderBalance: Number(context.senderWallet.balance),
+        blockedUntil,
+        archetype: "Small Transfer Burst",
+        reasons: [
+          `You already attempted ${transferStepUpPolicy.recentSmallTransferCount} small transfers in the last ${SMALL_TRANSFER_BURST_WINDOW_MINUTES} minutes.`,
+          transferStepUpPolicy.recentSmallTransferSameRecipientCount > 0
+            ? `${transferStepUpPolicy.recentSmallTransferSameRecipientCount} of those small transfers targeted this same recipient.`
+            : `FPIPay applies a cooldown when small transfers are repeated too quickly.`,
+        ],
+        timeline: [
+          "Repeated low-value transfers were detected in a short time window.",
+          "This pattern is commonly used to test account reachability before larger transfers.",
+        ],
+        recommendedActions: [
+          "Wait for the cooldown to finish before trying another low-value transfer.",
+          "Only retry sooner if you can explain the burst pattern during manual review.",
+        ],
+        title: "Small-transfer burst is temporarily blocked",
+        message:
+          transferStepUpPolicy.blockReason ||
+          "Too many low-value transfers were attempted in a short period, so FPIPay applied a temporary cooldown.",
+      });
+      return res.status(423).json({
+        error:
+          transferStepUpPolicy.blockReason ||
+          "Too many small transfers were attempted in a short period.",
+        previewStatus: "blocked",
+        anomaly: {
+          ...DEFAULT_AI_RESPONSE,
+          requestKey: null,
+          riskLevel: "high",
+          finalAction: "HOLD_REVIEW",
+          finalScore: 92,
+          reasons: transferAdvisory.reasons,
+          archetype: transferAdvisory.archetype,
+          headline: transferAdvisory.title,
+          summary: transferAdvisory.message,
+          nextStep:
+            "Wait for the cooldown to finish before starting another low-value transfer.",
+        } satisfies AnomalyResponse,
+        transferAdvisory,
+        faceIdRequired: false,
+        faceIdReason: null,
+        rollingOutflowAmount: transferStepUpPolicy.rollingOutflowAmount,
+        recipient: {
+          accountNumber: context.receiverAccountNumber,
+          userId: context.resolvedReceiverUserId,
+        },
+      });
+    }
     const transferNoteLlmPromise = analyzeTransferNoteWithLlm({
       note: context.note,
       amount: context.amount,
@@ -13004,7 +13131,37 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       userId: senderUserId,
       amount: context.amount,
       currency: context.senderWallet.currency,
+      toAccount: context.receiverAccountNumber,
     });
+    if (transferStepUpPolicy.shouldBlockSmallTransferBurst) {
+      await logFundsFlowEvent({
+        actor: req.user?.email,
+        userId: senderUserId,
+        ipAddress: getRequestIp(req),
+        channel: "WALLET_TRANSFER",
+        lifecycle: "BLOCKED",
+        direction: "OUTFLOW",
+        amount: context.amount,
+        currency: context.senderWallet.currency,
+        fromAccount: context.senderAccountNumber,
+        toAccount: context.receiverAccountNumber,
+        fromUserId: senderUserId,
+        toUserId: context.resolvedReceiverUserId,
+        balanceBefore: Number(context.senderWallet.balance),
+        balanceAfter: Math.max(
+          0,
+          Number(context.senderWallet.balance) - context.amount,
+        ),
+        sourceLabel: "SMALL_TRANSFER_BURST_BLOCK",
+      });
+      return res.status(423).json({
+        error:
+          transferStepUpPolicy.blockReason ||
+          "Too many small transfers were attempted in a short period.",
+        blockedUntil: transferStepUpPolicy.blockedUntil,
+        retryAfterSeconds: transferStepUpPolicy.retryAfterSeconds,
+      });
+    }
     if (transferStepUpPolicy.shouldBlockContinuousLargeTransfer) {
       await logFundsFlowEvent({
         actor: req.user?.email,
