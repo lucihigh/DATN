@@ -8392,12 +8392,95 @@ const MAX_PROFILE_AVATAR_FILE_SIZE = 6 * 1024 * 1024;
 const MAX_PROFILE_AVATAR_OUTPUT_BYTES = 900 * 1024;
 const PROFILE_AVATAR_MAX_DIMENSION = 640;
 
+type SettingSecurityDevice = {
+  id: string;
+  name: string;
+  lastUsed: string;
+  trusted: boolean;
+};
+
+type SettingSecurityState = {
+  twofa: boolean;
+  saveLogin: boolean;
+  devices: SettingSecurityDevice[];
+};
+
+const DEFAULT_SETTING_SECURITY: SettingSecurityState = {
+  twofa: false,
+  saveLogin: true,
+  devices: [
+    {
+      id: "mbp-16",
+      name: 'MacBook Pro 16"',
+      lastUsed: "2026-02-22 / San Francisco, US",
+      trusted: true,
+    },
+    {
+      id: "iphone-14",
+      name: "iPhone 14 Pro",
+      lastUsed: "2026-02-23 / San Francisco, US",
+      trusted: true,
+    },
+    {
+      id: "office-pc",
+      name: "Windows PC",
+      lastUsed: "2026-02-10 / Ho Chi Minh, VN",
+      trusted: false,
+    },
+  ],
+};
+
+const normalizeStoredSettingSecurity = (
+  value: unknown,
+): SettingSecurityState => {
+  const source =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  const devices = Array.isArray(source.devices)
+    ? source.devices
+        .map((item, index) => {
+          const device =
+            item && typeof item === "object" && !Array.isArray(item)
+              ? (item as Record<string, unknown>)
+              : null;
+          if (!device) return null;
+          const name =
+            typeof device.name === "string" && device.name.trim()
+              ? device.name.trim()
+              : `Device ${index + 1}`;
+          const lastUsed =
+            typeof device.lastUsed === "string" && device.lastUsed.trim()
+              ? device.lastUsed.trim()
+              : "Recent activity";
+          return {
+            id:
+              typeof device.id === "string" && device.id.trim()
+                ? device.id.trim()
+                : `device-${index + 1}`,
+            name,
+            lastUsed,
+            trusted: device.trusted === true,
+          } satisfies SettingSecurityDevice;
+        })
+        .filter((item): item is SettingSecurityDevice => Boolean(item))
+    : DEFAULT_SETTING_SECURITY.devices;
+
+  return {
+    twofa: source.twofa === true,
+    saveLogin:
+      typeof source.saveLogin === "boolean"
+        ? source.saveLogin
+        : DEFAULT_SETTING_SECURITY.saveLogin,
+    devices,
+  };
+};
+
 const readStoredSaveLoginPreference = () => {
   try {
     const raw = localStorage.getItem(SETTING_SECURITY_KEY);
     if (!raw) return true;
-    const parsed = JSON.parse(raw) as { saveLogin?: unknown } | null;
-    return typeof parsed?.saveLogin === "boolean" ? parsed.saveLogin : true;
+    return normalizeStoredSettingSecurity(JSON.parse(raw)).saveLogin;
   } catch {
     return true;
   }
@@ -8919,43 +9002,24 @@ function SettingView() {
     confirm: "",
   });
   const [transferPinBusy, setTransferPinBusy] = useState(false);
+  const [transferPinOtpBusy, setTransferPinOtpBusy] = useState(false);
   const [transferPinEnabledStatus, setTransferPinEnabledStatus] =
     useState(false);
-  const [security, setSecurity] = useState(() => {
+  const [transferPinOtp, setTransferPinOtp] = useState({
+    challengeId: "",
+    code: "",
+    destination: "",
+    expiresAt: "",
+    retryAfterSeconds: 0,
+  });
+  const [security, setSecurity] = useState<SettingSecurityState>(() => {
     try {
       const s = localStorage.getItem(SETTING_SECURITY_KEY);
       return s
-        ? JSON.parse(s)
-        : {
-            twofa: false,
-            saveLogin: true,
-            devices: [
-              {
-                id: "mbp-16",
-                name: 'MacBook Pro 16"',
-                lastUsed: "2026-02-22 / San Francisco, US",
-                trusted: true,
-              },
-              {
-                id: "iphone-14",
-                name: "iPhone 14 Pro",
-                lastUsed: "2026-02-23 / San Francisco, US",
-                trusted: true,
-              },
-              {
-                id: "office-pc",
-                name: "Windows PC",
-                lastUsed: "2026-02-10 / Ho Chi Minh, VN",
-                trusted: false,
-              },
-            ],
-          };
+        ? normalizeStoredSettingSecurity(JSON.parse(s))
+        : DEFAULT_SETTING_SECURITY;
     } catch {
-      return {
-        twofa: false,
-        saveLogin: true,
-        devices: [],
-      };
+      return { ...DEFAULT_SETTING_SECURITY, devices: [] };
     }
   });
   const [avatarUrl, setAvatarUrl] = useState(() => {
@@ -8979,7 +9043,7 @@ function SettingView() {
     setAvatarUrl(readStoredProfileAvatar(user));
   }, [user?.avatar, user?.id]);
 
-  const persistSecurity = (next: typeof security) => {
+  const persistSecurity = (next: SettingSecurityState) => {
     setSecurity(next);
     localStorage.setItem(SETTING_SECURITY_KEY, JSON.stringify(next));
   };
@@ -9063,6 +9127,13 @@ function SettingView() {
       toast("Transfer PIN confirmation does not match", "error");
       return;
     }
+    if (!transferPinOtp.challengeId || !/^\d{6}$/.test(transferPinOtp.code)) {
+      toast(
+        "Enter the OTP sent to your email before updating the transfer PIN",
+        "error",
+      );
+      return;
+    }
 
     setTransferPinBusy(true);
     try {
@@ -9075,6 +9146,8 @@ function SettingView() {
         body: JSON.stringify({
           currentPin: transferPinForm.current || undefined,
           newPin: transferPinForm.next,
+          otpChallengeId: transferPinOtp.challengeId,
+          otp: transferPinOtp.code,
         }),
       });
       const data = (await resp.json().catch(() => null)) as {
@@ -9089,9 +9162,67 @@ function SettingView() {
 
       setTransferPinEnabledStatus(data?.metadata?.transferPinEnabled === true);
       setTransferPinForm({ current: "", next: "", confirm: "" });
+      setTransferPinOtp({
+        challengeId: "",
+        code: "",
+        destination: "",
+        expiresAt: "",
+        retryAfterSeconds: 0,
+      });
       toast(data?.message || "Transfer PIN updated successfully");
     } finally {
       setTransferPinBusy(false);
+    }
+  };
+
+  const sendTransferPinOtp = async () => {
+    if (!token) {
+      toast("Session expired. Please login again.", "error");
+      return;
+    }
+
+    setTransferPinOtpBusy(true);
+    try {
+      const resp = await fetch(`${API_BASE}/security/transfer-pin/otp/send`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      const data = (await resp.json().catch(() => null)) as {
+        error?: string;
+        message?: string;
+        challengeId?: string;
+        destination?: string;
+        expiresAt?: string;
+        retryAfterSeconds?: number;
+      } | null;
+      if (!resp.ok) {
+        const retryNote =
+          typeof data?.retryAfterSeconds === "number"
+            ? ` Please wait ${data.retryAfterSeconds}s before requesting another code.`
+            : "";
+        toast(
+          `${data?.error || "Failed to send transfer PIN OTP"}${retryNote}`,
+          "error",
+        );
+        return;
+      }
+
+      setTransferPinOtp((prev) => ({
+        ...prev,
+        challengeId: data?.challengeId || "",
+        destination: data?.destination || "",
+        expiresAt: data?.expiresAt || "",
+        retryAfterSeconds: data?.retryAfterSeconds || 0,
+        code: "",
+      }));
+      toast(
+        data?.message ||
+          `Transfer PIN OTP sent${data?.destination ? ` to ${data.destination}` : ""}`,
+      );
+    } finally {
+      setTransferPinOtpBusy(false);
     }
   };
 
@@ -9524,8 +9655,8 @@ function SettingView() {
             <div className="setting-block">
               <h4 className="setting-block-head">Transfer PIN</h4>
               <p className="setting-block-desc muted">
-                Every transfer starts with your 6-digit transfer PIN. OTP is
-                only added when AI classifies the risk as medium.
+                Every transfer starts with your 6-digit transfer PIN. Creating
+                or changing it now requires an email OTP confirmation.
               </p>
               <div className="form-grid setting-form">
                 {transferPinEnabledStatus && (
@@ -9581,8 +9712,46 @@ function SettingView() {
                     }
                   />
                 </div>
+                <div className="form-group">
+                  <label>Email OTP</label>
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    maxLength={6}
+                    placeholder="Enter 6-digit OTP"
+                    value={transferPinOtp.code}
+                    onChange={(e) =>
+                      setTransferPinOtp((prev) => ({
+                        ...prev,
+                        code: e.target.value.replace(/\D/g, "").slice(0, 6),
+                      }))
+                    }
+                  />
+                  <small className="muted">
+                    {transferPinOtp.destination
+                      ? `OTP sent to ${transferPinOtp.destination}${
+                          transferPinOtp.expiresAt
+                            ? ` · expires ${new Date(
+                                transferPinOtp.expiresAt,
+                              ).toLocaleTimeString("en-US", {
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })}`
+                            : ""
+                        }`
+                      : "Send an OTP to your registered email before saving the new PIN."}
+                  </small>
+                </div>
               </div>
               <div className="setting-actions">
+                <button
+                  type="button"
+                  className="pill"
+                  onClick={sendTransferPinOtp}
+                  disabled={transferPinOtpBusy}
+                >
+                  {transferPinOtpBusy ? "Sending OTP..." : "Send OTP"}
+                </button>
                 <button
                   type="button"
                   className="btn-primary"

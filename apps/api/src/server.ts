@@ -56,6 +56,7 @@ import {
   sendPasswordResetOtpEmail,
   sendRegisterOtpEmail,
   sendTransferRiskAlertEmail,
+  sendTransferPinOtpEmail,
   sendTransferOtpEmail,
 } from "./services/email";
 import {
@@ -362,6 +363,9 @@ const RESET_PASSWORD_OTP_TTL_MINUTES = Number(
 );
 const CARD_DETAILS_OTP_TTL_MINUTES = Number(
   process.env.CARD_DETAILS_OTP_TTL_MINUTES || "5",
+);
+const TRANSFER_PIN_OTP_TTL_MINUTES = Number(
+  process.env.TRANSFER_PIN_OTP_TTL_MINUTES || "5",
 );
 const OTP_MAX_ATTEMPTS = Number(process.env.OTP_MAX_ATTEMPTS || "5");
 const CAPTCHA_TRACK_WIDTH_PX = Number(
@@ -12226,6 +12230,8 @@ app.post("/security/transfer-pin", requireAuth, async (req, res) => {
   const body = req.body as {
     currentPin?: unknown;
     newPin?: unknown;
+    otpChallengeId?: unknown;
+    otp?: unknown;
   };
   const currentPin =
     typeof body.currentPin === "string"
@@ -12233,9 +12239,18 @@ app.post("/security/transfer-pin", requireAuth, async (req, res) => {
       : "";
   const newPin =
     typeof body.newPin === "string" ? body.newPin.replace(/\D/g, "") : "";
+  const otpChallengeId =
+    typeof body.otpChallengeId === "string" ? body.otpChallengeId.trim() : "";
+  const otp = typeof body.otp === "string" ? body.otp.replace(/\D/g, "") : "";
   if (!/^\d{6}$/.test(newPin)) {
     return res.status(400).json({
       error: "Transfer password must be exactly 6 digits",
+    });
+  }
+  if (!otpChallengeId || !/^\d{6}$/.test(otp)) {
+    return res.status(400).json({
+      error:
+        "Email OTP confirmation is required before creating or changing the transfer PIN.",
     });
   }
 
@@ -12257,6 +12272,45 @@ app.post("/security/transfer-pin", requireAuth, async (req, res) => {
           error: "Current transfer PIN is incorrect",
         });
       }
+    }
+
+    try {
+      await verifyAndConsumeEmailOtpChallenge({
+        userId,
+        purpose: "TRANSFER_PIN",
+        challengeId: otpChallengeId,
+        otp,
+      });
+    } catch (err) {
+      if (err instanceof Error && err.message === "OTP_CHALLENGE_NOT_FOUND") {
+        return res.status(400).json({ error: "Transfer PIN OTP is invalid." });
+      }
+      if (
+        err instanceof Error &&
+        err.message === "OTP_CHALLENGE_ALREADY_USED"
+      ) {
+        return res.status(409).json({
+          error:
+            "This transfer PIN OTP was already used. Request a new code and try again.",
+        });
+      }
+      if (err instanceof Error && err.message === "OTP_EXPIRED") {
+        return res.status(400).json({
+          error: "Transfer PIN OTP expired. Request a new code.",
+        });
+      }
+      if (err instanceof Error && err.message === "OTP_TOO_MANY_ATTEMPTS") {
+        return res.status(429).json({
+          error:
+            "Too many incorrect transfer PIN OTP attempts. Request a new code.",
+        });
+      }
+      if (err instanceof Error && err.message === "OTP_INCORRECT") {
+        return res.status(400).json({
+          error: "Transfer PIN OTP is incorrect.",
+        });
+      }
+      throw err;
     }
 
     const nowIso = new Date().toISOString();
@@ -12282,6 +12336,7 @@ app.post("/security/transfer-pin", requireAuth, async (req, res) => {
         : "TRANSFER_PIN_CREATED",
       details: {
         transferPinEnabled: true,
+        otpChallengeId,
       },
       ipAddress: getRequestIp(req),
     });
@@ -12298,6 +12353,69 @@ app.post("/security/transfer-pin", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("Failed to update transfer PIN", err);
     return res.status(500).json({ error: "Failed to update transfer PIN" });
+  }
+});
+
+app.post("/security/transfer-pin/otp/send", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  try {
+    const userRepository = createUserRepository();
+    const userDoc = await userRepository.findValidatedById(userId);
+    if (!userDoc) return res.status(404).json({ error: "User not found" });
+    if (userDoc.status !== "ACTIVE") {
+      return res.status(423).json({ error: "Account is not active" });
+    }
+
+    const otpChallenge = await createEmailOtpChallenge({
+      userId,
+      purpose: "TRANSFER_PIN",
+      destination: userDoc.email,
+      ttlMinutes: TRANSFER_PIN_OTP_TTL_MINUTES,
+      maxAttempts: OTP_MAX_ATTEMPTS,
+    });
+
+    runAsyncSideEffect("sendTransferPinOtpEmail", () =>
+      sendTransferPinOtpEmail({
+        to: userDoc.email,
+        recipientName: getRecipientName(userDoc),
+        otpCode: otpChallenge.otpCode,
+        expiresInMinutes: TRANSFER_PIN_OTP_TTL_MINUTES,
+      }),
+    );
+
+    await logAuditEvent({
+      actor: req.user?.email,
+      userId,
+      action: "TRANSFER_PIN_OTP_SENT",
+      details: {
+        challengeId: otpChallenge.challengeId,
+      },
+      ipAddress: getRequestIp(req),
+    });
+
+    return res.json({
+      status: "ok",
+      challengeId: otpChallenge.challengeId,
+      expiresAt: otpChallenge.expiresAt.toISOString(),
+      retryAfterSeconds: otpChallenge.retryAfterSeconds,
+      destination: maskEmail(userDoc.email),
+      message: "Transfer PIN OTP sent successfully.",
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === "OTP_COOLDOWN_ACTIVE") {
+      return res.status(429).json({
+        error:
+          "A transfer PIN OTP was sent recently. Please wait before retrying.",
+        retryAfterSeconds:
+          "retryAfterSeconds" in err
+            ? (err as { retryAfterSeconds: number }).retryAfterSeconds
+            : 60,
+      });
+    }
+    console.error("Failed to send transfer PIN OTP", err);
+    return res.status(500).json({ error: "Failed to send transfer PIN OTP" });
   }
 });
 
