@@ -107,6 +107,7 @@ const STEP_COLORS: Record<FaceIdStepId, string> = {
 };
 
 const PROCESS_INTERVAL_MS = 220;
+const MIN_SCAN_DURATION_MS = 3000;
 const REQUIRED_STEP_STREAK = 3;
 const COMPAT_REQUIRED_STEP_STREAK = 4;
 const MEDIAPIPE_WASM_PATH =
@@ -514,6 +515,7 @@ export function FaceIdCapture({
   const motionAccumulatorRef = useRef(0);
   const cueAccumulatorRef = useRef(0);
   const sampleCountRef = useRef(0);
+  const scanStartedAtRef = useRef(0);
   const lastBoxRef = useRef<DetectedFace["boundingBox"] | null>(null);
   const lastDetectedFaceRef = useRef<DetectedFace | null>(null);
   const stepCaptureRef = useRef<
@@ -590,6 +592,7 @@ export function FaceIdCapture({
     motionAccumulatorRef.current = 0;
     cueAccumulatorRef.current = 0;
     sampleCountRef.current = 0;
+    scanStartedAtRef.current = 0;
     lastBoxRef.current = null;
     lastDetectedFaceRef.current = null;
     stepCaptureRef.current = {};
@@ -863,6 +866,14 @@ export function FaceIdCapture({
     [buildEvidenceImage],
   );
 
+  const getRemainingScanMs = useCallback(() => {
+    if (!scanStartedAtRef.current) return MIN_SCAN_DURATION_MS;
+    return Math.max(
+      0,
+      MIN_SCAN_DURATION_MS - (performance.now() - scanStartedAtRef.current),
+    );
+  }, []);
+
   const finalizeProof = useCallback(
     (resolvedSteps: FaceIdStepId[]) => {
       const canvas = canvasRef.current;
@@ -875,6 +886,14 @@ export function FaceIdCapture({
       }
 
       try {
+        const remainingScanMs = getRemainingScanMs();
+        if (remainingScanMs > 0) {
+          throw new Error(
+            `Face scan is still stabilizing. Hold steady for ${Math.ceil(
+              remainingScanMs / 1000,
+            )}s more.`,
+          );
+        }
         if (resolvedSteps.length !== challenge.steps.length) {
           throw new Error("Face scan steps were incomplete.");
         }
@@ -945,7 +964,7 @@ export function FaceIdCapture({
         onChange(null);
       }
     },
-    [challenge, isVerifyMode, onChange, stopCamera],
+    [challenge, getRemainingScanMs, isVerifyMode, onChange, stopCamera],
   );
 
   const renderCurrentFrameToCanvas = useCallback(async () => {
@@ -1122,7 +1141,18 @@ export function FaceIdCapture({
       setCompletedSteps(nextCompletedSteps);
 
       if (stepIndex + 1 >= (challenge?.steps.length ?? 0)) {
-        window.setTimeout(() => finalizeProof(nextCompletedSteps), 420);
+        const remainingScanMs = getRemainingScanMs();
+        setMessage(
+          remainingScanMs > 0
+            ? `Hold steady for ${Math.ceil(
+                remainingScanMs / 1000,
+              )}s to finish FaceID verification.`
+            : "Finalizing FaceID verification...",
+        );
+        window.setTimeout(
+          () => finalizeProof(nextCompletedSteps),
+          Math.max(420, remainingScanMs),
+        );
         return true;
       }
 
@@ -1138,6 +1168,7 @@ export function FaceIdCapture({
       challenge?.steps,
       completedSteps,
       finalizeProof,
+      getRemainingScanMs,
       stepIndex,
     ],
   );
@@ -1167,7 +1198,18 @@ export function FaceIdCapture({
       setCompletedSteps(nextCompletedSteps);
 
       if (stepIndex + 1 >= (challenge?.steps.length ?? 0)) {
-        window.setTimeout(() => finalizeProof(nextCompletedSteps), 520);
+        const remainingScanMs = getRemainingScanMs();
+        setMessage(
+          remainingScanMs > 0
+            ? `Keep still for ${Math.ceil(
+                remainingScanMs / 1000,
+              )}s so the FaceID scan can stabilize.`
+            : "Finalizing FaceID verification...",
+        );
+        window.setTimeout(
+          () => finalizeProof(nextCompletedSteps),
+          Math.max(520, remainingScanMs),
+        );
         return;
       }
 
@@ -1176,7 +1218,14 @@ export function FaceIdCapture({
         `Compatibility mode: ${challenge?.steps[stepIndex + 1]?.label || "Continue the live scan."}`,
       );
     },
-    [activeStep, challenge?.steps, completedSteps, finalizeProof, stepIndex],
+    [
+      activeStep,
+      challenge?.steps,
+      completedSteps,
+      finalizeProof,
+      getRemainingScanMs,
+      stepIndex,
+    ],
   );
 
   const processFrame = useCallback(async () => {
@@ -1445,7 +1494,19 @@ export function FaceIdCapture({
             progressRatio >= 1 &&
             sampleCountRef.current >= requiredCompatSamples
           ) {
-            finalizeProof(challenge.steps.map((step) => step.id));
+            const remainingScanMs = getRemainingScanMs();
+            const resolvedSteps = challenge.steps.map((step) => step.id);
+            setMessage(
+              remainingScanMs > 0
+                ? `Keep still for ${Math.ceil(
+                    remainingScanMs / 1000,
+                  )}s so the FaceID scan can stabilize.`
+                : "Finalizing FaceID verification...",
+            );
+            window.setTimeout(
+              () => finalizeProof(resolvedSteps),
+              Math.max(520, remainingScanMs),
+            );
             return;
           }
         } else {
@@ -1615,6 +1676,7 @@ export function FaceIdCapture({
       motionAccumulatorRef.current = 0;
       cueAccumulatorRef.current = 0;
       sampleCountRef.current = 0;
+      scanStartedAtRef.current = performance.now();
       lastBoxRef.current = null;
       lastDetectedFaceRef.current = null;
       centerSnapshotRef.current = null;

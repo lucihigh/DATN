@@ -1,0 +1,22 @@
+[
+  { "canonical": "FPT", "symbol": "FPT.VN", "sector": "technology", "kind": "stock", "aliases": ["fpt telecom", "fpt shop"] },
+  { "canonical": "Vinamilk", "symbol": "VNM.VN", "sector": "consumer", "kind": "stock" },
+  { "canonical": "Hoa Phat", "symbol": "HPG.VN", "sector": "materials", "kind": "stock", "aliases": ["hoa phat group"] },
+  { "canonical": "Vingroup", "symbol": "VIC.VN", "sector": "conglomerate", "kind": "stock" },
+  { "canonical": "Vinhomes", "symbol": "VHM.VN", "sector": "real-estate", "kind": "stock" },
+  { "canonical": "Mobile World", "symbol": "MWG.VN", "sector": "retail", "kind": "stock", "aliases": ["the gioi di dong"] },
+  { "canonical": "Masan", "symbol": "MSN.VN", "sector": "consumer", "kind": "stock" },
+  { "canonical": "PNJ", "symbol": "PNJ.VN", "sector": "retail", "kind": "stock", "aliases": ["phu nhuan jewelry"] },
+  { "canonical": "REE", "symbol": "REE.VN", "sector": "infrastructure", "kind": "stock" },
+  { "canonical": "Gemadept", "symbol": "GMD.VN", "sector": "logistics", "kind": "stock" },
+  { "canonical": "Becamex", "symbol": "BCM.VN", "sector": "industrial", "kind": "stock" },
+  { "canonical": "Vincom Retail", "symbol": "VRE.VN", "sector": "retail", "kind": "stock" },
+  { "canonical": "DGC", "symbol": "DGC.VN", "sector": "chemicals", "kind": "stock", "aliases": ["duc giang chemicals"] },
+  { "canonical": "Dam Phu My", "symbol": "DPM.VN", "sector": "chemicals", "kind": "stock" },
+  { "canonical": "Dam Ca Mau", "symbol": "DCM.VN", "sector": "chemicals", "kind": "stock" },
+  { "canonical": "Khang Dien", "symbol": "KDH.VN", "sector": "real-estate", "kind": "stock" },
+  { "canonical": "Nam Long", "symbol": "NLG.VN", "sector": "real-estate", "kind": "stock" },
+  { "canonical": "Dat Xanh", "symbol": "DXG.VN", "sector": "real-estate", "kind": "stock" },
+  { "canonical": "PV Drilling", "symbol": "PVD.VN", "sector": "energy", "kind": "stock" },
+  { "canonical": "PVS", "symbol": "PVS.VN", "sector": "energy", "kind": "stock", "aliases": ["petrovietnam technical services"] }
+]

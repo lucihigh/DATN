@@ -20,6 +20,13 @@ import {
 } from "@secure-wallet/shared";
 import type { components } from "@secure-wallet/shared/api-client/types";
 
+import {
+  COPILOT_FINANCE_KNOWLEDGE,
+  COPILOT_COMMON_MARKET_SYMBOLS,
+  COPILOT_COMPANY_ALIASES,
+  COPILOT_INDEX_ALIASES,
+  type MarketIntent,
+} from "./data/financeKnowledge";
 import { prisma } from "./db/prisma";
 import {
   createAuditLogRepository,
@@ -106,6 +113,72 @@ function runAsyncSideEffect(label: string, work: () => Promise<unknown>) {
   void work().catch((error) => {
     console.error(`Background side effect failed: ${label}`, error);
   });
+}
+
+const SAFE_AVATAR_MIME_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+]);
+const MAX_AVATAR_BINARY_BYTES = 900 * 1024;
+
+function hasMagicBytes(buffer: Buffer, signature: number[], offset = 0) {
+  if (buffer.length < offset + signature.length) return false;
+  return signature.every((byte, index) => buffer[offset + index] === byte);
+}
+
+function isSafeAvatarBuffer(buffer: Buffer, mimeType: string) {
+  if (mimeType === "image/jpeg") {
+    return hasMagicBytes(buffer, [0xff, 0xd8, 0xff]);
+  }
+  if (mimeType === "image/png") {
+    return hasMagicBytes(
+      buffer,
+      [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+    );
+  }
+  if (mimeType === "image/webp") {
+    return (
+      hasMagicBytes(buffer, [0x52, 0x49, 0x46, 0x46]) &&
+      hasMagicBytes(buffer, [0x57, 0x45, 0x42, 0x50], 8)
+    );
+  }
+  return false;
+}
+
+function parseSafeAvatarDataUrl(input: unknown) {
+  if (typeof input !== "string") return undefined;
+  const value = input.trim();
+  if (!value) return undefined;
+  if (value.length > 2_000_000) {
+    throw new Error("AVATAR_TOO_LARGE");
+  }
+
+  const match = value.match(
+    /^data:([a-z0-9.+-]+\/[a-z0-9.+-]+);base64,([a-z0-9+/=]+)$/i,
+  );
+  if (!match) {
+    throw new Error("AVATAR_INVALID_FORMAT");
+  }
+
+  const mimeType = match[1].toLowerCase();
+  if (!SAFE_AVATAR_MIME_TYPES.has(mimeType)) {
+    throw new Error("AVATAR_UNSUPPORTED_TYPE");
+  }
+
+  const base64Payload = match[2];
+  const buffer = Buffer.from(base64Payload, "base64");
+  if (!buffer.length) {
+    throw new Error("AVATAR_INVALID_FORMAT");
+  }
+  if (buffer.byteLength > MAX_AVATAR_BINARY_BYTES) {
+    throw new Error("AVATAR_TOO_LARGE");
+  }
+  if (!isSafeAvatarBuffer(buffer, mimeType)) {
+    throw new Error("AVATAR_CONTENT_MISMATCH");
+  }
+
+  return `data:${mimeType};base64,${buffer.toString("base64")}`;
 }
 
 type UserCacheScope = "auth" | "wallet" | "transactions" | "security";
@@ -354,8 +427,11 @@ const validateStartupConfiguration = () => {
     {
       key: "JWT_SECRET",
       isInvalid: (value: string) =>
-        !value || value === "changemejwtsecret" || value === "dev-insecure-jwt-secret",
-      message: "Set JWT_SECRET to a long random secret before starting production.",
+        !value ||
+        value === "changemejwtsecret" ||
+        value === "dev-insecure-jwt-secret",
+      message:
+        "Set JWT_SECRET to a long random secret before starting production.",
     },
     {
       key: "ENCRYPTION_KEY",
@@ -429,6 +505,12 @@ type AnomalyResponse = {
   score: number;
   riskLevel: "low" | "medium" | "high";
   reasons: string[];
+  archetype?: string | null;
+  timeline?: string[];
+  headline?: string | null;
+  summary?: string | null;
+  nextStep?: string | null;
+  recommendedActions?: string[];
   monitoringOnly: boolean;
   action?: string;
   requireOtp: boolean;
@@ -462,6 +544,9 @@ type TransferSafetyAdvisory = {
   severity: "caution" | "warning" | "blocked";
   title: string;
   message: string;
+  archetype?: string | null;
+  timeline?: string[];
+  recommendedActions?: string[];
   confirmationLabel: string;
   reasons: string[];
   requiresAcknowledgement: boolean;
@@ -709,15 +794,35 @@ const buildHeuristicLoginAiResponse = (input: {
 
   score = clamp(score, 0.05, 0.98);
 
+  const riskLevel = score >= 0.7 ? "high" : score >= 0.4 ? "medium" : "low";
+  const requireOtp = !input.wasTrustedIp;
+  const otpChannel = requireOtp ? "email" : null;
+  const otpReason = requireOtp
+    ? "the sign-in came from a new or untrusted IP"
+    : null;
+  const guidance = buildAnomalyGuidance({
+    riskLevel,
+    reasons,
+    requireOtp,
+    otpChannel,
+    otpReason,
+  });
+
   return {
     score,
-    riskLevel: score >= 0.7 ? "high" : score >= 0.4 ? "medium" : "low",
+    riskLevel,
     reasons,
+    archetype: guidance.archetype,
+    timeline: guidance.timeline,
+    headline: guidance.headline,
+    summary: guidance.summary,
+    nextStep: guidance.nextStep,
+    recommendedActions: guidance.recommendedActions,
     monitoringOnly: false,
     action: "NOTIFY_ADMIN_ONLY",
-    requireOtp: !input.wasTrustedIp,
-    otpChannel: !input.wasTrustedIp ? "email" : null,
-    otpReason: !input.wasTrustedIp ? "New IP sign-in verification" : null,
+    requireOtp,
+    otpChannel,
+    otpReason,
     modelSource: "api-heuristic-fallback",
     modelVersion: "login-risk-v1",
     requestKey: null,
@@ -795,27 +900,74 @@ const normalizeRuleHits = (value: unknown): AnomalyResponse["ruleHits"] => {
 const normalizeAiResponse = (value: unknown): AnomalyResponse => {
   if (!value || typeof value !== "object") return DEFAULT_AI_RESPONSE;
   const data = value as Record<string, unknown>;
+  const riskLevel = normalizeRiskLevel(data.risk_level ?? data.riskLevel);
+  const reasons = toStringList(data.reasons);
+  const requireOtp = Boolean(data.require_otp_sms ?? data.requireOtp);
+  const otpChannel =
+    typeof data.otp_channel === "string"
+      ? data.otp_channel
+      : typeof data.otpChannel === "string"
+        ? data.otpChannel
+        : null;
+  const otpReason =
+    typeof data.otp_reason === "string"
+      ? data.otp_reason
+      : typeof data.otpReason === "string"
+        ? data.otpReason
+        : null;
+  const warning = normalizeWarningPayload(data.warning_vi ?? data.warning);
+  const guidance = buildAnomalyGuidance({
+    riskLevel,
+    reasons,
+    requireOtp,
+    otpChannel,
+    otpReason,
+    warning,
+  });
+
   return {
     score: toAnomalyScore(data.anomaly_score ?? data.score),
-    riskLevel: normalizeRiskLevel(data.risk_level ?? data.riskLevel),
-    reasons: toStringList(data.reasons),
+    riskLevel,
+    reasons,
+    archetype:
+      typeof data.archetype === "string" ? data.archetype : guidance.archetype,
+    timeline: dedupeStringList([
+      ...(Array.isArray(data.timeline)
+        ? data.timeline.filter(
+            (item): item is string => typeof item === "string",
+          )
+        : []),
+      ...guidance.timeline,
+    ]).slice(0, 4),
+    headline:
+      typeof data.headline === "string" ? data.headline : guidance.headline,
+    summary: typeof data.summary === "string" ? data.summary : guidance.summary,
+    nextStep:
+      typeof data.next_step === "string"
+        ? data.next_step
+        : typeof data.nextStep === "string"
+          ? data.nextStep
+          : guidance.nextStep,
+    recommendedActions: dedupeStringList([
+      ...(Array.isArray(data.recommended_actions)
+        ? data.recommended_actions.filter(
+            (item): item is string => typeof item === "string",
+          )
+        : []),
+      ...(Array.isArray(data.recommendedActions)
+        ? data.recommendedActions.filter(
+            (item): item is string => typeof item === "string",
+          )
+        : []),
+      ...guidance.recommendedActions,
+    ]).slice(0, 4),
     monitoringOnly: Boolean(
       data.monitoring_only ?? data.monitoringOnly ?? true,
     ),
     action: typeof data.action === "string" ? data.action : undefined,
-    requireOtp: Boolean(data.require_otp_sms ?? data.requireOtp),
-    otpChannel:
-      typeof data.otp_channel === "string"
-        ? data.otp_channel
-        : typeof data.otpChannel === "string"
-          ? data.otpChannel
-          : null,
-    otpReason:
-      typeof data.otp_reason === "string"
-        ? data.otp_reason
-        : typeof data.otpReason === "string"
-          ? data.otpReason
-          : null,
+    requireOtp,
+    otpChannel,
+    otpReason,
     modelSource:
       typeof data.model_source === "string"
         ? data.model_source
@@ -856,7 +1008,7 @@ const normalizeAiResponse = (value: unknown): AnomalyResponse => {
           ? data.ruleHitCount
           : undefined,
     ruleHits: normalizeRuleHits(data.rule_hits ?? data.ruleHits),
-    warning: normalizeWarningPayload(data.warning_vi ?? data.warning),
+    warning,
   };
 };
 
@@ -1438,11 +1590,29 @@ type CopilotResponsePayload = {
   followUpQuestion?: string | null;
 };
 
-type MarketIntent = {
-  assetClass: "fx" | "crypto" | "commodity" | "stock" | "index";
-  symbol: string;
-  label: string;
-  quoteHint?: string | null;
+type StoredCopilotSessionState = {
+  messages: CopilotMessagePayload[];
+  insight: {
+    topic: string;
+    suggestedActions: string[];
+    suggestedDepositAmount: number | null;
+    riskLevel: string;
+    confidence: number;
+    followUpQuestion: string | null;
+  };
+};
+
+type StoredCopilotConversation = StoredCopilotSessionState & {
+  id: string;
+  title: string;
+  pinned: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type StoredCopilotWorkspaceState = {
+  activeSessionId: string;
+  sessions: StoredCopilotConversation[];
 };
 
 type MarketQuoteSnapshot = {
@@ -1457,7 +1627,7 @@ type MarketQuoteSnapshot = {
   exchangeName: string | null;
   marketState: string | null;
   asOf: Date;
-  source: "Yahoo Finance";
+  source: string;
 };
 
 const openaiClient = OPENAI_API_KEY
@@ -1481,6 +1651,204 @@ type OllamaCopilotResult =
       code: string;
       message: string;
     };
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === "object" && !Array.isArray(value);
+
+const buildDefaultStoredCopilotSession = (): StoredCopilotSessionState => ({
+  messages: [
+    {
+      role: "assistant",
+      content:
+        "Ask me anything about spending, savings, transfers, statements, scams, or market decisions. I will use your wallet context when it helps.",
+    },
+  ],
+  insight: {
+    topic: "",
+    suggestedActions: [],
+    suggestedDepositAmount: null,
+    riskLevel: "low",
+    confidence: 0,
+    followUpQuestion: null,
+  },
+});
+
+const buildDefaultStoredCopilotConversation = (): StoredCopilotConversation => {
+  const now = new Date().toISOString();
+  return {
+    id: crypto.randomUUID(),
+    title: "New Conversation",
+    pinned: false,
+    createdAt: now,
+    updatedAt: now,
+    ...buildDefaultStoredCopilotSession(),
+  };
+};
+
+const buildDefaultStoredCopilotWorkspace = (): StoredCopilotWorkspaceState => {
+  const session = buildDefaultStoredCopilotConversation();
+  return {
+    activeSessionId: session.id,
+    sessions: [session],
+  };
+};
+
+const sanitizeStoredCopilotMessages = (value: unknown) => {
+  const messages = Array.isArray(value)
+    ? value.filter(
+        (item): item is CopilotMessagePayload =>
+          isPlainObject(item) &&
+          (item.role === "user" ||
+            item.role === "assistant" ||
+            item.role === "system") &&
+          typeof item.content === "string" &&
+          item.content.trim().length > 0,
+      )
+    : [];
+
+  return messages.slice(-40).map((message) => ({
+    role: message.role,
+    content: message.content.trim().slice(0, 8000),
+  }));
+};
+
+const sanitizeStoredCopilotInsight = (
+  value: unknown,
+): StoredCopilotSessionState["insight"] => {
+  const raw = isPlainObject(value) ? value : {};
+  const suggestedActions = Array.isArray(raw.suggestedActions)
+    ? raw.suggestedActions
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .slice(0, 6)
+    : [];
+
+  return {
+    topic: typeof raw.topic === "string" ? raw.topic.trim().slice(0, 120) : "",
+    suggestedActions,
+    suggestedDepositAmount:
+      typeof raw.suggestedDepositAmount === "number" &&
+      Number.isFinite(raw.suggestedDepositAmount)
+        ? raw.suggestedDepositAmount
+        : null,
+    riskLevel: normalizeCopilotRiskLevel(raw.riskLevel),
+    confidence: clamp(Number(raw.confidence || 0), 0, 1),
+    followUpQuestion:
+      typeof raw.followUpQuestion === "string" && raw.followUpQuestion.trim()
+        ? raw.followUpQuestion.trim().slice(0, 240)
+        : null,
+  };
+};
+
+const sanitizeStoredCopilotSession = (
+  value: unknown,
+): StoredCopilotSessionState => {
+  const defaults = buildDefaultStoredCopilotSession();
+  const raw = isPlainObject(value) ? value : {};
+  const messages = sanitizeStoredCopilotMessages(raw.messages);
+
+  return {
+    messages: messages.length ? messages : defaults.messages,
+    insight: sanitizeStoredCopilotInsight(raw.insight),
+  };
+};
+
+const sanitizeStoredCopilotConversation = (
+  value: unknown,
+): StoredCopilotConversation | null => {
+  const raw = isPlainObject(value) ? value : null;
+  if (!raw) return null;
+  const base = sanitizeStoredCopilotSession(raw);
+  const now = new Date().toISOString();
+  const id =
+    typeof raw.id === "string" && raw.id.trim()
+      ? raw.id.trim().slice(0, 80)
+      : crypto.randomUUID();
+  const title =
+    typeof raw.title === "string" && raw.title.trim()
+      ? raw.title.trim().slice(0, 120)
+      : "New Conversation";
+  const pinned = Boolean(raw.pinned);
+  const createdAt =
+    typeof raw.createdAt === "string" && raw.createdAt.trim()
+      ? raw.createdAt
+      : now;
+  const updatedAt =
+    typeof raw.updatedAt === "string" && raw.updatedAt.trim()
+      ? raw.updatedAt
+      : now;
+
+  return {
+    id,
+    title,
+    pinned,
+    createdAt,
+    updatedAt,
+    ...base,
+  };
+};
+
+const sanitizeStoredCopilotWorkspace = (
+  value: unknown,
+): StoredCopilotWorkspaceState => {
+  const defaults = buildDefaultStoredCopilotWorkspace();
+  const raw = isPlainObject(value) ? value : {};
+
+  if (
+    Array.isArray(raw.messages) ||
+    isPlainObject(raw.insight) ||
+    typeof raw.topic === "string"
+  ) {
+    const legacySession = sanitizeStoredCopilotConversation({
+      id: crypto.randomUUID(),
+      title: "Recovered Conversation",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: raw.messages,
+      insight: raw.insight ?? raw,
+    });
+
+    return legacySession
+      ? {
+          activeSessionId: legacySession.id,
+          sessions: [legacySession],
+        }
+      : defaults;
+  }
+
+  const sessions = Array.isArray(raw.sessions)
+    ? raw.sessions
+        .map((session) => sanitizeStoredCopilotConversation(session))
+        .filter((session): session is StoredCopilotConversation =>
+          Boolean(session),
+        )
+        .slice(0, 20)
+    : [];
+
+  const nextSessions = sessions.length ? sessions : defaults.sessions;
+  const activeSessionId =
+    typeof raw.activeSessionId === "string" &&
+    nextSessions.some((session) => session.id === raw.activeSessionId)
+      ? raw.activeSessionId
+      : nextSessions[0].id;
+
+  return {
+    activeSessionId,
+    sessions: nextSessions,
+  };
+};
+
+const readStoredCopilotWorkspaceFromMetadata = (
+  metadata: unknown,
+): StoredCopilotWorkspaceState => {
+  if (!isPlainObject(metadata)) {
+    return buildDefaultStoredCopilotWorkspace();
+  }
+  return sanitizeStoredCopilotWorkspace(
+    metadata.copilotWorkspace ?? metadata.copilotSession,
+  );
+};
 
 type CopilotLanguage = "vi" | "en";
 
@@ -1884,6 +2252,9 @@ const buildBlockedTransferAdvisory = (input: {
   currency: string;
   senderBalance: number;
   reasons: string[];
+  archetype?: string | null;
+  timeline?: string[];
+  recommendedActions?: string[];
   blockedUntil: string;
   title?: string;
   message?: string;
@@ -1902,6 +2273,17 @@ const buildBlockedTransferAdvisory = (input: {
       ).toLocaleString(
         "en-US",
       )} so you have time to verify the recipient through a trusted channel.`,
+    archetype: input.archetype || "Known Scam Pattern",
+    timeline: dedupeStringList([
+      ...(input.timeline || []),
+      "The transfer entered a temporary safety hold while high-risk signals are reviewed.",
+    ]).slice(0, 4),
+    recommendedActions: dedupeStringList([
+      ...(input.recommendedActions || []),
+      "Verify the recipient through a trusted channel you initiate yourself.",
+      "Do not continue if anyone is pressuring you to act urgently.",
+      "Retry only after you confirm the payment purpose and recipient identity.",
+    ]).slice(0, 4),
     confirmationLabel: "Blocked for safety review",
     reasons: input.reasons,
     requiresAcknowledgement: false,
@@ -1971,8 +2353,20 @@ const buildTransferSafetyAdvisory = (input: {
       input.spendProfile.spendSurgeRatio >= 8) ||
     (noteRiskReasons.length > 0 &&
       amount >= Math.max(500, LARGE_TRANSFER_ADVISORY_AMOUNT * 0.5));
+  let archetype: string | null = null;
+  const recommendedActions: string[] = [];
+  const addRecommendedAction = (action: string) => {
+    if (
+      !recommendedActions.some(
+        (entry) => entry.toLowerCase() === action.toLowerCase(),
+      )
+    ) {
+      recommendedActions.push(action);
+    }
+  };
 
   if (hasMaterialDrainAmount && transferRatio >= BALANCE_DRAIN_ADVISORY_RATIO) {
+    archetype = archetype || "Balance Drain Risk";
     addReason(
       `This transfer uses ${Math.round(transferRatio * 100)}% of your available wallet balance.`,
     );
@@ -2004,8 +2398,12 @@ const buildTransferSafetyAdvisory = (input: {
   }
 
   if (!input.recipientProfile.isKnownRecipient) {
+    archetype = archetype || "New Recipient Risk";
     addReason(
       `${recipientLabel} has not appeared in your completed transfer history yet.`,
+    );
+    addRecommendedAction(
+      "Confirm the recipient using a trusted phone number or verified channel before sending.",
     );
     if (qualifiesForRedWarning) {
       severity = "warning";
@@ -2086,7 +2484,13 @@ const buildTransferSafetyAdvisory = (input: {
   }
 
   for (const noteReason of noteRiskReasons) {
+    archetype = archetype || "Scam Script Language";
     addReason(noteReason);
+  }
+  if (noteRiskReasons.length > 0) {
+    addRecommendedAction(
+      "Pause if this transfer was requested over chat, phone, or a link you did not verify independently.",
+    );
   }
   if (
     noteRiskReasons.length > 0 &&
@@ -2099,6 +2503,9 @@ const buildTransferSafetyAdvisory = (input: {
   if (noteIsGeneric && amount >= LARGE_TRANSFER_ADVISORY_AMOUNT) {
     addReason(
       `The transfer note is too generic for a payment of ${formatMoneyAmount(input.currency, amount)}.`,
+    );
+    addRecommendedAction(
+      "Add a specific payment purpose before continuing so the transfer is easier to verify later.",
     );
   }
 
@@ -2124,16 +2531,24 @@ const buildTransferSafetyAdvisory = (input: {
   }
 
   if (input.aiResult.riskLevel === "medium") {
+    archetype = archetype || "Behavior Drift";
     addReason(
       "AI sees this transfer as less typical than your recent completed behavior.",
     );
+    addRecommendedAction(
+      "Review the amount, recipient, and purpose once more before approving OTP.",
+    );
   }
   if (input.aiResult.riskLevel === "high") {
+    archetype = archetype || "Known Scam Pattern";
     if (qualifiesForRedWarning && hasStrongWarningSignal) {
       severity = "warning";
     }
     addReason(
       "AI found multiple scam-like signals around this recipient, amount, and transfer pattern.",
+    );
+    addRecommendedAction(
+      "Do not approve this transfer until you independently verify the request is legitimate.",
     );
   }
 
@@ -2168,13 +2583,28 @@ const buildTransferSafetyAdvisory = (input: {
     const blockedUntil = new Date(
       Date.now() + TRANSFER_SCAM_HOLD_MS,
     ).toISOString();
+    const timeline = dedupeStringList([
+      !input.recipientProfile.isKnownRecipient
+        ? "The recipient was not found in your completed transfer history."
+        : null,
+      noteRiskReasons.length > 0
+        ? "The payment note matched language often used in scam instructions."
+        : null,
+      hasMaterialDrainAmount && transferRatio >= BALANCE_DRAIN_ADVISORY_RATIO
+        ? `The amount would consume ${Math.round(transferRatio * 100)}% of your current balance.`
+        : null,
+      "The risk engine combined these signals and placed the transfer on hold.",
+    ]).slice(0, 4);
     return buildBlockedTransferAdvisory({
       requestKey: input.requestKey,
       amount,
       currency: input.currency,
       senderBalance,
       blockedUntil,
+      archetype: archetype || "Known Scam Pattern",
+      timeline,
       reasons: advisoryReasons,
+      recommendedActions,
       message: `This transfer is temporarily blocked until ${new Date(
         blockedUntil,
       ).toLocaleString(
@@ -2237,12 +2667,44 @@ const buildTransferSafetyAdvisory = (input: {
           .join(" ")}`;
 
   const requiresAcknowledgement = severity === "warning";
+  const timeline = dedupeStringList([
+    !input.recipientProfile.isKnownRecipient
+      ? "The recipient is new relative to your completed transfer history."
+      : null,
+    hasMaterialDrainAmount && transferRatio >= BALANCE_DRAIN_ADVISORY_RATIO
+      ? `The amount would use ${Math.round(transferRatio * 100)}% of your balance.`
+      : null,
+    noteRiskReasons.length > 0
+      ? "The payment note contains language commonly seen in scam or pressure-based requests."
+      : null,
+    input.aiResult.riskLevel === "high"
+      ? "AI combined recipient, amount, and behavior signals into a high-risk pattern."
+      : input.aiResult.riskLevel === "medium"
+        ? "AI found this transfer less typical than your recent completed behavior."
+        : "AI recorded only light advisory signals for this transfer.",
+    severity === "warning"
+      ? "The transfer can continue only after you actively review and acknowledge the warning."
+      : "The transfer can continue, but the system recommends a manual check first.",
+  ]).slice(0, 5);
 
   return {
     requestKey: input.requestKey || null,
     severity,
     title,
     message: `${messageLead} ${messageTail}`,
+    archetype:
+      archetype ||
+      (severity === "warning" ? "Step-Up Review" : "Light Advisory Signal"),
+    timeline,
+    recommendedActions: dedupeStringList([
+      ...recommendedActions,
+      severity === "warning"
+        ? "Verify the recipient and purpose before you continue to OTP."
+        : "Continue only if the recipient, amount, and note all match your intent.",
+      qualifiesForRedWarning
+        ? "Expect stronger verification on larger transfers."
+        : null,
+    ]).slice(0, 4),
     confirmationLabel:
       severity === "warning"
         ? "I reviewed the warning, continue to OTP"
@@ -2291,6 +2753,15 @@ const normalizeTransferSafetyAdvisory = (value: unknown) => {
     severity,
     title: data.title,
     message: data.message,
+    archetype: typeof data.archetype === "string" ? data.archetype : null,
+    timeline: Array.isArray(data.timeline)
+      ? data.timeline.filter((item): item is string => typeof item === "string")
+      : [],
+    recommendedActions: Array.isArray(data.recommendedActions)
+      ? data.recommendedActions.filter(
+          (item): item is string => typeof item === "string",
+        )
+      : [],
     confirmationLabel: data.confirmationLabel,
     reasons: Array.isArray(data.reasons)
       ? data.reasons.filter((item): item is string => typeof item === "string")
@@ -2318,6 +2789,22 @@ const formatCopilotMoney = (currency: string, amount: number) =>
 
 const formatCopilotSignedMoney = (currency: string, amount: number) =>
   `${amount >= 0 ? "+" : "-"}${formatCopilotMoney(currency, Math.abs(amount))}`;
+
+const dedupeStringList = (items: Array<string | null | undefined>) => {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of items) {
+    const cleaned = String(item || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!cleaned) continue;
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(cleaned);
+  }
+  return result;
+};
 
 const escapeCopilotMarkdownCell = (value: string | number) =>
   String(value).replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
@@ -2369,12 +2856,139 @@ const normalizeCopilotRiskLevel = (value: unknown) => {
   return normalized === "high" || normalized === "medium" ? normalized : "low";
 };
 
+const buildAnomalyGuidance = (input: {
+  riskLevel: "low" | "medium" | "high";
+  reasons: string[];
+  requireOtp: boolean;
+  otpChannel?: string | null;
+  otpReason?: string | null;
+  warning?: AnomalyResponse["warning"];
+}) => {
+  const joinedSignals = [
+    ...input.reasons,
+    input.otpReason || "",
+    input.warning?.title || "",
+    input.warning?.message || "",
+  ]
+    .join(" ")
+    .toLowerCase();
+  const primaryReason =
+    dedupeStringList([
+      input.warning?.message,
+      ...input.reasons,
+      input.otpReason,
+    ])[0] || "The activity differs from your normal pattern.";
+
+  const archetype = /credential|failed attempt|password/i.test(joinedSignals)
+    ? "Credential Abuse Pattern"
+    : /new or untrusted ip|different ip|different device|new device|vpn/i.test(
+          joinedSignals,
+        ) || input.requireOtp
+      ? "New Device / Network Shift"
+      : input.riskLevel === "high"
+        ? "High-Risk Session Change"
+        : input.riskLevel === "medium"
+          ? "Behavior Drift"
+          : "Low-Severity Deviation";
+
+  const headline =
+    input.warning?.title ||
+    (input.requireOtp
+      ? input.riskLevel === "high"
+        ? "AI security review escalated this activity"
+        : "AI requested an extra identity check"
+      : input.riskLevel === "high"
+        ? "AI detected a high-risk security pattern"
+        : input.riskLevel === "medium"
+          ? "AI detected an unusual security pattern"
+          : "AI observed a low-severity deviation");
+
+  const summary = input.requireOtp
+    ? `${primaryReason} Extra verification was triggered${input.otpChannel ? ` via ${input.otpChannel}` : ""}${input.otpReason ? ` because ${input.otpReason.toLowerCase()}` : ""}.`
+    : input.riskLevel === "high"
+      ? `${primaryReason} Treat this as a high-risk event until you verify it was expected.`
+      : input.riskLevel === "medium"
+        ? `${primaryReason} The behavior is unusual enough to justify a closer review.`
+        : `${primaryReason} The signal is mild, but the system still recorded it for protection.`;
+
+  const nextStep = input.requireOtp
+    ? `Complete the ${input.otpChannel || "additional"} verification before continuing.`
+    : input.riskLevel === "high"
+      ? "Pause and verify the activity before you continue."
+      : input.riskLevel === "medium"
+        ? "Review the signals before you approve the action."
+        : "Continue only if the activity looks expected to you.";
+
+  const recommendedActions = dedupeStringList([
+    ...(input.warning?.mustDo || []),
+    input.requireOtp
+      ? `Finish the ${input.otpChannel || "step-up"} check on this session.`
+      : null,
+    "Verify the device, IP, and timing match your own activity.",
+    input.riskLevel === "high"
+      ? "If this was not you, stop immediately and reset credentials."
+      : "If anything looks unfamiliar, do not approve the action yet.",
+    ...(input.warning?.doNot || []).map((item) => `Do not ${item}`),
+  ]).slice(0, 4);
+  const timeline = dedupeStringList([
+    "Signal captured from device, IP, and recent authentication history.",
+    /failed attempt|credential/i.test(joinedSignals)
+      ? "Recent failed or mismatched credential activity increased the risk score."
+      : null,
+    /new or untrusted ip|different ip|different device|new device|vpn/i.test(
+      joinedSignals,
+    ) || input.requireOtp
+      ? "The session did not match a trusted sign-in profile."
+      : null,
+    input.requireOtp
+      ? `Step-up verification was triggered${input.otpChannel ? ` via ${input.otpChannel}` : ""}.`
+      : input.riskLevel === "high"
+        ? "The session is treated as high risk until verified."
+        : input.riskLevel === "medium"
+          ? "The session should be reviewed before it is trusted."
+          : "The event was logged as a low-severity deviation for future comparison.",
+  ]).slice(0, 4);
+
+  return {
+    archetype,
+    headline,
+    summary,
+    nextStep,
+    recommendedActions,
+    timeline,
+  };
+};
+
 const sanitizeCopilotText = (value: string) =>
   value
     .replace(/^```json\s*/i, "")
     .replace(/^```\s*/i, "")
     .replace(/\s*```$/i, "")
     .trim();
+
+const polishCopilotReplyText = (value: string) =>
+  value
+    .replace(/^Bạn có muốn tôi[^?]*\?\s*/iu, "")
+    .replace(/^Ban co muon toi[^?]*\?\s*/iu, "")
+    .replace(/^Would you like me[^?]*\?\s*/iu, "")
+    .replace(/^Do you want me to[^?]*\?\s*/iu, "")
+    .replace(/^Tôi có thể giúp[^.?!]*[.?!]\s*/iu, "")
+    .replace(/^Toi co the giup[^.?!]*[.?!]\s*/iu, "")
+    .replace(/^I can help[^.?!]*[.?!]\s*/iu, "")
+    .trim();
+
+const polishCopilotFollowUpQuestion = (value: string | null | undefined) => {
+  const cleaned = String(value || "").trim();
+  if (!cleaned) return null;
+  if (
+    /^(Bạn có muốn tôi cung cấp thêm thông tin nào khác không\??|Ban co muon toi cung cap them thong tin nao khac khong\??|Would you like more information\??|Do you want more information\??)$/iu.test(
+      cleaned,
+    )
+  ) {
+    return null;
+  }
+  return cleaned;
+};
 
 const parseOpenAiCopilotPayload = (
   value: string,
@@ -2393,8 +3007,11 @@ const parseOpenAiCopilotPayload = (
         )
       : [];
 
+    const reply = polishCopilotReplyText(parsed.reply.trim());
+    if (!reply) return null;
+
     return {
-      reply: parsed.reply.trim(),
+      reply,
       topic:
         typeof parsed.topic === "string" && parsed.topic.trim()
           ? parsed.topic.trim()
@@ -2407,11 +3024,12 @@ const parseOpenAiCopilotPayload = (
           : null,
       riskLevel: normalizeCopilotRiskLevel(parsed.riskLevel),
       confidence: clamp(Number(parsed.confidence || 0.72), 0.4, 0.99),
-      followUpQuestion:
+      followUpQuestion: polishCopilotFollowUpQuestion(
         typeof parsed.followUpQuestion === "string" &&
-        parsed.followUpQuestion.trim()
+          parsed.followUpQuestion.trim()
           ? parsed.followUpQuestion.trim()
           : null,
+      ),
     };
   } catch {
     return null;
@@ -2448,6 +3066,43 @@ const summarizeCopilotTransactions = (
     })
     .join("\n");
 
+const normalizeCopilotKnowledgeText = (value: string) =>
+  value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+
+const buildRelevantFinanceKnowledgeSummary = (
+  messages: CopilotMessagePayload[],
+) => {
+  const latestUserMessage =
+    [...messages].reverse().find((message) => message.role === "user")
+      ?.content || "";
+  const normalizedMessage = normalizeCopilotKnowledgeText(latestUserMessage);
+  if (!normalizedMessage.trim()) {
+    return "No directly matched finance entities.";
+  }
+
+  const matchedEntries = COPILOT_FINANCE_KNOWLEDGE.filter((entry) =>
+    entry.aliases.some((alias) => normalizedMessage.includes(alias)),
+  ).slice(0, 8);
+
+  if (!matchedEntries.length) {
+    return "No directly matched finance entities.";
+  }
+
+  return matchedEntries
+    .map((entry) =>
+      [
+        entry.canonical,
+        `kind=${entry.kind}`,
+        `sector=${entry.sector || "n/a"}`,
+        `symbol=${entry.market?.symbol || "n/a"}`,
+      ].join(" | "),
+    )
+    .join("\n");
+};
+
 const buildOpenAiCopilotInput = (input: {
   currency: string;
   currentBalance: number;
@@ -2463,6 +3118,12 @@ const buildOpenAiCopilotInput = (input: {
     input.currency,
   );
   const conversationSummary = summarizeCopilotConversation(input.messages);
+  const latestUserMessage =
+    [...input.messages].reverse().find((message) => message.role === "user")
+      ?.content || "";
+  const financeKnowledgeSummary = buildRelevantFinanceKnowledgeSummary(
+    input.messages,
+  );
 
   return [
     `Current time: ${now}`,
@@ -2479,6 +3140,10 @@ const buildOpenAiCopilotInput = (input: {
     )}`,
     "Recent wallet transactions:",
     transactionSummary || "No recent transactions available.",
+    "Latest user message:",
+    latestUserMessage || "No latest message available.",
+    "Recognized finance entities:",
+    financeKnowledgeSummary,
     "Conversation transcript:",
     conversationSummary,
   ].join("\n\n");
@@ -2490,11 +3155,24 @@ const buildCopilotSystemInstructions = (language: CopilotLanguage) =>
     "Answer as a practical financial assistant for a wallet app.",
     "Use the wallet context and transaction context provided.",
     `Reply in ${language === "vi" ? "Vietnamese" : "English"} and keep the same language as the user's latest message.`,
+    "Start with the answer immediately. The first sentence must address the user's question directly.",
+    "Do not begin with permission-seeking, throat-clearing, generic offers to help, or by repeating the user's question.",
+    "Never start the reply with lines such as 'Do you want me to help', 'I can help', or equivalent Vietnamese phrasing.",
+    "Sound sharp, premium, and insight-driven, not like a helpdesk bot.",
+    "For short finance questions, prefer a compact structure: direct takeaway first, then 2-4 high-signal points.",
+    "If data is unavailable, say that in one sentence, then still give the most useful next-best analysis instead of a generic refusal.",
+    "Only ask a follow-up question after you have already delivered a useful answer.",
+    "Use followUpQuestion sparingly; set it to null unless it materially deepens the discussion.",
     "Prioritize user safety over convenience when the message contains signs of fraud, impersonation, urgency, OTP harvesting, remote-access setup, fake refunds, fake investment schemes, or account-takeover attempts.",
     "If a message looks like a scam, clearly say so, tell the user not to send money or codes, and recommend official verification steps.",
+    "You can answer broad personal-finance questions even when they are not tied to a live wallet action, including budgeting, debt payoff, emergency funds, savings habits, cash-flow tradeoffs, statement interpretation, and financial planning.",
     "You can answer stock-market, equity, index, ETF, and portfolio-allocation questions at an educational and practical level.",
     "For stock-market questions, help with concepts such as ticker basics, index vs stock, sector concentration, diversification, valuation checkpoints, drawdown risk, and how to read metrics like P/E, EPS, market cap, revenue growth, margin, debt, and free cash flow.",
     "When the user asks for market analysis without requiring exact real-time numbers, provide a concise structured framework and clearly label assumptions.",
+    "When the user asks whether buying a stock is sensible, do not collapse the answer into a live quote. Answer with thesis, valuation, downside risk, time horizon, and position-sizing guidance.",
+    "You can also help build long-term saving plans and summarize spending across daily, weekly, and monthly periods using wallet context.",
+    "When the user asks for a statement or spending comparison, explicitly compare today vs yesterday, this week vs last week, and this month vs last month when relevant.",
+    "If the user asks a general finance question and wallet context is not needed, still answer helpfully with practical education, decision frameworks, and clear caveats instead of refusing.",
     "Do not claim real-time market prices unless they were already provided by another tool in the app context.",
     "If the user asks for exact live market prices and no live quote is present, say that live quote support should be used.",
     "Return valid JSON only with these keys:",
@@ -2706,57 +3384,6 @@ const callOpenAiCopilot = async (input: {
 const COPILOT_MARKET_TIMEOUT_MS = Number(
   process.env.COPILOT_MARKET_TIMEOUT_MS || "7000",
 );
-const COPILOT_COMPANY_ALIASES: Record<string, MarketIntent> = {
-  apple: { assetClass: "stock", symbol: "AAPL", label: "Apple" },
-  tesla: { assetClass: "stock", symbol: "TSLA", label: "Tesla" },
-  nvidia: { assetClass: "stock", symbol: "NVDA", label: "NVIDIA" },
-  microsoft: { assetClass: "stock", symbol: "MSFT", label: "Microsoft" },
-  google: { assetClass: "stock", symbol: "GOOGL", label: "Alphabet" },
-  alphabet: { assetClass: "stock", symbol: "GOOGL", label: "Alphabet" },
-  amazon: { assetClass: "stock", symbol: "AMZN", label: "Amazon" },
-  meta: { assetClass: "stock", symbol: "META", label: "Meta" },
-  netflix: { assetClass: "stock", symbol: "NFLX", label: "Netflix" },
-  fpt: { assetClass: "stock", symbol: "FPT.VN", label: "FPT" },
-  vnm: { assetClass: "stock", symbol: "VNM.VN", label: "Vinamilk" },
-  hpg: { assetClass: "stock", symbol: "HPG.VN", label: "Hoa Phat" },
-  vcb: { assetClass: "stock", symbol: "VCB.VN", label: "Vietcombank" },
-  vic: { assetClass: "stock", symbol: "VIC.VN", label: "Vingroup" },
-  vhm: { assetClass: "stock", symbol: "VHM.VN", label: "Vinhomes" },
-  mwg: { assetClass: "stock", symbol: "MWG.VN", label: "Mobile World" },
-};
-const COPILOT_INDEX_ALIASES: Record<string, MarketIntent> = {
-  sp500: { assetClass: "index", symbol: "^GSPC", label: "S&P 500" },
-  "s&p500": { assetClass: "index", symbol: "^GSPC", label: "S&P 500" },
-  "s&p 500": { assetClass: "index", symbol: "^GSPC", label: "S&P 500" },
-  nasdaq: { assetClass: "index", symbol: "^IXIC", label: "NASDAQ Composite" },
-  dowjones: { assetClass: "index", symbol: "^DJI", label: "Dow Jones" },
-  "dow jones": { assetClass: "index", symbol: "^DJI", label: "Dow Jones" },
-  vnindex: { assetClass: "index", symbol: "^VNINDEX", label: "VN-Index" },
-  "vn-index": { assetClass: "index", symbol: "^VNINDEX", label: "VN-Index" },
-};
-const COPILOT_COMMON_MARKET_SYMBOLS = new Set([
-  "AAPL",
-  "AMZN",
-  "BTC",
-  "DJI",
-  "ETH",
-  "EUR",
-  "FPT",
-  "GC",
-  "GOOGL",
-  "META",
-  "MSFT",
-  "NASDAQ",
-  "NVDA",
-  "S&P",
-  "SPY",
-  "TSLA",
-  "USD",
-  "VND",
-  "VNINDEX",
-  "VNM",
-  "XAU",
-]);
 
 const normalizeCopilotText = (value: string) =>
   value
@@ -2970,6 +3597,26 @@ const collectMarketIntents = (message: string): MarketIntent[] => {
   return Array.from(intents.values()).slice(0, 6);
 };
 
+const isMarketAdvisoryRequest = (message: string) => {
+  const normalizedMessage = normalizeCopilotText(message);
+  return /\b(co nen mua|nen mua|nen ban|co nen ban|should i buy|should i sell|buy now|sell now|phan tich|phan tich rui ro|rui ro|risk|upside|downside|danh gia|outlook|luan diem|thesis|co hop ly khong|worth buying)\b/.test(
+    normalizedMessage,
+  );
+};
+
+const isExplicitLiveQuoteRequest = (message: string) => {
+  const normalizedMessage = normalizeCopilotText(message);
+  const asksForQuote =
+    /\b(gia|price|quote|realtime|real time|bao nhieu|ti gia|ty gia|exchange rate|hom nay gia|today price|latest price|market price)\b/.test(
+      normalizedMessage,
+    ) ||
+    /usd\/vnd|btc-usd|eth-usd|\^[a-z0-9]+|=[xfi]|\b[a-z]{2,5}\/[a-z]{2,5}\b/i.test(
+      message,
+    );
+
+  return asksForQuote && !isMarketAdvisoryRequest(message);
+};
+
 const formatMarketPrice = (value: number) => {
   const decimals = value >= 1000 ? 2 : value >= 100 ? 2 : value >= 1 ? 4 : 6;
   return value.toLocaleString("en-US", {
@@ -3093,6 +3740,9 @@ const buildLiveMarketCopilotResponse = async (
   latestMessage: string,
 ): Promise<CopilotResponsePayload | null> => {
   const language = detectCopilotLanguage(latestMessage);
+  if (!isExplicitLiveQuoteRequest(latestMessage)) {
+    return null;
+  }
   const intent = detectMarketIntent(latestMessage);
   if (!intent) return null;
 
@@ -3152,10 +3802,10 @@ const buildLiveMarketCopilotResponse = async (
       language === "vi"
         ? `Giá gần nhất của ${quote.label} là ${quote.currency} ${formatMarketPrice(
             quote.price,
-          )} tại ${formatMarketTimestamp(quote.asOf)}. Biến động là ${changeText}.${exchangeText}${marketStateText} Nguồn: ${quote.source}.`
+          )} tại ${formatMarketTimestamp(quote.asOf)}. Biến động là ${changeText}.${exchangeText}${marketStateText}`
         : `Latest available quote for ${quote.label} is ${quote.currency} ${formatMarketPrice(
             quote.price,
-          )} as of ${formatMarketTimestamp(quote.asOf)}. That is ${changeText}.${exchangeText}${marketStateText} Source: ${quote.source}.`,
+          )} as of ${formatMarketTimestamp(quote.asOf)}. That is ${changeText}.${exchangeText}${marketStateText}`,
     topic: "live-market-quote",
     suggestedActions:
       language === "vi"
@@ -3272,13 +3922,43 @@ const buildHeuristicStockEducationResponse = (input: {
     /\b(watchlist|danh sach theo doi|theo doi|screen|scanner|shortlist|goi y ma|nhom co phieu)\b/.test(
       latest,
     );
+  const asksDecisionSupport =
+    isMarketAdvisoryRequest(input.latestMessage) ||
+    /\b(mua hay khong|ban hay khong|co hop ly khong|nen giai ngan|nen vao lenh|co dang de mua|dau tu duoc khong)\b/.test(
+      latest,
+    );
+  const horizon: "short-term" | "medium-term" | "long-term" =
+    /\b(luot song|ltng|short term|short-term|ngan han|trong ngay|day trade|swing trade|trade ngan)\b/.test(
+      latest,
+    )
+      ? "short-term"
+      : /\b(6 thang|12 thang|6-12 thang|6 den 12 thang|6 to 12 months|medium term|medium-term|trung han)\b/.test(
+            latest,
+          )
+        ? "medium-term"
+        : /\b(2 nam|3 nam|2-3 nam|2 den 3 nam|2 to 3 years|long term|long-term|dai han|nam giu dai)\b/.test(
+              latest,
+            )
+          ? "long-term"
+          : "medium-term";
+  const riskTolerance: "low" | "medium" | "high" =
+    /\b(an toan|it rui ro|than trong|phong thu|bao toan von|low risk|defensive|capital preservation)\b/.test(
+      latest,
+    )
+      ? "low"
+      : /\b(rui ro cao|chap nhan bien dong|mao hiem|aggressive|high risk|volatility)\b/.test(
+            latest,
+          )
+        ? "high"
+        : "medium";
 
   if (
     !asksCompare &&
     !asksAllocation &&
     !asksValuation &&
     !asksStockLearning &&
-    !asksWatchlist
+    !asksWatchlist &&
+    !asksDecisionSupport
   ) {
     return null;
   }
@@ -3512,6 +4192,187 @@ const buildHeuristicStockEducationResponse = (input: {
     };
   }
 
+  if (asksDecisionSupport) {
+    const horizonLabel =
+      input.language === "vi"
+        ? horizon === "short-term"
+          ? "luot song / ngan han"
+          : horizon === "long-term"
+            ? "nam giu dai han 2-3 nam"
+            : "nam giu trung han 6-12 thang"
+        : horizon === "short-term"
+          ? "short-term / trading"
+          : horizon === "long-term"
+            ? "long-term 2-3 year hold"
+            : "medium-term 6-12 month hold";
+    const riskLabel =
+      input.language === "vi"
+        ? riskTolerance === "low"
+          ? "than trong"
+          : riskTolerance === "high"
+            ? "chap nhan rui ro cao"
+            : "rui ro trung binh"
+        : riskTolerance === "low"
+          ? "defensive"
+          : riskTolerance === "high"
+            ? "higher-risk"
+            : "moderate-risk";
+    const decisionTable = buildCopilotMarkdownTable(
+      input.language === "vi"
+        ? ["Goc nhin", "Can tu hoi", "Vi sao quan trong"]
+        : ["Lens", "Question to ask", "Why it matters"],
+      [
+        input.language === "vi"
+          ? [
+              "Luan diem",
+              `${focusLabel} dang tang truong nho dieu gi, va dong luc do co ben khong?`,
+              "Tach cau chuyen dai han khoi bien dong ngan han trong ngay.",
+            ]
+          : [
+              "Thesis",
+              `What is driving ${focusLabel}, and is that driver durable?`,
+              "Separates a long-term thesis from one-day price action.",
+            ],
+        input.language === "vi"
+          ? [
+              "Dinh gia",
+              "Muc dinh gia hien tai dang re, hop ly, hay da phan anh qua nhieu ky vong?",
+              "Mot doanh nghiep tot van co the la khoan mua kem neu vao o muc gia qua cao.",
+            ]
+          : [
+              "Valuation",
+              "Does the current valuation look cheap, fair, or already rich?",
+              "A strong business can still be a poor entry if expectations are overpriced.",
+            ],
+        input.language === "vi"
+          ? [
+              "Rui ro",
+              "Kich ban xau nhat 6-12 thang toi la gi: tang truong cham lai, bien loi nhuan giam, hay thi truong chung dieu chinh?",
+              "Giup ban hinh dung downside thay vi chi nhin upside.",
+            ]
+          : [
+              "Risk",
+              "What is the main downside over the next 6-12 months: slower growth, margin pressure, or a broader market drawdown?",
+              "Forces downside thinking instead of upside-only optimism.",
+            ],
+        input.language === "vi"
+          ? [
+              "Ky luat vi the",
+              "Neu mua, ty trong bao nhieu la hop ly va diem nao khien ban phai xem lai quyet dinh?",
+              "Dung ma nhung sai kich thuoc vi the van co the gay hai danh muc.",
+            ]
+          : [
+              "Position discipline",
+              "If you buy, what position size is reasonable and what would invalidate the idea?",
+              "Even the right stock can hurt the portfolio if sizing is wrong.",
+            ],
+      ],
+    );
+    const horizonTable = buildCopilotMarkdownTable(
+      input.language === "vi"
+        ? ["Khung nam giu", "Trong tam", "Dieu kien de tham gia", "Can tranh"]
+        : [
+            "Holding horizon",
+            "Primary focus",
+            "Reasonable entry condition",
+            "Avoid",
+          ],
+      [
+        input.language === "vi"
+          ? [
+              "Luot song / ngan han",
+              "Dong luc gia, thanh khoan, va ky luat cat lo",
+              "Chi nen vao khi ban da co muc vao, muc sai, va kich thuoc vi the ro rang",
+              "Mua chi vi thay xanh manh hoac FOMO theo dong tien trong ngay",
+            ]
+          : [
+              "Short-term / trading",
+              "Price momentum, liquidity, and strict downside rules",
+              "Only enter when entry, invalidation, and size are already defined",
+              "Chasing a green candle or intraday FOMO",
+            ],
+        input.language === "vi"
+          ? [
+              "6-12 thang",
+              "Tang truong loi nhuan, dinh gia, va xac suat rerating",
+              "Hop ly khi luan diem co catalyst ro trong 2-4 quy toi",
+              "Mua khi ky vong da qua day ma catalyst khong ro",
+            ]
+          : [
+              "6-12 months",
+              "Earnings growth, valuation, and rerating potential",
+              "Reasonable when the thesis has a visible 2-4 quarter catalyst",
+              "Buying when expectations are already crowded and catalysts are vague",
+            ],
+        input.language === "vi"
+          ? [
+              "2-3 nam",
+              "Do ben mo hinh kinh doanh, tai phan bo von, va kha nang compound",
+              "Hop ly khi doanh nghiep co moat, runway tang truong, va ban chap nhan duoc bien dong",
+              "Danh dong dau co dai han nhung lai khong chap nhan drawdown ngan han",
+            ]
+          : [
+              "2-3 years",
+              "Business durability, capital allocation, and compounding quality",
+              "Reasonable when the company has a moat, growth runway, and you can sit through volatility",
+              "Calling it long-term while being unable to tolerate short-term drawdowns",
+            ],
+      ],
+    );
+    const horizonNarrative =
+      input.language === "vi"
+        ? horizon === "short-term"
+          ? `Voi horizon ${horizonLabel}, toi khong xem day la cau hoi "co phieu co tot khong" nua, ma la cau hoi "trade nay co du xac suat va ky luat khong". Neu ban chua co diem sai ro rang, thi giao dich nay chua hop le.`
+          : horizon === "long-term"
+            ? `Voi horizon ${horizonLabel}, toi uu tien chat luong doanh nghiep hon bien dong gia trong ngay. Cau hoi dung la: ${focusLabel} co kha nang tang truong va compound trong 2-3 nam, hay ban dang bi hut vao tin hieu ngan han?`
+            : `Voi horizon ${horizonLabel}, diem can nhin la catalyst 2-4 quy toi va muc ky vong da duoc gia phan anh den dau. Toi se uu tien can bang giua luan diem tang truong va muc dinh gia vao lenh.`
+        : horizon === "short-term"
+          ? `For a ${horizonLabel} approach, this is less a question of whether the company is good and more a question of whether the trade has edge and discipline. If you do not already know your invalidation point, the trade is not ready.`
+          : horizon === "long-term"
+            ? `For a ${horizonLabel} approach, I care much more about business quality than one-day price movement. The right question is whether ${focusLabel} can compound over 2-3 years, or whether you are being pulled in by a short-term signal.`
+            : `For a ${horizonLabel} approach, the key is whether there is a visible 2-4 quarter catalyst and how much of that expectation is already priced in. I would balance the growth thesis against the entry valuation.`;
+    const riskNarrative =
+      input.language === "vi"
+        ? riskTolerance === "low"
+          ? `Voi muc chiu rui ro ${riskLabel}, toi se nghieng ve cach vao nho, giai ngan tung phan, va uu tien khong de mot ma don le lam lech danh muc.`
+          : riskTolerance === "high"
+            ? `Voi muc chiu rui ro ${riskLabel}, ban co the chap nhan bien dong cao hon, nhung van nen tach ro dau la luan diem va dau la FOMO. Rui ro cao khong dong nghia voi vao lenh vo ky luat.`
+            : `Voi muc chiu rui ro ${riskLabel}, cach hop ly nhat la giu kich thuoc vi the vua phai va de san mot moc xem lai khi gia/luan diem di nguoc ky vong.`
+        : riskTolerance === "low"
+          ? `With a ${riskLabel} profile, I would lean smaller, staged entries and avoid letting a single name dominate the portfolio.`
+          : riskTolerance === "high"
+            ? `With a ${riskLabel} profile, you can accept more volatility, but you still need to separate a thesis from FOMO. Higher risk tolerance is not a license for undisciplined entries.`
+            : `With a ${riskLabel} profile, a moderate position size plus a clear review trigger is usually the most balanced approach.`;
+
+    return {
+      reply:
+        input.language === "vi"
+          ? `Neu ban hoi “co nen mua ${focusLabel} hom nay khong”, toi se khong dua chi vao gia trong ngay de ket luan co hoac khong. Cach an toan hon la tach quyet dinh theo horizon nam giu va muc chiu rui ro.\n\n${horizonNarrative} ${riskNarrative}\n\n${horizonTable}\n\n${decisionTable}\n\nVoi ${focusLabel}, toi nghieng ve cach tiep can: chi can nhac giai ngan khi ban hieu ro luan diem tang truong, chap nhan duoc rui ro giam gia, va co ke hoach ty trong ro rang. Neu chua tra loi duoc 4 y tren, cau tra loi thuc te la chua nen mua voi chi vi bien dong hom nay.`
+          : `If you are asking whether you should buy ${focusLabel} today, I would not answer from one-day price action alone. A safer decision is to split the decision by holding horizon and risk tolerance.\n\n${horizonNarrative} ${riskNarrative}\n\n${horizonTable}\n\n${decisionTable}\n\nFor ${focusLabel}, my bias would be: only consider buying when you understand the growth thesis, accept the downside, and already know your position size and review trigger. If those checks are still unclear, the practical answer is not to rush into the trade today.`,
+      topic: "stock-decision-support",
+      suggestedActions:
+        input.language === "vi"
+          ? [
+              "Yeu cau toi phan tich tiep theo khung: tang truong, bien loi nhuan, dinh gia, no vay, va rui ro.",
+              "Noi ro ban dang luot song, nam giu 6-12 thang, hay nam giu 2-3 nam de toi siet khung khuyen nghi.",
+              "Neu can du lieu gia, hay hoi rieng quote; neu can quyet dinh mua, hay giu trong tam o luan diem, catalyst, va downside.",
+            ]
+          : [
+              "Ask me to continue with growth, margin, valuation, debt, and risk.",
+              "Tell me whether you are trading short-term, holding 6-12 months, or holding 2-3 years so I can tighten the lens.",
+              "Use a separate quote question for price; keep buy/sell decisions focused on thesis, catalyst, and downside.",
+            ],
+      suggestedDepositAmount: null,
+      riskLevel: "medium",
+      confidence: 0.88,
+      followUpQuestion: localizeCopilotText(
+        input.language,
+        `Ban dang nghi den ${focusLabel} theo kieu luot song, nam giu 6-12 thang, hay giu 2-3 nam?`,
+        `Are you thinking about ${focusLabel} as a short-term trade, a 6-12 month hold, or a 2-3 year hold?`,
+      ),
+    };
+  }
+
   const checklistTable = buildCopilotMarkdownTable(
     input.language === "vi"
       ? ["Chi so", "Cach doc nhanh", "Y nghia"]
@@ -3729,6 +4590,84 @@ const buildHeuristicCopilotResponse = (input: {
 
   const suggestedDepositAmount =
     netCashFlow > 0 ? roundMoney(clamp(netCashFlow * 0.35, 50, 5000)) : null;
+  const asksLongTermSavingsPlan =
+    /\b(tiet kiem dai han|ke hoach tiet kiem|long term savings?|saving plan|muc tieu tiet kiem|save for|quy hoc phi|quy mua nha|6 thang|12 thang|1 nam|2 nam|3 nam)\b/.test(
+      latest,
+    );
+
+  if (asksLongTermSavingsPlan) {
+    const horizonMonths = (() => {
+      const explicitMonths = latest.match(/(\d+)\s*thang/)?.[1];
+      if (explicitMonths) return clamp(Number(explicitMonths), 1, 60);
+      const explicitYears = latest.match(/(\d+)\s*(nam|year|years)/)?.[1];
+      if (explicitYears) return clamp(Number(explicitYears) * 12, 12, 120);
+      return 12;
+    })();
+    const safeMonthlySave =
+      netCashFlow > 0 ? roundMoney(Math.max(0, netCashFlow * 0.4)) : 0;
+    const projectedBalance = roundMoney(
+      balance + safeMonthlySave * horizonMonths,
+    );
+    const planTable = buildCopilotMarkdownTable(
+      language === "vi" ? ["Hang muc", "Gia tri"] : ["Item", "Value"],
+      [
+        [
+          language === "vi" ? "So du hien tai" : "Current balance",
+          formatCopilotMoney(input.currency, balance),
+        ],
+        [
+          language === "vi" ? "Dong tien rong thang" : "Monthly free cash flow",
+          formatCopilotSignedMoney(input.currency, netCashFlow),
+        ],
+        [
+          language === "vi"
+            ? "Muc tiet kiem goi y / thang"
+            : "Suggested monthly saving",
+          formatCopilotMoney(input.currency, safeMonthlySave),
+        ],
+        [
+          language === "vi" ? "Khung thoi gian" : "Horizon",
+          language === "vi"
+            ? `${horizonMonths} thang`
+            : `${horizonMonths} months`,
+        ],
+        [
+          language === "vi"
+            ? "So du uoc tinh cuoi ky"
+            : "Projected balance at horizon",
+          formatCopilotMoney(input.currency, projectedBalance),
+        ],
+      ],
+    );
+
+    return {
+      reply:
+        language === "vi"
+          ? `Toi da dung so du vi va dong tien hien tai de lap mot ke hoach tiet kiem dai han co the duy tri deu thay vi qua suc.\n\n${planTable}\n\nNeu ban muon di duong dai han, uu tien la giu deu lich tiet kiem hang thang va khong de mot giao dich tu y lam vo ky luat dong tien.`
+          : `I used your current wallet balance and cash flow to outline a long-term saving plan that looks sustainable instead of aggressive.\n\n${planTable}\n\nFor longer goals, the main edge is consistency: keep the monthly saving habit stable and avoid letting discretionary spending break the plan.`,
+      topic: "long-term-savings-plan",
+      suggestedActions:
+        language === "vi"
+          ? [
+              "Cho toi biet muc tieu cu the nhu hoc phi, du phong, hay mua tai san de toi siet ke hoach sat hon.",
+              "Neu thu nhap khong deu, toi co the doi thanh muc tiet kiem toi thieu va muc tiet kiem stretch.",
+              "Hoi toi bao cao chi tieu thang nay neu ban muon tim them room cho tiet kiem.",
+            ]
+          : [
+              "Tell me the exact goal, such as tuition, emergency fund, or a major purchase, and I can tighten the plan.",
+              "If income is uneven, I can split this into a minimum target and a stretch target.",
+              "Ask for this month's spending report if you want to free up more saving room.",
+            ],
+      suggestedDepositAmount: safeMonthlySave || null,
+      riskLevel: netCashFlow > 0 ? "low" : "medium",
+      confidence: 0.87,
+      followUpQuestion: localizeCopilotText(
+        language,
+        "Ban muon toi doi ke hoach nay theo muc tieu 6 thang, 12 thang, hay 24 thang?",
+        "Do you want me to reshape this plan for a 6, 12, or 24 month goal?",
+      ),
+    };
+  }
 
   if (
     /deposit|top up|fund|emergency|save|nap tien|gui tien|tiet kiem|quy du phong|du phong/.test(
@@ -3943,11 +4882,11 @@ const isTodayTransactionReportIntent = (message: string) => {
   const normalized = normalizeCopilotText(message);
   const asksForToday = /\b(today|hom nay)\b/.test(normalized);
   const asksForTransactions =
-    /\b(transaction|transactions|giao dich|dong tien|thu chi|money flow|cash flow)\b/.test(
+    /\b(transaction|transactions|giao dich|dong tien|thu chi|money flow|cash flow|sao ke|statement)\b/.test(
       normalized,
     );
   const asksForReport =
-    /\b(report|summary|summarize|list|bao cao|tong hop|liet ke|thong ke)\b/.test(
+    /\b(report|summary|summarize|list|bao cao|tong hop|liet ke|thong ke|sao ke|statement)\b/.test(
       normalized,
     ) ||
     /giao dich hom nay|transactions today|today transaction/.test(normalized);
@@ -3965,15 +4904,56 @@ const isWeeklyTransactionReportIntent = (message: string) => {
       normalized,
     );
   const asksForTransactions =
-    /\b(transaction|transactions|giao dich|dong tien|thu chi|money flow|cash flow)\b/.test(
+    /\b(transaction|transactions|giao dich|dong tien|thu chi|money flow|cash flow|sao ke|statement)\b/.test(
       normalized,
     );
   const asksForReport =
-    /\b(report|summary|summarize|list|bao cao|tong hop|liet ke|thong ke)\b/.test(
+    /\b(report|summary|summarize|list|bao cao|tong hop|liet ke|thong ke|sao ke|statement)\b/.test(
       normalized,
     ) || /giao dich tuan|weekly transaction|week transaction/.test(normalized);
 
   return asksForWeek && asksForTransactions && asksForReport;
+};
+
+const isMonthlyTransactionReportIntent = (message: string) => {
+  const normalized = normalizeCopilotText(message);
+  const asksForMonth =
+    /\b(this month|monthly|month report|month summary|thang nay|thang truoc|bao cao thang|tong hop thang|thong ke thang)\b/.test(
+      normalized,
+    ) || /\b(sao ke|statement)\b/.test(normalized);
+  const asksForTransactions =
+    /\b(transaction|transactions|giao dich|dong tien|thu chi|money flow|cash flow|sao ke)\b/.test(
+      normalized,
+    );
+  const asksForReport =
+    /\b(report|summary|summarize|list|bao cao|tong hop|liet ke|thong ke|sao ke|statement)\b/.test(
+      normalized,
+    );
+
+  return asksForMonth && asksForTransactions && asksForReport;
+};
+
+const isSpendingComparisonIntent = (message: string) => {
+  const normalized = normalizeCopilotText(message);
+  const asksComparison =
+    /\b(so voi|compare|comparison|vs|versus|trend|xu huong)\b/.test(
+      normalized,
+    ) ||
+    /\b(hom nay.*hom qua|tuan nay.*tuan truoc|thang nay.*thang truoc|today.*yesterday|this week.*last week|this month.*last month)\b/.test(
+      normalized,
+    );
+  const asksSpending =
+    /\b(chi tieu|spend|spending|thu chi|money flow|cash flow)\b/.test(
+      normalized,
+    );
+
+  return (
+    asksSpending &&
+    (asksComparison ||
+      /\b(hom nay|hom qua|tuan nay|tuan truoc|thang nay|thang truoc|today|yesterday|this week|last week|this month|last month)\b/.test(
+        normalized,
+      ))
+  );
 };
 
 const formatCopilotTransactionLine = (input: {
@@ -4108,6 +5088,131 @@ const buildTransactionReportReply = (input: {
     "",
     detailsTable,
   ].join("\n");
+};
+
+const getStartOfDay = (value: Date) => {
+  const next = new Date(value);
+  next.setHours(0, 0, 0, 0);
+  return next;
+};
+
+const getStartOfWeek = (value: Date) => {
+  const next = getStartOfDay(value);
+  const currentDay = next.getDay();
+  const diff = currentDay === 0 ? -6 : 1 - currentDay;
+  next.setDate(next.getDate() + diff);
+  return next;
+};
+
+const getStartOfMonth = (value: Date) => {
+  const next = getStartOfDay(value);
+  next.setDate(1);
+  return next;
+};
+
+const mapTransactionsForCopilot = (
+  txns: Parameters<typeof decryptStoredTransaction>[0][],
+  context: string,
+) =>
+  txns
+    .map((txn) => safelyDecryptTransaction(txn, context))
+    .filter((txn): txn is NonNullable<typeof txn> => Boolean(txn))
+    .map((txn) => {
+      const metadata =
+        txn.metadata && typeof txn.metadata === "object"
+          ? (txn.metadata as Record<string, unknown>)
+          : null;
+      const direction: "credit" | "debit" =
+        txn.type === "DEPOSIT" || metadata?.entry === "CREDIT"
+          ? "credit"
+          : "debit";
+
+      return {
+        id: txn.id,
+        amount: Math.max(0, Number(txn.amount || 0)),
+        createdAt: txn.createdAt,
+        direction,
+        type: txn.type,
+        description:
+          txn.description?.trim() ||
+          (txn.type === "DEPOSIT"
+            ? "Wallet deposit"
+            : txn.type === "WITHDRAW"
+              ? "Wallet withdrawal"
+              : "Wallet transfer"),
+      };
+    });
+
+const fetchCopilotTransactionsForUser = async (input: {
+  userId: string;
+  startInclusive: Date;
+  endExclusive: Date;
+  limit: number;
+  context: string;
+}) => {
+  const wallets = await prisma.wallet.findMany({
+    where: { userId: input.userId },
+    select: { id: true },
+  });
+  const walletIds = wallets.map((wallet) => wallet.id);
+
+  const txns = await prisma.transaction.findMany({
+    where: {
+      ...(walletIds.length
+        ? { walletId: { in: walletIds } }
+        : { walletId: "__NO_WALLET__" }),
+      createdAt: {
+        gte: input.startInclusive,
+        lt: input.endExclusive,
+      },
+    },
+    orderBy: { createdAt: "asc" },
+    take: input.limit,
+  });
+
+  return mapTransactionsForCopilot(txns, input.context);
+};
+
+const sumDebitAmount = (
+  transactions: Array<{ amount: number; direction: "credit" | "debit" }>,
+) =>
+  roundMoney(
+    transactions.reduce(
+      (sum, transaction) =>
+        sum +
+        (transaction.direction === "debit"
+          ? Math.max(0, transaction.amount)
+          : 0),
+      0,
+    ),
+  );
+
+const buildComparisonRow = (input: {
+  currentLabel: string;
+  previousLabel: string;
+  current: number;
+  previous: number;
+  currency: string;
+  language: CopilotLanguage;
+}) => {
+  const delta = roundMoney(input.current - input.previous);
+  const percent =
+    input.previous > 0
+      ? `${delta >= 0 ? "+" : ""}${roundMoney((delta / input.previous) * 100).toFixed(2)}%`
+      : input.current > 0
+        ? input.language === "vi"
+          ? "moi phat sinh"
+          : "new spend"
+        : "0.00%";
+
+  return [
+    input.currentLabel,
+    formatCopilotMoney(input.currency, input.current),
+    input.previousLabel,
+    formatCopilotMoney(input.currency, input.previous),
+    formatCopilotSignedMoney(input.currency, delta),
+    percent,
+  ];
 };
 
 const buildTodayTransactionReportResponse = async (input: {
@@ -4305,6 +5410,221 @@ const buildWeeklyTransactionReportResponse = async (input: {
       input.language,
       "Ban co muon toi tach them theo ngay hoac theo loai giao dich khong?",
       "Do you want this split further by day or by transaction type?",
+    ),
+  };
+};
+
+const buildMonthlyTransactionReportResponse = async (input: {
+  userId: string;
+  currency: string;
+  language: CopilotLanguage;
+}): Promise<CopilotResponsePayload> => {
+  const endExclusive = new Date();
+  const startInclusive = getStartOfMonth(endExclusive);
+
+  const transactions = await fetchCopilotTransactionsForUser({
+    userId: input.userId,
+    startInclusive,
+    endExclusive,
+    limit: 2000,
+    context: "/ai/copilot-chat:monthly-report",
+  });
+
+  return {
+    reply: buildTransactionReportReply({
+      language: input.language,
+      currency: input.currency,
+      transactions,
+      periodLabel:
+        input.language === "vi"
+          ? `Sao ke giao dich thang nay (${formatCopilotCalendarDate(input.language, startInclusive)} - ${formatCopilotCalendarDate(input.language, endExclusive)}):`
+          : `Transaction statement for this month (${formatCopilotCalendarDate(input.language, startInclusive)} - ${formatCopilotCalendarDate(input.language, endExclusive)}):`,
+      detailMode: "datetime",
+    }),
+    topic: "monthly-transaction-report",
+    suggestedActions:
+      input.language === "vi"
+        ? [
+            "Hoi them muc chi tieu lon nhat thang nay neu ban muon kiem tra diem nong.",
+            "Hoi toi so sanh thang nay voi thang truoc neu ban muon xem xu huong.",
+            "Hoi toi tach rieng nap tien, rut tien, va chuyen tien neu ban muon sao ke gon hon.",
+          ]
+        : [
+            "Ask for the largest spend this month if you want to inspect the main drivers.",
+            "Ask me to compare this month with last month if you want a trend view.",
+            "Ask me to split deposits, withdrawals, and transfers if you want a tighter statement.",
+          ],
+    suggestedDepositAmount: null,
+    riskLevel: "low",
+    confidence: 0.99,
+    followUpQuestion: localizeCopilotText(
+      input.language,
+      "Ban co muon toi so sanh thang nay voi thang truoc va tom tat diem khac biet chinh khong?",
+      "Do you want me to compare this month with last month and summarize the biggest differences?",
+    ),
+  };
+};
+
+const buildSpendingComparisonResponse = async (input: {
+  userId: string;
+  currency: string;
+  language: CopilotLanguage;
+}): Promise<CopilotResponsePayload> => {
+  const now = new Date();
+  const todayStart = getStartOfDay(now);
+  const yesterdayStart = new Date(todayStart);
+  yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+  const weekStart = getStartOfWeek(now);
+  const prevWeekStart = new Date(weekStart);
+  prevWeekStart.setDate(prevWeekStart.getDate() - 7);
+  const monthStart = getStartOfMonth(now);
+  const prevMonthStart = new Date(monthStart);
+  prevMonthStart.setMonth(prevMonthStart.getMonth() - 1);
+
+  const transactions = await fetchCopilotTransactionsForUser({
+    userId: input.userId,
+    startInclusive: prevMonthStart,
+    endExclusive: now,
+    limit: 3000,
+    context: "/ai/copilot-chat:spending-comparison",
+  });
+
+  const compareWeekEnd = new Date(prevWeekStart);
+  compareWeekEnd.setDate(
+    compareWeekEnd.getDate() +
+      (Math.floor((todayStart.getTime() - weekStart.getTime()) / 86400000) + 1),
+  );
+  const compareMonthEnd = new Date(prevMonthStart);
+  compareMonthEnd.setDate(
+    Math.min(
+      compareMonthEnd.getDate() + now.getDate() - 1,
+      new Date(
+        prevMonthStart.getFullYear(),
+        prevMonthStart.getMonth() + 1,
+        0,
+      ).getDate(),
+    ),
+  );
+  compareMonthEnd.setHours(
+    now.getHours(),
+    now.getMinutes(),
+    now.getSeconds(),
+    now.getMilliseconds(),
+  );
+
+  const spendToday = sumDebitAmount(
+    transactions.filter(
+      (transaction) =>
+        transaction.createdAt >= todayStart && transaction.createdAt < now,
+    ),
+  );
+  const spendYesterday = sumDebitAmount(
+    transactions.filter(
+      (transaction) =>
+        transaction.createdAt >= yesterdayStart &&
+        transaction.createdAt < todayStart,
+    ),
+  );
+  const spendThisWeek = sumDebitAmount(
+    transactions.filter(
+      (transaction) =>
+        transaction.createdAt >= weekStart && transaction.createdAt < now,
+    ),
+  );
+  const spendLastWeek = sumDebitAmount(
+    transactions.filter(
+      (transaction) =>
+        transaction.createdAt >= prevWeekStart &&
+        transaction.createdAt < compareWeekEnd,
+    ),
+  );
+  const spendThisMonth = sumDebitAmount(
+    transactions.filter(
+      (transaction) =>
+        transaction.createdAt >= monthStart && transaction.createdAt < now,
+    ),
+  );
+  const spendLastMonth = sumDebitAmount(
+    transactions.filter(
+      (transaction) =>
+        transaction.createdAt >= prevMonthStart &&
+        transaction.createdAt < compareMonthEnd,
+    ),
+  );
+
+  const comparisonTable = buildCopilotMarkdownTable(
+    input.language === "vi"
+      ? [
+          "Ky hien tai",
+          "Chi tieu",
+          "Ky doi chieu",
+          "Chi tieu",
+          "Chenh lech",
+          "%",
+        ]
+      : ["Current period", "Spend", "Comparison period", "Spend", "Delta", "%"],
+    [
+      buildComparisonRow({
+        currentLabel: input.language === "vi" ? "Hom nay" : "Today",
+        previousLabel: input.language === "vi" ? "Hom qua" : "Yesterday",
+        current: spendToday,
+        previous: spendYesterday,
+        currency: input.currency,
+        language: input.language,
+      }),
+      buildComparisonRow({
+        currentLabel: input.language === "vi" ? "Tuan nay" : "This week",
+        previousLabel:
+          input.language === "vi"
+            ? "Tuan truoc cung nhip"
+            : "Last week same pace",
+        current: spendThisWeek,
+        previous: spendLastWeek,
+        currency: input.currency,
+        language: input.language,
+      }),
+      buildComparisonRow({
+        currentLabel: input.language === "vi" ? "Thang nay" : "This month",
+        previousLabel:
+          input.language === "vi"
+            ? "Thang truoc cung nhip"
+            : "Last month same pace",
+        current: spendThisMonth,
+        previous: spendLastMonth,
+        currency: input.currency,
+        language: input.language,
+      }),
+    ],
+  );
+
+  return {
+    reply:
+      input.language === "vi"
+        ? `Toi da tong hop nhanh xu huong chi tieu cua ban theo ngay, tuan, va thang de ban nhin ro toc do tieu tien dang thay doi the nao.\n\n${comparisonTable}`
+        : `I summarized your spending trend across day, week, and month so you can see how quickly your outflows are changing.\n\n${comparisonTable}`,
+    topic: "spending-comparison",
+    suggestedActions:
+      input.language === "vi"
+        ? [
+            "Hoi toi giao dich nao dang day chi tieu thang nay len cao nhat.",
+            "Neu muon sao ke chi tiet, hay hoi rieng bao cao hom nay, tuan nay, hoac thang nay.",
+            "Neu muon tiet kiem hon, toi co the doi bang nay thanh muc tran chi tieu cho phan con lai cua thang.",
+          ]
+        : [
+            "Ask which transactions are driving this month's spending the most.",
+            "If you want detail, ask separately for today's, this week's, or this month's statement.",
+            "If you want tighter control, I can turn this into a spending cap for the rest of the month.",
+          ],
+    suggestedDepositAmount: null,
+    riskLevel:
+      spendToday > spendYesterday || spendThisWeek > spendLastWeek
+        ? "medium"
+        : "low",
+    confidence: 0.98,
+    followUpQuestion: localizeCopilotText(
+      input.language,
+      "Ban muon toi chi ra ngay nao, nhom nao, hoac giao dich nao dang day chi tieu len cao nhat khong?",
+      "Do you want me to point out which day, category, or transaction is pushing spending higher?",
     ),
   };
 };
@@ -5228,6 +6548,17 @@ const countRecentFailedAttempts = async (email: string, minutes: number) => {
       ? lockoutResetAt
       : windowStart;
   return loginEventRepository.countRecentFailures(email, effectiveWindowStart);
+};
+
+const buildLoginFailureMessage = (input: {
+  remainingAttempts: number;
+  lockoutMinutes: number;
+}) => {
+  if (input.remainingAttempts <= 0) {
+    return `Incorrect password. Your account has been temporarily locked for ${input.lockoutMinutes} minute${input.lockoutMinutes === 1 ? "" : "s"} after repeated failed attempts.`;
+  }
+
+  return `Incorrect password. ${input.remainingAttempts} attempt${input.remainingAttempts === 1 ? "" : "s"} remaining before a temporary ${input.lockoutMinutes}-minute lock.`;
 };
 
 const countRecentFailedTransfers = async (userId: string, hours: number) =>
@@ -6592,6 +7923,54 @@ app.post("/ai/deposit-agent", requireAuth, async (req, res) => {
   return res.json(plan);
 });
 
+app.get("/ai/copilot-history", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const userRecord = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { metadata: true },
+  });
+
+  return res.json(readStoredCopilotWorkspaceFromMetadata(userRecord?.metadata));
+});
+
+app.put("/ai/copilot-history", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const body = req.body as {
+    activeSessionId?: unknown;
+    sessions?: unknown;
+  };
+
+  const nextWorkspace = sanitizeStoredCopilotWorkspace({
+    activeSessionId: body.activeSessionId,
+    sessions: body.sessions,
+  });
+
+  const currentUser = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { metadata: true },
+  });
+  const nextMetadata = isPlainObject(currentUser?.metadata)
+    ? { ...currentUser.metadata }
+    : {};
+  nextMetadata.copilotWorkspace = nextWorkspace;
+  delete nextMetadata.copilotSession;
+
+  await prisma.user.update({
+    where: { id: userId },
+    data: { metadata: nextMetadata },
+  });
+
+  return res.json(nextWorkspace);
+});
+
 app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
   const body = req.body as {
     currency?: unknown;
@@ -6660,6 +8039,27 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
       language,
     });
     return res.json(todayReport);
+  }
+
+  if (
+    req.user?.sub &&
+    isMonthlyTransactionReportIntent(latestUserMessage.content)
+  ) {
+    const monthlyReport = await buildMonthlyTransactionReportResponse({
+      userId: req.user.sub,
+      currency,
+      language,
+    });
+    return res.json(monthlyReport);
+  }
+
+  if (req.user?.sub && isSpendingComparisonIntent(latestUserMessage.content)) {
+    const spendingComparison = await buildSpendingComparisonResponse({
+      userId: req.user.sub,
+      currency,
+      language,
+    });
+    return res.json(spendingComparison);
   }
 
   const marketResponse = await buildLiveMarketCopilotResponse(
@@ -7268,9 +8668,12 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
             : {}),
         },
       });
-      return res
-        .status(423)
-        .json({ error: "Account temporarily locked due to repeated failures" });
+      return res.status(423).json({
+        error: `Too many incorrect password attempts. Your account has been temporarily locked for ${policy.lockoutMinutes} minute${policy.lockoutMinutes === 1 ? "" : "s"}.`,
+        attemptsRemaining: 0,
+        maxAttempts: policy.maxLoginAttempts,
+        lockoutMinutes: policy.lockoutMinutes,
+      });
     }
 
     await loginEventRepository.createLoginEvent({
@@ -7317,8 +8720,31 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
           getRequestIp(req),
         );
         return res.status(423).json({
-          error: "Account locked after repeated failed attempts",
+          error: buildLoginFailureMessage({
+            remainingAttempts: 0,
+            lockoutMinutes: policy.lockoutMinutes,
+          }),
           anomaly: aiResult,
+          attemptsRemaining: 0,
+          maxAttempts: policy.maxLoginAttempts,
+          lockoutMinutes: policy.lockoutMinutes,
+        });
+      }
+
+      if (userDoc?.id && !isPasswordValid) {
+        const attemptsRemaining = Math.max(
+          policy.maxLoginAttempts - failedAttempts,
+          0,
+        );
+        return res.status(401).json({
+          error: buildLoginFailureMessage({
+            remainingAttempts: attemptsRemaining,
+            lockoutMinutes: policy.lockoutMinutes,
+          }),
+          anomaly: aiResult,
+          attemptsRemaining,
+          maxAttempts: policy.maxLoginAttempts,
+          lockoutMinutes: policy.lockoutMinutes,
         });
       }
 
@@ -8363,12 +9789,28 @@ app.patch("/auth/me", requireAuth, async (req, res) => {
     body.metadata && typeof body.metadata === "object"
       ? (body.metadata as Record<string, unknown>)
       : {};
-  const avatar =
-    typeof metadata.avatar === "string" &&
-    metadata.avatar.length > 0 &&
-    metadata.avatar.length <= 2_000_000
-      ? metadata.avatar
-      : undefined;
+  let avatar: string | undefined;
+  try {
+    avatar = parseSafeAvatarDataUrl(metadata.avatar);
+  } catch (err) {
+    if (err instanceof Error) {
+      if (err.message === "AVATAR_TOO_LARGE") {
+        return res.status(400).json({
+          error: "Avatar image is too large. Please choose a smaller image.",
+        });
+      }
+      if (err.message === "AVATAR_UNSUPPORTED_TYPE") {
+        return res
+          .status(400)
+          .json({ error: "Avatar must be a JPG, PNG, or WebP image." });
+      }
+      return res.status(400).json({
+        error:
+          "Avatar content is invalid. Please upload a real JPG, PNG, or WebP image.",
+      });
+    }
+    return res.status(400).json({ error: "Invalid avatar payload." });
+  }
   const safeMetadata = {
     ...metadata,
     ...(avatar ? { avatar } : {}),

@@ -1,0 +1,12 @@
+[
+  { "canonical": "S&P 500", "symbol": "^GSPC", "assetClass": "index", "sector": "index", "kind": "index", "aliases": ["sp500", "s&p500"] },
+  { "canonical": "NASDAQ Composite", "symbol": "^IXIC", "assetClass": "index", "sector": "index", "kind": "index", "aliases": ["nasdaq"] },
+  { "canonical": "Dow Jones", "symbol": "^DJI", "assetClass": "index", "sector": "index", "kind": "index", "aliases": ["dow jones", "dowjones"] },
+  { "canonical": "VN-Index", "symbol": "^VNINDEX", "assetClass": "index", "sector": "index", "kind": "index", "aliases": ["vnindex", "vn-index"] },
+  { "canonical": "SPDR S&P 500 ETF", "symbol": "SPY", "sector": "etf", "kind": "etf", "aliases": ["spy etf"] },
+  { "canonical": "Invesco QQQ Trust", "symbol": "QQQ", "sector": "etf", "kind": "etf", "aliases": ["qqq etf"] },
+  { "canonical": "SPDR Dow Jones ETF", "symbol": "DIA", "sector": "etf", "kind": "etf", "aliases": ["dia etf"] },
+  { "canonical": "VanEck Vietnam ETF", "symbol": "VNM", "sector": "etf", "kind": "etf", "aliases": ["van eck vietnam etf"] },
+  { "canonical": "DCVFMVN30 ETF", "symbol": "E1VFVN30", "sector": "etf", "kind": "etf", "aliases": ["vn30 etf", "e1vfvn30"] },
+  { "canonical": "VN Diamond ETF", "symbol": "FUEVFVND", "sector": "etf", "kind": "etf", "aliases": ["vndiamond etf", "fuevfvnd"] }
+]

@@ -13,6 +13,136 @@ type UseActivityNotificationsOptions = {
   userId?: string;
 };
 
+type NotificationTransaction = {
+  id: string;
+  amount: number;
+  type: string;
+  status?: string;
+  description?: string;
+  createdAt: string;
+  metadata?: {
+    entry?: "DEBIT" | "CREDIT";
+  };
+};
+
+const getStartOfLocalDay = (value: Date) => {
+  const next = new Date(value);
+  next.setHours(0, 0, 0, 0);
+  return next;
+};
+
+const getStartOfLocalWeek = (value: Date) => {
+  const next = getStartOfLocalDay(value);
+  const day = next.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  next.setDate(next.getDate() + diff);
+  return next;
+};
+
+const getStartOfLocalMonth = (value: Date) => {
+  const next = getStartOfLocalDay(value);
+  next.setDate(1);
+  return next;
+};
+
+const formatSignedDelta = (value: number) =>
+  `${value >= 0 ? "+" : "-"}$${Math.abs(value).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+
+const sumDebitsInRange = (
+  transactions: NotificationTransaction[],
+  startInclusive: Date,
+  endExclusive: Date,
+) =>
+  transactions.reduce((sum, transaction) => {
+    const createdAt = new Date(transaction.createdAt);
+    if (Number.isNaN(createdAt.getTime())) return sum;
+    if (createdAt < startInclusive || createdAt >= endExclusive) return sum;
+    const isCredit =
+      transaction.type === "DEPOSIT" ||
+      transaction.metadata?.entry === "CREDIT";
+    return sum + (isCredit ? 0 : Math.max(0, Number(transaction.amount || 0)));
+  }, 0);
+
+const buildDailyDigestNotification = (
+  transactions: NotificationTransaction[],
+  now: Date,
+): ActivityNotification | null => {
+  const digestTime = new Date(now);
+  digestTime.setHours(8, 0, 0, 0);
+  if (now < digestTime) return null;
+
+  const todayStart = getStartOfLocalDay(now);
+  const yesterdayStart = new Date(todayStart);
+  yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+  const weekStart = getStartOfLocalWeek(now);
+  const prevWeekStart = new Date(weekStart);
+  prevWeekStart.setDate(prevWeekStart.getDate() - 7);
+  const monthStart = getStartOfLocalMonth(now);
+  const prevMonthStart = new Date(monthStart);
+  prevMonthStart.setMonth(prevMonthStart.getMonth() - 1);
+
+  const weekSpanDays =
+    Math.floor((todayStart.getTime() - weekStart.getTime()) / 86400000) + 1;
+  const prevWeekEnd = new Date(prevWeekStart);
+  prevWeekEnd.setDate(prevWeekEnd.getDate() + weekSpanDays);
+
+  const prevMonthEnd = new Date(prevMonthStart);
+  prevMonthEnd.setDate(
+    Math.min(
+      now.getDate(),
+      new Date(
+        prevMonthStart.getFullYear(),
+        prevMonthStart.getMonth() + 1,
+        0,
+      ).getDate(),
+    ),
+  );
+  prevMonthEnd.setHours(now.getHours(), now.getMinutes(), now.getSeconds(), 0);
+
+  const todaySpend = sumDebitsInRange(transactions, todayStart, now);
+  const yesterdaySpend = sumDebitsInRange(
+    transactions,
+    yesterdayStart,
+    todayStart,
+  );
+  const thisWeekSpend = sumDebitsInRange(transactions, weekStart, now);
+  const lastWeekSpend = sumDebitsInRange(
+    transactions,
+    prevWeekStart,
+    prevWeekEnd,
+  );
+  const thisMonthSpend = sumDebitsInRange(transactions, monthStart, now);
+  const lastMonthSpend = sumDebitsInRange(
+    transactions,
+    prevMonthStart,
+    prevMonthEnd,
+  );
+
+  const message = [
+    `Today ${todaySpend >= yesterdaySpend ? "is above" : "is below"} yesterday by ${formatSignedDelta(todaySpend - yesterdaySpend)}.`,
+    `This week is ${thisWeekSpend >= lastWeekSpend ? "running above" : "running below"} last week by ${formatSignedDelta(thisWeekSpend - lastWeekSpend)}.`,
+    `This month is ${thisMonthSpend >= lastMonthSpend ? "tracking above" : "tracking below"} last month by ${formatSignedDelta(thisMonthSpend - lastMonthSpend)}.`,
+  ].join(" ");
+
+  return {
+    id: `digest:${todayStart.toISOString().slice(0, 10)}`,
+    type: "transactions",
+    title: "8:00 spending brief",
+    message,
+    meta: "Today vs yesterday | This week vs last week | This month vs last month",
+    createdAt: digestTime.toISOString(),
+    timeLabel: "Today 8:00 AM",
+    amountText: `$${todaySpend.toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`,
+    amountTone: todaySpend > yesterdaySpend ? "negative" : "positive",
+  };
+};
+
 export function useActivityNotifications({
   apiBase,
   token,
@@ -117,17 +247,7 @@ export function useActivityNotifications({
         ]);
 
         if (txResp.ok) {
-          const txs = (await txResp.json()) as Array<{
-            id: string;
-            amount: number;
-            type: string;
-            status?: string;
-            description?: string;
-            createdAt: string;
-            metadata?: {
-              entry?: "DEBIT" | "CREDIT";
-            };
-          }>;
+          const txs = (await txResp.json()) as NotificationTransaction[];
 
           hasSuccess = true;
           nextNotifications = nextNotifications.concat(
@@ -166,6 +286,14 @@ export function useActivityNotifications({
                 };
               }),
           );
+
+          const digestNotification = buildDailyDigestNotification(
+            txs,
+            new Date(),
+          );
+          if (digestNotification) {
+            nextNotifications.push(digestNotification);
+          }
         }
 
         if (securityResp.ok) {
