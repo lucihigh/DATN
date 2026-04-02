@@ -1,5 +1,7 @@
 import crypto from "crypto";
 
+import { Prisma } from "@prisma/client";
+
 import { prisma } from "../db/prisma";
 
 const OTP_RESEND_COOLDOWN_SECONDS = Number(
@@ -173,6 +175,86 @@ export const verifyEmailOtpChallenge = async (input: {
 
   return { challenge, metadata };
 };
+
+export const verifyAndConsumeEmailOtpChallenge = async (input: {
+  userId: string;
+  purpose: string;
+  challengeId: string;
+  otp: string;
+}) =>
+  prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    const challenge = await tx.otpChallenge.findFirst({
+      where: {
+        id: input.challengeId,
+        userId: input.userId,
+        purpose: input.purpose,
+        channel: "EMAIL",
+      },
+    });
+    if (!challenge) {
+      throw new Error("OTP_CHALLENGE_NOT_FOUND");
+    }
+    if (challenge.consumedAt) {
+      throw new Error("OTP_CHALLENGE_ALREADY_USED");
+    }
+    if (challenge.expiresAt.getTime() < Date.now()) {
+      throw new Error("OTP_EXPIRED");
+    }
+    if (challenge.attempts >= challenge.maxAttempts) {
+      throw new Error("OTP_TOO_MANY_ATTEMPTS");
+    }
+
+    const expectedHash = hashOtpCode(input.otp);
+    if (expectedHash !== challenge.codeHash) {
+      const nextAttempts = challenge.attempts + 1;
+      const remainingAttempts = Math.max(
+        challenge.maxAttempts - nextAttempts,
+        0,
+      );
+      await tx.otpChallenge.update({
+        where: { id: challenge.id },
+        data: { attempts: nextAttempts },
+      });
+      if (nextAttempts >= challenge.maxAttempts) {
+        const error = new Error("OTP_TOO_MANY_ATTEMPTS") as Error & {
+          remainingAttempts: number;
+        };
+        error.remainingAttempts = 0;
+        throw error;
+      }
+      const error = new Error("OTP_INCORRECT") as Error & {
+        remainingAttempts: number;
+      };
+      error.remainingAttempts = remainingAttempts;
+      throw error;
+    }
+
+    const consumedAt = new Date();
+    const claimResult = await tx.otpChallenge.updateMany({
+      where: {
+        id: challenge.id,
+        consumedAt: null,
+        attempts: challenge.attempts,
+      },
+      data: { consumedAt },
+    });
+    if (claimResult.count !== 1) {
+      throw new Error("OTP_CHALLENGE_ALREADY_USED");
+    }
+
+    const metadata =
+      challenge.metadata && typeof challenge.metadata === "object"
+        ? (challenge.metadata as Record<string, unknown>)
+        : {};
+
+    return {
+      challenge: {
+        ...challenge,
+        consumedAt,
+      },
+      metadata,
+    };
+  });
 
 export const consumeOtpChallenge = async (challengeId: string) =>
   prisma.otpChallenge.update({

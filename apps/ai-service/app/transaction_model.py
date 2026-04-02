@@ -19,8 +19,160 @@ TX_FEATURE_NAMES = [
     "balance_drain_ratio",
     "remaining_balance_log10",
     "low_remaining_balance_flag",
+    "new_recipient_flag",
+    "suspicious_note_count",
+    "session_transfer_limit_flag",
+    "rolling_outflow_amount_log10",
+    "face_id_required_flag",
+    "recent_review_count_30d",
+    "recent_blocked_count_30d",
+    "recent_pending_otp_count_7d",
+    "llm_note_medium_flag",
+    "llm_note_high_flag",
+    "llm_signal_count",
 ]
 BALANCE_DRAIN_RISK_MIN_AMOUNT = 1000.0
+DEFAULT_ACCOUNT_SEGMENT = "PERSONAL"
+DEFAULT_ACCOUNT_CATEGORY = "PERSONAL"
+DEFAULT_PERSONAL_TIER = "STANDARD"
+DEFAULT_BUSINESS_TIER = "SMALL_BUSINESS"
+PERSONAL_ACCOUNT_TIERS = {"BASIC", "STANDARD", "PREMIUM"}
+BUSINESS_ACCOUNT_TIERS = {"SMALL_BUSINESS", "MEDIUM_BUSINESS", "ENTERPRISE"}
+ACCOUNT_PROFILE_THRESHOLDS = {
+    "PERSONAL_BASIC": {
+        "medium_amount": 1500.0,
+        "high_amount": 5000.0,
+        "projected_medium_ratio": 16.0,
+        "projected_high_ratio": 45.0,
+        "projected_medium_delta": 1500.0,
+        "projected_high_delta": 6000.0,
+        "amount_ratio_medium": 2.8,
+        "amount_ratio_high": 6.0,
+        "amount_ratio_medium_min": 300.0,
+        "amount_ratio_high_min": 1200.0,
+        "rolling_outflow_medium": 1500.0,
+        "rolling_outflow_high": 5000.0,
+        "new_recipient_amount": 1000.0,
+        "high_drain_ratio": 0.92,
+        "medium_drain_ratio": 0.78,
+        "critical_remaining_balance": 5.0,
+        "low_remaining_balance": 25.0,
+        "label": "personal basic",
+        "review_bias": 1.18,
+    },
+    "PERSONAL_STANDARD": {
+        "medium_amount": 3000.0,
+        "high_amount": 10000.0,
+        "projected_medium_ratio": 30.0,
+        "projected_high_ratio": 100.0,
+        "projected_medium_delta": 5000.0,
+        "projected_high_delta": 20000.0,
+        "amount_ratio_medium": 4.0,
+        "amount_ratio_high": 10.0,
+        "amount_ratio_medium_min": 500.0,
+        "amount_ratio_high_min": 2000.0,
+        "rolling_outflow_medium": 3000.0,
+        "rolling_outflow_high": 10000.0,
+        "new_recipient_amount": 2000.0,
+        "high_drain_ratio": 0.95,
+        "medium_drain_ratio": 0.85,
+        "critical_remaining_balance": 5.0,
+        "low_remaining_balance": 25.0,
+        "label": "personal standard",
+        "review_bias": 1.0,
+    },
+    "PERSONAL_PREMIUM": {
+        "medium_amount": 7000.0,
+        "high_amount": 25000.0,
+        "projected_medium_ratio": 42.0,
+        "projected_high_ratio": 120.0,
+        "projected_medium_delta": 10000.0,
+        "projected_high_delta": 35000.0,
+        "amount_ratio_medium": 5.5,
+        "amount_ratio_high": 12.0,
+        "amount_ratio_medium_min": 1000.0,
+        "amount_ratio_high_min": 4000.0,
+        "rolling_outflow_medium": 8000.0,
+        "rolling_outflow_high": 25000.0,
+        "new_recipient_amount": 5000.0,
+        "high_drain_ratio": 0.97,
+        "medium_drain_ratio": 0.88,
+        "critical_remaining_balance": 10.0,
+        "low_remaining_balance": 50.0,
+        "label": "personal premium",
+        "review_bias": 0.92,
+    },
+    "BUSINESS_SMALL_BUSINESS": {
+        "medium_amount": 10000.0,
+        "high_amount": 35000.0,
+        "projected_medium_ratio": 40.0,
+        "projected_high_ratio": 120.0,
+        "projected_medium_delta": 10000.0,
+        "projected_high_delta": 40000.0,
+        "amount_ratio_medium": 6.0,
+        "amount_ratio_high": 14.0,
+        "amount_ratio_medium_min": 1500.0,
+        "amount_ratio_high_min": 7000.0,
+        "rolling_outflow_medium": 10000.0,
+        "rolling_outflow_high": 25000.0,
+        "new_recipient_amount": 7000.0,
+        "high_drain_ratio": 0.98,
+        "medium_drain_ratio": 0.9,
+        "critical_remaining_balance": 50.0,
+        "low_remaining_balance": 250.0,
+        "label": "business small",
+        "review_bias": 0.88,
+    },
+    "BUSINESS_MEDIUM_BUSINESS": {
+        "medium_amount": 25000.0,
+        "high_amount": 100000.0,
+        "projected_medium_ratio": 65.0,
+        "projected_high_ratio": 180.0,
+        "projected_medium_delta": 25000.0,
+        "projected_high_delta": 120000.0,
+        "amount_ratio_medium": 8.5,
+        "amount_ratio_high": 18.0,
+        "amount_ratio_medium_min": 4000.0,
+        "amount_ratio_high_min": 18000.0,
+        "rolling_outflow_medium": 25000.0,
+        "rolling_outflow_high": 90000.0,
+        "new_recipient_amount": 15000.0,
+        "high_drain_ratio": 0.985,
+        "medium_drain_ratio": 0.9,
+        "critical_remaining_balance": 150.0,
+        "low_remaining_balance": 700.0,
+        "label": "business medium",
+        "review_bias": 0.82,
+    },
+    "BUSINESS_ENTERPRISE": {
+        "medium_amount": 50000.0,
+        "high_amount": 250000.0,
+        "projected_medium_ratio": 90.0,
+        "projected_high_ratio": 240.0,
+        "projected_medium_delta": 50000.0,
+        "projected_high_delta": 250000.0,
+        "amount_ratio_medium": 12.0,
+        "amount_ratio_high": 26.0,
+        "amount_ratio_medium_min": 15000.0,
+        "amount_ratio_high_min": 60000.0,
+        "rolling_outflow_medium": 60000.0,
+        "rolling_outflow_high": 250000.0,
+        "new_recipient_amount": 30000.0,
+        "high_drain_ratio": 0.99,
+        "medium_drain_ratio": 0.92,
+        "critical_remaining_balance": 250.0,
+        "low_remaining_balance": 1000.0,
+        "label": "business enterprise",
+        "review_bias": 0.78,
+    },
+}
+ACCOUNT_SEGMENT_THRESHOLDS = {
+    "PERSONAL": ACCOUNT_PROFILE_THRESHOLDS["PERSONAL_STANDARD"],
+    "SME": ACCOUNT_PROFILE_THRESHOLDS["BUSINESS_MEDIUM_BUSINESS"],
+    "ENTERPRISE": ACCOUNT_PROFILE_THRESHOLDS["BUSINESS_ENTERPRISE"],
+}
+ACCOUNT_PROFILE_THRESHOLDS["PERSONAL_PRIVATE"] = ACCOUNT_PROFILE_THRESHOLDS["PERSONAL_PREMIUM"]
+ACCOUNT_PROFILE_THRESHOLDS["BUSINESS_SME"] = ACCOUNT_PROFILE_THRESHOLDS["BUSINESS_SMALL_BUSINESS"]
 
 
 class TransactionEvent(BaseModel):
@@ -47,6 +199,47 @@ class TransactionEvent(BaseModel):
     country: str = Field(validation_alias=AliasChoices("country", "location"))
     payment_method: str = Field(validation_alias=AliasChoices("payment_method", "paymentMethod"))
     merchant_category: str = Field(validation_alias=AliasChoices("merchant_category", "merchantCategory"))
+    account_segment: str = Field(
+        default=DEFAULT_ACCOUNT_SEGMENT,
+        validation_alias=AliasChoices(
+            "account_segment",
+            "accountSegment",
+            "account_type",
+            "accountType",
+        ),
+    )
+    account_category: str = Field(
+        default=DEFAULT_ACCOUNT_CATEGORY,
+        validation_alias=AliasChoices(
+            "account_category",
+            "accountCategory",
+            "category",
+        ),
+    )
+    account_tier: str = Field(
+        default=DEFAULT_PERSONAL_TIER,
+        validation_alias=AliasChoices(
+            "account_tier",
+            "accountTier",
+            "tier",
+        ),
+    )
+    account_profile_status: str = Field(
+        default="SYSTEM_ASSIGNED",
+        validation_alias=AliasChoices(
+            "account_profile_status",
+            "accountProfileStatus",
+            "profileStatus",
+        ),
+    )
+    account_profile_confidence: float = Field(
+        default=0.6,
+        validation_alias=AliasChoices(
+            "account_profile_confidence",
+            "accountProfileConfidence",
+            "profileConfidence",
+        ),
+    )
     device: str = Field(default="")
     channel: str | None = None
     failed_tx_24h: int = Field(default=0, validation_alias=AliasChoices("failed_tx_24h", "failedTx24h"))
@@ -70,6 +263,96 @@ class TransactionEvent(BaseModel):
     remaining_balance: float = Field(
         default=0.0,
         validation_alias=AliasChoices("remaining_balance", "remainingBalance"),
+    )
+    recipient_known: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("recipient_known", "recipientKnown"),
+    )
+    suspicious_note_count: int = Field(
+        default=0,
+        validation_alias=AliasChoices("suspicious_note_count", "suspiciousNoteCount"),
+    )
+    rolling_outflow_amount: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices("rolling_outflow_amount", "rollingOutflowAmount"),
+    )
+    face_id_required: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("face_id_required", "faceIdRequired"),
+    )
+    session_restrict_large_transfers: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "session_restrict_large_transfers",
+            "sessionRestrictLargeTransfers",
+        ),
+    )
+    recent_review_count_30d: int = Field(
+        default=0,
+        validation_alias=AliasChoices("recent_review_count_30d", "recentReviewCount30d"),
+    )
+    recent_blocked_count_30d: int = Field(
+        default=0,
+        validation_alias=AliasChoices("recent_blocked_count_30d", "recentBlockedCount30d"),
+    )
+    recent_pending_otp_count_7d: int = Field(
+        default=0,
+        validation_alias=AliasChoices(
+            "recent_pending_otp_count_7d",
+            "recentPendingOtpCount7d",
+        ),
+    )
+    small_probe_count_24h: int = Field(
+        default=0,
+        validation_alias=AliasChoices("small_probe_count_24h", "smallProbeCount24h"),
+    )
+    small_probe_total_24h: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices("small_probe_total_24h", "smallProbeTotal24h"),
+    )
+    distinct_small_probe_recipients_24h: int = Field(
+        default=0,
+        validation_alias=AliasChoices(
+            "distinct_small_probe_recipients_24h",
+            "distinctSmallProbeRecipients24h",
+        ),
+    )
+    same_recipient_small_probe_count_24h: int = Field(
+        default=0,
+        validation_alias=AliasChoices(
+            "same_recipient_small_probe_count_24h",
+            "sameRecipientSmallProbeCount24h",
+        ),
+    )
+    new_recipient_small_probe_count_24h: int = Field(
+        default=0,
+        validation_alias=AliasChoices(
+            "new_recipient_small_probe_count_24h",
+            "newRecipientSmallProbeCount24h",
+        ),
+    )
+    probe_then_large_risk_score: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices(
+            "probe_then_large_risk_score",
+            "probeThenLargeRiskScore",
+        ),
+    )
+    llm_note_risk_level: str = Field(
+        default="LOW",
+        validation_alias=AliasChoices("llm_note_risk_level", "llmNoteRiskLevel"),
+    )
+    llm_signal_count: int = Field(
+        default=0,
+        validation_alias=AliasChoices("llm_signal_count", "llmSignalCount"),
+    )
+    llm_rule_tags: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("llm_rule_tags", "llmRuleTags"),
+    )
+    session_risk_level: str = Field(
+        default="LOW",
+        validation_alias=AliasChoices("session_risk_level", "sessionRiskLevel"),
     )
 
 
@@ -99,12 +382,128 @@ def _normalize_region_city(value: str | None) -> str | None:
     return cleaned if cleaned else None
 
 
+def _normalize_risk_level(value: str | None) -> str:
+    cleaned = str(value or "").strip().upper()
+    if cleaned in {"LOW", "MEDIUM", "HIGH"}:
+        return cleaned
+    return "LOW"
+
+
+def _normalize_profile_status(value: str | None) -> str:
+    cleaned = str(value or "").strip().upper().replace("-", "_").replace(" ", "_")
+    if cleaned in {"PENDING_REVIEW", "VERIFIED", "REQUIRES_REVIEW"}:
+        return cleaned
+    return "SYSTEM_ASSIGNED"
+
+
+def normalize_account_segment(value: str | None) -> str:
+    cleaned = str(value or "").strip().upper()
+    if cleaned in ACCOUNT_SEGMENT_THRESHOLDS:
+        return cleaned
+    return DEFAULT_ACCOUNT_SEGMENT
+
+
+def normalize_account_category(value: str | None, segment: str | None = None) -> str:
+    cleaned = str(value or "").strip().upper()
+    if cleaned == "PERSONAL":
+        return cleaned
+    if cleaned in {"BUSINESS", "SME", "ENTERPRISE", "CORPORATE", "SMALLBUSINESS"}:
+        return "BUSINESS"
+    normalized_segment = normalize_account_segment(segment)
+    return "BUSINESS" if normalized_segment in {"SME", "ENTERPRISE"} else DEFAULT_ACCOUNT_CATEGORY
+
+
+def normalize_account_tier(
+    category: str | None,
+    value: str | None,
+    segment: str | None = None,
+) -> str:
+    normalized_category = normalize_account_category(category, segment)
+    cleaned = str(value or "").strip().upper()
+    if cleaned == "PRIVATE":
+        cleaned = "PREMIUM"
+    if cleaned in {"SME", "SMALLBUSINESS", "B1_SMALL_BUSINESS", "B1SMALLBUSINESS"}:
+        cleaned = "SMALL_BUSINESS"
+    elif cleaned in {"MEDIUMBUSINESS", "B2_MEDIUM_BUSINESS", "B2MEDIUMBUSINESS"}:
+        cleaned = "MEDIUM_BUSINESS"
+    elif cleaned in {"P1_BASIC", "P1BASIC"}:
+        cleaned = "BASIC"
+    elif cleaned in {"P2_STANDARD", "P2STANDARD"}:
+        cleaned = "STANDARD"
+    elif cleaned in {"P3_PREMIUM", "P3PREMIUM"}:
+        cleaned = "PREMIUM"
+    if normalized_category == "BUSINESS":
+        if cleaned in BUSINESS_ACCOUNT_TIERS:
+            return cleaned
+        return "ENTERPRISE" if normalize_account_segment(segment) == "ENTERPRISE" else DEFAULT_BUSINESS_TIER
+    if cleaned in PERSONAL_ACCOUNT_TIERS:
+        return cleaned
+    return DEFAULT_PERSONAL_TIER
+
+
+def derive_account_segment(
+    category: str | None,
+    tier: str | None,
+    fallback_segment: str | None = None,
+) -> str:
+    normalized_category = normalize_account_category(category, fallback_segment)
+    normalized_tier = normalize_account_tier(normalized_category, tier, fallback_segment)
+    if normalized_category == "BUSINESS":
+        return "ENTERPRISE" if normalized_tier == "ENTERPRISE" else "SME"
+    return DEFAULT_ACCOUNT_SEGMENT
+
+
+def build_account_profile_code(
+    category: str | None,
+    tier: str | None,
+    segment: str | None = None,
+) -> str:
+    normalized_category = normalize_account_category(category, segment)
+    normalized_tier = normalize_account_tier(normalized_category, tier, segment)
+    return f"{normalized_category}_{normalized_tier}"
+
+
+def get_account_segment_thresholds(segment: str | None) -> dict[str, float]:
+    normalized = normalize_account_segment(segment)
+    return ACCOUNT_SEGMENT_THRESHOLDS[normalized]
+
+
+def get_account_profile_thresholds(
+    category: str | None,
+    tier: str | None,
+    segment: str | None = None,
+) -> dict[str, float]:
+    profile_code = build_account_profile_code(category, tier, segment)
+    return ACCOUNT_PROFILE_THRESHOLDS.get(
+        profile_code,
+        ACCOUNT_PROFILE_THRESHOLDS["PERSONAL_STANDARD"],
+    )
+
+
 def normalize_transaction_event(event: TransactionEvent) -> TransactionEvent:
     event.timestamp = _as_utc(event.timestamp) or event.timestamp
     event.currency = (event.currency or "").strip().upper()[:8] or "UNK"
     event.country = _normalize_country(event.country)
     event.payment_method = (event.payment_method or "").strip().lower()
     event.merchant_category = (event.merchant_category or "").strip().lower()
+    event.account_category = normalize_account_category(
+        event.account_category,
+        event.account_segment,
+    )
+    event.account_tier = normalize_account_tier(
+        event.account_category,
+        event.account_tier,
+        event.account_segment,
+    )
+    event.account_segment = derive_account_segment(
+        event.account_category,
+        event.account_tier,
+        event.account_segment,
+    )
+    event.account_profile_status = _normalize_profile_status(event.account_profile_status)
+    event.account_profile_confidence = float(
+        min(0.99, max(0.1, float(event.account_profile_confidence or 0.6)))
+    )
     event.device = (event.device or "").strip()
     event.channel = _normalize_region_city(event.channel)
     event.amount = float(max(event.amount, 0.0))
@@ -117,6 +516,33 @@ def normalize_transaction_event(event: TransactionEvent) -> TransactionEvent:
     if event.remaining_balance <= 0.0 and event.balance_before > 0.0:
         event.remaining_balance = max(event.balance_before - event.amount, 0.0)
     event.remaining_balance = float(max(event.remaining_balance, 0.0))
+    event.suspicious_note_count = int(max(event.suspicious_note_count, 0))
+    event.rolling_outflow_amount = float(max(event.rolling_outflow_amount, 0.0))
+    event.recent_review_count_30d = int(max(event.recent_review_count_30d, 0))
+    event.recent_blocked_count_30d = int(max(event.recent_blocked_count_30d, 0))
+    event.recent_pending_otp_count_7d = int(max(event.recent_pending_otp_count_7d, 0))
+    event.small_probe_count_24h = int(max(event.small_probe_count_24h, 0))
+    event.small_probe_total_24h = float(max(event.small_probe_total_24h, 0.0))
+    event.distinct_small_probe_recipients_24h = int(
+        max(event.distinct_small_probe_recipients_24h, 0)
+    )
+    event.same_recipient_small_probe_count_24h = int(
+        max(event.same_recipient_small_probe_count_24h, 0)
+    )
+    event.new_recipient_small_probe_count_24h = int(
+        max(event.new_recipient_small_probe_count_24h, 0)
+    )
+    event.probe_then_large_risk_score = float(
+        min(0.99, max(0.0, float(event.probe_then_large_risk_score or 0.0)))
+    )
+    event.llm_note_risk_level = _normalize_risk_level(event.llm_note_risk_level)
+    event.llm_signal_count = int(max(event.llm_signal_count, 0))
+    event.llm_rule_tags = [
+        str(tag).strip().lower()
+        for tag in event.llm_rule_tags
+        if str(tag).strip()
+    ][:6]
+    event.session_risk_level = _normalize_risk_level(event.session_risk_level)
     return event
 
 
@@ -130,9 +556,28 @@ def build_tx_request_fingerprint(event: TransactionEvent) -> str:
             str(event.country),
             str(event.payment_method),
             str(event.merchant_category),
+            str(event.account_segment),
+            str(event.account_category),
+            str(event.account_tier),
+            str(event.account_profile_status),
+            str(event.account_profile_confidence),
             str(event.device),
             str(event.failed_tx_24h),
             str(event.velocity_1h),
+            str(event.recipient_known),
+            str(event.suspicious_note_count),
+            str(event.rolling_outflow_amount),
+            str(event.session_restrict_large_transfers),
+            str(event.small_probe_count_24h),
+            str(event.small_probe_total_24h),
+            str(event.distinct_small_probe_recipients_24h),
+            str(event.same_recipient_small_probe_count_24h),
+            str(event.new_recipient_small_probe_count_24h),
+            str(event.probe_then_large_risk_score),
+            str(event.llm_note_risk_level),
+            str(event.llm_signal_count),
+            ",".join(event.llm_rule_tags),
+            str(event.session_risk_level),
         ]
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -175,6 +620,19 @@ def build_tx_feature_map(event: TransactionEvent) -> dict[str, float]:
         "balance_drain_ratio": float(balance_drain_ratio),
         "remaining_balance_log10": _safe_log10(float(event.remaining_balance)),
         "low_remaining_balance_flag": 1.0 if float(event.remaining_balance) <= 25.0 else 0.0,
+        "new_recipient_flag": 0.0 if event.recipient_known else 1.0,
+        "suspicious_note_count": float(event.suspicious_note_count),
+        "session_transfer_limit_flag": 1.0 if event.session_restrict_large_transfers else 0.0,
+        "rolling_outflow_amount_log10": _safe_log10(float(event.rolling_outflow_amount)),
+        "face_id_required_flag": 1.0 if event.face_id_required else 0.0,
+        "recent_review_count_30d": float(event.recent_review_count_30d),
+        "recent_blocked_count_30d": float(event.recent_blocked_count_30d),
+        "recent_pending_otp_count_7d": float(event.recent_pending_otp_count_7d),
+        # Keep these feature names for backward-compatible artifacts, but
+        # decouple LLM note analysis from model-based transaction decisions.
+        "llm_note_medium_flag": 0.0,
+        "llm_note_high_flag": 0.0,
+        "llm_signal_count": 0.0,
     }
 
 
@@ -199,9 +657,16 @@ def _is_material_balance_drain(event: TransactionEvent) -> bool:
 
 def adjust_tx_risk_level(base_risk: str, event: TransactionEvent, feedback_profile: dict | None = None) -> str:
     risk = base_risk
-    if event.amount >= 10000:
+    thresholds = get_account_profile_thresholds(
+        event.account_category,
+        event.account_tier,
+        event.account_segment,
+    )
+    historical_risk_amount_floor = max(50.0, float(thresholds["amount_ratio_medium_min"]) * 0.2)
+    probe_escalation_amount_floor = max(300.0, float(thresholds["medium_amount"]) * 0.2)
+    if event.amount >= thresholds["high_amount"]:
         risk = _max_risk_level(risk, "HIGH")
-    elif event.amount >= 3000:
+    elif event.amount >= thresholds["medium_amount"]:
         risk = _max_risk_level(risk, "MEDIUM")
 
     if event.failed_tx_24h >= 3:
@@ -217,26 +682,87 @@ def adjust_tx_risk_level(base_risk: str, event: TransactionEvent, feedback_profi
     if event.daily_spend_avg_30d > 0:
         projected_ratio = event.projected_daily_spend / max(event.daily_spend_avg_30d, 1.0)
         projected_delta = event.projected_daily_spend - event.daily_spend_avg_30d
-        if projected_ratio >= 100 and projected_delta >= 20000:
+        if (
+            projected_ratio >= thresholds["projected_high_ratio"]
+            and projected_delta >= thresholds["projected_high_delta"]
+        ):
             risk = _max_risk_level(risk, "HIGH")
-        elif projected_ratio >= 30 and projected_delta >= 5000:
+        elif (
+            projected_ratio >= thresholds["projected_medium_ratio"]
+            and projected_delta >= thresholds["projected_medium_delta"]
+        ):
             risk = _max_risk_level(risk, "MEDIUM")
         amount_ratio = event.amount / max(event.daily_spend_avg_30d, 1.0)
-        if amount_ratio >= 10 and event.amount >= 2000:
+        if (
+            amount_ratio >= thresholds["amount_ratio_high"]
+            and event.amount >= thresholds["amount_ratio_high_min"]
+        ):
             risk = _max_risk_level(risk, "HIGH")
-        elif amount_ratio >= 4 and event.amount >= 500:
+        elif (
+            amount_ratio >= thresholds["amount_ratio_medium"]
+            and event.amount >= thresholds["amount_ratio_medium_min"]
+        ):
             risk = _max_risk_level(risk, "MEDIUM")
 
     if event.balance_before > 0 and _is_material_balance_drain(event):
         drain_ratio = event.amount / max(event.balance_before, 1.0)
-        if drain_ratio >= 0.95:
+        if drain_ratio >= thresholds["high_drain_ratio"]:
             risk = _max_risk_level(risk, "HIGH")
-        elif drain_ratio >= 0.85:
+        elif drain_ratio >= thresholds["medium_drain_ratio"]:
             risk = _max_risk_level(risk, "MEDIUM")
 
-    if _is_material_balance_drain(event) and event.remaining_balance <= 5:
+    if _is_material_balance_drain(event) and event.remaining_balance <= thresholds["critical_remaining_balance"]:
         risk = _max_risk_level(risk, "HIGH")
-    elif _is_material_balance_drain(event) and event.remaining_balance <= 25:
+    elif _is_material_balance_drain(event) and event.remaining_balance <= thresholds["low_remaining_balance"]:
+        risk = _max_risk_level(risk, "MEDIUM")
+
+    if not event.recipient_known and event.amount >= thresholds["new_recipient_amount"]:
+        risk = _max_risk_level(risk, "MEDIUM")
+
+    if event.suspicious_note_count >= 2:
+        risk = _max_risk_level(risk, "HIGH")
+    elif event.suspicious_note_count >= 1 and event.amount >= 500:
+        risk = _max_risk_level(risk, "MEDIUM")
+
+    if event.session_restrict_large_transfers and event.amount >= 500:
+        risk = _max_risk_level(risk, "HIGH")
+
+    if event.rolling_outflow_amount >= thresholds["rolling_outflow_high"]:
+        risk = _max_risk_level(risk, "HIGH")
+    elif event.rolling_outflow_amount >= thresholds["rolling_outflow_medium"]:
+        risk = _max_risk_level(risk, "MEDIUM")
+
+    if event.face_id_required and event.amount >= 1000:
+        risk = _max_risk_level(risk, "MEDIUM")
+
+    if event.amount >= historical_risk_amount_floor and event.recent_blocked_count_30d >= 2:
+        risk = _max_risk_level(risk, "HIGH")
+    elif (
+        event.amount >= historical_risk_amount_floor
+        and event.recent_review_count_30d + event.recent_pending_otp_count_7d >= 4
+    ):
+        risk = _max_risk_level(risk, "MEDIUM")
+
+    if event.amount >= probe_escalation_amount_floor and event.probe_then_large_risk_score >= 0.75:
+        risk = _max_risk_level(risk, "HIGH")
+    elif event.amount >= probe_escalation_amount_floor and event.probe_then_large_risk_score >= 0.45:
+        risk = _max_risk_level(risk, "MEDIUM")
+
+    if (
+        event.small_probe_count_24h >= 3
+        and not event.recipient_known
+        and event.amount >= max(500.0, thresholds["medium_amount"] * 0.5)
+    ):
+        risk = _max_risk_level(risk, "HIGH")
+    elif event.same_recipient_small_probe_count_24h >= 2 and event.amount >= 750.0:
+        risk = _max_risk_level(risk, "MEDIUM")
+
+    if event.account_profile_status == "PENDING_REVIEW":
+        risk = _max_risk_level(risk, "MEDIUM")
+    elif event.account_profile_status == "REQUIRES_REVIEW":
+        risk = _max_risk_level(risk, "HIGH")
+
+    if event.account_profile_confidence < 0.45 and event.amount >= thresholds["medium_amount"] * 0.75:
         risk = _max_risk_level(risk, "MEDIUM")
 
     if feedback_profile:
@@ -280,6 +806,16 @@ def build_tx_reasons(
     feedback_profile: dict | None = None,
 ) -> list[str]:
     reasons: list[str] = []
+    thresholds = get_account_profile_thresholds(
+        event.account_category,
+        event.account_tier,
+        event.account_segment,
+    )
+    historical_risk_amount_floor = max(50.0, float(thresholds["amount_ratio_medium_min"]) * 0.2)
+    probe_escalation_amount_floor = max(300.0, float(thresholds["medium_amount"]) * 0.2)
+    profile_label = str(
+        thresholds.get("label") or normalize_account_segment(event.account_segment).lower()
+    )
     feature_names = list(TX_FEATURE_NAMES[: len(features)])
     feature_positions = {name: index for index, name in enumerate(feature_names)}
 
@@ -289,36 +825,67 @@ def build_tx_reasons(
         reasons.append("New payment method")
     if merchant_categories and event.merchant_category not in merchant_categories:
         reasons.append("New merchant category")
-    if event.amount >= 10000:
-        reasons.append("Very high transaction amount")
-    elif event.amount >= 3000:
-        reasons.append("High transaction amount")
+    if event.amount >= thresholds["high_amount"]:
+        reasons.append(f"Very high transaction amount for a {profile_label} account")
+    elif event.amount >= thresholds["medium_amount"]:
+        reasons.append(f"High transaction amount for a {profile_label} account")
     if event.failed_tx_24h >= 1:
         reasons.append("Recent failed transactions within 24h")
     if event.velocity_1h >= 3:
         reasons.append("High transaction velocity in 1h")
     if event.daily_spend_avg_30d > 0:
         projected_ratio = event.projected_daily_spend / max(event.daily_spend_avg_30d, 1.0)
-        if projected_ratio >= 100:
+        if projected_ratio >= thresholds["projected_high_ratio"]:
             reasons.append("Projected daily spend is far above normal behavior")
-        elif projected_ratio >= 30:
+        elif projected_ratio >= thresholds["projected_medium_ratio"]:
             reasons.append("Projected daily spend is significantly above normal behavior")
         amount_ratio = event.amount / max(event.daily_spend_avg_30d, 1.0)
-        if amount_ratio >= 10:
+        if amount_ratio >= thresholds["amount_ratio_high"]:
             reasons.append("Transaction amount is far above the user's usual daily spend")
-        elif amount_ratio >= 4:
+        elif amount_ratio >= thresholds["amount_ratio_medium"]:
             reasons.append("Transaction amount is well above the user's usual daily spend")
     if event.balance_before > 0 and _is_material_balance_drain(event):
         drain_ratio = event.amount / max(event.balance_before, 1.0)
-        if drain_ratio >= 0.95:
+        if drain_ratio >= thresholds["high_drain_ratio"]:
             reasons.append("Transfer would use almost all available wallet balance")
-        elif drain_ratio >= 0.85:
+        elif drain_ratio >= thresholds["medium_drain_ratio"]:
             reasons.append("Transfer would use most of the available wallet balance")
-    if _is_material_balance_drain(event) and event.remaining_balance <= 5:
+    if _is_material_balance_drain(event) and event.remaining_balance <= thresholds["critical_remaining_balance"]:
         reasons.append("Transfer would leave the wallet nearly empty")
-    elif _is_material_balance_drain(event) and event.remaining_balance <= 25:
+    elif _is_material_balance_drain(event) and event.remaining_balance <= thresholds["low_remaining_balance"]:
         reasons.append("Transfer would leave only a very small remaining balance")
-
+    if not event.recipient_known:
+        reasons.append("Recipient is new or not established in transfer history")
+    if event.suspicious_note_count >= 1:
+        reasons.append("Transfer note contains scam-like or pressure language")
+    if event.session_restrict_large_transfers:
+        reasons.append("This sign-in session is already under temporary large-transfer restriction")
+    if event.rolling_outflow_amount >= thresholds["rolling_outflow_medium"]:
+        reasons.append("Rolling outgoing transfer volume is elevated for this session")
+    if event.face_id_required:
+        reasons.append("Server step-up policy already requires FaceID for this transfer path")
+    if event.amount >= historical_risk_amount_floor and event.recent_review_count_30d >= 1:
+        reasons.append("User had recent transfers sent to review in the last 30 days")
+    if event.amount >= historical_risk_amount_floor and event.recent_blocked_count_30d >= 1:
+        reasons.append("User had recent transfers blocked in the last 30 days")
+    if event.amount >= historical_risk_amount_floor and event.recent_pending_otp_count_7d >= 3:
+        reasons.append("Multiple recent transfer OTP flows were started in the last 7 days")
+    if event.amount >= probe_escalation_amount_floor and event.small_probe_count_24h >= 3:
+        reasons.append("Multiple small outbound transfers appeared shortly before this higher-value transfer")
+    if event.amount >= probe_escalation_amount_floor and event.distinct_small_probe_recipients_24h >= 2:
+        reasons.append("Recent small-value transfers touched multiple recipients in a short period")
+    if event.amount >= probe_escalation_amount_floor and event.same_recipient_small_probe_count_24h >= 2:
+        reasons.append("The same recipient already saw repeated small-value tests before this transfer")
+    if event.amount >= probe_escalation_amount_floor and event.new_recipient_small_probe_count_24h >= 2:
+        reasons.append("Recent small-value probes targeted new recipients")
+    if event.amount >= probe_escalation_amount_floor and event.probe_then_large_risk_score >= 0.65:
+        reasons.append("Behavior resembles a probe-then-escalate fraud pattern")
+    if event.account_profile_status == "PENDING_REVIEW":
+        reasons.append("Account profile change is pending review, so large-value behavior is treated more cautiously")
+    elif event.account_profile_status == "REQUIRES_REVIEW":
+        reasons.append("Account profile confidence is degraded and requires manual review")
+    if event.account_profile_confidence < 0.45:
+        reasons.append("Account profile confidence is low, so baseline relaxation is limited")
     z_scores = (features - feature_mean) / feature_std
     if feature_positions.get("hour_of_day") is not None and z_scores[feature_positions["hour_of_day"]] > 2.0:
         reasons.append("Unusual transaction hour")
@@ -348,7 +915,21 @@ def build_tx_reasons(
         and z_scores[feature_positions["low_remaining_balance_flag"]] > 1.5
     ):
         reasons.append("Remaining balance after transfer is unusually low")
-
+    if (
+        feature_positions.get("rolling_outflow_amount_log10") is not None
+        and z_scores[feature_positions["rolling_outflow_amount_log10"]] > 2.0
+    ):
+        reasons.append("Rolling outgoing transfer amount is unusually high")
+    if (
+        feature_positions.get("recent_blocked_count_30d") is not None
+        and z_scores[feature_positions["recent_blocked_count_30d"]] > 2.0
+    ):
+        reasons.append("Recent blocked-transfer count is unusually high")
+    if (
+        feature_positions.get("recent_pending_otp_count_7d") is not None
+        and z_scores[feature_positions["recent_pending_otp_count_7d"]] > 2.0
+    ):
+        reasons.append("Recent transfer verification attempts are unusually frequent")
     if feedback_profile:
         profile_drain = float(feedback_profile.get("median_balance_drain_ratio") or 0.0)
         profile_amount_ratio = float(feedback_profile.get("median_amount_to_daily_avg_ratio") or 0.0)

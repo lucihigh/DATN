@@ -223,6 +223,22 @@ def _build_tx_events_from_audit_scores(database_url: str, max_rows: int = 2000) 
             "projected_daily_spend": round(_safe_number(input_snapshot.get("projectedDailySpend")), 2),
             "balance_before": round(_safe_number(input_snapshot.get("balanceBefore")), 2),
             "remaining_balance": round(_safe_number(input_snapshot.get("remainingBalance")), 2),
+            "recipient_known": bool(input_snapshot.get("recipientKnown")),
+            "suspicious_note_count": int(_safe_number(input_snapshot.get("suspiciousNoteCount"))),
+            "rolling_outflow_amount": round(_safe_number(input_snapshot.get("rollingOutflowAmount")), 2),
+            "face_id_required": bool(input_snapshot.get("faceIdRequired")),
+            "session_restrict_large_transfers": bool(input_snapshot.get("sessionRestrictLargeTransfers")),
+            "recent_review_count_30d": int(_safe_number(input_snapshot.get("recentReviewCount30d"))),
+            "recent_blocked_count_30d": int(_safe_number(input_snapshot.get("recentBlockedCount30d"))),
+            "recent_pending_otp_count_7d": int(_safe_number(input_snapshot.get("recentPendingOtpCount7d"))),
+            "llm_note_risk_level": str(input_snapshot.get("llmNoteRiskLevel") or "LOW"),
+            "llm_signal_count": int(_safe_number(input_snapshot.get("llmSignalCount"))),
+            "llm_rule_tags": [
+                str(tag).strip().lower()
+                for tag in input_snapshot.get("llmRuleTags") or []
+                if str(tag).strip()
+            ],
+            "session_risk_level": str(input_snapshot.get("sessionRiskLevel") or "LOW"),
             "risk_level": str(result.get("riskLevel") or "low").lower(),
         }
         if event["user_id"] and event["amount"] > 0:

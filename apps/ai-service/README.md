@@ -187,3 +187,28 @@ Ghi chu map dataset:
 - PaySim: dung truc tiep `step,type,amount,nameOrig,isFraud`
 - CERT logon.csv: cac cot mong doi `date,user,pc,activity`
 - LANL auth: ho tro dong CSV hoac whitespace, token cuoi cung la trang thai success/failure
+
+## Day dataset train local len ai-service server
+
+Neu muon dung du lieu local de train truc tiep tren ai-service server:
+
+```powershell
+py scripts/push_local_training_to_remote.py ^
+  --remote-url "https://your-ai-service.onrender.com" ^
+  --api-key "replace-with-remote-ai-api-key"
+```
+
+Mac dinh script se:
+
+- doc `DATABASE_URL` local de build dataset login + transaction
+- goi `POST /ai/train` va `POST /ai/tx/train` tren ai-service server
+- bat `persist=true` va `promote=true` de server tu luu artifact moi
+
+Kiem tra truoc ma chua day len server:
+
+```powershell
+py scripts/push_local_training_to_remote.py ^
+  --remote-url "https://your-ai-service.onrender.com" ^
+  --api-key "replace-with-remote-ai-api-key" ^
+  --dry-run
+```
