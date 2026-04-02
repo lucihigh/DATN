@@ -6917,7 +6917,7 @@ const fetchCopilotTransactionsForUser = async (input: {
     where: { userId: input.userId },
     select: { id: true },
   });
-  const walletIds = wallets.map((wallet) => wallet.id);
+  const walletIds = wallets.map((wallet: { id: string }) => wallet.id);
 
   const txns = await prisma.transaction.findMany({
     where: {
@@ -7064,7 +7064,7 @@ const buildTodayTransactionReportResponse = async (input: {
     where: { userId: input.userId },
     select: { id: true },
   });
-  const walletIds = wallets.map((wallet) => wallet.id);
+  const walletIds = wallets.map((wallet: { id: string }) => wallet.id);
   const now = new Date();
   const startOfDay = new Date(now);
   startOfDay.setHours(0, 0, 0, 0);
@@ -7168,7 +7168,7 @@ const buildWeeklyTransactionReportResponse = async (input: {
     where: { userId: input.userId },
     select: { id: true },
   });
-  const walletIds = wallets.map((wallet) => wallet.id);
+  const walletIds = wallets.map((wallet: { id: string }) => wallet.id);
   const endExclusive = new Date();
   const startInclusive = new Date(endExclusive);
   startInclusive.setHours(0, 0, 0, 0);
@@ -8805,7 +8805,7 @@ const evaluateAutomaticAccountProfileForUser = async (input: {
       where: { userId: input.userId },
       select: { id: true },
     })
-  ).map((wallet) => wallet.id);
+  ).map((wallet: { id: string }) => wallet.id);
 
   const transactionWhere: Prisma.TransactionWhereInput = {
     status: "COMPLETED",
@@ -8834,9 +8834,14 @@ const evaluateAutomaticAccountProfileForUser = async (input: {
       metadata: true,
     },
   });
-  const uniqueTransactions = Array.from(
-    new Map(transactionRows.map((row) => [row.id, row])).values(),
-  );
+  const uniqueTransactions: Array<(typeof transactionRows)[number]> =
+    Array.from(
+      new Map<string, (typeof transactionRows)[number]>(
+        transactionRows.map(
+          (row: (typeof transactionRows)[number]) => [row.id, row] as const,
+        ),
+      ).values(),
+    );
 
   let totalVolume = 0;
   let outgoingVolume = 0;
@@ -9498,7 +9503,7 @@ const hardenTransferAiResultForAccountProfile = (input: {
             ? "Require OTP and review the recipient, amount, and note again before sending."
             : input.aiResult.nextStep,
     recommendedActions: dedupeStringList([
-      ...input.aiResult.recommendedActions,
+      ...(input.aiResult.recommendedActions || []),
       "Confirm the recipient and payment purpose independently before continuing.",
       shouldForceHardReview
         ? "Do not release this transfer automatically while the account remains on the current tier."
@@ -9821,7 +9826,7 @@ const getRecentUserTransferRows = async (
     take: 10,
   });
   const walletIds = wallets
-    .map((wallet) => wallet.id)
+    .map((wallet: { id: string }) => wallet.id)
     .filter(
       (value): value is string => typeof value === "string" && value.length > 0,
     );
