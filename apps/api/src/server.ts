@@ -8260,6 +8260,288 @@ const resolveUserAccountSegment = (metadata: unknown) => {
   return buildResolvedAccountProfile(metadata).segment;
 };
 
+type AccountProfileTransferThresholds = {
+  mediumAmount: number;
+  highAmount: number;
+  newRecipientAmount: number;
+  extremeMultiplier: number;
+};
+
+const ACCOUNT_PROFILE_TRANSFER_THRESHOLDS: Record<
+  ResolvedAccountProfile["profileCode"],
+  AccountProfileTransferThresholds
+> = {
+  PERSONAL_BASIC: {
+    mediumAmount: 1500,
+    highAmount: 5000,
+    newRecipientAmount: 1000,
+    extremeMultiplier: 8,
+  },
+  PERSONAL_STANDARD: {
+    mediumAmount: 3000,
+    highAmount: 10000,
+    newRecipientAmount: 2000,
+    extremeMultiplier: 8,
+  },
+  PERSONAL_PREMIUM: {
+    mediumAmount: 7000,
+    highAmount: 25000,
+    newRecipientAmount: 5000,
+    extremeMultiplier: 7,
+  },
+  BUSINESS_SMALL_BUSINESS: {
+    mediumAmount: 10000,
+    highAmount: 35000,
+    newRecipientAmount: 7000,
+    extremeMultiplier: 6,
+  },
+  BUSINESS_MEDIUM_BUSINESS: {
+    mediumAmount: 25000,
+    highAmount: 100000,
+    newRecipientAmount: 15000,
+    extremeMultiplier: 5,
+  },
+  BUSINESS_ENTERPRISE: {
+    mediumAmount: 50000,
+    highAmount: 250000,
+    newRecipientAmount: 30000,
+    extremeMultiplier: 4,
+  },
+};
+
+const getAccountProfileTransferThresholds = (
+  accountProfile: ResolvedAccountProfile,
+): AccountProfileTransferThresholds =>
+  ACCOUNT_PROFILE_TRANSFER_THRESHOLDS[accountProfile.profileCode];
+
+const TRANSFER_ACTION_ORDER: NonNullable<AnomalyResponse["finalAction"]>[] = [
+  "ALLOW",
+  "ALLOW_WITH_WARNING",
+  "REQUIRE_OTP",
+  "REQUIRE_OTP_FACE_ID",
+  "HOLD_REVIEW",
+];
+
+const rankTransferFinalAction = (
+  value: AnomalyResponse["finalAction"] | null | undefined,
+) => {
+  const normalized = value || "ALLOW";
+  const index = TRANSFER_ACTION_ORDER.indexOf(normalized);
+  return index >= 0 ? index : 0;
+};
+
+const promoteTransferRiskLevel = (
+  current: AnomalyResponse["riskLevel"],
+  target: AnomalyResponse["riskLevel"],
+): AnomalyResponse["riskLevel"] => {
+  const order: Record<AnomalyResponse["riskLevel"], number> = {
+    low: 0,
+    medium: 1,
+    high: 2,
+  };
+  return order[target] > order[current] ? target : current;
+};
+
+const hardenTransferAiResultForAccountProfile = (input: {
+  aiResult: AnomalyResponse;
+  amount: number;
+  senderBalance: number;
+  accountProfile: ResolvedAccountProfile;
+  recipientKnown: boolean;
+  faceIdRequired: boolean;
+  sessionRestrictLargeTransfers: boolean;
+  spendProfile: TransferSpendProfile;
+}): AnomalyResponse => {
+  const amount = Math.max(0, Number(input.amount) || 0);
+  if (amount <= 0) return input.aiResult;
+
+  const thresholds = getAccountProfileTransferThresholds(input.accountProfile);
+  const senderBalance = Math.max(0, Number(input.senderBalance) || 0);
+  const drainRatio = amount / Math.max(senderBalance, 1);
+  const amountVsAverage =
+    input.spendProfile.dailySpendAvg30d > 0
+      ? amount / Math.max(input.spendProfile.dailySpendAvg30d, 1)
+      : null;
+  const aiUnavailable =
+    input.aiResult.modelSource === "fallback" ||
+    input.aiResult.modelSource === "api-profile-guard-fallback" ||
+    input.aiResult.reasons.some((reason) =>
+      /ai monitoring unavailable/i.test(reason),
+    );
+  const exceedsMediumBand = amount >= thresholds.mediumAmount;
+  const exceedsHighBand = amount >= thresholds.highAmount;
+  const exceedsExtremeBand =
+    amount >= thresholds.highAmount * thresholds.extremeMultiplier;
+  const isLargeNewRecipientTransfer =
+    !input.recipientKnown && amount >= thresholds.newRecipientAmount;
+  const isStrictPersonalTier =
+    input.accountProfile.category === "PERSONAL" &&
+    input.accountProfile.tier === "BASIC";
+  const hasStrongSpendBreak =
+    amountVsAverage !== null &&
+    amountVsAverage >=
+      (isStrictPersonalTier
+        ? 8
+        : input.accountProfile.reviewBias === "balanced"
+          ? 10
+          : 12);
+  const shouldForceHardReview =
+    exceedsExtremeBand ||
+    (isStrictPersonalTier &&
+      exceedsHighBand &&
+      (!input.recipientKnown || drainRatio >= 0.75)) ||
+    (aiUnavailable &&
+      exceedsHighBand &&
+      (!input.recipientKnown || drainRatio >= 0.75)) ||
+    (exceedsHighBand && drainRatio >= 0.9);
+
+  if (
+    !exceedsMediumBand &&
+    !isLargeNewRecipientTransfer &&
+    !hasStrongSpendBreak &&
+    !shouldForceHardReview
+  ) {
+    return input.aiResult;
+  }
+
+  let riskLevel = input.aiResult.riskLevel;
+  let finalAction = input.aiResult.finalAction || "ALLOW";
+  let finalScore =
+    typeof input.aiResult.finalScore === "number"
+      ? input.aiResult.finalScore
+      : 0;
+  let baseScore =
+    typeof input.aiResult.baseScore === "number"
+      ? input.aiResult.baseScore
+      : finalScore;
+
+  const reasons = dedupeStringList([
+    ...input.aiResult.reasons,
+    exceedsHighBand
+      ? `Amount exceeds the normal high-value band for a ${input.accountProfile.label.toLowerCase()} account.`
+      : exceedsMediumBand
+        ? `Amount is elevated for a ${input.accountProfile.label.toLowerCase()} account and should not pass under passive monitoring.`
+        : null,
+    isLargeNewRecipientTransfer
+      ? "Large transfer is being sent to a recipient outside the user's established completed-transfer history."
+      : null,
+    drainRatio >= 0.75
+      ? `This payment would consume ${Math.round(drainRatio * 100)}% of the current wallet balance.`
+      : null,
+    hasStrongSpendBreak
+      ? "Transfer amount is materially above the user's recent clean spending baseline."
+      : null,
+    aiUnavailable
+      ? "AI scoring was unavailable, so the platform applied strict account-tier protection instead of silently allowing the transfer."
+      : null,
+  ]).slice(0, 6);
+
+  if (shouldForceHardReview) {
+    riskLevel = "high";
+    finalAction = "HOLD_REVIEW";
+    finalScore = Math.max(finalScore, 92);
+    baseScore = Math.max(baseScore, 92);
+  } else if (
+    exceedsHighBand ||
+    isLargeNewRecipientTransfer ||
+    hasStrongSpendBreak
+  ) {
+    riskLevel = promoteTransferRiskLevel(riskLevel, "high");
+    finalAction =
+      rankTransferFinalAction(finalAction) >=
+      rankTransferFinalAction("REQUIRE_OTP_FACE_ID")
+        ? finalAction
+        : input.faceIdRequired || amount >= thresholds.highAmount
+          ? "REQUIRE_OTP_FACE_ID"
+          : "REQUIRE_OTP";
+    finalScore = Math.max(finalScore, 78);
+    baseScore = Math.max(baseScore, 78);
+  } else if (exceedsMediumBand) {
+    riskLevel = promoteTransferRiskLevel(riskLevel, "medium");
+    finalAction =
+      rankTransferFinalAction(finalAction) >=
+      rankTransferFinalAction("REQUIRE_OTP")
+        ? finalAction
+        : "REQUIRE_OTP";
+    finalScore = Math.max(finalScore, 58);
+    baseScore = Math.max(baseScore, 58);
+  }
+
+  const mitigationScore =
+    typeof input.aiResult.mitigationScore === "number"
+      ? input.aiResult.mitigationScore
+      : Math.max(0, baseScore - finalScore);
+
+  return {
+    ...input.aiResult,
+    riskLevel,
+    reasons,
+    modelSource: aiUnavailable
+      ? "api-profile-guard-fallback"
+      : input.aiResult.modelSource || "api-profile-guard",
+    monitoringOnly: false,
+    requireOtp:
+      finalAction === "REQUIRE_OTP" ||
+      finalAction === "REQUIRE_OTP_FACE_ID" ||
+      finalAction === "HOLD_REVIEW",
+    otpChannel: input.aiResult.otpChannel || "email",
+    otpReason:
+      finalAction === "REQUIRE_OTP" || finalAction === "REQUIRE_OTP_FACE_ID"
+        ? `the transfer exceeds the protection band for a ${input.accountProfile.label.toLowerCase()} account`
+        : input.aiResult.otpReason,
+    headline: shouldForceHardReview
+      ? `Transfer exceeds the safe operating band for ${input.accountProfile.label}`
+      : exceedsHighBand
+        ? `${input.accountProfile.label} account requires step-up for this amount`
+        : input.aiResult.headline,
+    summary: shouldForceHardReview
+      ? "The transfer is too large for the current account tier to pass automatically and must be reviewed before completion."
+      : exceedsHighBand
+        ? "The transfer materially exceeds the current account tier baseline, so passive AI monitoring is not enough."
+        : input.aiResult.summary,
+    nextStep:
+      finalAction === "HOLD_REVIEW"
+        ? "Place the transfer on hold and require admin review before any funds leave the wallet."
+        : finalAction === "REQUIRE_OTP_FACE_ID"
+          ? "Require OTP and FaceID, then re-check the recipient and amount before completion."
+          : finalAction === "REQUIRE_OTP"
+            ? "Require OTP and review the recipient, amount, and note again before sending."
+            : input.aiResult.nextStep,
+    recommendedActions: dedupeStringList([
+      ...input.aiResult.recommendedActions,
+      "Confirm the recipient and payment purpose independently before continuing.",
+      shouldForceHardReview
+        ? "Do not release this transfer automatically while the account remains on the current tier."
+        : "Escalate the transfer with stronger verification because it sits outside the normal tier baseline.",
+    ]).slice(0, 4),
+    finalAction,
+    finalScore,
+    baseScore,
+    mitigationScore,
+    stepUpLevel:
+      finalAction === "HOLD_REVIEW"
+        ? "manual_review"
+        : finalAction === "REQUIRE_OTP_FACE_ID"
+          ? "otp_faceid"
+          : finalAction === "REQUIRE_OTP"
+            ? "otp"
+            : input.aiResult.stepUpLevel,
+    analysisSignals: {
+      ...(input.aiResult.analysisSignals || {}),
+      accountProfileGuardTriggered: true,
+      accountProfileCode: input.accountProfile.profileCode,
+      accountProfileLabel: input.accountProfile.label,
+      profileThresholds: thresholds,
+      amountVsTierMedium: roundMoney(
+        amount / Math.max(thresholds.mediumAmount, 1),
+      ),
+      amountVsTierHigh: roundMoney(amount / Math.max(thresholds.highAmount, 1)),
+      aiUnavailable,
+      balanceDrainRatio: Number(drainRatio.toFixed(3)),
+    },
+  };
+};
+
 const normalizeRecentTransferRecipients = (value: unknown) => {
   if (!Array.isArray(value)) return [] as RecentTransferRecipient[];
 
@@ -9512,7 +9794,21 @@ const completeAuthorizedTransfer = async (input: {
     throw new Error("INVALID_TRANSFER_PAYLOAD");
   }
 
-  if (input.faceIdRequired) {
+  const effectiveFinalAction = input.transferAiResult.finalAction || "ALLOW";
+  if (effectiveFinalAction === "HOLD_REVIEW") {
+    throw new Error("TRANSFER_MANUAL_REVIEW_REQUIRED");
+  }
+  if (
+    input.verificationMethod === "pin" &&
+    (effectiveFinalAction === "REQUIRE_OTP" ||
+      effectiveFinalAction === "REQUIRE_OTP_FACE_ID")
+  ) {
+    throw new Error("TRANSFER_OTP_VERIFICATION_REQUIRED");
+  }
+
+  const effectiveFaceIdRequired =
+    input.faceIdRequired || effectiveFinalAction === "REQUIRE_OTP_FACE_ID";
+  if (effectiveFaceIdRequired) {
     const storedFaceId = getInternalFaceIdMetadata(input.senderUser.metadata);
     const storedDescriptor =
       storedFaceId && typeof storedFaceId.descriptor === "string"
@@ -12998,6 +13294,18 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
       faceIdRequired: transferStepUpPolicy.faceIdRequired,
       behaviorProfile,
     });
+    aiResult = hardenTransferAiResultForAccountProfile({
+      aiResult,
+      amount: context.amount,
+      senderBalance: Number(context.senderWallet.balance),
+      accountProfile,
+      recipientKnown: recipientProfile.isKnownRecipient,
+      faceIdRequired: transferStepUpPolicy.faceIdRequired,
+      sessionRestrictLargeTransfers: Boolean(
+        req.sessionSecurity?.restrictLargeTransfers,
+      ),
+      spendProfile,
+    });
 
     const transferAdvisory = buildTransferSafetyAdvisory({
       amount: context.amount,
@@ -13392,6 +13700,18 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       faceIdRequired: transferStepUpPolicy.faceIdRequired,
       behaviorProfile,
     });
+    aiResult = hardenTransferAiResultForAccountProfile({
+      aiResult,
+      amount: context.amount,
+      senderBalance: Number(context.senderWallet.balance),
+      accountProfile,
+      recipientKnown: recipientProfile.isKnownRecipient,
+      faceIdRequired: transferStepUpPolicy.faceIdRequired,
+      sessionRestrictLargeTransfers: Boolean(
+        req.sessionSecurity?.restrictLargeTransfers,
+      ),
+      spendProfile,
+    });
 
     const transferAdvisory = buildTransferSafetyAdvisory({
       amount: context.amount,
@@ -13635,6 +13955,9 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       crypto.randomUUID();
     const requiresOtp =
       shouldRequireOtpForMediumRisk ||
+      aiResult.finalAction === "REQUIRE_OTP" ||
+      aiResult.finalAction === "REQUIRE_OTP_FACE_ID" ||
+      aiResult.finalAction === "HOLD_REVIEW" ||
       aiResult.riskLevel === "high" ||
       effectiveFaceIdRequired;
     if (!requiresOtp) {
@@ -13794,6 +14117,18 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       });
     }
     if (err instanceof Error) {
+      if (err.message === "TRANSFER_MANUAL_REVIEW_REQUIRED") {
+        return res.status(423).json({
+          error:
+            "This transfer exceeds the safe operating band for the current account tier and must be reviewed manually.",
+        });
+      }
+      if (err.message === "TRANSFER_OTP_VERIFICATION_REQUIRED") {
+        return res.status(409).json({
+          error:
+            "This transfer now requires OTP verification because it falls outside the normal account-tier baseline.",
+        });
+      }
       if (err.message === "MISSING_RECIPIENT_ACCOUNT") {
         return res.status(400).json({ error: "Missing recipient account" });
       }
@@ -14002,7 +14337,9 @@ app.post("/transfer/otp/verify", requireAuth, async (req, res) => {
         .json({ error: "Stored OTP transfer payload is invalid" });
     }
     const faceIdRequired =
-      metadata.faceIdRequired === true || amount > TRANSFER_FACE_ID_THRESHOLD;
+      metadata.faceIdRequired === true ||
+      transferAiResult.finalAction === "REQUIRE_OTP_FACE_ID" ||
+      amount > TRANSFER_FACE_ID_THRESHOLD;
     const faceIdReason =
       typeof metadata.faceIdReason === "string" ? metadata.faceIdReason : null;
     const rollingOutflowAmount =
@@ -14154,7 +14491,9 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
         .json({ error: "Stored OTP transfer payload is invalid" });
     }
     const faceIdRequired =
-      metadata.faceIdRequired === true || amount > TRANSFER_FACE_ID_THRESHOLD;
+      metadata.faceIdRequired === true ||
+      transferAiResult.finalAction === "REQUIRE_OTP_FACE_ID" ||
+      amount > TRANSFER_FACE_ID_THRESHOLD;
     const faceIdReason =
       typeof metadata.faceIdReason === "string" ? metadata.faceIdReason : null;
     const transferRequestKey =
@@ -14214,6 +14553,24 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
       return res
         .status(400)
         .json({ error: "Stored OTP transfer payload is invalid" });
+    }
+    if (
+      err instanceof Error &&
+      err.message === "TRANSFER_MANUAL_REVIEW_REQUIRED"
+    ) {
+      return res.status(423).json({
+        error:
+          "This transfer exceeds the safe operating band for the current account tier and must be reviewed manually.",
+      });
+    }
+    if (
+      err instanceof Error &&
+      err.message === "TRANSFER_OTP_VERIFICATION_REQUIRED"
+    ) {
+      return res.status(409).json({
+        error:
+          "This transfer now requires OTP verification because it falls outside the normal account-tier baseline.",
+      });
     }
     if (err instanceof Error && err.message === "SENDER_WALLET_NOT_FOUND") {
       return res.status(400).json({ error: "Sender wallet not found" });
