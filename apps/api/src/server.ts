@@ -1976,6 +1976,29 @@ type CopilotResponsePayload = {
   followUpQuestion?: string | null;
 };
 
+type CopilotIntent =
+  | "finance_education"
+  | "market_data"
+  | "portfolio_analysis"
+  | "spending_analysis"
+  | "budgeting_help"
+  | "transaction_review"
+  | "anomaly_check"
+  | "unsupported";
+
+type CopilotIntentTool =
+  | "wallet_summary"
+  | "wallet_transactions"
+  | "market_quote"
+  | "security_signals";
+
+type CopilotIntentClassification = {
+  intent: CopilotIntent;
+  needs_tools: boolean;
+  required_tools: CopilotIntentTool[];
+  reason: string;
+};
+
 type StoredCopilotSessionState = {
   messages: CopilotMessagePayload[];
   insight: {
@@ -2032,6 +2055,24 @@ type OpenAiCopilotResult =
 type OllamaCopilotResult =
   | { status: "disabled" }
   | { status: "ok"; payload: CopilotResponsePayload }
+  | {
+      status: "error";
+      code: string;
+      message: string;
+    };
+
+type OpenAiCopilotClassificationResult =
+  | { status: "disabled" }
+  | { status: "ok"; payload: CopilotIntentClassification }
+  | {
+      status: "error";
+      code: string;
+      message: string;
+    };
+
+type OllamaCopilotClassificationResult =
+  | { status: "disabled" }
+  | { status: "ok"; payload: CopilotIntentClassification }
   | {
       status: "error";
       code: string;
@@ -4168,6 +4209,243 @@ const parseOpenAiCopilotPayload = (
   }
 };
 
+const normalizeCopilotIntent = (value: unknown): CopilotIntent => {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (
+    normalized === "finance_education" ||
+    normalized === "market_data" ||
+    normalized === "portfolio_analysis" ||
+    normalized === "spending_analysis" ||
+    normalized === "budgeting_help" ||
+    normalized === "transaction_review" ||
+    normalized === "anomaly_check"
+  ) {
+    return normalized;
+  }
+  return "unsupported";
+};
+
+const normalizeCopilotIntentTool = (
+  value: unknown,
+): CopilotIntentTool | null => {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (
+    normalized === "wallet_summary" ||
+    normalized === "wallet_transactions" ||
+    normalized === "market_quote" ||
+    normalized === "security_signals"
+  ) {
+    return normalized;
+  }
+  return null;
+};
+
+const parseCopilotIntentClassification = (
+  value: string,
+): CopilotIntentClassification | null => {
+  try {
+    const parsed = JSON.parse(extractCopilotJsonCandidate(value)) as Record<
+      string,
+      unknown
+    >;
+    const reason =
+      typeof parsed.reason === "string" && parsed.reason.trim()
+        ? parsed.reason.trim()
+        : "";
+    if (!reason) return null;
+    const requiredTools = Array.isArray(parsed.required_tools)
+      ? parsed.required_tools
+          .map((item) => normalizeCopilotIntentTool(item))
+          .filter((item): item is CopilotIntentTool => Boolean(item))
+      : [];
+
+    return {
+      intent: normalizeCopilotIntent(parsed.intent),
+      needs_tools: parsed.needs_tools === true,
+      required_tools: requiredTools,
+      reason,
+    };
+  } catch {
+    return null;
+  }
+};
+
+const classifyCopilotIntentHeuristically = (
+  latestMessage: string,
+): CopilotIntentClassification => {
+  const normalized = normalizeCopilotText(latestMessage);
+
+  if (
+    /\b(scam|fraud|lua dao|otp|faceid|pin|mat khau|password|remote access|screen share|bat thuong|anomaly|suspicious|nghi ngo|safe account|tai khoan an toan)\b/.test(
+      normalized,
+    )
+  ) {
+    return {
+      intent: "anomaly_check",
+      needs_tools: true,
+      required_tools: ["security_signals", "wallet_transactions"],
+      reason:
+        "The user is asking about suspicious activity, scam signals, or abnormal transaction behavior.",
+    };
+  }
+
+  if (
+    isTodayTransactionReportIntent(latestMessage) ||
+    isWeeklyTransactionReportIntent(latestMessage) ||
+    isMonthlyTransactionReportIntent(latestMessage) ||
+    /\b(statement|sao ke|transaction history|lich su giao dich|giao dich cua toi|my transactions)\b/.test(
+      normalized,
+    )
+  ) {
+    return {
+      intent: "transaction_review",
+      needs_tools: true,
+      required_tools: ["wallet_transactions"],
+      reason:
+        "The user is asking to review recorded transactions or account statement activity.",
+    };
+  }
+
+  if (isSpendingComparisonIntent(latestMessage)) {
+    return {
+      intent: "spending_analysis",
+      needs_tools: true,
+      required_tools: ["wallet_transactions", "wallet_summary"],
+      reason:
+        "The user wants spending trends, comparisons, or outflow analysis based on transaction history.",
+    };
+  }
+
+  if (
+    /\b(budget|budgeting|ngan sach|chi tieu hop ly|saving plan|tiet kiem|emergency fund|quy du phong|cash flow plan|ke hoach chi tieu)\b/.test(
+      normalized,
+    )
+  ) {
+    return {
+      intent: "budgeting_help",
+      needs_tools: true,
+      required_tools: ["wallet_summary", "wallet_transactions"],
+      reason:
+        "The user is asking for budgeting, savings planning, or cash-flow guidance.",
+    };
+  }
+
+  if (
+    isExplicitLiveQuoteRequest(latestMessage) ||
+    detectMarketIntent(latestMessage)
+  ) {
+    return {
+      intent: "market_data",
+      needs_tools: true,
+      required_tools: ["market_quote"],
+      reason:
+        "The user is asking for a market price, live quote, exchange rate, or ticker-specific market data.",
+    };
+  }
+
+  if (
+    /\b(portfolio|allocation|phan bo|etf|index fund|diversif|da dang hoa|valuation|p\/e|eps|market cap|dividend|free cash flow|fcf|co phieu|chung khoan|watchlist)\b/.test(
+      normalized,
+    )
+  ) {
+    return {
+      intent: "portfolio_analysis",
+      needs_tools: false,
+      required_tools: [],
+      reason:
+        "The user is asking for educational portfolio, stock, valuation, or diversification analysis rather than exact live data.",
+    };
+  }
+
+  if (
+    /\b(finance|tai chinh|interest rate|lai suat|inflation|lam phat|bond|trai phieu|mutual fund|fundamentals|valuation basics|what is|la gi)\b/.test(
+      normalized,
+    )
+  ) {
+    return {
+      intent: "finance_education",
+      needs_tools: false,
+      required_tools: [],
+      reason:
+        "The user is asking for general finance or market education that does not require live account data.",
+    };
+  }
+
+  return {
+    intent: "unsupported",
+    needs_tools: false,
+    required_tools: [],
+    reason:
+      "The request does not clearly match the supported finance, spending, transaction, or anomaly-review workflows.",
+  };
+};
+
+const classifyCopilotIntent = async (input: {
+  currency: string;
+  currentBalance: number;
+  monthlyIncome: number;
+  monthlyExpenses: number;
+  recentTransactions: CopilotTransactionPayload[];
+  messages: CopilotMessagePayload[];
+  language: CopilotLanguage;
+}): Promise<CopilotIntentClassification> => {
+  const latestUserMessage =
+    [...input.messages].reverse().find((message) => message.role === "user")
+      ?.content || "";
+  const heuristic = classifyCopilotIntentHeuristically(latestUserMessage);
+
+  const isHighConfidenceHeuristic =
+    heuristic.intent === "transaction_review" ||
+    (heuristic.intent === "spending_analysis" &&
+      isSpendingComparisonIntent(latestUserMessage)) ||
+    heuristic.intent === "anomaly_check" ||
+    (heuristic.intent === "market_data" &&
+      (isExplicitLiveQuoteRequest(latestUserMessage) ||
+        Boolean(detectMarketIntent(latestUserMessage))));
+
+  if (isHighConfidenceHeuristic) {
+    return heuristic;
+  }
+
+  const classifierInput = {
+    currency: input.currency,
+    currentBalance: input.currentBalance,
+    monthlyIncome: input.monthlyIncome,
+    monthlyExpenses: input.monthlyExpenses,
+    recentTransactions: input.recentTransactions,
+    messages: input.messages,
+    language: input.language,
+  };
+
+  const ollamaResult = await callOllamaCopilotClassifier(classifierInput);
+  if (ollamaResult.status === "ok") {
+    const payload = ollamaResult.payload;
+    if (
+      payload.intent !== "unsupported" ||
+      heuristic.intent === "unsupported"
+    ) {
+      return payload;
+    }
+  }
+
+  const openAiResult = await callOpenAiCopilotClassifier(classifierInput);
+  if (openAiResult.status === "ok") {
+    const payload = openAiResult.payload;
+    if (
+      payload.intent !== "unsupported" ||
+      heuristic.intent === "unsupported"
+    ) {
+      return payload;
+    }
+  }
+
+  return heuristic;
+};
+
 const summarizeCopilotConversation = (messages: CopilotMessagePayload[]) =>
   messages
     .slice(-12)
@@ -4243,6 +4521,7 @@ const buildOpenAiCopilotInput = (input: {
   recentTransactions: CopilotTransactionPayload[];
   messages: CopilotMessagePayload[];
   language: CopilotLanguage;
+  classification?: CopilotIntentClassification | null;
 }) => {
   const now = formatMarketTimestamp(new Date());
   const transactionSummary = summarizeCopilotTransactions(
@@ -4260,6 +4539,13 @@ const buildOpenAiCopilotInput = (input: {
   return [
     `Current time: ${now}`,
     `Preferred response language: ${input.language === "vi" ? "Vietnamese" : "English"}`,
+    `Intent classification: ${input.classification?.intent || "unsupported"}`,
+    `Classification reason: ${input.classification?.reason || "No classifier reason available."}`,
+    `Required tools: ${
+      input.classification?.required_tools?.length
+        ? input.classification.required_tools.join(", ")
+        : "none"
+    }`,
     `Wallet currency: ${input.currency}`,
     `Wallet balance: ${input.currency} ${formatMarketPrice(
       Math.max(0, input.currentBalance),
@@ -4276,29 +4562,75 @@ const buildOpenAiCopilotInput = (input: {
     latestUserMessage || "No latest message available.",
     "Recognized finance entities:",
     financeKnowledgeSummary,
+    "Source-of-truth policy:",
+    "Use only wallet context, transaction records, and tool results from this prompt as facts. Never invent prices, balances, portfolio values, or transaction history. If exact data is unavailable, state that clearly.",
     "Conversation transcript:",
     conversationSummary,
   ].join("\n\n");
 };
 
+const buildCopilotClassificationInput = (input: {
+  currency: string;
+  currentBalance: number;
+  monthlyIncome: number;
+  monthlyExpenses: number;
+  recentTransactions: CopilotTransactionPayload[];
+  messages: CopilotMessagePayload[];
+  language: CopilotLanguage;
+}) => {
+  const latestUserMessage =
+    [...input.messages].reverse().find((message) => message.role === "user")
+      ?.content || "";
+  const conversationSummary = summarizeCopilotConversation(input.messages);
+  const transactionSummary = summarizeCopilotTransactions(
+    input.recentTransactions,
+    input.currency,
+  );
+
+  return [
+    `Preferred language context: ${input.language === "vi" ? "Vietnamese" : "English"}`,
+    `Wallet currency available: ${input.currency}`,
+    `Wallet balance available: ${input.currency} ${formatMarketPrice(
+      Math.max(0, input.currentBalance),
+    )}`,
+    `Estimated monthly income available: ${input.currency} ${formatMarketPrice(
+      Math.max(0, input.monthlyIncome),
+    )}`,
+    `Estimated monthly expenses available: ${input.currency} ${formatMarketPrice(
+      Math.max(0, input.monthlyExpenses),
+    )}`,
+    "Recent wallet transactions available to tools:",
+    transactionSummary || "No recent transactions available.",
+    "Latest user message:",
+    latestUserMessage || "No latest user message available.",
+    "Conversation transcript:",
+    conversationSummary || "No prior transcript available.",
+  ].join("\n\n");
+};
+
 const buildCopilotSystemInstructions = (language: CopilotLanguage) =>
   [
-    "You are FPIPay Financial Copilot.",
-    "Answer like a polished, thoughtful conversational assistant, not like a rigid template engine.",
-    "Act as a strong finance-native chat assistant inside a wallet app.",
-    "Use the wallet context and transaction context provided.",
+    "You are a financial copilot integrated into a secure academic e-wallet system.",
+    "Explain finance, stock market, and personal spending concepts clearly.",
+    "Use tool results and database results as the source of truth.",
+    "Never invent prices, balances, portfolio values, transaction records, or unsupported historical facts.",
+    "If real-time data is unavailable, explicitly say that the data is unavailable.",
+    "Do not provide definitive investment advice, guarantee returns, or present speculation as certainty.",
+    "For personal-finance questions, prioritize budgeting, risk awareness, and spending insights.",
+    "For stock-related questions, provide educational and analytical support only.",
     `Reply in ${language === "vi" ? "Vietnamese" : "English"} and keep the same language as the user's latest message.`,
+    "Be concise, structured, and easy to understand.",
+    "If confidence is low, say what is uncertain.",
+    "Always separate facts, calculations, and suggestions in the reply when that improves clarity.",
     "Maintain continuity with the conversation transcript and resolve references like 'that', 'this', 'last one', or 'in the past week' using recent context.",
     "Start with the answer immediately. The first sentence must address the user's question directly.",
-    "Do not begin with permission-seeking, throat-clearing, generic offers to help, or by repeating the user's question.",
-    "Never start the reply with lines such as 'Do you want me to help', 'I can help', or equivalent Vietnamese phrasing.",
-    "Sound sharp, premium, natural, and insight-driven, not like a helpdesk bot.",
+    "Do not begin with permission-seeking, generic offers to help, or by repeating the user's question.",
     "Prefer natural paragraphs first. Use bullets only when they genuinely improve clarity.",
     "Use Markdown tables only when numeric comparisons materially benefit from a table. Do not force tables for every answer.",
-    "For short questions, answer compactly and naturally. For complex questions, organize the answer cleanly without sounding robotic.",
-    "If data is unavailable, say that in one sentence, then still give the most useful next-best analysis instead of a generic refusal.",
+    "For short questions, answer compactly and naturally. For complex questions, organize the answer cleanly.",
+    "If data is unavailable, say that in one sentence, then still give the most useful next-best analysis.",
     "Only ask a follow-up question after you have already delivered a useful answer.",
-    "Use followUpQuestion very sparingly; set it to null unless it materially deepens the discussion.",
+    "Use followUpQuestion sparingly; set it to null unless it materially deepens the discussion.",
     "Keep suggestedActions empty unless there are truly useful concrete next steps.",
     "Prioritize user safety over convenience when the message contains signs of fraud, impersonation, urgency, OTP harvesting, remote-access setup, fake refunds, fake investment schemes, or account-takeover attempts.",
     "If a message looks like a scam, clearly say so, tell the user not to send money or codes, and recommend official verification steps.",
@@ -4309,10 +4641,10 @@ const buildCopilotSystemInstructions = (language: CopilotLanguage) =>
     "When the user asks whether buying a stock is sensible, do not collapse the answer into a live quote. Answer with thesis, valuation, downside risk, time horizon, and position-sizing guidance.",
     "You can also help build long-term saving plans and summarize spending across daily, weekly, and monthly periods using wallet context.",
     "When the user asks for a statement or spending comparison, explicitly compare today vs yesterday, this week vs last week, and this month vs last month when relevant.",
-    "If the user asks a general finance question and wallet context is not needed, still answer helpfully with practical education, decision frameworks, and clear caveats instead of refusing.",
+    "If the user asks a general finance question and wallet context is not needed, still answer helpfully with practical education, decision frameworks, and clear caveats.",
     "If the user asks a conversational follow-up, answer that follow-up directly instead of resetting to a generic wallet introduction.",
     "Do not claim real-time market prices unless they were already provided by another tool in the app context.",
-    "If the user asks for exact live market prices and no live quote is present, say that live quote support should be used.",
+    "If the user asks for exact live market prices and no live quote is present, say that the data is unavailable.",
     "Return valid JSON only with these keys:",
     "reply, topic, suggestedActions, suggestedDepositAmount, riskLevel, confidence, followUpQuestion",
     "The reply field may contain Markdown.",
@@ -4324,6 +4656,32 @@ const buildCopilotSystemInstructions = (language: CopilotLanguage) =>
     "followUpQuestion must be a string or null.",
   ].join(" ");
 
+const buildCopilotClassificationInstructions = () =>
+  [
+    "You are a financial copilot query classifier integrated into a secure academic e-wallet system.",
+    "Use tool results and database results as the source of truth.",
+    "Never invent prices, balances, portfolio values, or transaction records.",
+    "If real-time data is unavailable, the downstream assistant must say that the data is unavailable.",
+    "Do not provide definitive investment advice or guarantee returns.",
+    "For personal finance questions, prioritize budgeting, risk awareness, and spending insights.",
+    "For stock-related questions, provide educational and analytical support only.",
+    "Be concise, structured, and easy to understand.",
+    "Classify the user query into exactly one intent from this list:",
+    "finance_education, market_data, portfolio_analysis, spending_analysis, budgeting_help, transaction_review, anomaly_check, unsupported.",
+    "If the user asks for exact market prices, exchange rates, or ticker quotes, choose market_data.",
+    "If the user asks to review transactions, statements, or recent wallet activity, choose transaction_review.",
+    "If the user asks for spending trends, category insights, or outflow comparisons, choose spending_analysis.",
+    "If the user asks for budgeting, savings planning, or cash-flow discipline, choose budgeting_help.",
+    "If the user asks about scams, suspicious transfers, anomalies, or risky behavior, choose anomaly_check.",
+    "If the user asks for stock, ETF, diversification, valuation, or portfolio concepts without needing exact live prices, choose portfolio_analysis.",
+    "If the user asks for broad finance concepts, choose finance_education.",
+    "Use required_tools only from this list: wallet_summary, wallet_transactions, market_quote, security_signals.",
+    "Return JSON only with these keys:",
+    "intent, needs_tools, required_tools, reason",
+    "needs_tools must be boolean.",
+    "reason must be one short sentence.",
+  ].join(" ");
+
 const callOllamaCopilotWithModel = async (
   input: {
     currency: string;
@@ -4333,6 +4691,7 @@ const callOllamaCopilotWithModel = async (
     recentTransactions: CopilotTransactionPayload[];
     messages: CopilotMessagePayload[];
     language: CopilotLanguage;
+    classification?: CopilotIntentClassification | null;
   },
   options: { model: string; timeoutMs: number },
 ): Promise<OllamaCopilotResult> => {
@@ -4426,6 +4785,7 @@ const callOllamaCopilot = async (input: {
   recentTransactions: CopilotTransactionPayload[];
   messages: CopilotMessagePayload[];
   language: CopilotLanguage;
+  classification?: CopilotIntentClassification | null;
 }): Promise<OllamaCopilotResult> => {
   if (!OLLAMA_MODEL.trim()) return { status: "disabled" };
 
@@ -4458,6 +4818,131 @@ const callOllamaCopilot = async (input: {
   return fallbackResult.status === "ok" ? fallbackResult : primaryResult;
 };
 
+const callOllamaCopilotClassifierWithModel = async (
+  input: {
+    currency: string;
+    currentBalance: number;
+    monthlyIncome: number;
+    monthlyExpenses: number;
+    recentTransactions: CopilotTransactionPayload[];
+    messages: CopilotMessagePayload[];
+    language: CopilotLanguage;
+  },
+  options: { model: string; timeoutMs: number },
+): Promise<OllamaCopilotClassificationResult> => {
+  if (!options.model.trim()) return { status: "disabled" };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
+
+  try {
+    const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: options.model,
+        prompt: buildCopilotClassificationInput(input),
+        system: buildCopilotClassificationInstructions(),
+        format: "json",
+        stream: false,
+        options: {
+          temperature: 0.05,
+          top_p: 0.3,
+          repeat_penalty: 1,
+          num_ctx: Math.min(OLLAMA_NUM_CTX, 2048),
+          num_predict: 220,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      return {
+        status: "error",
+        code:
+          response.status === 404
+            ? "ollama_model_not_found"
+            : response.status === 400
+              ? "ollama_bad_request"
+              : `ollama_http_${response.status}`,
+        message:
+          errorText || `Ollama request failed with status ${response.status}`,
+      };
+    }
+
+    const payload = (await response.json().catch(() => null)) as Record<
+      string,
+      unknown
+    > | null;
+    const responseText =
+      payload && typeof payload.response === "string"
+        ? payload.response.trim()
+        : "";
+    if (!responseText) {
+      return {
+        status: "error",
+        code: "ollama_empty_response",
+        message: "Ollama returned an empty classifier response.",
+      };
+    }
+
+    const parsed = parseCopilotIntentClassification(responseText);
+    if (!parsed) {
+      return {
+        status: "error",
+        code: "ollama_invalid_response_format",
+        message:
+          "Ollama returned a classifier response that did not match the expected format.",
+      };
+    }
+
+    return { status: "ok", payload: parsed };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const code =
+      message.includes("ECONNREFUSED") || message.includes("fetch failed")
+        ? "ollama_unreachable"
+        : message.includes("aborted")
+          ? "ollama_timeout"
+          : "ollama_unknown_error";
+    return { status: "error", code, message };
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+const callOllamaCopilotClassifier = async (input: {
+  currency: string;
+  currentBalance: number;
+  monthlyIncome: number;
+  monthlyExpenses: number;
+  recentTransactions: CopilotTransactionPayload[];
+  messages: CopilotMessagePayload[];
+  language: CopilotLanguage;
+}): Promise<OllamaCopilotClassificationResult> => {
+  if (!OLLAMA_MODEL.trim()) return { status: "disabled" };
+
+  const primaryResult = await callOllamaCopilotClassifierWithModel(input, {
+    model: OLLAMA_MODEL,
+    timeoutMs: Math.min(OLLAMA_TIMEOUT_MS, 12000),
+  });
+  if (primaryResult.status === "ok" || primaryResult.status === "disabled") {
+    return primaryResult;
+  }
+
+  const fallbackModel = OLLAMA_FALLBACK_MODEL.trim();
+  if (!fallbackModel || fallbackModel === OLLAMA_MODEL.trim()) {
+    return primaryResult;
+  }
+
+  const fallbackResult = await callOllamaCopilotClassifierWithModel(input, {
+    model: fallbackModel,
+    timeoutMs: Math.min(OLLAMA_FALLBACK_TIMEOUT_MS, 8000),
+  });
+  return fallbackResult.status === "ok" ? fallbackResult : primaryResult;
+};
+
 const callOpenAiCopilot = async (input: {
   currency: string;
   currentBalance: number;
@@ -4466,6 +4951,7 @@ const callOpenAiCopilot = async (input: {
   recentTransactions: CopilotTransactionPayload[];
   messages: CopilotMessagePayload[];
   language: CopilotLanguage;
+  classification?: CopilotIntentClassification | null;
 }): Promise<OpenAiCopilotResult> => {
   if (!openaiClient) return { status: "disabled" };
 
@@ -4515,6 +5001,70 @@ const callOpenAiCopilot = async (input: {
       err instanceof Error && err.message
         ? err.message
         : "OpenAI request failed";
+    return {
+      status: "error",
+      code: errorCode,
+      message: errorMessage,
+    };
+  }
+};
+
+const callOpenAiCopilotClassifier = async (input: {
+  currency: string;
+  currentBalance: number;
+  monthlyIncome: number;
+  monthlyExpenses: number;
+  recentTransactions: CopilotTransactionPayload[];
+  messages: CopilotMessagePayload[];
+  language: CopilotLanguage;
+}): Promise<OpenAiCopilotClassificationResult> => {
+  if (!openaiClient) return { status: "disabled" };
+
+  try {
+    const response = await openaiClient.responses.create({
+      model: OPENAI_MODEL,
+      reasoning: {
+        effort: "low",
+      },
+      instructions: buildCopilotClassificationInstructions(),
+      input: buildCopilotClassificationInput(input),
+    });
+
+    const responseText =
+      typeof response.output_text === "string" && response.output_text.trim()
+        ? response.output_text.trim()
+        : "";
+    if (!responseText) {
+      return {
+        status: "error",
+        code: "empty_response",
+        message: "OpenAI returned an empty classifier response.",
+      };
+    }
+
+    const parsed = parseCopilotIntentClassification(responseText);
+    if (!parsed) {
+      return {
+        status: "error",
+        code: "invalid_response_format",
+        message:
+          "OpenAI returned a classifier response that did not match the expected format.",
+      };
+    }
+
+    return { status: "ok", payload: parsed };
+  } catch (err) {
+    const errorCode =
+      err &&
+      typeof err === "object" &&
+      "code" in err &&
+      typeof err.code === "string"
+        ? err.code
+        : "unknown_error";
+    const errorMessage =
+      err instanceof Error && err.message
+        ? err.message
+        : "OpenAI classifier request failed";
     return {
       status: "error",
       code: errorCode,
@@ -6784,6 +7334,229 @@ const buildSpendingComparisonResponse = async (input: {
     ),
   };
 };
+
+const buildRecentTransactionReviewResponse = async (input: {
+  userId: string;
+  currency: string;
+  language: CopilotLanguage;
+}): Promise<CopilotResponsePayload> => {
+  const endExclusive = new Date();
+  const startInclusive = new Date(endExclusive);
+  startInclusive.setDate(startInclusive.getDate() - 30);
+
+  const transactions = await fetchCopilotTransactionsForUser({
+    userId: input.userId,
+    startInclusive,
+    endExclusive,
+    limit: 20,
+    context: "/ai/copilot-chat:recent-transaction-review",
+  });
+
+  return {
+    reply: buildTransactionReportReply({
+      language: input.language,
+      currency: input.currency,
+      transactions,
+      periodLabel:
+        input.language === "vi"
+          ? `Tong hop giao dich gan day trong 30 ngay (${formatCopilotCalendarDate(input.language, startInclusive)} - ${formatCopilotCalendarDate(input.language, endExclusive)}):`
+          : `Recent transaction review for the last 30 days (${formatCopilotCalendarDate(input.language, startInclusive)} - ${formatCopilotCalendarDate(input.language, endExclusive)}):`,
+      detailMode: "datetime",
+    }),
+    topic: "recent-transaction-review",
+    suggestedActions:
+      input.language === "vi"
+        ? [
+            "Hoi rieng sao ke hom nay, tuan nay, hoac thang nay neu ban muon khung thoi gian cu the hon.",
+            "Hoi toi giao dich nao co gia tri lon nhat neu ban muon xem diem nong nhanh.",
+            "Hoi toi so sanh chi tieu voi ky truoc neu ban muon xem xu huong.",
+          ]
+        : [
+            "Ask for today's, this week's, or this month's statement if you want a tighter period.",
+            "Ask which transaction was the largest if you want the main driver quickly.",
+            "Ask for a spending comparison if you want a trend view.",
+          ],
+    suggestedDepositAmount: null,
+    riskLevel: "low",
+    confidence: 0.98,
+    followUpQuestion: localizeCopilotText(
+      input.language,
+      "Ban co muon toi tach them theo giao dich vao va ra khong?",
+      "Do you want this split further into inflows and outflows?",
+    ),
+  };
+};
+
+const buildTransactionAnomalyReviewResponse = async (input: {
+  userId: string;
+  currency: string;
+  language: CopilotLanguage;
+}): Promise<CopilotResponsePayload> => {
+  const endExclusive = new Date();
+  const startInclusive = new Date(endExclusive);
+  startInclusive.setDate(startInclusive.getDate() - 14);
+
+  const transactions = await fetchCopilotTransactionsForUser({
+    userId: input.userId,
+    startInclusive,
+    endExclusive,
+    limit: 120,
+    context: "/ai/copilot-chat:anomaly-review",
+  });
+
+  const inflows = transactions.filter(
+    (transaction) => transaction.direction === "credit",
+  );
+  const outflows = transactions.filter(
+    (transaction) => transaction.direction === "debit",
+  );
+  const totalInflow = roundMoney(
+    inflows.reduce((sum, transaction) => sum + transaction.amount, 0),
+  );
+  const totalOutflow = roundMoney(
+    outflows.reduce((sum, transaction) => sum + transaction.amount, 0),
+  );
+  const largestOutflow = outflows.reduce(
+    (max, transaction) => Math.max(max, transaction.amount),
+    0,
+  );
+  const outflowCoverage =
+    totalInflow > 0 ? roundMoney((totalOutflow / totalInflow) * 100) : null;
+
+  const facts = [
+    input.language === "vi"
+      ? `Da ra soat ${transactions.length} giao dich trong 14 ngay gan day tu du lieu vi.`
+      : `Reviewed ${transactions.length} wallet transactions from the last 14 days.`,
+    input.language === "vi"
+      ? `Tong tien vao: ${formatCopilotMoney(input.currency, totalInflow)}. Tong tien ra: ${formatCopilotMoney(input.currency, totalOutflow)}.`
+      : `Total inflow: ${formatCopilotMoney(input.currency, totalInflow)}. Total outflow: ${formatCopilotMoney(input.currency, totalOutflow)}.`,
+    input.language === "vi"
+      ? `Giao dich ra lon nhat: ${formatCopilotMoney(input.currency, largestOutflow)}.`
+      : `Largest outflow: ${formatCopilotMoney(input.currency, largestOutflow)}.`,
+    localizeCopilotText(
+      input.language,
+      "Trong route chat nay, diem bat thuong realtime co the khong san sang; phan nay chi dua tren ban ghi giao dich va tom tat vi.",
+      "A real-time anomaly score may be unavailable in this chat route; this review is based on wallet records and transaction summaries only.",
+    ),
+  ];
+
+  const calculations = [
+    outflowCoverage !== null
+      ? localizeCopilotText(
+          input.language,
+          `Ty le tien ra / tien vao 14 ngay: ${outflowCoverage.toFixed(2)}%.`,
+          `14-day outflow-to-inflow ratio: ${outflowCoverage.toFixed(2)}%.`,
+        )
+      : localizeCopilotText(
+          input.language,
+          "Khong co dong tien vao de tinh ty le bao phu tien ra.",
+          "There is no inflow data available to calculate an outflow coverage ratio.",
+        ),
+    localizeCopilotText(
+      input.language,
+      `So giao dich ra: ${outflows.length}. So giao dich vao: ${inflows.length}.`,
+      `Outflow count: ${outflows.length}. Inflow count: ${inflows.length}.`,
+    ),
+  ];
+
+  const suggestions =
+    input.language === "vi"
+      ? [
+          "Neu ban nghi ngo mot giao dich cu the, hay dua thoi gian hoac so tien de toi khoanh vung sat hon.",
+          "Neu co dau hieu bi thuc giuc chuyen tien, khong chia se OTP hoac ma xac minh.",
+          "Neu muon kiem tra tong quat, vao Alerts/Admin de xem risk signals thay vi chat route.",
+        ]
+      : [
+          "If you are concerned about one specific transfer, give me the time or amount and I can narrow the review.",
+          "If someone is pressuring you to move funds, do not share OTPs or verification codes.",
+          "For full security signals, check the Alerts/Admin review path rather than this chat route.",
+        ];
+
+  return {
+    reply: [
+      input.language === "vi" ? "Facts:" : "Facts:",
+      ...facts.map((fact) => `- ${fact}`),
+      "",
+      input.language === "vi" ? "Calculations:" : "Calculations:",
+      ...calculations.map((calculation) => `- ${calculation}`),
+      "",
+      input.language === "vi" ? "Suggestions:" : "Suggestions:",
+      ...suggestions.map((suggestion) => `- ${suggestion}`),
+    ].join("\n"),
+    topic: "transaction-anomaly-review",
+    suggestedActions: suggestions,
+    suggestedDepositAmount: null,
+    riskLevel:
+      largestOutflow >= 5000 ||
+      (outflowCoverage !== null && outflowCoverage > 90)
+        ? "medium"
+        : "low",
+    confidence: transactions.length ? 0.83 : 0.68,
+    followUpQuestion: localizeCopilotText(
+      input.language,
+      "Ban co muon toi ra soat mot giao dich cu the theo so tien, thoi gian, hoac nguoi nhan khong?",
+      "Do you want me to review one specific transfer by amount, time, or recipient?",
+    ),
+  };
+};
+
+const buildMarketDataUnavailableCopilotResponse = (input: {
+  language: CopilotLanguage;
+}): CopilotResponsePayload => ({
+  reply: localizeCopilotText(
+    input.language,
+    "Du lieu thi truong realtime hien khong kha dung trong ngu canh nay, nen toi khong the xac nhan gia song mot cach chinh xac.",
+    "Real-time market data is unavailable in this context, so I cannot confirm a live price accurately.",
+  ),
+  topic: "market-data-unavailable",
+  suggestedActions:
+    input.language === "vi"
+      ? [
+          "Hoi toi ve cach doc dinh gia, rui ro, va luan diem dau tu cua ma ban dang quan tam.",
+          "Neu ban bat du lieu quote song, toi co the xu ly lai cau hoi theo gia realtime.",
+        ]
+      : [
+          "Ask me about valuation, downside risk, and the investment thesis of the symbol you care about.",
+          "If you enable a live quote source, I can revisit the question with real-time prices.",
+        ],
+  suggestedDepositAmount: null,
+  riskLevel: "low",
+  confidence: 0.95,
+  followUpQuestion: localizeCopilotText(
+    input.language,
+    "Ban muon phan tich giao duc ve co phieu, ETF, hay dinh gia thay vi gia realtime khong?",
+    "Do you want an educational analysis of the stock, ETF, or valuation instead of a live price?",
+  ),
+});
+
+const buildUnsupportedCopilotResponse = (input: {
+  language: CopilotLanguage;
+}): CopilotResponsePayload => ({
+  reply: localizeCopilotText(
+    input.language,
+    "Toi co the ho tro giao duc tai chinh, chi tieu ca nhan, sao ke giao dich, kiem tra bat thuong, va phan tich thi truong o muc giao duc. Yeu cau vua roi nam ngoai cac nhom ho tro do.",
+    "I can help with finance education, spending insights, transaction reviews, anomaly checks, and educational market analysis. The last request falls outside those supported areas.",
+  ),
+  topic: "unsupported-copilot-request",
+  suggestedActions:
+    input.language === "vi"
+      ? [
+          "Hoi ve chi tieu, ngan sach, sao ke giao dich, hoac kiem tra rui ro giao dich.",
+          "Hoi ve co phieu hoac ETF theo huong giao duc va phan tich, khong phai khuyen nghi mua ban.",
+        ]
+      : [
+          "Ask about spending, budgeting, transaction statements, or transfer-risk checks.",
+          "Ask about stocks or ETFs in an educational, analytical way rather than as a buy or sell instruction.",
+        ],
+  suggestedDepositAmount: null,
+  riskLevel: "low",
+  confidence: 0.9,
+  followUpQuestion: localizeCopilotText(
+    input.language,
+    "Ban muon toi giup ve ngan sach, giao dich, hay kien thuc thi truong?",
+    "Do you want help with budgeting, transactions, or market education?",
+  ),
+});
 
 const sanitizeUser = (user: UserEntity | null) => {
   if (!user) return null;
@@ -10554,8 +11327,21 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
       ? body.currency.trim().toUpperCase()
       : "USD";
 
+  const copilotBaseInput = {
+    currency,
+    currentBalance: Number(body.currentBalance || 0),
+    monthlyIncome: Number(body.monthlyIncome || 0),
+    monthlyExpenses: Number(body.monthlyExpenses || 0),
+    recentTransactions,
+    messages,
+    language,
+  };
+
+  const intentClassification = await classifyCopilotIntent(copilotBaseInput);
+
   if (
     req.user?.sub &&
+    intentClassification.intent === "transaction_review" &&
     isWeeklyTransactionReportIntent(latestUserMessage.content)
   ) {
     const weeklyReport = await buildWeeklyTransactionReportResponse({
@@ -10568,6 +11354,7 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
 
   if (
     req.user?.sub &&
+    intentClassification.intent === "transaction_review" &&
     isTodayTransactionReportIntent(latestUserMessage.content)
   ) {
     const todayReport = await buildTodayTransactionReportResponse({
@@ -10580,6 +11367,7 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
 
   if (
     req.user?.sub &&
+    intentClassification.intent === "transaction_review" &&
     isMonthlyTransactionReportIntent(latestUserMessage.content)
   ) {
     const monthlyReport = await buildMonthlyTransactionReportResponse({
@@ -10590,7 +11378,16 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
     return res.json(monthlyReport);
   }
 
-  if (req.user?.sub && isSpendingComparisonIntent(latestUserMessage.content)) {
+  if (req.user?.sub && intentClassification.intent === "transaction_review") {
+    const recentReview = await buildRecentTransactionReviewResponse({
+      userId: req.user.sub,
+      currency,
+      language,
+    });
+    return res.json(recentReview);
+  }
+
+  if (req.user?.sub && intentClassification.intent === "spending_analysis") {
     const spendingComparison = await buildSpendingComparisonResponse({
       userId: req.user.sub,
       currency,
@@ -10599,21 +11396,41 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
     return res.json(spendingComparison);
   }
 
-  const marketResponse = await buildLiveMarketCopilotResponse(
-    latestUserMessage.content,
-  );
-  if (marketResponse) {
-    return res.json(marketResponse);
+  if (intentClassification.intent === "market_data") {
+    const marketResponse = await buildLiveMarketCopilotResponse(
+      latestUserMessage.content,
+    );
+    if (marketResponse) {
+      return res.json(marketResponse);
+    }
+    return res.json(buildMarketDataUnavailableCopilotResponse({ language }));
+  }
+
+  if (intentClassification.intent === "anomaly_check") {
+    const scamProtectionResponse = buildHeuristicScamProtectionResponse({
+      latestMessage: latestUserMessage.content,
+      language,
+    });
+    if (scamProtectionResponse) {
+      return res.json(scamProtectionResponse);
+    }
+    if (req.user?.sub) {
+      const anomalyReview = await buildTransactionAnomalyReviewResponse({
+        userId: req.user.sub,
+        currency,
+        language,
+      });
+      return res.json(anomalyReview);
+    }
+  }
+
+  if (intentClassification.intent === "unsupported") {
+    return res.json(buildUnsupportedCopilotResponse({ language }));
   }
 
   const copilotInput = {
-    currency,
-    currentBalance: Number(body.currentBalance || 0),
-    monthlyIncome: Number(body.monthlyIncome || 0),
-    monthlyExpenses: Number(body.monthlyExpenses || 0),
-    recentTransactions,
-    messages,
-    language,
+    ...copilotBaseInput,
+    classification: intentClassification,
   };
 
   const ollamaResult = await callOllamaCopilot(copilotInput);
