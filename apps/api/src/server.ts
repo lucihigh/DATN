@@ -5894,7 +5894,10 @@ const isTodayTransactionReportIntent = (message: string) => {
     /\b(report|summary|summarize|list|bao cao|tong hop|liet ke|thong ke|sao ke|statement)\b/.test(
       normalized,
     ) ||
-    /giao dich hom nay|transactions today|today transaction/.test(normalized);
+    /giao dich hom nay|transactions today|today transaction/.test(normalized) ||
+    (asksForToday &&
+      asksForTransactions &&
+      /\b(xem|cho toi|cua toi|my|show|review|giup|di)\b/.test(normalized));
 
   return asksForToday && asksForTransactions && asksForReport;
 };
@@ -5915,7 +5918,13 @@ const isWeeklyTransactionReportIntent = (message: string) => {
   const asksForReport =
     /\b(report|summary|summarize|list|bao cao|tong hop|liet ke|thong ke|sao ke|statement)\b/.test(
       normalized,
-    ) || /giao dich tuan|weekly transaction|week transaction/.test(normalized);
+    ) ||
+    /giao dich tuan|weekly transaction|week transaction/.test(normalized) ||
+    (asksForWeek &&
+      asksForTransactions &&
+      /\b(xem|cho toi|cua toi|my|show|review|giup|di|trong)\b/.test(
+        normalized,
+      ));
 
   return asksForWeek && asksForTransactions && asksForReport;
 };
@@ -5933,7 +5942,12 @@ const isMonthlyTransactionReportIntent = (message: string) => {
   const asksForReport =
     /\b(report|summary|summarize|list|bao cao|tong hop|liet ke|thong ke|sao ke|statement)\b/.test(
       normalized,
-    );
+    ) ||
+    (asksForMonth &&
+      asksForTransactions &&
+      /\b(xem|cho toi|cua toi|my|show|review|giup|di|trong)\b/.test(
+        normalized,
+      ));
 
   return asksForMonth && asksForTransactions && asksForReport;
 };
