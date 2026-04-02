@@ -5,7 +5,6 @@
   useEffect,
   useLayoutEffect,
   useCallback,
-  useDeferredValue,
   useMemo,
   useRef,
   useState,
@@ -536,6 +535,125 @@ const TRANSFER_WARNING_NOTE_PATTERNS = [
 const TRANSFER_GENERIC_NOTE_PATTERN =
   /^(transfer|payment|test|chuyen tien|ck|thanh toan|gui tien)$/i;
 
+const translateTransferRiskCopy = (value?: string) => {
+  const text = (value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+
+  let localized = text
+    .replace(
+      /^tài khoản đuôi (\d{4}) chưa xuất hiện trong lịch sử chuyển tiền hoàn tất của bạn\.?$/i,
+      "Account ending $1 has not appeared in your completed transfer history yet.",
+    )
+    .replace(
+      /^người nhận này còn mới so với lịch sử chuyển tiền hoàn tất của bạn\.?$/i,
+      "The recipient is new relative to your completed transfer history.",
+    )
+    .replace(
+      /^đây là giao dịch giá trị cao đối với ví cá nhân \(usd ([\d,]+(?:\.\d+)?)\)\.?$/i,
+      "This is a high-value transfer for a consumer wallet (USD $1).",
+    )
+    .replace(
+      /^hành vi chuyển tiền gần đây đã kích hoạt (\d+) lần ai rà soát hoặc chặn trong 30 ngày qua\.?$/i,
+      "Recent outbound transfer behavior has triggered $1 AI reviews or blocks in the last 30 days.",
+    )
+    .replace(
+      /^bạn có (\d+) lần thử chuyển gần mức tiền này đã bị đưa vào diện rà soát hoặc chặn trước khi hoàn tất\.?$/i,
+      "You had $1 recent transfer attempts near this amount that were reviewed or blocked before completion.",
+    )
+    .replace(
+      /^xác minh người nhận qua số điện thoại hoặc kênh bạn đã tin cậy từ trước\.?$/i,
+      "Verify the recipient using a phone number or channel you already trust.",
+    )
+    .replace(
+      /^xác minh người nhận, số tiền và mục đích thanh toán trong kênh liên hệ do chính bạn chủ động mở\.?$/i,
+      "Confirm the recipient, amount, and payment purpose in a channel you initiated yourself.",
+    )
+    .replace(
+      /^không tiếp tục nếu có người hướng dẫn bạn qua điện thoại, chat hoặc chia sẻ màn hình\.?$/i,
+      "Do not continue if someone is guiding you over phone, chat, or screen share.",
+    )
+    .replace(
+      /^không tiếp tục nếu bạn bị hối thúc hoặc bị yêu cầu bỏ qua bước bảo mật\.?$/i,
+      "Do not continue if you feel rushed or are being told to bypass security checks.",
+    )
+    .replace(/^rủi ro người nhận mới$/i, "New Recipient Risk")
+    .replace(
+      /^tôi đã kiểm tra, tiếp tục nhận otp$/i,
+      "I reviewed the warning, continue to OTP",
+    )
+    .replace(
+      /^otp kết hợp xác thực faceid trực tiếp$/i,
+      "OTP plus live FaceID check",
+    )
+    .replace(/^rà soát trước khi gửi otp$/i, "Review, then release OTP")
+    .replace(/^tạm dừng và tự xác minh$/i, "Pause and verify independently")
+    .replace(/^cảnh báo tăng cường xác minh$/i, "Step-up warning")
+    .replace(/^tạm dừng để bảo vệ tài khoản$/i, "Protection pause")
+    .replace(/^kiểm tra độ tin cậy$/i, "Trust check")
+    .replace(
+      /^account ending (\d{4}) has not appeared in your completed transfer history yet\.?$/i,
+      "Account ending $1 has not appeared in your completed transfer history yet.",
+    )
+    .replace(
+      /^the recipient is new relative to your completed transfer history\.?$/i,
+      "The recipient is new relative to your completed transfer history.",
+    )
+    .replace(
+      /^this is a high-value transfer for a consumer wallet \(usd ([\d,]+(?:\.\d+)?)\)\.?$/i,
+      "This is a high-value transfer for a consumer wallet (USD $1).",
+    )
+    .replace(
+      /^recent outbound transfer behavior has triggered (\d+) ai reviews or blocks in the last 30 days\.?$/i,
+      "Recent outbound transfer behavior has triggered $1 AI reviews or blocks in the last 30 days.",
+    )
+    .replace(
+      /^you had (\d+) recent transfer attempt(?:s)? near this amount that (?:were|was) reviewed or blocked before completion\.?$/i,
+      "You had $1 recent transfer attempts near this amount that were reviewed or blocked before completion.",
+    )
+    .replace(
+      /^verify the recipient using a phone number or channel you already trust\.?$/i,
+      "Verify the recipient using a phone number or channel you already trust.",
+    )
+    .replace(
+      /^confirm the recipient, amount, and payment purpose in a channel you initiated yourself\.?$/i,
+      "Confirm the recipient, amount, and payment purpose in a channel you initiated yourself.",
+    )
+    .replace(
+      /^do not continue if someone is guiding you over phone, chat, or screen share\.?$/i,
+      "Do not continue if someone is guiding you over phone, chat, or screen share.",
+    )
+    .replace(
+      /^do not continue if you feel rushed or are being told to bypass security checks\.?$/i,
+      "Do not continue if you feel rushed or are being told to bypass security checks.",
+    )
+    .replace(
+      /^tam dung giao dich va goi hotline chinh thuc\.?$/i,
+      "Pause the transfer and call the official support hotline.",
+    )
+    .replace(
+      /^tạm dừng giao dịch và gọi hotline chính thức\.?$/i,
+      "Pause the transfer and call the official support hotline.",
+    )
+    .replace(/^new recipient risk$/i, "New Recipient Risk")
+    .replace(/^continue carefully$/i, "I reviewed the warning, continue to OTP")
+    .replace(/^otp plus live faceid check$/i, "OTP plus live FaceID check")
+    .replace(/^review, then release otp$/i, "Review, then release OTP")
+    .replace(
+      /^pause and verify independently$/i,
+      "Pause and verify independently",
+    )
+    .replace(/^step-up warning$/i, "Step-up warning")
+    .replace(/^protection pause$/i, "Protection pause")
+    .replace(/^trust check$/i, "Trust check");
+
+  localized = localized
+    .replace(/\bAI\b/g, "AI")
+    .replace(/\bOTP\b/g, "OTP")
+    .replace(/\bFaceID\b/g, "FaceID");
+
+  return localized;
+};
+
 const normalizeNotificationCopy = (value?: string) =>
   (value || "").replace(/\s+/g, " ").trim();
 
@@ -991,6 +1109,9 @@ type AiMonitoringSummary = {
   score: number;
   riskLevel: string;
   reasons: string[];
+  baseScore?: number | null;
+  finalScore?: number | null;
+  mitigationScore?: number | null;
   archetype?: string | null;
   timeline?: string[];
   headline?: string | null;
@@ -1004,6 +1125,8 @@ type AiMonitoringSummary = {
   requestKey?: string | null;
   modelRiskLevel?: string | null;
   ruleRiskLevel?: string | null;
+  finalAction?: string | null;
+  stepUpLevel?: string | null;
   ruleScore?: number | null;
   ruleHitCount?: number | null;
   ruleHits?: Array<{
@@ -1371,6 +1494,8 @@ function DashboardView({
   const [transferAdvisory, setTransferAdvisory] =
     useState<TransferSafetyAdvisory | null>(null);
   const [transferAdvisoryAcknowledged, setTransferAdvisoryAcknowledged] =
+    useState(false);
+  const [transferAiInterventionOpen, setTransferAiInterventionOpen] =
     useState(false);
   const [recentTransactions, setRecentTransactions] = useState<
     RecentTransaction[]
@@ -1967,6 +2092,24 @@ function DashboardView({
             : typeof data.risk_level === "string"
               ? data.risk_level
               : "low",
+        baseScore:
+          typeof data.baseScore === "number"
+            ? data.baseScore
+            : typeof data.base_score === "number"
+              ? data.base_score
+              : null,
+        finalScore:
+          typeof data.finalScore === "number"
+            ? data.finalScore
+            : typeof data.final_score === "number"
+              ? data.final_score
+              : null,
+        mitigationScore:
+          typeof data.mitigationScore === "number"
+            ? data.mitigationScore
+            : typeof data.mitigation_score === "number"
+              ? data.mitigation_score
+              : null,
         reasons: asStringList(data.reasons),
         archetype: typeof data.archetype === "string" ? data.archetype : null,
         timeline: Array.isArray(data.timeline)
@@ -2024,6 +2167,18 @@ function DashboardView({
             ? data.ruleRiskLevel
             : typeof data.rule_risk_level === "string"
               ? data.rule_risk_level
+              : null,
+        finalAction:
+          typeof data.finalAction === "string"
+            ? data.finalAction
+            : typeof data.final_action === "string"
+              ? data.final_action
+              : null,
+        stepUpLevel:
+          typeof data.stepUpLevel === "string"
+            ? data.stepUpLevel
+            : typeof data.step_up_level === "string"
+              ? data.step_up_level
               : null,
         ruleScore:
           typeof data.ruleScore === "number"
@@ -2466,10 +2621,6 @@ function DashboardView({
       reasons: filteredReasons,
     };
   }, [transferMonitoring]);
-  const deferredTransferMonitoring = useDeferredValue(
-    visibleTransferMonitoring,
-  );
-  const showExternalTransferAiPanel = transferStep !== 4;
   const transferBlockedUntilMs = transferAdvisory?.blockedUntil
     ? Date.parse(transferAdvisory.blockedUntil)
     : Number.NaN;
@@ -2482,6 +2633,151 @@ function DashboardView({
         transferBlockedUntilMs - transferAdvisoryClock,
       )
     : "";
+  const transferAiIntervention = useMemo(() => {
+    const monitoring = visibleTransferMonitoring;
+    const advisory = effectiveTransferAdvisory;
+    if (!advisory && !monitoring) return null;
+
+    const monitoringRisk = (monitoring?.riskLevel || "").toLowerCase();
+    const monitoringFinalAction = (monitoring?.finalAction || "").toUpperCase();
+    const requiresStrongStepUp =
+      monitoringFinalAction === "HOLD_REVIEW" ||
+      monitoringFinalAction === "REQUIRE_OTP_FACE_ID";
+    const requiresOtpStepUp = monitoringFinalAction === "REQUIRE_OTP";
+    const allowsWithWarning = monitoringFinalAction === "ALLOW_WITH_WARNING";
+    const tone =
+      advisory?.severity === "blocked" || isTransferHoldActive
+        ? "blocked"
+        : advisory?.severity === "warning" ||
+            requiresStrongStepUp ||
+            requiresOtpStepUp
+          ? "warning"
+          : allowsWithWarning || monitoringRisk === "high"
+            ? "caution"
+            : "caution";
+    const recipientLabel =
+      transferReceiverName.trim() ||
+      (transferAccount
+        ? `account ending ${transferAccount.slice(-4)}`
+        : "this recipient");
+    const amount =
+      Number(transferAmount.replace(/,/g, "")) || advisory?.amount || 0;
+    const amountLabel = formatTransferAdvisoryAmount(amount, "USD");
+    const nextAction =
+      tone === "blocked"
+        ? "Pause and verify independently"
+        : transferServerFaceIdReason
+          ? "OTP plus live FaceID check"
+          : "Review, then release OTP";
+    const title =
+      tone === "blocked"
+        ? "Transfer paused before funds leave your wallet"
+        : tone === "warning"
+          ? "AI wants one more review before sending OTP"
+          : "Quick AI safety review before OTP";
+    const summary =
+      tone === "blocked"
+        ? `This transfer to ${recipientLabel} matches patterns that often appear when attackers test small payments, pressure victims, or route money through unfamiliar recipients. Funds stay in your wallet until the risk clears.`
+        : tone === "warning"
+          ? `This transfer to ${recipientLabel} can still continue, but the behavior is unusual enough that FPIPay wants you to pause, confirm the recipient, and re-check the purpose before OTP is issued.`
+          : `AI noticed a mild deviation for this transfer to ${recipientLabel}. Nothing is confirmed as fraud, but a short review helps prevent accidental or manipulated payments.`;
+    const signals = [
+      ...(advisory?.reasons || []),
+      ...(monitoring?.reasons || []),
+      ...((monitoring?.ruleHits || []).flatMap((hit) =>
+        [hit.userWarning, hit.reason, hit.title].filter(
+          (value): value is string =>
+            typeof value === "string" && value.trim().length > 0,
+        ),
+      ) || []),
+    ]
+      .map((item) => translateTransferRiskCopy(item))
+      .filter((item, index, arr) => item && arr.indexOf(item) === index)
+      .slice(0, 2);
+    const protectSteps = [
+      tone === "blocked"
+        ? "Verify the recipient using a phone number or channel you already trust."
+        : "Confirm the recipient, amount, and payment purpose in a channel you initiated yourself.",
+      ...((monitoring?.warning?.mustDo || []).map((item) =>
+        item.replace(/^do[:\s-]*/i, "").trim(),
+      ) || []),
+      ...(advisory?.recommendedActions || []),
+      ...(monitoring?.recommendedActions || []),
+    ]
+      .map((item) => translateTransferRiskCopy(item))
+      .filter((item, index, arr) => item && arr.indexOf(item) === index)
+      .slice(0, 2);
+    const stopList = [
+      tone === "blocked"
+        ? "Do not continue if someone is guiding you over phone, chat, or screen share."
+        : "Do not continue if you feel rushed or are being told to bypass security checks.",
+      ...((monitoring?.warning?.doNot || []).map((item) =>
+        item.replace(/^do not[:\s-]*/i, "").trim(),
+      ) || []),
+    ]
+      .map((item) => translateTransferRiskCopy(item))
+      .filter((item, index, arr) => item && arr.indexOf(item) === index)
+      .slice(0, 1);
+    const timeline = [
+      ...(advisory?.timeline || []),
+      ...(monitoring?.timeline || []),
+    ]
+      .map((item) => translateTransferRiskCopy(item))
+      .filter((item, index, arr) => item && arr.indexOf(item) === index)
+      .slice(0, 2);
+    const shouldPrompt =
+      tone === "blocked" ||
+      isTransferHoldActive ||
+      advisory?.severity === "warning" ||
+      advisory?.requiresAcknowledgement === true ||
+      requiresStrongStepUp ||
+      requiresOtpStepUp;
+
+    return {
+      tone,
+      title,
+      summary,
+      recipientLabel,
+      amountLabel,
+      nextAction,
+      confidence:
+        typeof monitoring?.finalScore === "number"
+          ? Math.max(1, Math.min(99, Math.round(monitoring.finalScore)))
+          : typeof monitoring?.score === "number"
+            ? Math.max(1, Math.min(99, Math.round(monitoring.score * 100)))
+            : tone === "blocked"
+              ? 96
+              : tone === "warning"
+                ? 82
+                : 61,
+      statusLabel:
+        tone === "blocked"
+          ? "Protection pause"
+          : tone === "warning"
+            ? "Step-up warning"
+            : "Trust check",
+      primaryLabel:
+        tone === "blocked" || isTransferHoldActive
+          ? "Understood"
+          : translateTransferRiskCopy(advisory?.confirmationLabel) ||
+            "I reviewed the warning, continue to OTP",
+      signals,
+      protectSteps,
+      stopList,
+      timeline,
+      archetype: advisory?.archetype || monitoring?.archetype || "",
+      shouldPrompt,
+    };
+  }, [
+    effectiveTransferAdvisory,
+    formatTransferAdvisoryAmount,
+    isTransferHoldActive,
+    transferAccount,
+    transferAmount,
+    transferReceiverName,
+    transferServerFaceIdReason,
+    visibleTransferMonitoring,
+  ]);
 
   useEffect(() => {
     if (!token || transferStep !== 2) {
@@ -2497,6 +2793,7 @@ function DashboardView({
       setTransferPreviewBusy(false);
       setTransferMonitoring(null);
       setTransferAdvisory(null);
+      setTransferAiInterventionOpen(false);
       setTransferServerFaceIdRequired(false);
       setTransferServerFaceIdReason("");
       setTransferRollingOutflowAmount(null);
@@ -2531,6 +2828,7 @@ function DashboardView({
         if (!resp.ok) {
           setTransferMonitoring(null);
           setTransferAdvisory(localTransferPreflightAdvisory);
+          setTransferAiInterventionOpen(false);
           setTransferServerFaceIdRequired(false);
           setTransferServerFaceIdReason("");
           setTransferRollingOutflowAmount(null);
@@ -2571,6 +2869,12 @@ function DashboardView({
     transferReceiverName,
     transferStep,
   ]);
+
+  useEffect(() => {
+    if (!transferOpen || transferStep !== 3) {
+      setTransferAiInterventionOpen(false);
+    }
+  }, [transferOpen, transferStep]);
 
   const renderAiMonitoringPanel = useCallback(
     (monitoring: AiMonitoringSummary | null, title: string) => {
@@ -4461,13 +4765,7 @@ function DashboardView({
 
       if ((resp.status === 409 || resp.status === 423) && advisory) {
         setTransferAdvisoryAcknowledged(false);
-        toast(
-          data?.error ||
-            (resp.status === 423
-              ? "This transfer is blocked for safety review."
-              : "Please review this transfer warning."),
-          resp.status === 423 ? "error" : "info",
-        );
+        setTransferAiInterventionOpen(true);
         return false;
       }
 
@@ -4530,17 +4828,6 @@ function DashboardView({
           : "OTP sent to your email",
         "info",
       );
-      if (
-        visibleMonitoring &&
-        visibleMonitoring.riskLevel.toLowerCase() !== "low"
-      ) {
-        toast(
-          `AI transfer monitoring flagged ${visibleMonitoring.riskLevel.toLowerCase()} risk (${Math.round(
-            visibleMonitoring.score * 100,
-          )}%).`,
-          "info",
-        );
-      }
       return true;
     } finally {
       setTransferOtpBusy(false);
@@ -4881,8 +5168,17 @@ function DashboardView({
     }
     setTransferPinError("");
     if (!transferOtpRequired) {
+      if (
+        transferAiIntervention?.shouldPrompt &&
+        !transferAdvisoryAcknowledged
+      ) {
+        setTransferAiInterventionOpen(true);
+        return;
+      }
       await generateTransferOtp({
-        advisoryAcknowledged: Boolean(transferAdvisory),
+        advisoryAcknowledged:
+          Boolean(transferAdvisory) ||
+          Boolean(transferAiIntervention?.shouldPrompt),
       });
       return;
     }
@@ -4908,6 +5204,28 @@ function DashboardView({
     }
     await submitTransferConfirmation(null);
   };
+  const closeTransferAiIntervention = useCallback(() => {
+    setTransferAiInterventionOpen(false);
+  }, []);
+  const reviewTransferBeforeProceeding = useCallback(() => {
+    setTransferAiInterventionOpen(false);
+    setTransferOtpRequired(false);
+    setTransferOtpInput("");
+    setTransferOtpError("");
+    setTransferOtpChallengeId("");
+    setTransferOtpDestination("");
+    setTransferOtpExpiresAt("");
+    goToTransferStep(2);
+  }, [goToTransferStep]);
+  const proceedTransferAfterAiWarning = useCallback(async () => {
+    setTransferAiInterventionOpen(false);
+    if (!transferAiIntervention) return;
+    if (transferAiIntervention.tone === "blocked" || isTransferHoldActive) {
+      return;
+    }
+    setTransferAdvisoryAcknowledged(true);
+    await generateTransferOtp({ advisoryAcknowledged: true });
+  }, [generateTransferOtp, isTransferHoldActive, transferAiIntervention]);
 
   const handleTransferFaceConfirm = useCallback(async () => {
     if (!transferFaceProof) {
@@ -5750,11 +6068,7 @@ function DashboardView({
 
       {transferOpen && (
         <div className="modal-overlay transfer-modal-overlay">
-          <div
-            className={`transfer-modal-frame${
-              showExternalTransferAiPanel ? " transfer-modal-frame-with-ai" : ""
-            }`}
-          >
+          <div className="transfer-modal-frame">
             <div
               className="modal-card transfer-modal"
               onClick={(e) => e.stopPropagation()}
@@ -5833,6 +6147,7 @@ function DashboardView({
                               setTransferMonitoring(null);
                               setTransferAdvisory(null);
                               setTransferAdvisoryAcknowledged(false);
+                              setTransferAiInterventionOpen(false);
                             }}
                           />
                         </label>
@@ -5859,6 +6174,7 @@ function DashboardView({
                                       setTransferMonitoring(null);
                                       setTransferAdvisory(null);
                                       setTransferAdvisoryAcknowledged(false);
+                                      setTransferAiInterventionOpen(false);
                                       void (async () => {
                                         const resolved =
                                           await resolveTransferRecipient(
@@ -6096,6 +6412,7 @@ function DashboardView({
                           setTransferMonitoring(null);
                           setTransferAdvisory(null);
                           setTransferAdvisoryAcknowledged(false);
+                          setTransferAiInterventionOpen(false);
                         }}
                       />
                       {isInsufficientBalance && (
@@ -6129,6 +6446,7 @@ function DashboardView({
                           setTransferMonitoring(null);
                           setTransferAdvisory(null);
                           setTransferAdvisoryAcknowledged(false);
+                          setTransferAiInterventionOpen(false);
                         }}
                       />
                     </label>
@@ -6142,6 +6460,7 @@ function DashboardView({
                           setTransferMonitoring(null);
                           setTransferAdvisory(null);
                           setTransferAdvisoryAcknowledged(false);
+                          setTransferAiInterventionOpen(false);
                         }}
                       >
                         Back
@@ -6285,6 +6604,7 @@ function DashboardView({
                             setTransferOtpChallengeId("");
                             setTransferOtpDestination("");
                             setTransferOtpExpiresAt("");
+                            setTransferAiInterventionOpen(false);
                             goToTransferStep(2);
                           }}
                         >
@@ -6337,53 +6657,6 @@ function DashboardView({
                 )}
               </div>
             </div>
-            {showExternalTransferAiPanel &&
-              (effectiveTransferAdvisory || deferredTransferMonitoring ? (
-                renderTransferAmountAiPanel(
-                  effectiveTransferAdvisory,
-                  deferredTransferMonitoring,
-                  {
-                    external: true,
-                  },
-                )
-              ) : (
-                <aside className="transfer-ai-amount-panel external transfer-ai-amount-panel-idle">
-                  <div className="transfer-ai-amount-head">
-                    <span className="transfer-ai-amount-badge">
-                      AI Risk Analyst
-                    </span>
-                    <span className="transfer-advisory-pill caution">
-                      {transferPreviewBusy ? "Analyzing" : "Standby"}
-                    </span>
-                  </div>
-                  <div className="transfer-ai-amount-summary">
-                    <div>
-                      <span>Assessment</span>
-                      <strong>
-                        {transferPreviewBusy
-                          ? "Running model"
-                          : "Awaiting transfer data"}
-                      </strong>
-                    </div>
-                    <div>
-                      <span>Confidence</span>
-                      <strong>{transferPreviewBusy ? "..." : "0%"}</strong>
-                    </div>
-                    <div>
-                      <span>Next action</span>
-                      <strong>
-                        {transferPreviewBusy ? "Evaluate" : "Monitor"}
-                      </strong>
-                    </div>
-                  </div>
-                  <strong>AI monitoring will appear here</strong>
-                  <p>
-                    {transferPreviewBusy
-                      ? "Checking recipient history, transfer size, recent behavior, and verification requirements with the transaction risk model."
-                      : "Recipient history, transfer size, recent behavior, and verification requirements will be summarized in this panel before approval."}
-                  </p>
-                </aside>
-              ))}
             {transferPinSetupOpen && (
               <div
                 className="transfer-pin-setup-overlay"
@@ -6591,6 +6864,128 @@ function DashboardView({
                     {transferFaceVerifyBusy
                       ? "Verifying Transfer..."
                       : "Verify FaceID & Transfer"}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+
+      {transferAiInterventionOpen &&
+      transferAiIntervention &&
+      typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="transfer-ai-warning-overlay"
+              onClick={closeTransferAiIntervention}
+            >
+              <div
+                className={`transfer-ai-warning-card ${transferAiIntervention.tone}`}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="transfer-ai-warning-head">
+                  <div>
+                    <span className="transfer-ai-warning-kicker">
+                      AI transfer guard
+                    </span>
+                    <h4>{transferAiIntervention.title}</h4>
+                    <p>{transferAiIntervention.summary}</p>
+                  </div>
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    onClick={closeTransferAiIntervention}
+                    aria-label="Close AI transfer warning"
+                  >
+                    ×
+                  </button>
+                </div>
+                <div className="transfer-ai-warning-summary">
+                  <div>
+                    <span>Status</span>
+                    <strong>{transferAiIntervention.statusLabel}</strong>
+                  </div>
+                  <div>
+                    <span>Confidence</span>
+                    <strong>{transferAiIntervention.confidence}%</strong>
+                  </div>
+                  <div>
+                    <span>Next action</span>
+                    <strong>{transferAiIntervention.nextAction}</strong>
+                  </div>
+                </div>
+                <div className="transfer-ai-warning-grid">
+                  <div className="transfer-ai-warning-section">
+                    <span className="transfer-ai-warning-section-label">
+                      Transfer snapshot
+                    </span>
+                    <strong>{transferAiIntervention.recipientLabel}</strong>
+                    <p>Amount: {transferAiIntervention.amountLabel}</p>
+                    {transferAiIntervention.archetype ? (
+                      <small>
+                        Pattern:{" "}
+                        {translateTransferRiskCopy(
+                          transferAiIntervention.archetype,
+                        )}
+                      </small>
+                    ) : null}
+                    {isTransferHoldActive ? (
+                      <small>
+                        Retry after {transferHoldRemainingLabel} or wait for
+                        manual review to clear the hold.
+                      </small>
+                    ) : null}
+                  </div>
+                  <div className="transfer-ai-warning-section">
+                    <span className="transfer-ai-warning-section-label">
+                      Why AI flagged this
+                    </span>
+                    {transferAiIntervention.signals.length > 0 ? (
+                      <ul>
+                        {transferAiIntervention.signals.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p>
+                        AI detected enough deviation from your normal behavior
+                        to trigger a safety review before OTP is sent.
+                      </p>
+                    )}
+                    {transferAiIntervention.timeline.length > 0 ? (
+                      <small>{transferAiIntervention.timeline[0]}</small>
+                    ) : null}
+                  </div>
+                  <div className="transfer-ai-warning-section">
+                    <span className="transfer-ai-warning-section-label">
+                      Before continuing
+                    </span>
+                    <ul>
+                      {transferAiIntervention.protectSteps.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                      {transferAiIntervention.stopList.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+                <div className="transfer-actions">
+                  <button
+                    type="button"
+                    className="pill"
+                    onClick={reviewTransferBeforeProceeding}
+                  >
+                    Edit transfer
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={() => void proceedTransferAfterAiWarning()}
+                    disabled={transferOtpBusy || transferOtpVerifyBusy}
+                  >
+                    {transferAiIntervention.primaryLabel}
                   </button>
                 </div>
               </div>
@@ -7942,6 +8337,35 @@ const MAX_PROFILE_AVATAR_FILE_SIZE = 6 * 1024 * 1024;
 const MAX_PROFILE_AVATAR_OUTPUT_BYTES = 900 * 1024;
 const PROFILE_AVATAR_MAX_DIMENSION = 640;
 
+const readStoredSaveLoginPreference = () => {
+  try {
+    const raw = localStorage.getItem(SETTING_SECURITY_KEY);
+    if (!raw) return true;
+    const parsed = JSON.parse(raw) as { saveLogin?: unknown } | null;
+    return typeof parsed?.saveLogin === "boolean" ? parsed.saveLogin : true;
+  } catch {
+    return true;
+  }
+};
+
+const writeStoredSaveLoginPreference = (saveLogin: boolean) => {
+  try {
+    const raw = localStorage.getItem(SETTING_SECURITY_KEY);
+    const parsed =
+      raw && typeof raw === "string"
+        ? (JSON.parse(raw) as Record<string, unknown> | null)
+        : null;
+    const next =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed
+        : {};
+    next.saveLogin = saveLogin;
+    localStorage.setItem(SETTING_SECURITY_KEY, JSON.stringify(next));
+  } catch {
+    // ignore storage permission errors
+  }
+};
+
 const getProfileAvatarStorageKey = (userId?: string | null) =>
   userId ? `${PROFILE_AVATAR_KEY}:${userId}` : PROFILE_AVATAR_KEY;
 
@@ -8070,6 +8494,265 @@ type FaceIdAccountStatus = {
   enabled: boolean;
   enrolledAt: string | null;
   verifiedAt: string | null;
+};
+
+type AccountProfileCategory = "PERSONAL" | "BUSINESS";
+type AccountProfileTier =
+  | "BASIC"
+  | "STANDARD"
+  | "PREMIUM"
+  | "SMALL_BUSINESS"
+  | "MEDIUM_BUSINESS"
+  | "ENTERPRISE";
+type AccountProfileStatus =
+  | "SYSTEM_ASSIGNED"
+  | "PENDING_REVIEW"
+  | "VERIFIED"
+  | "REQUIRES_REVIEW";
+type AccountProfileRequestContext = {
+  usagePurpose?: string;
+  expectedTransactionLevel?: string;
+  expectedTransactionFrequency?: string;
+  businessSize?: string;
+  justification?: string;
+};
+type AccountProfileAutomation = {
+  mode: "AUTOMATIC" | "ADMIN_CONTROLLED";
+  reviewWindowDays: number;
+  lastEvaluatedAt: string | null;
+  autoUpgradeApplied: boolean;
+  eligibleForUpgrade: boolean;
+  recommendedCategory: AccountProfileCategory;
+  recommendedTier: AccountProfileTier;
+  nextTier: AccountProfileTier | null;
+  rationale: string[];
+  milestones: string[];
+  stats: {
+    completedCount: number;
+    totalVolume: number;
+    outgoingVolume: number;
+    incomingVolume: number;
+    largeTransferCount: number;
+    counterpartyCount: number;
+    sourceCoverageRatio: number;
+    cleanActivityRatio: number;
+  };
+};
+type AccountProfileView = {
+  category: AccountProfileCategory;
+  tier: AccountProfileTier;
+  label: string;
+  status: AccountProfileStatus;
+  confidence: number;
+  requestedCategory: AccountProfileCategory | null;
+  requestedTier: AccountProfileTier | null;
+  hasPendingRequest: boolean;
+  requestContext: AccountProfileRequestContext | null;
+  automation: AccountProfileAutomation | null;
+};
+
+const PERSONAL_PROFILE_OPTIONS = [
+  { value: "BASIC", label: "P1 Basic" },
+  { value: "STANDARD", label: "P2 Standard" },
+  { value: "PREMIUM", label: "P3 Premium" },
+] as const;
+
+const BUSINESS_PROFILE_OPTIONS = [
+  { value: "SMALL_BUSINESS", label: "B1 Small Business" },
+  { value: "MEDIUM_BUSINESS", label: "B2 Medium Business" },
+  { value: "ENTERPRISE", label: "B3 Enterprise" },
+] as const;
+
+const DEFAULT_ACCOUNT_PROFILE_VIEW: AccountProfileView = {
+  category: "PERSONAL",
+  tier: "STANDARD",
+  label: "Personal Standard",
+  status: "SYSTEM_ASSIGNED",
+  confidence: 0.6,
+  requestedCategory: null,
+  requestedTier: null,
+  hasPendingRequest: false,
+  requestContext: null,
+  automation: null,
+};
+
+const defaultTierForCategory = (
+  category: AccountProfileCategory,
+): AccountProfileTier =>
+  category === "BUSINESS" ? "SMALL_BUSINESS" : "STANDARD";
+
+const formatAccountProfileLabel = (
+  category: AccountProfileCategory,
+  tier: AccountProfileTier | null | undefined,
+) => {
+  if (category === "BUSINESS") {
+    if (tier === "ENTERPRISE") return "B3 Enterprise";
+    if (tier === "MEDIUM_BUSINESS") return "B2 Medium Business";
+    return "B1 Small Business";
+  }
+  if (tier === "BASIC") return "P1 Basic";
+  if (tier === "PREMIUM") return "P3 Premium";
+  return "P2 Standard";
+};
+
+const formatAccountProfileStatus = (status: AccountProfileStatus) => {
+  if (status === "PENDING_REVIEW") return "Pending admin review";
+  if (status === "VERIFIED") return "Verified baseline";
+  if (status === "REQUIRES_REVIEW") return "Needs review";
+  return "System assigned";
+};
+
+const formatAccountProfileAutomationMode = (
+  mode?: AccountProfileAutomation["mode"] | null,
+) => {
+  if (mode === "ADMIN_CONTROLLED") return "Admin-controlled";
+  return "Automatic monthly review";
+};
+
+const parseAccountProfileMetadata = (
+  metadata?: Record<string, unknown> | null,
+) => {
+  const source = metadata && typeof metadata === "object" ? metadata : {};
+  const rawProfile =
+    source.accountProfile && typeof source.accountProfile === "object"
+      ? (source.accountProfile as Record<string, unknown>)
+      : {};
+  const category = rawProfile.category === "BUSINESS" ? "BUSINESS" : "PERSONAL";
+  const tierSource =
+    typeof rawProfile.tier === "string"
+      ? rawProfile.tier
+      : defaultTierForCategory(category);
+  const tier = (
+    tierSource === "BASIC" ||
+    tierSource === "STANDARD" ||
+    tierSource === "PREMIUM" ||
+    tierSource === "SMALL_BUSINESS" ||
+    tierSource === "MEDIUM_BUSINESS" ||
+    tierSource === "ENTERPRISE"
+      ? tierSource
+      : defaultTierForCategory(category)
+  ) as AccountProfileTier;
+  const requestedCategory =
+    rawProfile.requestedCategory === "BUSINESS" ||
+    rawProfile.requestedCategory === "PERSONAL"
+      ? (rawProfile.requestedCategory as AccountProfileCategory)
+      : null;
+  const requestedTier =
+    typeof rawProfile.requestedTier === "string"
+      ? (rawProfile.requestedTier as AccountProfileTier)
+      : null;
+  const status =
+    rawProfile.status === "PENDING_REVIEW" ||
+    rawProfile.status === "VERIFIED" ||
+    rawProfile.status === "REQUIRES_REVIEW"
+      ? (rawProfile.status as AccountProfileStatus)
+      : "SYSTEM_ASSIGNED";
+  const requestContext =
+    rawProfile.requestContext && typeof rawProfile.requestContext === "object"
+      ? (rawProfile.requestContext as AccountProfileRequestContext)
+      : null;
+  const rawAutomation =
+    rawProfile.automation && typeof rawProfile.automation === "object"
+      ? (rawProfile.automation as Record<string, unknown>)
+      : null;
+  const automationStats =
+    rawAutomation?.stats && typeof rawAutomation.stats === "object"
+      ? (rawAutomation.stats as Record<string, unknown>)
+      : null;
+  const automation =
+    rawAutomation !== null
+      ? ({
+          mode:
+            rawAutomation.mode === "ADMIN_CONTROLLED"
+              ? "ADMIN_CONTROLLED"
+              : "AUTOMATIC",
+          reviewWindowDays:
+            typeof rawAutomation.reviewWindowDays === "number"
+              ? rawAutomation.reviewWindowDays
+              : 30,
+          lastEvaluatedAt:
+            typeof rawAutomation.lastEvaluatedAt === "string"
+              ? rawAutomation.lastEvaluatedAt
+              : null,
+          autoUpgradeApplied: rawAutomation.autoUpgradeApplied === true,
+          eligibleForUpgrade: rawAutomation.eligibleForUpgrade === true,
+          recommendedCategory:
+            rawAutomation.recommendedCategory === "BUSINESS"
+              ? "BUSINESS"
+              : "PERSONAL",
+          recommendedTier:
+            typeof rawAutomation.recommendedTier === "string"
+              ? (rawAutomation.recommendedTier as AccountProfileTier)
+              : tier,
+          nextTier:
+            typeof rawAutomation.nextTier === "string"
+              ? (rawAutomation.nextTier as AccountProfileTier)
+              : null,
+          rationale: Array.isArray(rawAutomation.rationale)
+            ? rawAutomation.rationale.filter(
+                (item): item is string =>
+                  typeof item === "string" && item.trim().length > 0,
+              )
+            : [],
+          milestones: Array.isArray(rawAutomation.milestones)
+            ? rawAutomation.milestones.filter(
+                (item): item is string =>
+                  typeof item === "string" && item.trim().length > 0,
+              )
+            : [],
+          stats: {
+            completedCount:
+              typeof automationStats?.completedCount === "number"
+                ? automationStats.completedCount
+                : 0,
+            totalVolume:
+              typeof automationStats?.totalVolume === "number"
+                ? automationStats.totalVolume
+                : 0,
+            outgoingVolume:
+              typeof automationStats?.outgoingVolume === "number"
+                ? automationStats.outgoingVolume
+                : 0,
+            incomingVolume:
+              typeof automationStats?.incomingVolume === "number"
+                ? automationStats.incomingVolume
+                : 0,
+            largeTransferCount:
+              typeof automationStats?.largeTransferCount === "number"
+                ? automationStats.largeTransferCount
+                : 0,
+            counterpartyCount:
+              typeof automationStats?.counterpartyCount === "number"
+                ? automationStats.counterpartyCount
+                : 0,
+            sourceCoverageRatio:
+              typeof automationStats?.sourceCoverageRatio === "number"
+                ? automationStats.sourceCoverageRatio
+                : 0,
+            cleanActivityRatio:
+              typeof automationStats?.cleanActivityRatio === "number"
+                ? automationStats.cleanActivityRatio
+                : 1,
+          },
+        } satisfies AccountProfileAutomation)
+      : null;
+
+  return {
+    category,
+    tier,
+    label:
+      typeof rawProfile.label === "string"
+        ? rawProfile.label
+        : formatAccountProfileLabel(category, tier),
+    status,
+    confidence:
+      typeof rawProfile.confidence === "number" ? rawProfile.confidence : 0.6,
+    requestedCategory,
+    requestedTier,
+    hasPendingRequest: rawProfile.hasPendingRequest === true,
+    requestContext,
+    automation,
+  } satisfies AccountProfileView;
 };
 
 const parseFaceIdAccountStatus = (
@@ -8223,6 +8906,19 @@ function SettingView() {
   const [avatarUrl, setAvatarUrl] = useState(() => {
     return readStoredProfileAvatar(user);
   });
+  const [accountProfile, setAccountProfile] = useState<AccountProfileView>(
+    DEFAULT_ACCOUNT_PROFILE_VIEW,
+  );
+  const [profileRequest, setProfileRequest] = useState(() => ({
+    category: DEFAULT_ACCOUNT_PROFILE_VIEW.category,
+    tier: DEFAULT_ACCOUNT_PROFILE_VIEW.tier,
+    usagePurpose: "personal_spending",
+    expectedTransactionLevel: "MEDIUM",
+    expectedTransactionFrequency: "REGULAR",
+    businessSize: "SMALL",
+    justification: "",
+  }));
+  const [profileRequestBusy, setProfileRequestBusy] = useState(false);
 
   useEffect(() => {
     setAvatarUrl(readStoredProfileAvatar(user));
@@ -8239,6 +8935,7 @@ function SettingView() {
   };
 
   const toggleSaveLogin = (v: boolean) => {
+    writeStoredSaveLoginPreference(v);
     persistSecurity({ ...security, saveLogin: v });
     toast(v ? "Login info will be remembered" : "Login info will not be saved");
   };
@@ -8932,6 +9629,19 @@ function MyProfileView({
   const [avatarUrl, setAvatarUrl] = useState(() => {
     return readStoredProfileAvatar(user);
   });
+  const [accountProfile, setAccountProfile] = useState<AccountProfileView>(
+    DEFAULT_ACCOUNT_PROFILE_VIEW,
+  );
+  const [profileRequest, setProfileRequest] = useState(() => ({
+    category: DEFAULT_ACCOUNT_PROFILE_VIEW.category,
+    tier: DEFAULT_ACCOUNT_PROFILE_VIEW.tier,
+    usagePurpose: "personal_spending",
+    expectedTransactionLevel: "MEDIUM",
+    expectedTransactionFrequency: "REGULAR",
+    businessSize: "SMALL",
+    justification: "",
+  }));
+  const [profileRequestBusy, setProfileRequestBusy] = useState(false);
 
   useEffect(() => {
     setAvatarUrl(readStoredProfileAvatar(user));
@@ -8963,6 +9673,7 @@ function MyProfileView({
         }
         if (!data) return;
         const metadata = data.metadata ?? {};
+        const parsedAccountProfile = parseAccountProfileMetadata(metadata);
         setProfile((prev) => ({
           ...prev,
           name: data.fullName || user?.name || prev.name,
@@ -8984,6 +9695,28 @@ function MyProfileView({
           writeStoredProfileAvatar(user?.id, nextAvatar);
           updateUser({ avatar: nextAvatar });
         }
+        setAccountProfile(parsedAccountProfile);
+        setProfileRequest((prev) => ({
+          ...prev,
+          category:
+            parsedAccountProfile.requestedCategory ??
+            parsedAccountProfile.category,
+          tier: parsedAccountProfile.requestedTier ?? parsedAccountProfile.tier,
+          usagePurpose:
+            parsedAccountProfile.requestContext?.usagePurpose ||
+            prev.usagePurpose,
+          expectedTransactionLevel:
+            parsedAccountProfile.requestContext?.expectedTransactionLevel ||
+            prev.expectedTransactionLevel,
+          expectedTransactionFrequency:
+            parsedAccountProfile.requestContext?.expectedTransactionFrequency ||
+            prev.expectedTransactionFrequency,
+          businessSize:
+            parsedAccountProfile.requestContext?.businessSize ||
+            prev.businessSize,
+          justification:
+            parsedAccountProfile.requestContext?.justification || "",
+        }));
         const walletResp = await fetch(`${API_BASE}/wallet/me`, {
           headers: { Authorization: `Bearer ${token}` },
         });
@@ -9060,6 +9793,61 @@ function MyProfileView({
       toast("Profile saved successfully");
     } catch {
       toast("Cannot connect to API server.", "error");
+    }
+  };
+
+  const submitAccountProfileRequest = async () => {
+    if (!token) {
+      toast("Session expired. Please login again.", "error");
+      return;
+    }
+    try {
+      setProfileRequestBusy(true);
+      const resp = await fetch(`${API_BASE}/auth/me/account-profile`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          category: profileRequest.category,
+          tier: profileRequest.tier,
+          usagePurpose: profileRequest.usagePurpose,
+          expectedTransactionLevel: profileRequest.expectedTransactionLevel,
+          expectedTransactionFrequency:
+            profileRequest.expectedTransactionFrequency,
+          businessSize:
+            profileRequest.category === "BUSINESS"
+              ? profileRequest.businessSize
+              : undefined,
+          justification: profileRequest.justification,
+        }),
+      });
+      const data = (await resp.json().catch(() => null)) as {
+        error?: string;
+        message?: string;
+        metadata?: Record<string, unknown>;
+        accountProfile?: Record<string, unknown>;
+      } | null;
+      if (!resp.ok) {
+        if (isAuthExpired(resp.status, data?.error)) {
+          toast("Session expired. Please sign in again.", "error");
+          logout();
+          return;
+        }
+        toast(data?.error || "Failed to submit profile request", "error");
+        return;
+      }
+      const parsedAccountProfile = parseAccountProfileMetadata(data?.metadata);
+      setAccountProfile(parsedAccountProfile);
+      toast(
+        data?.message ||
+          "Profile request submitted. The current risk baseline stays active until admin approval.",
+      );
+    } catch {
+      toast("Cannot connect to API server.", "error");
+    } finally {
+      setProfileRequestBusy(false);
     }
   };
 
@@ -9251,6 +10039,148 @@ function MyProfileView({
           />
         </div>
       </div>
+
+      <section className="account-profile-panel">
+        <div className="account-profile-head">
+          <div>
+            <strong>Automatic Card Tier Review</strong>
+            <p>
+              Personal tiers now upgrade automatically from clean activity over
+              the last {accountProfile.automation?.reviewWindowDays ?? 30} days.
+              Users can no longer widen their own AI baseline manually.
+            </p>
+          </div>
+          <div className="account-profile-summary">
+            <span className="account-profile-badge">
+              Effective:{" "}
+              {formatAccountProfileLabel(
+                accountProfile.category,
+                accountProfile.tier,
+              )}
+            </span>
+            <span className="account-profile-badge neutral">
+              {formatAccountProfileAutomationMode(
+                accountProfile.automation?.mode,
+              )}
+            </span>
+            <span className="account-profile-badge neutral">
+              Confidence {Math.round(accountProfile.confidence * 100)}%
+            </span>
+          </div>
+        </div>
+
+        <div className="account-profile-grid">
+          <div className="user-profile-cell">
+            <strong>Current tier</strong>
+            <span>
+              {formatAccountProfileLabel(
+                accountProfile.category,
+                accountProfile.tier,
+              )}
+            </span>
+          </div>
+          <div className="user-profile-cell">
+            <strong>Review status</strong>
+            <span>{formatAccountProfileStatus(accountProfile.status)}</span>
+          </div>
+          <div className="user-profile-cell">
+            <strong>Completed activity</strong>
+            <span>
+              {accountProfile.automation?.stats.completedCount ?? 0} completed
+              transactions
+            </span>
+          </div>
+          <div className="user-profile-cell">
+            <strong>Total monthly volume</strong>
+            <span>
+              $
+              {(
+                accountProfile.automation?.stats.totalVolume ?? 0
+              ).toLocaleString("en-US", {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })}
+            </span>
+          </div>
+          <div className="user-profile-cell">
+            <strong>Source-of-funds coverage</strong>
+            <span>
+              {Math.round(
+                (accountProfile.automation?.stats.sourceCoverageRatio ?? 0) *
+                  100,
+              )}
+              %
+            </span>
+          </div>
+          <div className="user-profile-cell">
+            <strong>Clean activity ratio</strong>
+            <span>
+              {Math.round(
+                (accountProfile.automation?.stats.cleanActivityRatio ?? 1) *
+                  100,
+              )}
+              %
+            </span>
+          </div>
+        </div>
+
+        <div className="profile-review-grid">
+          <div className="profile-review-card">
+            <strong>Automatic review result</strong>
+            <small>
+              {accountProfile.automation?.autoUpgradeApplied
+                ? "Your personal tier was upgraded automatically after the latest monthly review."
+                : accountProfile.automation?.eligibleForUpgrade
+                  ? "You already meet the next upgrade conditions and the baseline is ready to widen automatically."
+                  : accountProfile.automation?.mode === "ADMIN_CONTROLLED"
+                    ? "This account stays under admin-controlled tiering for business/demo scenarios."
+                    : "FPIPay is still collecting enough clean monthly behavior before the next tier upgrade."}
+            </small>
+            <small>
+              Recommended baseline:{" "}
+              {formatAccountProfileLabel(
+                accountProfile.automation?.recommendedCategory ||
+                  accountProfile.category,
+                accountProfile.automation?.recommendedTier ||
+                  accountProfile.tier,
+              )}
+            </small>
+            {accountProfile.automation?.nextTier ? (
+              <small>
+                Next target:{" "}
+                {formatAccountProfileLabel(
+                  accountProfile.category,
+                  accountProfile.automation.nextTier,
+                )}
+              </small>
+            ) : null}
+          </div>
+          <div className="profile-review-context">
+            <strong>Why AI trusts this tier</strong>
+            {accountProfile.automation?.rationale?.length ? (
+              <>
+                {accountProfile.automation.rationale.slice(0, 3).map((item) => (
+                  <p key={item}>{item}</p>
+                ))}
+              </>
+            ) : (
+              <p>
+                Automatic tiering is waiting for enough clean monthly behavior
+                to justify a broader risk baseline.
+              </p>
+            )}
+          </div>
+        </div>
+
+        {accountProfile.automation?.milestones?.length ? (
+          <div className="profile-review-context">
+            <strong>What helps the next automatic upgrade</strong>
+            {accountProfile.automation.milestones.slice(0, 4).map((item) => (
+              <p key={item}>{item}</p>
+            ))}
+          </div>
+        ) : null}
+      </section>
 
       <section className="card faceid-banner">
         <div className="faceid-banner-copy">
@@ -10370,11 +11300,13 @@ type AuthShellProps = {
     email: string,
     password: string,
     captcha: SliderCaptchaValue,
+    options?: { rememberSession?: boolean },
   ) => Promise<LoginResult>;
   onVerifyLoginOtp: (
     challengeId: string,
     otp: string,
     captcha: SliderCaptchaValue,
+    options?: { rememberSession?: boolean },
   ) => Promise<AuthCompletionResult>;
   onRequestRegisterOtp: (payload: {
     fullName: string;
@@ -10458,6 +11390,9 @@ function AuthShell({
   const [authClock, setAuthClock] = useState(Date.now());
 
   const [signinForm, setSigninForm] = useState({ email: "", password: "" });
+  const [signinRemember, setSigninRemember] = useState(() =>
+    readStoredSaveLoginPreference(),
+  );
   const [signupForm, setSignupForm] = useState({
     fullName: "",
     username: "",
@@ -10817,6 +11752,7 @@ function AuthShell({
         signinForm.email,
         signinForm.password,
         signinCaptcha,
+        { rememberSession: signinRemember },
       );
       if (data.status === "authenticated") {
         setLoginOtpChallengeId("");
@@ -10958,6 +11894,7 @@ function AuthShell({
         loginOtpChallengeId,
         loginOtpInput,
         signinCaptcha,
+        { rememberSession: signinRemember },
       );
       setLoginOtpAvailableAt("");
       resetSigninCaptcha();
@@ -10988,6 +11925,7 @@ function AuthShell({
         signinForm.email,
         signinForm.password,
         signinCaptcha,
+        { rememberSession: signinRemember },
       );
       if (data.status === "authenticated") {
         setLoginOtpChallengeId("");
@@ -11524,7 +12462,16 @@ function AuthShell({
               </label>
               <div className="auth-row">
                 <label className="auth-checkbox">
-                  <input type="checkbox" /> Remember me
+                  <input
+                    type="checkbox"
+                    checked={signinRemember}
+                    onChange={(e) => {
+                      const nextValue = e.target.checked;
+                      setSigninRemember(nextValue);
+                      writeStoredSaveLoginPreference(nextValue);
+                    }}
+                  />{" "}
+                  Remember me
                 </label>
                 <a
                   href="#"

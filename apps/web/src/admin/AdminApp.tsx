@@ -40,6 +40,23 @@ type AdminUser = {
   avatar: string;
   status: "Active" | "Locked";
   lastLogin: string;
+  accountProfile?: {
+    category: "PERSONAL" | "BUSINESS";
+    tier: string;
+    label?: string;
+    status?: string;
+    confidence?: number;
+    requestedCategory?: "PERSONAL" | "BUSINESS" | null;
+    requestedTier?: string | null;
+    hasPendingRequest?: boolean;
+    requestContext?: {
+      usagePurpose?: string;
+      expectedTransactionLevel?: string;
+      expectedTransactionFrequency?: string;
+      businessSize?: string;
+      justification?: string;
+    } | null;
+  } | null;
 };
 
 type Transaction = {
@@ -62,6 +79,7 @@ type AdminUserApi = {
   address?: string;
   createdAt?: string;
   lastLoginAt?: string;
+  metadata?: Record<string, unknown> | null;
 };
 
 type AdminTransactionApi = {
@@ -142,6 +160,49 @@ type AdminAlertApi = {
   location?: string | null;
   paymentMethod?: string | null;
   merchantCategory?: string | null;
+  baseScore?: number | null;
+  finalScore?: number | null;
+  mitigationScore?: number | null;
+  mitigationReasons?: string[];
+  counterArguments?: string[];
+  accountSegment?: "personal" | "sme" | "enterprise" | null;
+  adminSummary?: string | null;
+  decisionComponents?: Record<string, number> | null;
+  segmentHistoryCount30d?: number | null;
+  segmentAmountP90_30d?: number | null;
+  segmentAmountMedian30d?: number | null;
+  smallProbeCount24h?: number | null;
+  distinctSmallProbeRecipients24h?: number | null;
+  sameRecipientSmallProbeCount24h?: number | null;
+  newRecipientSmallProbeCount24h?: number | null;
+  probeThenLargeRiskScore?: number | null;
+  analysisSignals?: Record<string, unknown> | null;
+};
+
+type AiOverview = {
+  status: {
+    modelLoaded: boolean;
+    modelVersion?: string | null;
+    modelSource?: string | null;
+    txModelLoaded: boolean;
+    txModelVersion?: string | null;
+    txModelSource?: string | null;
+    mongoConnected: boolean;
+    authMode?: string | null;
+  };
+  stats: {
+    windowHours: number;
+    loginRiskCounts: Record<string, number>;
+    txRiskCounts: Record<string, number>;
+    combinedRiskCounts: Record<string, number>;
+  };
+};
+
+type AiOpsAttention = {
+  tone: "low" | "medium" | "high";
+  label: string;
+  summary: string;
+  details: string[];
 };
 
 const AUDIT_ACTION_LABELS: Record<string, string> = {
@@ -178,6 +239,24 @@ const formatUsdAmount = (amount?: number | null, currency?: string | null) => {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })} ${suffix}`;
+};
+
+const formatProfileLabel = (category?: string | null, tier?: string | null) => {
+  if (category === "BUSINESS") {
+    if (tier === "ENTERPRISE") return "B3 Enterprise";
+    if (tier === "MEDIUM_BUSINESS") return "B2 Medium Business";
+    return "B1 Small Business";
+  }
+  if (tier === "BASIC") return "P1 Basic";
+  if (tier === "PREMIUM") return "P3 Premium";
+  return "P2 Standard";
+};
+
+const formatProfileStatus = (status?: string | null) => {
+  if (status === "PENDING_REVIEW") return "Pending review";
+  if (status === "VERIFIED") return "Verified";
+  if (status === "REQUIRES_REVIEW") return "Needs review";
+  return "System assigned";
 };
 
 const inferAuditCategoryClass = (
@@ -427,6 +506,147 @@ const formatAlertStatusLabel = (value: AdminAlertStatus) => {
 const formatAlertTypeLabel = (value: AdminAlertApi["type"]) =>
   value === "transaction" ? "Transaction" : "Login";
 
+const formatAlertScore = (value?: number | null) => {
+  if (value == null || !Number.isFinite(value)) return "N/A";
+  return value <= 1 ? `${Math.round(value * 100)}%` : `${Math.round(value)}%`;
+};
+
+const buildAiRuntimeAttention = (
+  overview: AiOverview | null,
+): AiOpsAttention => {
+  if (!overview) {
+    return {
+      tone: "medium",
+      label: "Unavailable",
+      summary: "AI runtime status has not loaded yet.",
+      details: ["Refresh admin data to confirm model and runtime health."],
+    };
+  }
+
+  const details: string[] = [];
+  let tone: AiOpsAttention["tone"] = "low";
+
+  if (!overview.status.modelLoaded) {
+    tone = "high";
+    details.push("Login anomaly model is not loaded.");
+  }
+  if (!overview.status.txModelLoaded) {
+    tone = "high";
+    details.push("Transaction risk model is not loaded.");
+  }
+  if (!overview.status.mongoConnected) {
+    tone = tone === "high" ? "high" : "medium";
+    details.push(
+      "Mongo connectivity is offline; some AI fallback or feature paths may be reduced.",
+    );
+  }
+  if (!overview.status.authMode || overview.status.authMode === "n/a") {
+    tone = tone === "high" ? "high" : "medium";
+    details.push("The AI service did not report a clear auth mode.");
+  }
+
+  if (details.length === 0) {
+    details.push(
+      "Login and transaction models are loaded and reporting runtime status normally.",
+    );
+  }
+
+  return {
+    tone,
+    label:
+      tone === "high"
+        ? "Needs attention"
+        : tone === "medium"
+          ? "Monitor"
+          : "Healthy",
+    summary:
+      tone === "high"
+        ? "One or more core AI runtime dependencies are degraded."
+        : tone === "medium"
+          ? "AI runtime is available but has signals worth checking."
+          : "AI runtime is healthy and ready for scoring.",
+    details,
+  };
+};
+
+const buildAiMaintenanceAttention = (
+  overview: AiOverview | null,
+  txRetrainBusy: boolean,
+  txRetrainMessage: string,
+): AiOpsAttention => {
+  if (!overview) {
+    return {
+      tone: "medium",
+      label: "Unavailable",
+      summary: "Transaction monitoring statistics have not loaded yet.",
+      details: ["Refresh admin data before reviewing model maintenance."],
+    };
+  }
+
+  const high = overview.stats.txRiskCounts.HIGH || 0;
+  const medium = overview.stats.txRiskCounts.MEDIUM || 0;
+  const low = overview.stats.txRiskCounts.LOW || 0;
+  const details: string[] = [];
+  let tone: AiOpsAttention["tone"] = "low";
+
+  if (high > 0) {
+    tone = "high";
+    details.push(
+      `${high} high-risk transaction alerts were recorded in the last ${overview.stats.windowHours} hours.`,
+    );
+  }
+  if (medium > 0) {
+    tone = tone === "high" ? "high" : "medium";
+    details.push(
+      `${medium} medium-risk transaction alerts were recorded in the same window.`,
+    );
+  }
+  if (txRetrainBusy) {
+    tone = tone === "high" ? "high" : "medium";
+    details.push("A transaction model retraining job is currently running.");
+  }
+  if (txRetrainMessage) {
+    details.push(txRetrainMessage);
+  }
+  if (details.length === 0) {
+    details.push(
+      `No medium or high transaction alerts were recorded in the last ${overview.stats.windowHours} hours.`,
+    );
+    details.push(
+      `${low} low-risk transaction events were monitored without escalation.`,
+    );
+  }
+
+  return {
+    tone,
+    label:
+      tone === "high"
+        ? "Action needed"
+        : tone === "medium"
+          ? "Review suggested"
+          : "Stable",
+    summary:
+      tone === "high"
+        ? "Recent transaction risk activity needs analyst attention."
+        : tone === "medium"
+          ? "Transaction model maintenance has notable signals to review."
+          : "Transaction monitoring looks stable in the current window.",
+    details,
+  };
+};
+
+const formatRiskScore100 = (value?: number | null) => {
+  if (value == null || !Number.isFinite(value)) return "N/A";
+  return `${Math.round(value)}/100`;
+};
+
+const formatAccountSegmentLabel = (value?: AdminAlertApi["accountSegment"]) => {
+  if (!value) return "N/A";
+  if (value === "enterprise") return "Enterprise";
+  if (value === "sme") return "SME";
+  return "Personal";
+};
+
 const parseCurrencyAmount = (value: string): number => {
   const parsed = Number(value.replace(/[^0-9.-]/g, ""));
   return Number.isFinite(parsed) ? parsed : 0;
@@ -489,9 +709,92 @@ const styles = `
   .ana-page {
     background: #f6f7fb;
     min-height: 100vh;
-    padding: 28px 32px 40px;
+    padding: 24px 28px 36px;
     color: #1f2937;
     font-family: "Inter", "Segoe UI", sans-serif;
+  }
+  .ops-topbar {
+    display:grid;
+    grid-template-columns:minmax(0, 1.2fr) auto;
+    gap:18px;
+    align-items:start;
+    margin-bottom:18px;
+  }
+  .ops-header-copy {
+    display:grid;
+    gap:6px;
+  }
+  .ops-eyebrow {
+    display:inline-flex;
+    align-items:center;
+    gap:8px;
+    width:max-content;
+    padding:6px 10px;
+    border-radius:999px;
+    background:#122340;
+    border:1px solid #1e3a66;
+    color:#8fb7ff;
+    font-size:11px;
+    font-weight:800;
+    letter-spacing:0.08em;
+    text-transform:uppercase;
+  }
+  .ops-header-copy h1 {
+    margin:0;
+    font-size:30px;
+    line-height:1.05;
+  }
+  .ops-header-copy p {
+    margin:0;
+    color:#6b7280;
+    max-width:760px;
+    line-height:1.55;
+  }
+  .ops-quick-actions {
+    display:flex;
+    gap:10px;
+    flex-wrap:wrap;
+    justify-content:flex-end;
+  }
+  .ops-quick-btn {
+    border:1px solid #1d3a5b;
+    background:#0d1f35;
+    color:#e7f1ff;
+    border-radius:12px;
+    padding:10px 14px;
+    cursor:pointer;
+    font-weight:700;
+  }
+  .ops-summary-strip {
+    display:grid;
+    grid-template-columns:repeat(4, minmax(0, 1fr));
+    gap:12px;
+    margin-bottom:18px;
+  }
+  .ops-summary-card {
+    border-radius:16px;
+    border:1px solid #1b3352;
+    background:linear-gradient(180deg, #091a2f 0%, #0d2139 100%);
+    padding:14px 16px;
+    display:grid;
+    gap:6px;
+    box-shadow:0 18px 36px rgba(7,17,48,0.24);
+  }
+  .ops-summary-card strong {
+    font-size:26px;
+    line-height:1;
+  }
+  .ops-summary-label {
+    font-size:12px;
+    font-weight:800;
+    letter-spacing:0.08em;
+    text-transform:uppercase;
+    color:#89a3c8;
+  }
+  .ops-summary-note {
+    color:#9fb4d6;
+    font-size:13px;
+    line-height:1.45;
   }
   .ana-header {
     display: flex;
@@ -532,6 +835,12 @@ const styles = `
   }
   .ana-title h1 { margin: 0; font-size: 26px; }
   .ana-title p { margin: 2px 0 0; color: #6b7280; }
+  .section-subtitle {
+    margin:6px 0 0;
+    color:#89a3c8;
+    font-size:14px;
+    line-height:1.5;
+  }
   .ana-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .ana-segmented {
     display: inline-flex;
@@ -692,42 +1001,153 @@ const styles = `
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    background: #ffffff;
-    border-right: 1px solid #e5e7eb;
-    color: #111827;
+    background: linear-gradient(180deg, #0c1327 0%, #0a1021 100%);
+    border-right: 1px solid #101a35;
+    color: #e7ecff;
+    padding: 18px 14px;
+    gap: 16px;
+  }
+  .mf-brand {
+    display:grid;
+    gap:10px;
+    padding:8px 8px 2px;
+  }
+  .mf-brand-top {
+    display:flex;
+    align-items:center;
+    gap:12px;
+  }
+  .mf-brand-badge {
+    width:42px;
+    height:42px;
+    border-radius:14px;
+    display:grid;
+    place-items:center;
+    background:linear-gradient(135deg, #1f6bff, #11398d);
+    color:#ffffff;
+    font-weight:800;
+    font-size:12px;
+    letter-spacing:0.08em;
+  }
+  .mf-brand-copy {
+    display:grid;
+    gap:2px;
+  }
+  .mf-brand-copy strong {
+    font-size:18px;
+    color:#f4f8ff;
+  }
+  .mf-brand-copy span {
+    font-size:12px;
+    color:#7f97bc;
+  }
+  .mf-brand-meta {
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+  }
+  .mf-brand-pill {
+    display:inline-flex;
+    align-items:center;
+    padding:5px 9px;
+    border-radius:999px;
+    border:1px solid #1b2748;
+    background:#10192f;
+    color:#9cbcf9;
+    font-size:11px;
+    font-weight:700;
   }
   .mf-menu {
     display: flex;
     flex-direction: column;
     flex: 1;
+    gap: 6px;
   }
   .mf-menu li:last-child { margin-top: auto; }
 
   /* Sidebar icons */
   .mf-menu button {
     width: 100%; display: flex; align-items: center; gap: 14px; padding: 14px 16px;
-    background: transparent; border: none; color: #111827; text-align: left;
-    border-radius: 12px; cursor: pointer; transition: all 0.2s; font-size: 16px; font-weight: 700;
+    background: transparent; border: none; color: #dbe8ff; text-align: left;
+    border-radius: 12px; cursor: pointer; transition: all 0.2s; font-size: 15px; font-weight: 700;
   }
-  .mf-menu button:hover, .mf-menu button.active { background: #e8edfb; color: #111827; }
+  .mf-menu button:hover, .mf-menu button.active { background: #162143; color: #ffffff; }
   .mf-ico {
     width: 32px; height: 32px;
-    border-radius: 50%;
+    border-radius: 10px;
     display: grid; place-items: center;
-    font-size: 16px;
-    background: #e8edfb;
-    color: #1f2937;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    background: #111c35;
+    color: #9cbcf9;
     flex-shrink: 0;
-  }
-  .mf-ico.users, .mf-ico.audit, .mf-ico.profile, .mf-ico.setting, .mf-ico.logout {
-    background: #e8edfb;
-    color: #1f2937;
   }
   .mf-menu button.active .mf-ico {
     background: #2563eb;
     color: #ffffff;
   }
-  .mf-logo { color: #111827; }
+  .dashboard-security-grid {
+    display:grid;
+    grid-template-columns:repeat(3, minmax(0, 1fr));
+    gap:14px;
+    margin-bottom:18px;
+  }
+  .dashboard-security-card {
+    border-radius:16px;
+    border:1px solid #19345b;
+    background:linear-gradient(180deg, #09192e 0%, #0d2038 100%);
+    box-shadow:0 18px 36px rgba(7,17,48,0.24);
+    padding:16px;
+    display:grid;
+    gap:12px;
+  }
+  .dashboard-security-card h3 {
+    margin:0;
+    color:#f3f7ff;
+    font-size:18px;
+  }
+  .dashboard-security-card p {
+    margin:0;
+    color:#9cb5d6;
+    line-height:1.5;
+  }
+  .dashboard-security-list {
+    display:grid;
+    gap:10px;
+  }
+  .dashboard-security-item {
+    display:flex;
+    justify-content:space-between;
+    gap:10px;
+    align-items:center;
+    border:1px solid #1c3558;
+    border-radius:12px;
+    background:#0c1a2f;
+    padding:10px 12px;
+  }
+  .dashboard-security-item span {
+    color:#9cb5d6;
+    font-size:13px;
+  }
+  .dashboard-security-item strong {
+    color:#eef4ff;
+    font-size:14px;
+  }
+  .dashboard-security-actions {
+    display:grid;
+    gap:10px;
+  }
+  .dashboard-security-actions button {
+    border:1px solid #284564;
+    border-radius:12px;
+    background:#10233c;
+    color:#e7f1ff;
+    padding:12px 14px;
+    text-align:left;
+    cursor:pointer;
+    font-weight:700;
+  }
 
   /* User management */
   .user-card {
@@ -1201,6 +1621,32 @@ const styles = `
     font-weight:600;
   }
   .alerts-search { min-width:240px; }
+  .alerts-ops-grid {
+    display:grid;
+    grid-template-columns:repeat(2, minmax(0, 1fr));
+    gap:12px;
+    margin:0 0 18px;
+  }
+  .alerts-ops-card {
+    border:1px solid #1d3a5b;
+    border-radius:16px;
+    background:#0d1f35;
+    padding:16px;
+    display:grid;
+    gap:12px;
+  }
+  .alerts-ops-card[data-tone="high"] { border-color:#6b2d3b; box-shadow: inset 0 0 0 1px rgba(255,122,149,0.16); }
+  .alerts-ops-card[data-tone="medium"] { border-color:#665422; box-shadow: inset 0 0 0 1px rgba(243,199,66,0.12); }
+  .alerts-ops-head {
+    display:flex;
+    justify-content:space-between;
+    gap:14px;
+    flex-wrap:wrap;
+    align-items:flex-start;
+  }
+  .alerts-ops-head h3 { margin:6px 0 4px; color:#eef4ff; font-size:18px; }
+  .alerts-ops-body { display:grid; gap:12px; }
+  .alerts-ops-points { display:flex; gap:8px; flex-wrap:wrap; }
   .alerts-list { display:grid; gap:14px; }
   .alerts-item {
     border:1px solid #1f3857;
@@ -1394,6 +1840,24 @@ const styles = `
   .theme-light .alerts-reason { background:#f8fbff; border-color:#dbe5f3; color:#0f172a; }
   .theme-light .alerts-explanation { color:#334155; }
   .theme-light .alerts-tone-pill { background:#eff6ff; border-color:#bfdbfe; color:#1d4ed8; }
+  .theme-light .alerts-ops-card { background:#ffffff; border-color:#dbe5f3; }
+  .theme-light .alerts-ops-head h3 { color:#0f172a; }
+  .theme-light .ops-eyebrow,
+  .theme-light .ops-summary-card,
+  .theme-light .ops-quick-btn,
+  .theme-light .dashboard-security-card,
+  .theme-light .dashboard-security-item,
+  .theme-light .dashboard-security-actions button {
+    background:#ffffff;
+    color:#0f172a;
+    border-color:#dbe5f3;
+  }
+  .theme-light .ops-summary-label,
+  .theme-light .ops-summary-note,
+  .theme-light .dashboard-security-card p,
+  .theme-light .dashboard-security-item span { color:#64748b; }
+  .theme-light .dashboard-security-card h3,
+  .theme-light .dashboard-security-item strong { color:#0f172a; }
 
   /* Compact desktop layout for 16:9 screens */
   @media (min-width: 1280px) and (min-aspect-ratio: 16/9) {
@@ -1430,7 +1894,11 @@ const styles = `
     .audit-select { min-width: 150px; }
   }
   @media (max-width: 900px) {
+    .ops-topbar { grid-template-columns:1fr; }
+    .ops-summary-strip { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+    .dashboard-security-grid { grid-template-columns:1fr; }
     .alerts-summary-bar { grid-template-columns:repeat(2, minmax(140px, 1fr)); }
+    .alerts-ops-grid { grid-template-columns:1fr; }
     .alerts-core-grid { grid-template-columns:1fr; }
     .audit-filters { width: 100%; }
     .audit-select { flex: 1 1 170px; min-width: 0; }
@@ -1440,6 +1908,9 @@ const styles = `
     .audit-pagination { justify-content: center; }
     .alerts-filters { width:100%; }
     .alerts-filter, .alerts-search { flex:1 1 180px; min-width:0; }
+  }
+  @media (max-width: 640px) {
+    .ops-summary-strip { grid-template-columns:1fr; }
   }
 `;
 
@@ -1484,7 +1955,7 @@ function AdminApp() {
   });
   const [active, setActive] = useState<
     "dashboard" | "alerts" | "users" | "audit" | "profile" | "setting"
-  >("dashboard");
+  >("alerts");
   useEffect(() => {
     if (typeof document !== "undefined") {
       document.body.classList.remove("theme-light", "theme-dark");
@@ -1509,6 +1980,7 @@ function AdminApp() {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [alerts, setAlerts] = useState<AdminAlertApi[]>([]);
+  const [aiOverview, setAiOverview] = useState<AiOverview | null>(null);
   const [auditLogs, setAuditLogs] = useState<AuditLogView[]>([]);
   const [auditTotalCount, setAuditTotalCount] = useState(0);
   const [adminDataLoading, setAdminDataLoading] = useState(false);
@@ -1560,21 +2032,30 @@ function AdminApp() {
 
     const headers = { Authorization: `Bearer ${token}` };
 
-    const mapUser = (u: AdminUserApi): AdminUser => ({
-      id: u.id,
-      name: u.fullName?.trim() || u.email.split("@")[0] || "User",
-      email: u.email,
-      role: u.role === "ADMIN" ? "Admin" : "User",
-      title: u.role === "ADMIN" ? "System Admin" : "Customer",
-      phone: u.phone || "-",
-      birthday: u.createdAt
-        ? new Date(u.createdAt).toISOString().slice(0, 10)
-        : "",
-      address: u.address || "-",
-      avatar: `https://i.pravatar.cc/80?u=${encodeURIComponent(u.email)}`,
-      status: u.status === "ACTIVE" ? "Active" : "Locked",
-      lastLogin: u.lastLoginAt || u.createdAt || new Date().toISOString(),
-    });
+    const mapUser = (u: AdminUserApi): AdminUser => {
+      const metadata =
+        u.metadata && typeof u.metadata === "object" ? u.metadata : {};
+      const accountProfile =
+        metadata.accountProfile && typeof metadata.accountProfile === "object"
+          ? (metadata.accountProfile as AdminUser["accountProfile"])
+          : null;
+      return {
+        id: u.id,
+        name: u.fullName?.trim() || u.email.split("@")[0] || "User",
+        email: u.email,
+        role: u.role === "ADMIN" ? "Admin" : "User",
+        title: u.role === "ADMIN" ? "System Admin" : "Customer",
+        phone: u.phone || "-",
+        birthday: u.createdAt
+          ? new Date(u.createdAt).toISOString().slice(0, 10)
+          : "",
+        address: u.address || "-",
+        avatar: `https://i.pravatar.cc/80?u=${encodeURIComponent(u.email)}`,
+        status: u.status === "ACTIVE" ? "Active" : "Locked",
+        lastLogin: u.lastLoginAt || u.createdAt || new Date().toISOString(),
+        accountProfile: accountProfile || null,
+      };
+    };
 
     const load = async () => {
       setAdminDataLoading(true);
@@ -1632,6 +2113,31 @@ function AdminApp() {
     void load();
   }, [token, user?.role]);
 
+  useEffect(() => {
+    if (!token || user?.role !== "ADMIN") return;
+    let cancelled = false;
+    const loadAiOverview = async () => {
+      try {
+        const resp = await fetch(`${API_BASE}/ai/overview`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const payload = (await resp
+          .json()
+          .catch(() => null)) as AiOverview | null;
+        if (!resp.ok || !payload || cancelled) return;
+        setAiOverview(payload);
+      } catch {
+        if (!cancelled) {
+          setAiOverview(null);
+        }
+      }
+    };
+    void loadAiOverview();
+    return () => {
+      cancelled = true;
+    };
+  }, [token, user?.role]);
+
   const [settings, setSettings] = useState({
     notifications: true,
     twofa: false,
@@ -1660,7 +2166,21 @@ function AdminApp() {
   const [userPage, setUserPage] = useState(1);
   const userPageSize = 10;
   const [txUser, setTxUser] = useState<AdminUser | null>(null);
+  const [profileReviewUser, setProfileReviewUser] = useState<AdminUser | null>(
+    null,
+  );
+  const [profileReviewBusy, setProfileReviewBusy] = useState(false);
+  const [profileReviewForm, setProfileReviewForm] = useState({
+    category: "PERSONAL",
+    tier: "STANDARD",
+    confidence: "0.92",
+  });
+  const [txRetrainBusy, setTxRetrainBusy] = useState(false);
+  const [txRetrainMessage, setTxRetrainMessage] = useState("");
   const [expandedAlert, setExpandedAlert] = useState<string | null>(null);
+  const [expandedAiOpsPanel, setExpandedAiOpsPanel] = useState<
+    "runtime" | "maintenance" | null
+  >(null);
   const [alertStatusFilter, setAlertStatusFilter] = useState<
     "all" | AdminAlertStatus
   >("all");
@@ -1830,6 +2350,12 @@ function AdminApp() {
     }),
     [filteredAlerts],
   );
+  const aiRuntimeAttention = buildAiRuntimeAttention(aiOverview);
+  const aiMaintenanceAttention = buildAiMaintenanceAttention(
+    aiOverview,
+    txRetrainBusy,
+    txRetrainMessage,
+  );
   const currentAlertPage = Math.min(alertPage, totalAlertPages);
   const paginatedAlerts = useMemo(() => {
     const start = (currentAlertPage - 1) * alertPageSize;
@@ -1879,6 +2405,143 @@ function AdminApp() {
       );
     } finally {
       setAlertActionBusyId(null);
+    }
+  };
+
+  useEffect(() => {
+    if (!profileReviewUser) return;
+    const profile = profileReviewUser.accountProfile;
+    setProfileReviewForm({
+      category: profile?.requestedCategory || profile?.category || "PERSONAL",
+      tier: profile?.requestedTier || profile?.tier || "STANDARD",
+      confidence: String(
+        typeof profile?.confidence === "number" ? profile.confidence : 0.92,
+      ),
+    });
+  }, [profileReviewUser]);
+
+  const handleApproveAccountProfile = async () => {
+    if (!token || !profileReviewUser) return;
+    try {
+      setProfileReviewBusy(true);
+      const resp = await fetch(
+        `${API_BASE}/admin/users/${profileReviewUser.id}/account-profile`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            category: profileReviewForm.category,
+            tier: profileReviewForm.tier,
+            approvePending:
+              profileReviewUser.accountProfile?.hasPendingRequest === true,
+            confidence: Number(profileReviewForm.confidence),
+            status: "VERIFIED",
+          }),
+        },
+      );
+      const payload = (await resp.json().catch(() => null)) as {
+        error?: string;
+        user?: AdminUserApi;
+      } | null;
+      if (!resp.ok || !payload?.user) {
+        window.alert(payload?.error || "Could not update account profile.");
+        return;
+      }
+
+      const updated = {
+        id: payload.user.id,
+        email: payload.user.email,
+        role: payload.user.role,
+        status: payload.user.status,
+        fullName: payload.user.fullName,
+        phone: payload.user.phone,
+        address: payload.user.address,
+        createdAt: payload.user.createdAt,
+        lastLoginAt: payload.user.lastLoginAt,
+        metadata: payload.user.metadata,
+      } satisfies AdminUserApi;
+
+      const nextUser = (() => {
+        const metadata =
+          updated.metadata && typeof updated.metadata === "object"
+            ? updated.metadata
+            : {};
+        const accountProfile =
+          metadata.accountProfile && typeof metadata.accountProfile === "object"
+            ? (metadata.accountProfile as AdminUser["accountProfile"])
+            : null;
+        return {
+          id: updated.id,
+          name:
+            updated.fullName?.trim() || updated.email.split("@")[0] || "User",
+          email: updated.email,
+          role: updated.role === "ADMIN" ? "Admin" : "User",
+          title: updated.role === "ADMIN" ? "System Admin" : "Customer",
+          phone: updated.phone || "-",
+          birthday: updated.createdAt
+            ? new Date(updated.createdAt).toISOString().slice(0, 10)
+            : "",
+          address: updated.address || "-",
+          avatar: `https://i.pravatar.cc/80?u=${encodeURIComponent(updated.email)}`,
+          status: updated.status === "ACTIVE" ? "Active" : "Locked",
+          lastLogin:
+            updated.lastLoginAt ||
+            updated.createdAt ||
+            new Date().toISOString(),
+          accountProfile: accountProfile || null,
+        } satisfies AdminUser;
+      })();
+
+      setUsers((list) =>
+        list.map((item) => (item.id === nextUser.id ? nextUser : item)),
+      );
+      setProfileReviewUser(nextUser);
+    } finally {
+      setProfileReviewBusy(false);
+    }
+  };
+
+  const handleRetrainTransactionModel = async () => {
+    if (!token) return;
+    try {
+      setTxRetrainBusy(true);
+      setTxRetrainMessage("");
+      const resp = await fetch(`${API_BASE}/admin/ai/tx/retrain`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ limit: 900 }),
+      });
+      const payload = (await resp.json().catch(() => null)) as {
+        error?: string;
+        modelVersion?: string;
+        trainSize?: number;
+        excludedFlaggedCount?: number;
+        trainedAt?: string;
+      } | null;
+      if (!resp.ok) {
+        window.alert(payload?.error || "Could not retrain transaction model.");
+        return;
+      }
+      setTxRetrainMessage(
+        `Retrained ${payload?.trainSize || 0} clean transfers. Excluded ${payload?.excludedFlaggedCount || 0} flagged cases.`,
+      );
+      const overviewResp = await fetch(`${API_BASE}/ai/overview`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const overviewPayload = (await overviewResp
+        .json()
+        .catch(() => null)) as AiOverview | null;
+      if (overviewResp.ok && overviewPayload) {
+        setAiOverview(overviewPayload);
+      }
+    } finally {
+      setTxRetrainBusy(false);
     }
   };
 
@@ -2487,19 +3150,108 @@ function AdminApp() {
     [analytics.revenueTrend],
   );
 
+  const securitySummary = useMemo(() => {
+    const pendingAlerts = alerts.filter(
+      (item) => item.adminStatus === "pending_review",
+    ).length;
+    const highRiskAlerts = alerts.filter(
+      (item) => item.riskLevel === "high",
+    ).length;
+    const highRiskTransactions = alerts.filter(
+      (item) => item.type === "transaction" && item.riskLevel === "high",
+    ).length;
+    const lockedAccounts = users.filter(
+      (item) => item.status === "Locked",
+    ).length;
+    const pendingProfiles = users.filter(
+      (item) => item.accountProfile?.hasPendingRequest,
+    ).length;
+    const auditFailures = auditLogs.filter(
+      (item) => item.statusClass === "fail",
+    ).length;
+
+    return {
+      pendingAlerts,
+      highRiskAlerts,
+      highRiskTransactions,
+      lockedAccounts,
+      pendingProfiles,
+      auditFailures,
+    };
+  }, [alerts, users, auditLogs]);
+
+  const pageMeta: Record<
+    typeof active,
+    { eyebrow: string; title: string; description: string }
+  > = {
+    alerts: {
+      eyebrow: "Security operations",
+      title: "Security Alerts",
+      description:
+        "Work the live queue first, confirm real risk quickly, and keep AI decisions explainable for every alert.",
+    },
+    audit: {
+      eyebrow: "Investigation trail",
+      title: "Audit Trail",
+      description:
+        "Trace every admin action, AI review, and transaction event with enough context to investigate safely.",
+    },
+    dashboard: {
+      eyebrow: "Risk posture",
+      title: "Security Dashboard",
+      description:
+        "See the current defensive posture before you drill into alerts, user reviews, or the audit trail.",
+    },
+    profile: {
+      eyebrow: "Admin workspace",
+      title: "Admin Profile",
+      description:
+        "Keep the operator account current so account ownership, contact routing, and session security remain clear.",
+    },
+    setting: {
+      eyebrow: "Control plane",
+      title: "Security Controls",
+      description:
+        "Review admin-only controls, notification routing, and sign-in hardening from one place.",
+    },
+    users: {
+      eyebrow: "Account governance",
+      title: "User Risk Review",
+      description:
+        "Lock risky accounts, review profile drift, and inspect user activity before approving high-trust changes.",
+    },
+  };
+  const activePageMeta = pageMeta[active];
+
   return (
     <div className={`mf-shell theme-${theme}`}>
       <style>{styles}</style>
 
       <aside className="mf-sidebar">
-        <div className="mf-logo">FPIPay Admin</div>
+        <div className="mf-brand">
+          <div className="mf-brand-top">
+            <div className="mf-brand-badge">SOC</div>
+            <div className="mf-brand-copy">
+              <strong>Security Ops</strong>
+              <span>Admin control console</span>
+            </div>
+          </div>
+          <div className="mf-brand-meta">
+            <span className="mf-brand-pill">
+              {securitySummary.pendingAlerts} pending
+            </span>
+            <span className="mf-brand-pill">
+              {securitySummary.highRiskAlerts} high risk
+            </span>
+          </div>
+        </div>
         <ul className="mf-menu">
           <li>
             <button
               className={active === "dashboard" ? "active" : ""}
               onClick={() => setActive("dashboard")}
             >
-              <span className="mf-ico palette">🎨</span>
+              <span className="mf-ico palette">DB</span>
               Dashboard
             </button>
           </li>
@@ -2508,8 +3260,8 @@ function AdminApp() {
               className={active === "alerts" ? "active" : ""}
               onClick={() => setActive("alerts")}
             >
-              <span className="mf-ico audit">AI</span>
-              Alerts
+              <span className="mf-ico audit">AL</span>
+              Security Alerts
             </button>
           </li>
           <li>
@@ -2517,8 +3269,8 @@ function AdminApp() {
               className={active === "users" ? "active" : ""}
               onClick={() => setActive("users")}
             >
-              <span className="mf-ico users">👥</span>
-              User Management
+              <span className="mf-ico users">UR</span>
+              User Review
             </button>
           </li>
           <li>
@@ -2526,8 +3278,8 @@ function AdminApp() {
               className={active === "audit" ? "active" : ""}
               onClick={() => setActive("audit")}
             >
-              <span className="mf-ico audit">📄</span>
-              Audit Log
+              <span className="mf-ico audit">AT</span>
+              Audit Trail
             </button>
           </li>
           <li>
@@ -2535,8 +3287,8 @@ function AdminApp() {
               className={active === "profile" ? "active" : ""}
               onClick={() => setActive("profile")}
             >
-              <span className="mf-ico profile">👤</span>
-              Profile
+              <span className="mf-ico profile">PR</span>
+              Admin Profile
             </button>
           </li>
           <li>
@@ -2544,8 +3296,8 @@ function AdminApp() {
               className={active === "setting" ? "active" : ""}
               onClick={() => setActive("setting")}
             >
-              <span className="mf-ico setting">⚙️</span>
-              Setting
+              <span className="mf-ico setting">SC</span>
+              Security Controls
             </button>
           </li>
           <li>
@@ -2555,7 +3307,7 @@ function AdminApp() {
                 window.location.href = "/";
               }}
             >
-              <span className="mf-ico logout">🚪</span>
+              <span className="mf-ico logout">LO</span>
               Logout
             </button>
           </li>
@@ -2584,11 +3336,75 @@ function AdminApp() {
             </div>
           </div>
         ) : null}
+        <section className="ops-topbar">
+          <div className="ops-header-copy">
+            <span className="ops-eyebrow">{activePageMeta.eyebrow}</span>
+            <h1>{activePageMeta.title}</h1>
+            <p>{activePageMeta.description}</p>
+          </div>
+          <div className="ops-quick-actions">
+            <button
+              type="button"
+              className="ops-quick-btn"
+              onClick={() => setActive("alerts")}
+            >
+              Review queue
+            </button>
+            <button
+              type="button"
+              className="ops-quick-btn"
+              onClick={() => setActive("users")}
+            >
+              User review
+            </button>
+            <button
+              type="button"
+              className="ops-quick-btn"
+              onClick={() => setActive("audit")}
+            >
+              Audit trail
+            </button>
+          </div>
+        </section>
+        <section className="ops-summary-strip">
+          <div className="ops-summary-card">
+            <span className="ops-summary-label">Pending alerts</span>
+            <strong>{securitySummary.pendingAlerts}</strong>
+            <span className="ops-summary-note">
+              Analyst queue waiting for review decisions.
+            </span>
+          </div>
+          <div className="ops-summary-card">
+            <span className="ops-summary-label">High-risk cases</span>
+            <strong>{securitySummary.highRiskAlerts}</strong>
+            <span className="ops-summary-note">
+              Includes {securitySummary.highRiskTransactions} transaction cases.
+            </span>
+          </div>
+          <div className="ops-summary-card">
+            <span className="ops-summary-label">Locked accounts</span>
+            <strong>{securitySummary.lockedAccounts}</strong>
+            <span className="ops-summary-note">
+              Accounts currently restricted by admins or policy.
+            </span>
+          </div>
+          <div className="ops-summary-card">
+            <span className="ops-summary-label">Review backlog</span>
+            <strong>{securitySummary.pendingProfiles}</strong>
+            <span className="ops-summary-note">
+              Profile reviews pending, audit failures{" "}
+              {securitySummary.auditFailures}.
+            </span>
+          </div>
+        </section>
         {active === "dashboard" && (
           <>
             <header className="ana-header">
               <div className="ana-title">
-                <h1>Dashboard</h1>
+                <h1>Risk Posture Trends</h1>
+                <p className="section-subtitle">
+                  Operational context after triaging the live queue.
+                </p>
               </div>
               <div className="ana-actions">
                 <div className="ana-segmented">
@@ -2615,6 +3431,62 @@ function AdminApp() {
                 </div>
               </div>
             </header>
+
+            <section className="dashboard-security-grid">
+              <div className="dashboard-security-card">
+                <h3>Immediate queue</h3>
+                <p>Focus the team on items that can change exposure quickly.</p>
+                <div className="dashboard-security-list">
+                  <div className="dashboard-security-item">
+                    <span>Pending alert reviews</span>
+                    <strong>{securitySummary.pendingAlerts}</strong>
+                  </div>
+                  <div className="dashboard-security-item">
+                    <span>Locked accounts</span>
+                    <strong>{securitySummary.lockedAccounts}</strong>
+                  </div>
+                  <div className="dashboard-security-item">
+                    <span>Profile approvals waiting</span>
+                    <strong>{securitySummary.pendingProfiles}</strong>
+                  </div>
+                </div>
+              </div>
+              <div className="dashboard-security-card">
+                <h3>Attack surface signals</h3>
+                <p>
+                  Watch the controls that usually move first during incidents.
+                </p>
+                <div className="dashboard-security-list">
+                  <div className="dashboard-security-item">
+                    <span>High-risk transaction alerts</span>
+                    <strong>{securitySummary.highRiskTransactions}</strong>
+                  </div>
+                  <div className="dashboard-security-item">
+                    <span>Total high-risk alerts</span>
+                    <strong>{securitySummary.highRiskAlerts}</strong>
+                  </div>
+                  <div className="dashboard-security-item">
+                    <span>Audit failures</span>
+                    <strong>{securitySummary.auditFailures}</strong>
+                  </div>
+                </div>
+              </div>
+              <div className="dashboard-security-card">
+                <h3>Next actions</h3>
+                <p>Jump straight into the workflows used most during review.</p>
+                <div className="dashboard-security-actions">
+                  <button type="button" onClick={() => setActive("alerts")}>
+                    Work the alert queue
+                  </button>
+                  <button type="button" onClick={() => setActive("users")}>
+                    Review account profile changes
+                  </button>
+                  <button type="button" onClick={() => setActive("audit")}>
+                    Inspect the audit trail
+                  </button>
+                </div>
+              </div>
+            </section>
 
             <section className="ana-kpi-grid">
               {analytics.kpiCards.map((card) => (
@@ -2796,10 +3668,10 @@ function AdminApp() {
           <div className="alerts-card">
             <div className="alerts-head">
               <div>
-                <h2>AI Alerts</h2>
+                <h2>Security Alerts</h2>
                 <p>
-                  Review flagged cases, decide quickly, and open details only
-                  when you need them.
+                  Review AI-flagged cases, investigate quickly, and keep every
+                  security decision visible to the team.
                 </p>
               </div>
               <div className="alerts-filters">
@@ -2869,6 +3741,244 @@ function AdminApp() {
                 <span>Transaction alerts</span>
               </div>
             </div>
+
+            <section className="alerts-ops-grid">
+              <article
+                className="alerts-ops-card"
+                data-tone={aiRuntimeAttention.tone}
+              >
+                <div className="alerts-ops-head">
+                  <div>
+                    <div className="alerts-meta-line">
+                      <span
+                        className={`alerts-badge ${aiRuntimeAttention.tone === "high" ? "high" : aiRuntimeAttention.tone === "medium" ? "medium" : "low"}`}
+                      >
+                        {aiRuntimeAttention.label}
+                      </span>
+                      <span className="alerts-tone-pill">AI runtime</span>
+                    </div>
+                    <h3>AI Runtime</h3>
+                    <p className="alerts-one-line">
+                      {aiRuntimeAttention.summary}
+                    </p>
+                  </div>
+                  <button
+                    className="alerts-btn"
+                    type="button"
+                    onClick={() =>
+                      setExpandedAiOpsPanel((prev) =>
+                        prev === "runtime" ? null : "runtime",
+                      )
+                    }
+                  >
+                    {expandedAiOpsPanel === "runtime"
+                      ? "Hide details"
+                      : "Open details"}
+                  </button>
+                </div>
+                <div className="alerts-signals">
+                  <div className="alerts-signal" data-tone="info">
+                    <strong>Login model</strong>
+                    <span>
+                      {aiOverview?.status.modelLoaded
+                        ? aiOverview.status.modelVersion || "loaded"
+                        : "not loaded"}
+                    </span>
+                  </div>
+                  <div className="alerts-signal" data-tone="info">
+                    <strong>Transaction model</strong>
+                    <span>
+                      {aiOverview?.status.txModelLoaded
+                        ? aiOverview.status.txModelVersion || "loaded"
+                        : "not loaded"}
+                    </span>
+                  </div>
+                </div>
+                {expandedAiOpsPanel === "runtime" ? (
+                  <div className="alerts-ops-body">
+                    <div className="alerts-extra">
+                      <div>
+                        <strong>Transaction source</strong>
+                        <span>
+                          {aiOverview?.status.txModelSource || "unknown"}
+                        </span>
+                      </div>
+                      <div>
+                        <strong>Login source</strong>
+                        <span>
+                          {aiOverview?.status.modelSource || "unknown"}
+                        </span>
+                      </div>
+                      <div>
+                        <strong>Auth mode</strong>
+                        <span>{aiOverview?.status.authMode || "n/a"}</span>
+                      </div>
+                      <div>
+                        <strong>Mongo connectivity</strong>
+                        <span>
+                          {aiOverview?.status.mongoConnected
+                            ? "Connected"
+                            : "Disconnected"}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="alerts-ops-points">
+                      {aiRuntimeAttention.details.map((item) => (
+                        <span key={item} className="alerts-reason">
+                          {item}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </article>
+
+              <article
+                className="alerts-ops-card"
+                data-tone={aiMaintenanceAttention.tone}
+              >
+                <div className="alerts-ops-head">
+                  <div>
+                    <div className="alerts-meta-line">
+                      <span
+                        className={`alerts-badge ${aiMaintenanceAttention.tone === "high" ? "high" : aiMaintenanceAttention.tone === "medium" ? "medium" : "low"}`}
+                      >
+                        {aiMaintenanceAttention.label}
+                      </span>
+                      <span className="alerts-tone-pill">TX maintenance</span>
+                    </div>
+                    <h3>Transaction AI Maintenance</h3>
+                    <p className="alerts-one-line">
+                      {aiMaintenanceAttention.summary}
+                    </p>
+                  </div>
+                  <button
+                    className="alerts-btn"
+                    type="button"
+                    onClick={() =>
+                      setExpandedAiOpsPanel((prev) =>
+                        prev === "maintenance" ? null : "maintenance",
+                      )
+                    }
+                  >
+                    {expandedAiOpsPanel === "maintenance"
+                      ? "Hide details"
+                      : "Open details"}
+                  </button>
+                </div>
+                <div className="alerts-signals">
+                  <div
+                    className="alerts-signal"
+                    data-tone={
+                      (aiOverview?.stats.txRiskCounts.HIGH || 0) > 0
+                        ? "warn"
+                        : "info"
+                    }
+                  >
+                    <strong>24h tx risks</strong>
+                    <span>
+                      {aiOverview
+                        ? `${aiOverview.stats.txRiskCounts.HIGH || 0} high / ${aiOverview.stats.txRiskCounts.MEDIUM || 0} medium`
+                        : "Unavailable"}
+                    </span>
+                  </div>
+                  <div className="alerts-signal" data-tone="info">
+                    <strong>Retrain state</strong>
+                    <span>{txRetrainBusy ? "Running" : "Idle"}</span>
+                  </div>
+                </div>
+                {expandedAiOpsPanel === "maintenance" ? (
+                  <div className="alerts-ops-body">
+                    <div className="alerts-extra">
+                      <div>
+                        <strong>Window</strong>
+                        <span>{aiOverview?.stats.windowHours || 24} hours</span>
+                      </div>
+                      <div>
+                        <strong>High tx alerts</strong>
+                        <span>{aiOverview?.stats.txRiskCounts.HIGH || 0}</span>
+                      </div>
+                      <div>
+                        <strong>Medium tx alerts</strong>
+                        <span>
+                          {aiOverview?.stats.txRiskCounts.MEDIUM || 0}
+                        </span>
+                      </div>
+                      <div>
+                        <strong>Low tx alerts</strong>
+                        <span>{aiOverview?.stats.txRiskCounts.LOW || 0}</span>
+                      </div>
+                    </div>
+                    <div className="alerts-ops-points">
+                      {aiMaintenanceAttention.details.map((item) => (
+                        <span key={item} className="alerts-reason">
+                          {item}
+                        </span>
+                      ))}
+                    </div>
+                    <div className="alerts-actions">
+                      <div className="alerts-buttons">
+                        <button
+                          className="alerts-btn primary"
+                          type="button"
+                          onClick={handleRetrainTransactionModel}
+                          disabled={txRetrainBusy}
+                        >
+                          {txRetrainBusy ? "Retraining..." : "Retrain TX model"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </article>
+            </section>
+
+            {false ? (
+              <section className="profile-review-grid">
+                <div className="profile-review-card">
+                  <strong>AI Runtime</strong>
+                  <span>
+                    Login model:{" "}
+                    {aiOverview?.status.modelLoaded
+                      ? aiOverview?.status.modelVersion || "loaded"
+                      : "not loaded"}
+                  </span>
+                  <span>
+                    Transaction model:{" "}
+                    {aiOverview?.status.txModelLoaded
+                      ? aiOverview?.status.txModelVersion || "loaded"
+                      : "not loaded"}
+                  </span>
+                  <small>
+                    Source: {aiOverview?.status.txModelSource || "unknown"} ·
+                    Auth {aiOverview?.status.authMode || "n/a"}
+                  </small>
+                </div>
+                <div className="profile-review-card">
+                  <strong>Transaction AI Maintenance</strong>
+                  <span>
+                    24h tx risks:{" "}
+                    {aiOverview
+                      ? `${aiOverview?.stats.txRiskCounts.HIGH || 0} high / ${aiOverview?.stats.txRiskCounts.MEDIUM || 0} medium`
+                      : "Unavailable"}
+                  </span>
+                  <small>
+                    Retrain from completed funds-flow history while excluding
+                    cases confirmed by analysts as real fraud.
+                  </small>
+                  <div className="user-action-group">
+                    <button
+                      className="user-btn primary"
+                      onClick={handleRetrainTransactionModel}
+                      disabled={txRetrainBusy}
+                    >
+                      {txRetrainBusy ? "Retraining..." : "Retrain TX model"}
+                    </button>
+                  </div>
+                  {txRetrainMessage ? <small>{txRetrainMessage}</small> : null}
+                </div>
+              </section>
+            ) : null}
 
             {filteredAlerts.length === 0 ? (
               <div className="alerts-empty">
@@ -2976,9 +4086,7 @@ function AdminApp() {
                                   >
                                     <strong>Anomaly score</strong>
                                     <span>
-                                      {typeof alert.anomalyScore === "number"
-                                        ? `${Math.round(alert.anomalyScore)}%`
-                                        : "N/A"}
+                                      {formatAlertScore(alert.anomalyScore)}
                                     </span>
                                   </div>
                                   <div
@@ -3004,6 +4112,50 @@ function AdminApp() {
                                       {formatAlertOrigin(
                                         alert.location,
                                         alert.ipAddress,
+                                      )}
+                                    </span>
+                                  </div>
+                                  <div
+                                    className="alerts-signal"
+                                    data-tone="info"
+                                  >
+                                    <strong>Base risk</strong>
+                                    <span>
+                                      {formatRiskScore100(alert.baseScore)}
+                                    </span>
+                                  </div>
+                                  <div
+                                    className="alerts-signal"
+                                    data-tone={
+                                      (alert.finalScore || 0) >= 80
+                                        ? "warn"
+                                        : "info"
+                                    }
+                                  >
+                                    <strong>Final risk</strong>
+                                    <span>
+                                      {formatRiskScore100(alert.finalScore)}
+                                    </span>
+                                  </div>
+                                  <div
+                                    className="alerts-signal"
+                                    data-tone="info"
+                                  >
+                                    <strong>Mitigation</strong>
+                                    <span>
+                                      {alert.mitigationScore != null
+                                        ? `-${Math.round(alert.mitigationScore)}`
+                                        : "N/A"}
+                                    </span>
+                                  </div>
+                                  <div
+                                    className="alerts-signal"
+                                    data-tone="neutral"
+                                  >
+                                    <strong>Segment</strong>
+                                    <span>
+                                      {formatAccountSegmentLabel(
+                                        alert.accountSegment,
                                       )}
                                     </span>
                                   </div>
@@ -3063,8 +4215,10 @@ function AdminApp() {
 
                             <div className="alerts-extra">
                               <div>
-                                <strong>Full explanation</strong>
-                                <span>{alert.explanation}</span>
+                                <strong>Analyst summary</strong>
+                                <span>
+                                  {alert.adminSummary || alert.explanation}
+                                </span>
                               </div>
                               <div>
                                 <strong>AI action</strong>
@@ -3106,6 +4260,38 @@ function AdminApp() {
                               <div>
                                 <strong>Source</strong>
                                 <span>{alert.sourceAction}</span>
+                              </div>
+                              <div>
+                                <strong>Mitigation reasons</strong>
+                                <span>
+                                  {alert.mitigationReasons?.length
+                                    ? alert.mitigationReasons.join(" | ")
+                                    : "No mitigation context recorded"}
+                                </span>
+                              </div>
+                              <div>
+                                <strong>Counter-arguments</strong>
+                                <span>
+                                  {alert.counterArguments?.length
+                                    ? alert.counterArguments.join(" | ")
+                                    : "No counter-arguments recorded"}
+                                </span>
+                              </div>
+                              <div>
+                                <strong>Peer baseline</strong>
+                                <span>
+                                  {alert.segmentHistoryCount30d
+                                    ? `${alert.segmentHistoryCount30d} peer transfers, median ${formatUsdAmount(alert.segmentAmountMedian30d, alert.currency)}, p90 ${formatUsdAmount(alert.segmentAmountP90_30d, alert.currency)}`
+                                    : "Peer baseline not available yet"}
+                                </span>
+                              </div>
+                              <div>
+                                <strong>Probe pattern</strong>
+                                <span>
+                                  {alert.probeThenLargeRiskScore != null
+                                    ? `Score ${Math.round(alert.probeThenLargeRiskScore * 100)}%, small probes ${alert.smallProbeCount24h || 0}, distinct recipients ${alert.distinctSmallProbeRecipients24h || 0}, same recipient tests ${alert.sameRecipientSmallProbeCount24h || 0}`
+                                    : "No probe-escalation signal recorded"}
+                                </span>
                               </div>
                             </div>
                           </>
@@ -3188,6 +4374,10 @@ function AdminApp() {
                 </div>
                 <div className="prof-name">{profile.name}</div>
                 <p className="prof-email">{profile.email}</p>
+                <p className="section-subtitle">
+                  Operator account details used for accountability, contact
+                  routing, and session security.
+                </p>
               </div>
 
               <div className="prof-grid">
@@ -3290,7 +4480,13 @@ function AdminApp() {
 
         {active === "setting" && (
           <div className="set-card">
-            <h2 style={{ marginTop: 0, marginBottom: 10 }}>Settings</h2>
+            <h2 style={{ marginTop: 0, marginBottom: 10 }}>
+              Security Controls
+            </h2>
+            <p className="section-subtitle" style={{ marginBottom: 14 }}>
+              Configure the admin-side controls that shape notifications,
+              operator sign-in hardening, and review discipline.
+            </p>
             <div className="set-row">
               <div>
                 <h4>Theme</h4>
@@ -3348,8 +4544,12 @@ function AdminApp() {
               <div className="user-head">
                 <div>
                   <h2 style={{ margin: 0, fontSize: 28, color: "var(--text)" }}>
-                    User Management
+                    User Risk Review
                   </h2>
+                  <p className="section-subtitle">
+                    Lock risky accounts, inspect profile drift, and review trust
+                    changes before broadening access.
+                  </p>
                 </div>
                 <div className="user-actions" style={{ gap: 12 }}>
                   <input
@@ -3437,6 +4637,7 @@ function AdminApp() {
                       <th>Full name</th>
                       <th>Contact details</th>
                       <th>Role</th>
+                      <th>Risk profile</th>
                       <th>Birthday</th>
                       <th>Address</th>
                       <th>Status</th>
@@ -3466,6 +4667,30 @@ function AdminApp() {
                           </div>
                         </td>
                         <td style={{ color: "var(--text)" }}>{u.role}</td>
+                        <td>
+                          <div className="user-profile-cell">
+                            <strong>
+                              {formatProfileLabel(
+                                u.accountProfile?.category,
+                                u.accountProfile?.tier,
+                              )}
+                            </strong>
+                            <span>
+                              {formatProfileStatus(u.accountProfile?.status)}
+                            </span>
+                            {u.accountProfile?.hasPendingRequest ? (
+                              <em>
+                                Pending:{" "}
+                                {formatProfileLabel(
+                                  u.accountProfile.requestedCategory ||
+                                    u.accountProfile.category,
+                                  u.accountProfile.requestedTier ||
+                                    u.accountProfile.tier,
+                                )}
+                              </em>
+                            ) : null}
+                          </div>
+                        </td>
                         <td style={{ color: "var(--text)" }}>
                           {u.birthday
                             ? new Date(u.birthday).toLocaleDateString("en-US", {
@@ -3538,7 +4763,7 @@ function AdminApp() {
                                 );
                               }}
                             >
-                              Add Money
+                              Manual top-up
                             </button>
                             <button
                               className="user-btn danger"
@@ -3582,7 +4807,13 @@ function AdminApp() {
                               className="user-btn text"
                               onClick={() => setTxUser(u)}
                             >
-                              Transactions
+                              Activity
+                            </button>
+                            <button
+                              className="user-btn text"
+                              onClick={() => setProfileReviewUser(u)}
+                            >
+                              Review profile
                             </button>
                           </div>
                         </td>
@@ -3651,7 +4882,7 @@ function AdminApp() {
                       onClick={(e) => e.stopPropagation()}
                     >
                       <div className="tx-head">
-                        <h3>Transactions · {txUser.name}</h3>
+                        <h3>Account Activity · {txUser.name}</h3>
                         <button
                           className="tx-close"
                           aria-label="Close"
@@ -3693,12 +4924,196 @@ function AdminApp() {
                                 colSpan={5}
                                 style={{ textAlign: "center", padding: 18 }}
                               >
-                                No transactions recorded.
+                                No account activity recorded.
                               </td>
                             </tr>
                           )}
                         </tbody>
                       </table>
+                    </div>
+                  </div>,
+                  document.body,
+                )
+              : null}
+
+            {profileReviewUser && typeof document !== "undefined"
+              ? createPortal(
+                  <div
+                    className="tx-backdrop"
+                    role="dialog"
+                    aria-modal="true"
+                    onClick={() => setProfileReviewUser(null)}
+                  >
+                    <div
+                      className="tx-modal profile-review-modal"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="tx-head">
+                        <h3>
+                          Account Risk Profile Review · {profileReviewUser.name}
+                        </h3>
+                        <button
+                          className="tx-close"
+                          aria-label="Close"
+                          onClick={() => setProfileReviewUser(null)}
+                        >
+                          X
+                        </button>
+                      </div>
+                      <div className="profile-review-grid">
+                        <div className="profile-review-card">
+                          <strong>Current effective profile</strong>
+                          <span>
+                            {formatProfileLabel(
+                              profileReviewUser.accountProfile?.category,
+                              profileReviewUser.accountProfile?.tier,
+                            )}
+                          </span>
+                          <small>
+                            {formatProfileStatus(
+                              profileReviewUser.accountProfile?.status,
+                            )}{" "}
+                            · Confidence{" "}
+                            {Math.round(
+                              (profileReviewUser.accountProfile?.confidence ||
+                                0.6) * 100,
+                            )}
+                            %
+                          </small>
+                        </div>
+                        <div className="profile-review-card">
+                          <strong>Requested profile</strong>
+                          <span>
+                            {profileReviewUser.accountProfile?.hasPendingRequest
+                              ? formatProfileLabel(
+                                  profileReviewUser.accountProfile
+                                    ?.requestedCategory ||
+                                    profileReviewUser.accountProfile?.category,
+                                  profileReviewUser.accountProfile
+                                    ?.requestedTier ||
+                                    profileReviewUser.accountProfile?.tier,
+                                )
+                              : "No pending request"}
+                          </span>
+                          <small>
+                            {profileReviewUser.accountProfile?.requestContext
+                              ?.usagePurpose || "No usage purpose provided"}
+                          </small>
+                        </div>
+                      </div>
+
+                      <div className="profile-review-form">
+                        <label>
+                          Category
+                          <select
+                            value={profileReviewForm.category}
+                            onChange={(e) =>
+                              setProfileReviewForm((prev) => ({
+                                ...prev,
+                                category: e.target.value,
+                                tier:
+                                  e.target.value === "BUSINESS"
+                                    ? "SMALL_BUSINESS"
+                                    : "STANDARD",
+                              }))
+                            }
+                          >
+                            <option value="PERSONAL">Personal</option>
+                            <option value="BUSINESS">Business</option>
+                          </select>
+                        </label>
+                        <label>
+                          Tier
+                          <select
+                            value={profileReviewForm.tier}
+                            onChange={(e) =>
+                              setProfileReviewForm((prev) => ({
+                                ...prev,
+                                tier: e.target.value,
+                              }))
+                            }
+                          >
+                            {(profileReviewForm.category === "BUSINESS"
+                              ? [
+                                  ["SMALL_BUSINESS", "B1 Small Business"],
+                                  ["MEDIUM_BUSINESS", "B2 Medium Business"],
+                                  ["ENTERPRISE", "B3 Enterprise"],
+                                ]
+                              : [
+                                  ["BASIC", "P1 Basic"],
+                                  ["STANDARD", "P2 Standard"],
+                                  ["PREMIUM", "P3 Premium"],
+                                ]
+                            ).map(([value, label]) => (
+                              <option key={value} value={value}>
+                                {label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Confidence
+                          <input
+                            type="number"
+                            min="0.1"
+                            max="0.99"
+                            step="0.01"
+                            value={profileReviewForm.confidence}
+                            onChange={(e) =>
+                              setProfileReviewForm((prev) => ({
+                                ...prev,
+                                confidence: e.target.value,
+                              }))
+                            }
+                          />
+                        </label>
+                      </div>
+
+                      <div className="profile-review-context">
+                        <strong>Request context</strong>
+                        <p>
+                          Purpose:{" "}
+                          {profileReviewUser.accountProfile?.requestContext
+                            ?.usagePurpose || "N/A"}
+                        </p>
+                        <p>
+                          Expected level:{" "}
+                          {profileReviewUser.accountProfile?.requestContext
+                            ?.expectedTransactionLevel || "N/A"}
+                        </p>
+                        <p>
+                          Expected frequency:{" "}
+                          {profileReviewUser.accountProfile?.requestContext
+                            ?.expectedTransactionFrequency || "N/A"}
+                        </p>
+                        <p>
+                          Business size:{" "}
+                          {profileReviewUser.accountProfile?.requestContext
+                            ?.businessSize || "N/A"}
+                        </p>
+                        <p>
+                          Analyst note:{" "}
+                          {profileReviewUser.accountProfile?.requestContext
+                            ?.justification || "No justification provided"}
+                        </p>
+                      </div>
+
+                      <div className="user-action-group">
+                        <button
+                          className="user-btn primary"
+                          onClick={handleApproveAccountProfile}
+                          disabled={profileReviewBusy}
+                        >
+                          {profileReviewBusy ? "Saving..." : "Approve profile"}
+                        </button>
+                        <button
+                          className="user-btn text"
+                          onClick={() => setProfileReviewUser(null)}
+                          disabled={profileReviewBusy}
+                        >
+                          Close
+                        </button>
+                      </div>
                     </div>
                   </div>,
                   document.body,
@@ -3711,11 +5126,18 @@ function AdminApp() {
           <div className="audit-card">
             <div className="audit-tabs">
               <button className="audit-tab active" type="button">
-                Audit Logs
+                Audit Trail
               </button>
             </div>
 
             <div className="audit-head">
+              <div>
+                <h2 style={{ margin: 0 }}>Investigation Log</h2>
+                <p className="section-subtitle">
+                  Trace admin, AI, and transaction actions with enough context
+                  to explain every security decision.
+                </p>
+              </div>
               <div className="audit-filters">
                 <select
                   className="audit-select"
@@ -3744,7 +5166,7 @@ function AdminApp() {
                   }
                 >
                   <option value="all">All Types</option>
-                  <option value="um">User Management</option>
+                  <option value="um">User Review</option>
                   <option value="tx">Transaction</option>
                   <option value="acc">Account Edit</option>
                   <option value="login">Login</option>

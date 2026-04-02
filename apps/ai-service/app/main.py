@@ -52,9 +52,16 @@ from app.transaction_model import (
     TrainTransactionRequest,
     TransactionEvent,
     adjust_tx_risk_level as transaction_adjust_risk_level,
+    build_account_profile_code,
     build_tx_features as build_transaction_features,
     build_tx_reasons as build_transaction_reasons,
+    derive_account_segment,
+    get_account_profile_thresholds,
+    get_account_segment_thresholds,
+    normalize_account_category,
     normalize_transaction_event as normalize_transaction_event_payload,
+    normalize_account_segment,
+    normalize_account_tier,
     resolve_tx_request_key as resolve_transaction_request_key,
 )
 from app.test_ui import TEST_UI_HTML
@@ -117,7 +124,7 @@ def _auth_mode() -> str:
 
 
 def _strict_model_only_enabled() -> bool:
-    return bool(str(os.getenv("AI_STRICT_MODEL_ONLY", "1")).strip().lower() in {"1", "true", "yes"})
+    return bool(str(os.getenv("AI_STRICT_MODEL_ONLY", "0")).strip().lower() in {"1", "true", "yes"})
 
 
 def _verify_api_key(x_ai_api_key: str | None) -> bool:
@@ -355,6 +362,78 @@ def _pg_execute(query: str, params: tuple[Any, ...] = ()) -> None:
         cur.execute(query, params)
 
 
+def _build_tx_feedback_profile_from_postgres(limit: int = 600) -> dict[str, Any]:
+    if not _postgres_ready():
+        return {}
+    since = _now_dt() - timedelta(days=180)
+    rows = _pg_fetchall(
+        """
+        SELECT "metadata", "createdAt"
+        FROM "AuditLog"
+        WHERE "action" = 'FUNDS_FLOW_EVENT'
+          AND "createdAt" >= %s
+        ORDER BY "createdAt" DESC
+        LIMIT %s
+        """,
+        (since, limit),
+    )
+    if not rows:
+        return {}
+
+    drain_ratios: list[float] = []
+    amount_ratios: list[float] = []
+    projected_ratios: list[float] = []
+    probe_scores: list[float] = []
+    sample_count = 0
+
+    for row in rows:
+        metadata = _normalize_json_field(row.get("metadata"))
+        if (
+            str(metadata.get("channel") or "").upper() != "WALLET_TRANSFER"
+            or str(metadata.get("direction") or "").upper() != "OUTFLOW"
+            or str(metadata.get("lifecycle") or "").upper()
+            not in {"REVIEW_REQUIRED", "BLOCKED"}
+        ):
+            continue
+        ai_monitoring = _normalize_json_field(metadata.get("aiMonitoring"))
+        analysis_signals = _normalize_json_field(ai_monitoring.get("analysisSignals"))
+        amount = float(metadata.get("amount") or analysis_signals.get("amount") or 0.0)
+        balance_before = float(
+            metadata.get("balanceBefore") or analysis_signals.get("balance_before") or 0.0
+        )
+        daily_avg = float(analysis_signals.get("daily_spend_avg_30d") or 0.0)
+        projected = float(analysis_signals.get("projected_daily_spend") or 0.0)
+        probe_score = float(analysis_signals.get("probe_then_large_risk_score") or 0.0)
+
+        if amount <= 0:
+            continue
+        sample_count += 1
+        if balance_before > 0:
+            drain_ratios.append(float(amount / max(balance_before, 1.0)))
+        if daily_avg > 0:
+            amount_ratios.append(float(amount / max(daily_avg, 1.0)))
+            projected_ratios.append(float(projected / max(daily_avg, 1.0)))
+        if probe_score > 0:
+            probe_scores.append(probe_score)
+
+    if sample_count < 5:
+        return {}
+
+    def _median(values: list[float]) -> float:
+        return float(np.median(np.asarray(values, dtype=float))) if values else 0.0
+
+    return {
+        "sample_count": sample_count,
+        "window_days": 180,
+        "median_balance_drain_ratio": _median(drain_ratios),
+        "median_amount_to_daily_avg_ratio": _median(amount_ratios),
+        "median_projected_spend_ratio": _median(projected_ratios),
+        "median_probe_then_large_risk_score": _median(probe_scores),
+        "generated_at": _now_iso(),
+        "source": "postgres_funds_flow_feedback",
+    }
+
+
 def _build_login_score_details(
     *,
     event: LoginEvent,
@@ -463,6 +542,7 @@ def _build_tx_score_details(
     reasons: list[str],
     request_key: str,
     transaction_event_id: str,
+    decision: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     model_version = str(getattr(app.state, "tx_model_version", None) or "unknown")
     feature_names = _active_tx_feature_names()
@@ -479,6 +559,16 @@ def _build_tx_score_details(
             "country": event.country,
             "paymentMethod": event.payment_method,
             "merchantCategory": event.merchant_category,
+            "accountSegment": event.account_segment,
+            "accountCategory": event.account_category,
+            "accountTier": event.account_tier,
+            "accountProfileStatus": event.account_profile_status,
+            "accountProfileConfidence": float(event.account_profile_confidence),
+            "accountProfileCode": build_account_profile_code(
+                event.account_category,
+                event.account_tier,
+                event.account_segment,
+            ),
             "device": event.device,
             "channel": event.channel,
             "failedTx24h": int(event.failed_tx_24h),
@@ -488,6 +578,24 @@ def _build_tx_score_details(
             "projectedDailySpend": float(event.projected_daily_spend),
             "balanceBefore": float(event.balance_before),
             "remainingBalance": float(event.remaining_balance),
+            "recipientKnown": bool(event.recipient_known),
+            "suspiciousNoteCount": int(event.suspicious_note_count),
+            "rollingOutflowAmount": float(event.rolling_outflow_amount),
+            "faceIdRequired": bool(event.face_id_required),
+            "sessionRestrictLargeTransfers": bool(event.session_restrict_large_transfers),
+            "recentReviewCount30d": int(event.recent_review_count_30d),
+            "recentBlockedCount30d": int(event.recent_blocked_count_30d),
+            "recentPendingOtpCount7d": int(event.recent_pending_otp_count_7d),
+            "smallProbeCount24h": int(event.small_probe_count_24h),
+            "smallProbeTotal24h": float(event.small_probe_total_24h),
+            "distinctSmallProbeRecipients24h": int(event.distinct_small_probe_recipients_24h),
+            "sameRecipientSmallProbeCount24h": int(event.same_recipient_small_probe_count_24h),
+            "newRecipientSmallProbeCount24h": int(event.new_recipient_small_probe_count_24h),
+            "probeThenLargeRiskScore": float(event.probe_then_large_risk_score),
+            "llmNoteRiskLevel": event.llm_note_risk_level,
+            "llmSignalCount": int(event.llm_signal_count),
+            "llmRuleTags": list(event.llm_rule_tags),
+            "sessionRiskLevel": event.session_risk_level,
         },
         "features": _feature_vector_to_dict(feature_names, features),
         "result": {
@@ -499,6 +607,7 @@ def _build_tx_score_details(
             "reasons": reasons,
             "monitoringOnly": True,
             "action": AI_TX_ACTION,
+            "decision": decision or {},
         },
         "model": {
             "name": "pyod_iforest",
@@ -675,6 +784,20 @@ def _is_private_or_loopback_ip(ip: str) -> bool:
 
 
 def _get_tx_history_signals(event: TransactionEvent) -> dict[str, Any]:
+    account_category = normalize_account_category(
+        getattr(event, "account_category", None),
+        getattr(event, "account_segment", None),
+    )
+    account_tier = normalize_account_tier(
+        account_category,
+        getattr(event, "account_tier", None),
+        getattr(event, "account_segment", None),
+    )
+    account_segment = derive_account_segment(
+        account_category,
+        account_tier,
+        getattr(event, "account_segment", None),
+    )
     if _postgres_ready():
         return _get_tx_history_signals_from_postgres(event)
     if _mongo_ready():
@@ -689,6 +812,102 @@ def _get_tx_history_signals(event: TransactionEvent) -> dict[str, Any]:
         "projected_daily_spend": float(event.projected_daily_spend),
         "last_transaction_at": None,
         "history_source": "none",
+        "segment_available": False,
+        "segment_source": "none",
+        "segment_history_count_30d": 0,
+        "segment_amount_avg_30d": 0.0,
+        "segment_amount_median_30d": 0.0,
+        "segment_amount_p90_30d": 0.0,
+        "segment_daily_spend_avg_30d": 0.0,
+        "account_segment": account_segment,
+        "account_category": account_category,
+        "account_tier": account_tier,
+        "account_profile_code": build_account_profile_code(
+            account_category,
+            account_tier,
+            account_segment,
+        ),
+    }
+
+
+def _summarize_tx_segment_rows(
+    rows: list[dict[str, Any]],
+    *,
+    account_segment: str,
+    account_category: str,
+    account_tier: str,
+) -> dict[str, Any]:
+    if not rows:
+        return {
+            "segment_available": False,
+            "segment_source": "none",
+            "segment_history_count_30d": 0,
+            "segment_amount_avg_30d": 0.0,
+            "segment_amount_median_30d": 0.0,
+            "segment_amount_p90_30d": 0.0,
+            "segment_daily_spend_avg_30d": 0.0,
+            "account_segment": account_segment,
+            "account_category": account_category,
+            "account_tier": account_tier,
+            "account_profile_code": build_account_profile_code(
+                account_category,
+                account_tier,
+                account_segment,
+            ),
+        }
+
+    amounts: list[float] = []
+    daily_totals: dict[str, float] = {}
+    for row in rows:
+        amount = float(row.get("amount") or 0.0)
+        created_at = _as_utc(row.get("createdAt"))
+        if amount <= 0.0 or not isinstance(created_at, datetime):
+            continue
+        amounts.append(amount)
+        day_key = created_at.date().isoformat()
+        daily_totals[day_key] = daily_totals.get(day_key, 0.0) + amount
+
+    if not amounts:
+        return {
+            "segment_available": False,
+            "segment_source": "none",
+            "segment_history_count_30d": 0,
+            "segment_amount_avg_30d": 0.0,
+            "segment_amount_median_30d": 0.0,
+            "segment_amount_p90_30d": 0.0,
+            "segment_daily_spend_avg_30d": 0.0,
+            "account_segment": account_segment,
+            "account_category": account_category,
+            "account_tier": account_tier,
+            "account_profile_code": build_account_profile_code(
+                account_category,
+                account_tier,
+                account_segment,
+            ),
+        }
+
+    amount_array = np.asarray(amounts, dtype=float)
+    active_day_totals = [value for value in daily_totals.values() if value > 0]
+    return {
+        "segment_available": True,
+        "segment_source": "derived",
+        "segment_history_count_30d": len(amounts),
+        "segment_amount_avg_30d": float(np.mean(amount_array)),
+        "segment_amount_median_30d": float(np.median(amount_array)),
+        "segment_amount_p90_30d": float(np.percentile(amount_array, 90)),
+        "segment_daily_spend_avg_30d": (
+            float(sum(active_day_totals) / len(active_day_totals))
+            if active_day_totals
+            else 0.0
+        ),
+        "account_segment": account_segment,
+        "account_category": account_category,
+        "account_tier": account_tier,
+        "account_profile_code": build_account_profile_code(
+            account_category,
+            account_tier,
+            account_segment,
+        ),
     }
 
 
@@ -697,6 +916,20 @@ def _get_tx_history_signals_from_postgres(event: TransactionEvent) -> dict[str, 
     since_30d = event_ts - timedelta(days=30)
     since_24h = event_ts - timedelta(hours=24)
     since_1h = event_ts - timedelta(hours=1)
+    account_category = normalize_account_category(
+        getattr(event, "account_category", None),
+        getattr(event, "account_segment", None),
+    )
+    account_tier = normalize_account_tier(
+        account_category,
+        getattr(event, "account_tier", None),
+        getattr(event, "account_segment", None),
+    )
+    account_segment = derive_account_segment(
+        account_category,
+        account_tier,
+        getattr(event, "account_segment", None),
+    )
     rows = _pg_fetchall(
         """
         SELECT "amount", "status", "type", "createdAt"
@@ -718,7 +951,68 @@ def _get_tx_history_signals_from_postgres(event: TransactionEvent) -> dict[str, 
         "projected_daily_spend": float(max(event.amount, 0.0)),
         "last_transaction_at": _to_json_value(rows[0]["createdAt"]) if rows else None,
         "history_source": "postgres",
+        "segment_available": False,
+        "segment_source": "none",
+        "segment_history_count_30d": 0,
+        "segment_amount_avg_30d": 0.0,
+        "segment_amount_median_30d": 0.0,
+        "segment_amount_p90_30d": 0.0,
+        "segment_daily_spend_avg_30d": 0.0,
+        "account_segment": account_segment,
+        "account_category": account_category,
+        "account_tier": account_tier,
+        "account_profile_code": build_account_profile_code(
+            account_category,
+            account_tier,
+            account_segment,
+        ),
     }
+    segment_rows = _pg_fetchall(
+        """
+        SELECT
+          t."amount",
+          t."createdAt",
+          u."metadata"->'accountProfile'->>'category' AS "accountCategory",
+          u."metadata"->'accountProfile'->>'tier' AS "accountTier",
+          u."metadata"->>'accountCategory' AS "accountCategoryLegacy",
+          u."metadata"->>'accountTier' AS "accountTierLegacy",
+          u."metadata"->>'accountSegment' AS "accountSegment"
+        FROM "Transaction" t
+        LEFT JOIN "User" u ON u."id" = t."fromUserId"
+        WHERE t."type" = 'TRANSFER'
+          AND t."status" = 'COMPLETED'
+          AND t."createdAt" < %s
+          AND t."createdAt" >= %s
+        ORDER BY t."createdAt" DESC
+        LIMIT 2500
+        """,
+        (event_ts, since_30d),
+    )
+    segment_rows = [
+        row
+        for row in segment_rows
+        if normalize_account_category(
+            row.get("accountCategory") or row.get("accountCategoryLegacy"),
+            row.get("accountSegment"),
+        )
+        == account_category
+        and normalize_account_tier(
+            account_category,
+            row.get("accountTier") or row.get("accountTierLegacy"),
+            row.get("accountSegment"),
+        )
+        == account_tier
+    ]
+    segment_summary = _summarize_tx_segment_rows(
+        segment_rows,
+        account_segment=account_segment,
+        account_category=account_category,
+        account_tier=account_tier,
+    )
+    segment_summary["segment_source"] = (
+        "postgres_segment" if segment_summary["segment_available"] else "none"
+    )
+    signals.update(segment_summary)
     if not rows:
         audit_rows = _pg_fetchall(
             """
@@ -802,6 +1096,20 @@ def _get_tx_history_signals_from_mongo(event: TransactionEvent) -> dict[str, Any
     since_30d = event_ts - timedelta(days=30)
     since_24h = event_ts - timedelta(hours=24)
     since_1h = event_ts - timedelta(hours=1)
+    account_category = normalize_account_category(
+        getattr(event, "account_category", None),
+        getattr(event, "account_segment", None),
+    )
+    account_tier = normalize_account_tier(
+        account_category,
+        getattr(event, "account_tier", None),
+        getattr(event, "account_segment", None),
+    )
+    account_segment = derive_account_segment(
+        account_category,
+        account_tier,
+        getattr(event, "account_segment", None),
+    )
     mongo_db = app.state.mongo_db
     user_oid = _safe_object_id(event.user_id)
     query: dict[str, Any] = {"createdAt": {"$lt": event_ts, "$gte": since_30d}}
@@ -809,7 +1117,20 @@ def _get_tx_history_signals_from_mongo(event: TransactionEvent) -> dict[str, Any
         query["$or"] = [{"userId": user_oid}, {"userIdRaw": event.user_id}]
     else:
         query["userIdRaw"] = event.user_id
-    projection = {"amount": 1, "status": 1, "type": 1, "createdAt": 1}
+    projection = {
+        "amount": 1,
+        "status": 1,
+        "type": 1,
+        "createdAt": 1,
+        "accountSegment": 1,
+        "account_segment": 1,
+        "accountCategory": 1,
+        "account_category": 1,
+        "accountTier": 1,
+        "account_tier": 1,
+        "accountType": 1,
+        "account_type": 1,
+    }
     try:
         rows = list(
             mongo_db[TRANSACTION_EVENTS_COLLECTION]
@@ -829,9 +1150,61 @@ def _get_tx_history_signals_from_mongo(event: TransactionEvent) -> dict[str, Any
         "projected_daily_spend": float(max(event.amount, 0.0)),
         "last_transaction_at": _to_json_value(rows[0]["createdAt"]) if rows else None,
         "history_source": "mongo",
+        "segment_available": False,
+        "segment_source": "none",
+        "segment_history_count_30d": 0,
+        "segment_amount_avg_30d": 0.0,
+        "segment_amount_median_30d": 0.0,
+        "segment_amount_p90_30d": 0.0,
+        "segment_daily_spend_avg_30d": 0.0,
+        "account_segment": account_segment,
+        "account_category": account_category,
+        "account_tier": account_tier,
+        "account_profile_code": build_account_profile_code(
+            account_category,
+            account_tier,
+            account_segment,
+        ),
     }
     if not rows:
         return signals
+
+    segment_query: dict[str, Any] = {
+        "createdAt": {"$lt": event_ts, "$gte": since_30d},
+    }
+    try:
+        segment_rows = list(
+            mongo_db[TRANSACTION_EVENTS_COLLECTION]
+            .find(segment_query, projection=projection)
+            .sort("createdAt", -1)
+            .limit(1500)
+        )
+    except PyMongoError:
+        segment_rows = []
+    segment_rows = [
+        row
+        for row in segment_rows
+        if normalize_account_category(
+            row.get("accountCategory") or row.get("account_category"),
+            row.get("accountSegment") or row.get("account_segment"),
+        )
+        == account_category
+        and normalize_account_tier(
+            account_category,
+            row.get("accountTier") or row.get("account_tier"),
+            row.get("accountSegment") or row.get("account_segment"),
+        )
+        == account_tier
+    ]
+    if segment_rows:
+        segment_summary = _summarize_tx_segment_rows(
+            segment_rows,
+            account_segment=account_segment,
+            account_category=account_category,
+            account_tier=account_tier,
+        )
+        segment_summary["segment_source"] = "mongo_segment"
+        signals.update(segment_summary)
 
     event_day = event_ts.date().isoformat()
     daily_totals: dict[str, float] = {}
@@ -1080,6 +1453,469 @@ def _merge_tx_reasons(model_reasons: list[str], rule_reasons: list[str]) -> list
             seen.add(reason)
             merged.append(reason)
     return merged
+
+
+def dedupe_list(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(cleaned)
+    return result
+
+
+def _risk_level_to_score(level: str) -> int:
+    normalized = str(level or "").strip().upper()
+    if normalized == "HIGH":
+        return 90
+    if normalized == "MEDIUM":
+        return 60
+    return 20
+
+
+def _clamp_score(value: float) -> int:
+    return int(max(0, min(100, round(float(value)))))
+
+
+def _build_tx_mitigation_payload(
+    *,
+    event: TransactionEvent,
+    model_risk_level: str,
+    rule_risk_level: str,
+    tx_history_signals: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    account_category = normalize_account_category(
+        getattr(event, "account_category", None),
+        getattr(event, "account_segment", None),
+    )
+    account_tier = normalize_account_tier(
+        account_category,
+        getattr(event, "account_tier", None),
+        getattr(event, "account_segment", None),
+    )
+    account_segment = derive_account_segment(
+        account_category,
+        account_tier,
+        getattr(event, "account_segment", None),
+    )
+    thresholds = get_account_profile_thresholds(
+        account_category,
+        account_tier,
+        account_segment,
+    )
+    profile_code = build_account_profile_code(
+        account_category,
+        account_tier,
+        account_segment,
+    )
+    tx_history_signals = tx_history_signals or {}
+    profile_status = str(getattr(event, "account_profile_status", "SYSTEM_ASSIGNED") or "SYSTEM_ASSIGNED").upper()
+    profile_confidence = float(getattr(event, "account_profile_confidence", 0.6) or 0.6)
+    amount_ratio = (
+        float(event.amount) / max(float(event.daily_spend_avg_30d), 1.0)
+        if float(event.daily_spend_avg_30d) > 0
+        else 0.0
+    )
+    projected_ratio = (
+        float(event.projected_daily_spend) / max(float(event.daily_spend_avg_30d), 1.0)
+        if float(event.daily_spend_avg_30d) > 0
+        else 0.0
+    )
+
+    mitigation_score = 0
+    mitigation_reasons: list[str] = []
+    counter_arguments: list[str] = []
+    segment_p90 = float(tx_history_signals.get("segment_amount_p90_30d") or 0.0)
+    segment_median = float(tx_history_signals.get("segment_amount_median_30d") or 0.0)
+    segment_average = float(tx_history_signals.get("segment_amount_avg_30d") or 0.0)
+    segment_daily_avg = float(tx_history_signals.get("segment_daily_spend_avg_30d") or 0.0)
+    segment_history_count = int(tx_history_signals.get("segment_history_count_30d") or 0)
+    segment_available = bool(tx_history_signals.get("segment_available"))
+
+    def _add(score: int, reason: str, counter_argument: str | None = None) -> None:
+        nonlocal mitigation_score
+        mitigation_score += int(score)
+        mitigation_reasons.append(reason)
+        if counter_argument:
+            counter_arguments.append(counter_argument)
+
+    if event.recipient_known:
+        _add(
+            12,
+            "Recipient already exists in the user's completed transfer history.",
+            "The recipient is known from previous completed transfers.",
+        )
+
+    if event.session_risk_level == "LOW" and not event.session_restrict_large_transfers:
+        _add(
+            8,
+            "Current session is low risk and not under temporary transfer restrictions.",
+            "The session context is low risk.",
+        )
+    elif event.session_risk_level == "MEDIUM" and not event.session_restrict_large_transfers:
+        _add(
+            3,
+            "Current session is medium risk but does not carry large-transfer restrictions.",
+            "The session context is not strongly risky.",
+        )
+
+    if account_category == "BUSINESS" and float(event.amount) <= thresholds["medium_amount"]:
+        _add(
+            10,
+            f"Transaction amount remains within the normal operating band for a {str(thresholds.get('label') or profile_code).lower()} account.",
+            f"This amount is elevated but still consistent with {str(thresholds.get('label') or profile_code).lower()} behavior.",
+        )
+
+    if profile_status == "VERIFIED" and profile_confidence >= 0.85:
+        _add(
+            5,
+            "The active account profile has already been verified by the system or admin review.",
+            "The effective account tier is trusted enough to relax some baseline checks.",
+        )
+
+    if segment_available and segment_history_count >= 20:
+        if segment_p90 > 0 and float(event.amount) <= segment_p90:
+            _add(
+                8,
+                f"Amount stays below the recent 90th percentile for {str(thresholds.get('label') or profile_code).lower()} peer transfers.",
+                f"This amount still falls inside the recent peer envelope for {str(thresholds.get('label') or profile_code).lower()} accounts.",
+            )
+        elif segment_average > 0 and float(event.amount) <= (segment_average * 1.35):
+            _add(
+                4,
+                f"Amount remains close to the recent average transfer size for {str(thresholds.get('label') or profile_code).lower()} peers.",
+                f"Peer accounts in the same segment commonly move similar amounts.",
+            )
+
+        if (
+            segment_daily_avg > 0
+            and float(event.projected_daily_spend) <= max(segment_daily_avg * 1.5, float(event.amount))
+        ):
+            _add(
+                4,
+                f"Projected daily transfer volume is still near the peer baseline for {str(thresholds.get('label') or profile_code).lower()} accounts.",
+                "The projected transfer volume is not materially above peer behavior.",
+            )
+
+    if (
+        account_category == "BUSINESS"
+        and account_tier == "ENTERPRISE"
+        and profile_status == "VERIFIED"
+        and profile_confidence >= 0.75
+        and event.session_risk_level == "LOW"
+        and float(event.amount) <= max(segment_p90, thresholds["medium_amount"] * 1.25)
+    ):
+        _add(
+            6,
+            "Enterprise profile is allowed to operate with materially larger values when session and peer context remain healthy.",
+            "Large value alone is not sufficient to classify this enterprise transfer as abusive.",
+        )
+
+    if account_category == "PERSONAL" and account_tier == "PREMIUM" and float(event.amount) <= thresholds["medium_amount"]:
+        _add(
+            4,
+            "Higher-tier personal profile supports larger but still monitored transfer values.",
+            "This amount is elevated, but still plausible for the customer's personal tier.",
+        )
+
+    if profile_status in {"PENDING_REVIEW", "REQUIRES_REVIEW"} or profile_confidence < 0.45:
+        mitigation_score = max(0, mitigation_score - 8)
+        mitigation_reasons.append(
+            "Profile-based relaxation is reduced because the current account classification is still uncertain."
+        )
+
+    if float(getattr(event, "probe_then_large_risk_score", 0.0) or 0.0) >= 0.45:
+        mitigation_score = max(0, mitigation_score - 10)
+        mitigation_reasons.append(
+            "Mitigation is reduced because recent small-transfer probing weakens the trust normally granted to this transaction."
+        )
+
+    if float(event.daily_spend_avg_30d) > 0:
+        if (
+            amount_ratio <= max(2.0, thresholds["amount_ratio_medium"] * 0.65)
+            and projected_ratio <= max(2.5, thresholds["projected_medium_ratio"] * 0.2)
+        ):
+            _add(
+                10,
+                "Amount and projected spend remain close to the user's recent baseline.",
+                "The transfer stays close to the user's normal spending baseline.",
+            )
+        elif amount_ratio <= max(3.0, thresholds["amount_ratio_medium"] * 0.85):
+            _add(
+                5,
+                "Amount is elevated but not far from the user's recent daily behavior.",
+                "The amount is only moderately above recent user behavior.",
+            )
+
+    if (
+        event.velocity_1h <= 1
+        and event.failed_tx_24h == 0
+        and float(event.rolling_outflow_amount) <= thresholds["rolling_outflow_medium"] * 0.5
+    ):
+        _add(
+            6,
+            "Transfer velocity and rolling outflow remain calm for the current user session.",
+            "The session does not show burst-transfer behavior.",
+        )
+
+    if model_risk_level == "MEDIUM" and rule_risk_level == "LOW":
+        _add(
+            4,
+            "Deterministic transaction rules did not confirm the model anomaly.",
+            "The rule engine does not support a high-risk interpretation here.",
+        )
+
+    return {
+        "accountSegment": account_segment,
+        "accountCategory": account_category,
+        "accountTier": account_tier,
+        "accountProfileCode": profile_code,
+        "score": _clamp_score(min(mitigation_score, 35)),
+        "reasons": dedupe_list(mitigation_reasons)[:5],
+        "counterArguments": dedupe_list(counter_arguments)[:4],
+        "segmentStats": {
+            "available": segment_available,
+            "historyCount30d": segment_history_count,
+            "amountMedian30d": round(segment_median, 2),
+            "amountP90_30d": round(segment_p90, 2),
+            "amountAvg30d": round(segment_average, 2),
+            "dailySpendAvg30d": round(segment_daily_avg, 2),
+        },
+    }
+
+
+def _build_tx_decision_payload(
+    *,
+    event: TransactionEvent,
+    anomaly_score: float,
+    model_risk_level: str,
+    rule_risk_level: str,
+    rule_score: int,
+    reasons: list[str],
+    tx_history_signals: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    account_category = normalize_account_category(
+        getattr(event, "account_category", None),
+        getattr(event, "account_segment", None),
+    )
+    account_tier = normalize_account_tier(
+        account_category,
+        getattr(event, "account_tier", None),
+        getattr(event, "account_segment", None),
+    )
+    account_segment = derive_account_segment(
+        account_category,
+        account_tier,
+        getattr(event, "account_segment", None),
+    )
+    thresholds = get_account_profile_thresholds(
+        account_category,
+        account_tier,
+        account_segment,
+    )
+    tx_history_signals = tx_history_signals or {}
+    profile_status = str(getattr(event, "account_profile_status", "SYSTEM_ASSIGNED") or "SYSTEM_ASSIGNED").upper()
+    profile_confidence = float(getattr(event, "account_profile_confidence", 0.6) or 0.6)
+    model_component = _clamp_score(max(0.0, min(1.0, float(anomaly_score))) * 100.0)
+    rule_component = _clamp_score(max(_risk_level_to_score(rule_risk_level), min(int(rule_score) * 2, 100)))
+    session_component = _risk_level_to_score(getattr(event, "session_risk_level", "LOW"))
+    device_component = 15
+    if event.face_id_required:
+        device_component = 90
+    elif event.session_restrict_large_transfers:
+        device_component = 75
+    elif event.device:
+        device_component = 25
+    recipient_component = 75 if not event.recipient_known else 15
+
+    base_score = _clamp_score(
+        (0.35 * model_component)
+        + (0.25 * rule_component)
+        + (0.15 * session_component)
+        + (0.15 * device_component)
+        + (0.10 * recipient_component)
+    )
+    severity_floor = 0
+    historical_risk_amount_floor = max(50.0, float(thresholds["amount_ratio_medium_min"]) * 0.2)
+    probe_escalation_amount_floor = max(300.0, float(thresholds["medium_amount"]) * 0.2)
+
+    if float(event.amount) >= historical_risk_amount_floor and event.recent_blocked_count_30d >= 2:
+        base_score = max(base_score, 90)
+    elif (
+        float(event.amount) >= historical_risk_amount_floor
+        and event.recent_review_count_30d + event.recent_pending_otp_count_7d >= 4
+    ):
+        base_score = max(base_score, 78)
+
+    history_count_30d = int(tx_history_signals.get("history_count_30d") or 0)
+    if (
+        account_category == "PERSONAL"
+        and history_count_30d < 3
+        and float(event.amount) >= thresholds["medium_amount"] * 0.75
+    ):
+        base_score = max(base_score, 64 if account_tier == "PREMIUM" else 72)
+        severity_floor = max(severity_floor, 48)
+
+    if (
+        account_category == "PERSONAL"
+        and account_tier == "BASIC"
+        and not event.recipient_known
+        and float(event.amount) >= thresholds["medium_amount"]
+    ):
+        base_score = max(base_score, 84)
+        severity_floor = max(severity_floor, 68)
+
+    if (
+        account_category == "PERSONAL"
+        and event.balance_before > 0
+        and not event.recipient_known
+        and (float(event.amount) / max(float(event.balance_before), 1.0)) >= thresholds["medium_drain_ratio"]
+    ):
+        base_score = max(base_score, 80)
+        severity_floor = max(severity_floor, 62)
+
+    if (
+        float(event.amount) >= probe_escalation_amount_floor
+        and float(getattr(event, "probe_then_large_risk_score", 0.0) or 0.0) >= 0.75
+    ):
+        base_score = max(base_score, 88)
+        severity_floor = max(severity_floor, 72)
+    elif (
+        float(event.amount) >= probe_escalation_amount_floor
+        and float(getattr(event, "probe_then_large_risk_score", 0.0) or 0.0) >= 0.45
+    ):
+        base_score = max(base_score, 72)
+        severity_floor = max(severity_floor, 52)
+
+    if (
+        int(getattr(event, "same_recipient_small_probe_count_24h", 0) or 0) >= 2
+        and not event.recipient_known
+        and float(event.amount) >= probe_escalation_amount_floor
+    ):
+        base_score = max(base_score, 82)
+        severity_floor = max(severity_floor, 60)
+
+    if profile_status == "PENDING_REVIEW":
+        base_score = max(base_score, 62)
+        severity_floor = max(severity_floor, 46)
+    elif profile_status == "REQUIRES_REVIEW":
+        base_score = max(base_score, 78)
+        severity_floor = max(severity_floor, 60)
+
+    if profile_confidence < 0.45 and float(event.amount) >= thresholds["medium_amount"] * 0.75:
+        base_score = max(base_score, 70)
+        severity_floor = max(severity_floor, 52)
+
+    if event.session_restrict_large_transfers and event.amount >= 500:
+        base_score = max(base_score, 88 if event.face_id_required else 80)
+        severity_floor = max(severity_floor, 72)
+
+    if rule_risk_level == "HIGH" and model_risk_level == "HIGH":
+        base_score = max(base_score, 90)
+        severity_floor = max(severity_floor, 82)
+    elif rule_risk_level == "HIGH" or model_risk_level == "HIGH":
+        base_score = max(base_score, 80)
+        severity_floor = max(severity_floor, 68)
+    elif rule_risk_level == "MEDIUM" and model_risk_level == "MEDIUM":
+        base_score = max(base_score, 68)
+        severity_floor = max(severity_floor, 54)
+
+    mitigation = _build_tx_mitigation_payload(
+        event=event,
+        model_risk_level=model_risk_level,
+        rule_risk_level=rule_risk_level,
+        tx_history_signals=tx_history_signals,
+    )
+    final_score = max(
+        severity_floor,
+        _clamp_score(base_score - int(mitigation["score"])),
+    )
+
+    if final_score >= 90:
+        final_action = "HOLD_REVIEW"
+        final_step_up = "ADMIN_REVIEW"
+        headline = "High-risk transfer placed on safety hold"
+        summary = "The transfer matches a high-risk combination of behavior, rule, and session signals, so it should be held for review."
+        next_step = "Do not complete the transfer until the recipient and payment purpose are independently verified."
+    elif final_score >= 80:
+        final_action = "REQUIRE_OTP_FACE_ID"
+        final_step_up = "OTP_AND_FACE_ID"
+        headline = "High-risk transfer requires stronger verification"
+        summary = "The transfer risk is high enough to require OTP plus FaceID or equivalent biometric verification before completion."
+        next_step = "Ask the user to complete OTP and FaceID, then re-check the recipient and amount."
+    elif final_score >= 60:
+        final_action = "REQUIRE_OTP"
+        final_step_up = "OTP"
+        headline = "Transfer requires OTP confirmation"
+        summary = "The transfer is unusual enough to require OTP verification before it can continue."
+        next_step = "Require OTP and ask the user to review the recipient, amount, and note before confirming."
+    elif final_score >= 30:
+        final_action = "ALLOW_WITH_WARNING"
+        final_step_up = None
+        headline = "Transfer can continue with a safety warning"
+        summary = "The transfer can continue, but the system detected moderate advisory signals that should be reviewed first."
+        next_step = "Show a warning and let the user continue only after acknowledging the risk cues."
+    else:
+        final_action = "ALLOW"
+        final_step_up = None
+        headline = "Transfer risk is low"
+        summary = "The transfer currently matches low-risk behavior and can continue under normal monitoring."
+        next_step = "Allow the transfer and keep monitoring for follow-up anomalies."
+
+    recommended_actions = []
+    if final_action in {"HOLD_REVIEW", "REQUIRE_OTP_FACE_ID", "REQUIRE_OTP"}:
+        recommended_actions.append("Verify the recipient through a trusted channel before sending money.")
+    if not event.recipient_known:
+        recommended_actions.append("Treat first-time recipients as higher risk until verified.")
+    if event.face_id_required:
+        recommended_actions.append("Require FaceID or biometric verification before completing the transfer.")
+    if event.session_restrict_large_transfers:
+        recommended_actions.append("Keep large-transfer restrictions active for this session until it is trusted again.")
+    if final_action == "HOLD_REVIEW":
+        recommended_actions.append("Send the case to manual review with full audit context.")
+
+    admin_summary = (
+        f"{headline}. Final score {final_score}/100 after {mitigation['score']}/100 mitigation. "
+        f"Model={model_risk_level}, rule={rule_risk_level}, session={event.session_risk_level}, "
+        f"profile={mitigation['accountProfileCode']}, segment={mitigation['accountSegment']}. "
+        f"Top reasons: {'; '.join(reasons[:3]) if reasons else 'No strong reasons captured.'}"
+    )
+
+    return {
+        "baseScore": base_score,
+        "finalScore": final_score,
+        "finalAction": final_action,
+        "stepUpLevel": final_step_up,
+        "headline": headline,
+        "summary": summary,
+        "nextStep": next_step,
+        "recommendedActions": dedupe_list(recommended_actions)[:4],
+        "componentScores": {
+            "model": model_component,
+            "rule": rule_component,
+            "session": session_component,
+            "device": device_component,
+            "recipient": recipient_component,
+            "mitigation": int(mitigation["score"]),
+        },
+        "mitigationScore": int(mitigation["score"]),
+        "mitigationReasons": mitigation["reasons"],
+        "counterArguments": mitigation["counterArguments"],
+        "accountSegment": mitigation["accountSegment"],
+        "accountCategory": mitigation["accountCategory"],
+        "accountTier": mitigation["accountTier"],
+        "accountProfileCode": mitigation["accountProfileCode"],
+        "accountProfileStatus": profile_status,
+        "accountProfileConfidence": round(profile_confidence, 3),
+        "segmentStats": mitigation["segmentStats"],
+        "adminSummary": admin_summary,
+    }
 
 
 def _resolve_artifact_paths() -> tuple[Path, Path]:
@@ -1807,6 +2643,7 @@ def _persist_tx_score_to_postgres(
     risk_level_final: str,
     reasons: list[str],
     request_key: str,
+    decision: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not _postgres_ready():
         return {"saved": False, "reason": "postgres_not_connected"}
@@ -1845,6 +2682,7 @@ def _persist_tx_score_to_postgres(
         reasons=reasons,
         request_key=request_key,
         transaction_event_id=transaction_event_id,
+        decision=decision,
     )
     metadata = {
         "recordType": "ai_transaction_score",
@@ -1852,6 +2690,8 @@ def _persist_tx_score_to_postgres(
         "modelVersion": model_version,
         "modelSource": app.state.tx_model_source,
         "riskLevel": risk_level_final,
+        "finalAction": decision.get("finalAction") if isinstance(decision, dict) else None,
+        "finalScore": decision.get("finalScore") if isinstance(decision, dict) else None,
         "monitoringOnly": True,
         "transactionEventId": transaction_event_id,
         "transactionId": event.transaction_id,
@@ -2235,6 +3075,7 @@ def _persist_tx_score_to_mongo(
     risk_level_final: str,
     reasons: list[str],
     request_key: str,
+    decision: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if _postgres_ready():
         return _persist_tx_score_to_postgres(
@@ -2246,6 +3087,7 @@ def _persist_tx_score_to_mongo(
             risk_level_final=risk_level_final,
             reasons=reasons,
             request_key=request_key,
+            decision=decision,
         )
     if not _mongo_ready():
         return {"saved": False, "reason": "storage_not_connected"}
@@ -2281,6 +3123,18 @@ def _persist_tx_score_to_mongo(
                 "channel": event.channel,
                 "failedTx24h": int(event.failed_tx_24h),
                 "velocity1h": int(event.velocity_1h),
+                "recipientKnown": bool(event.recipient_known),
+                "suspiciousNoteCount": int(event.suspicious_note_count),
+                "rollingOutflowAmount": float(event.rolling_outflow_amount),
+                "faceIdRequired": bool(event.face_id_required),
+                "sessionRestrictLargeTransfers": bool(event.session_restrict_large_transfers),
+                "recentReviewCount30d": int(event.recent_review_count_30d),
+                "recentBlockedCount30d": int(event.recent_blocked_count_30d),
+                "recentPendingOtpCount7d": int(event.recent_pending_otp_count_7d),
+                "llmNoteRiskLevel": event.llm_note_risk_level,
+                "llmSignalCount": int(event.llm_signal_count),
+                "llmRuleTags": list(event.llm_rule_tags),
+                "sessionRiskLevel": event.session_risk_level,
                 "requestId": event.request_id,
                 "requestKey": request_key,
                 "createdAt": event.timestamp,
@@ -2306,6 +3160,18 @@ def _persist_tx_score_to_mongo(
                 "channel": event.channel,
                 "failedTx24h": int(event.failed_tx_24h),
                 "velocity1h": int(event.velocity_1h),
+                "recipientKnown": bool(event.recipient_known),
+                "suspiciousNoteCount": int(event.suspicious_note_count),
+                "rollingOutflowAmount": float(event.rolling_outflow_amount),
+                "faceIdRequired": bool(event.face_id_required),
+                "sessionRestrictLargeTransfers": bool(event.session_restrict_large_transfers),
+                "recentReviewCount30d": int(event.recent_review_count_30d),
+                "recentBlockedCount30d": int(event.recent_blocked_count_30d),
+                "recentPendingOtpCount7d": int(event.recent_pending_otp_count_7d),
+                "llmNoteRiskLevel": event.llm_note_risk_level,
+                "llmSignalCount": int(event.llm_signal_count),
+                "llmRuleTags": list(event.llm_rule_tags),
+                "sessionRiskLevel": event.session_risk_level,
             },
             "features": _feature_vector_to_dict(_active_tx_feature_names(), features),
             "result": {
@@ -2317,6 +3183,7 @@ def _persist_tx_score_to_mongo(
                 "reasons": reasons,
                 "monitoringOnly": True,
                 "action": AI_TX_ACTION,
+                "decision": decision or {},
             },
             "model": {
                 "name": "pyod_iforest",
@@ -2397,6 +3264,8 @@ def _startup_app() -> None:
     _try_load_persisted_tx_model()
     _init_postgres()
     _init_mongo()
+    if not getattr(app.state, "tx_feedback_profile", None):
+        app.state.tx_feedback_profile = _build_tx_feedback_profile_from_postgres()
 
 
 def _shutdown_app() -> None:
@@ -2821,6 +3690,7 @@ def train_transaction(
     countries = {event.country.strip().lower() for event in normalized_events if event.country}
     payment_methods = {event.payment_method for event in normalized_events if event.payment_method}
     merchant_categories = {event.merchant_category for event in normalized_events if event.merchant_category}
+    feedback_profile = _build_tx_feedback_profile_from_postgres()
 
     _set_tx_model_state(
         model=model,
@@ -2837,6 +3707,7 @@ def train_transaction(
         model_path=None,
         metadata_path=None,
         feature_names=TX_FEATURE_NAMES,
+        feedback_profile=feedback_profile,
     )
     app.state.tx_model_trained_at_dt = _parse_iso_datetime(app.state.tx_trained_at)
     artifact = _persist_tx_model_artifacts(promote=promote) if persist else {"saved": False}
@@ -2867,6 +3738,8 @@ def score_transaction(
             status_code=503,
             detail="Transaction model is not trained yet. Train via /ai/tx/train or load an artifact first.",
         )
+    if not getattr(app.state, "tx_feedback_profile", None):
+        app.state.tx_feedback_profile = _build_tx_feedback_profile_from_postgres()
 
     event = _normalize_transaction_event(event)
     request_key = _resolve_tx_request_key(event, x_idempotency_key)
@@ -2923,6 +3796,55 @@ def score_transaction(
             model_reasons,
             [hit["reason"] for hit in rule_hits],
         )
+    decision = _build_tx_decision_payload(
+        event=event,
+        anomaly_score=anomaly_score,
+        model_risk_level=model_adjusted_risk,
+        rule_risk_level=rule_risk_level,
+        rule_score=rule_score,
+        reasons=reasons,
+        tx_history_signals=tx_history_signals,
+    )
+    if decision["finalAction"] == "HOLD_REVIEW":
+        warning_vi = {
+            "title": "Canh bao do: Giao dich tam dung de review",
+            "message": decision["summary"],
+            "do_not": [
+                "Khong tiep tuc neu chua xac minh doc lap nguoi nhan.",
+                "Khong bo qua canh bao de chuyen nhanh.",
+            ],
+            "must_do": [
+                "Chuyen giao dich sang review thu cong.",
+                "Lien he nguoi dung qua kenh tin cay neu can xac minh.",
+            ],
+            "prompt_template_id": "vi_warning_hold_review_v1",
+        }
+    elif decision["finalAction"] == "REQUIRE_OTP_FACE_ID":
+        warning_vi = {
+            "title": "Canh bao cam: Can OTP va FaceID",
+            "message": decision["summary"],
+            "do_not": warning_vi.get("do_not", []),
+            "must_do": dedupe_list([
+                *warning_vi.get("must_do", []),
+                "Bat buoc OTP va FaceID truoc khi hoan tat.",
+            ]),
+            "prompt_template_id": "vi_warning_otp_faceid_v1",
+        }
+    elif decision["finalAction"] == "REQUIRE_OTP":
+        warning_vi = {
+            "title": "Canh bao vang: Can OTP xac minh",
+            "message": decision["summary"],
+            "do_not": warning_vi.get("do_not", []),
+            "must_do": dedupe_list([
+                *warning_vi.get("must_do", []),
+                "Bat buoc OTP truoc khi tiep tuc giao dich.",
+            ]),
+            "prompt_template_id": "vi_warning_otp_v1",
+        }
+    risk_level = _max_risk_level(
+        risk_level,
+        "HIGH" if int(decision["finalScore"]) >= 80 else "MEDIUM" if int(decision["finalScore"]) >= 60 else "LOW",
+    )
     try:
         mongo_persist = _persist_tx_score_to_mongo(
             event=event,
@@ -2933,6 +3855,7 @@ def score_transaction(
             risk_level_final=risk_level,
             reasons=reasons,
             request_key=request_key,
+            decision=decision,
         )
     except Exception as exc:
         _metric_inc("mongo_write_error_total")
@@ -2973,6 +3896,25 @@ def score_transaction(
         "warning_vi": warning_vi,
         "monitoring_only": True,
         "action": AI_TX_ACTION,
+        "final_score": int(decision["finalScore"]),
+        "final_action": decision["finalAction"],
+        "step_up_level": decision["stepUpLevel"],
+        "headline": decision["headline"],
+        "summary": decision["summary"],
+        "next_step": decision["nextStep"],
+        "recommended_actions": decision["recommendedActions"],
+        "decision_components": decision["componentScores"],
+        "base_score": int(decision["baseScore"]),
+        "mitigation_score": int(decision["mitigationScore"]),
+        "mitigation_reasons": list(decision["mitigationReasons"]),
+        "counter_arguments": list(decision["counterArguments"]),
+        "account_segment": decision["accountSegment"],
+        "account_category": decision["accountCategory"],
+        "account_tier": decision["accountTier"],
+        "account_profile_code": decision["accountProfileCode"],
+        "account_profile_status": decision["accountProfileStatus"],
+        "account_profile_confidence": decision["accountProfileConfidence"],
+        "admin_summary": decision["adminSummary"],
         "model_source": app.state.tx_model_source,
         "model_version": getattr(app.state, "tx_model_version", "unknown"),
         "request_key": request_key,
@@ -2981,6 +3923,13 @@ def score_transaction(
             "history_source": tx_history_signals.get("history_source"),
             "history_count_30d": int(tx_history_signals.get("history_count_30d", 0)),
             "last_transaction_at": tx_history_signals.get("last_transaction_at"),
+            "segment_available": bool(tx_history_signals.get("segment_available")),
+            "segment_source": tx_history_signals.get("segment_source"),
+            "segment_history_count_30d": int(tx_history_signals.get("segment_history_count_30d", 0)),
+            "segment_amount_avg_30d": float(tx_history_signals.get("segment_amount_avg_30d", 0.0)),
+            "segment_amount_median_30d": float(tx_history_signals.get("segment_amount_median_30d", 0.0)),
+            "segment_amount_p90_30d": float(tx_history_signals.get("segment_amount_p90_30d", 0.0)),
+            "segment_daily_spend_avg_30d": float(tx_history_signals.get("segment_daily_spend_avg_30d", 0.0)),
             "amount": float(event.amount),
             "currency": event.currency,
             "country": event.country,
@@ -2993,6 +3942,38 @@ def score_transaction(
             "projected_daily_spend": float(event.projected_daily_spend),
             "balance_before": float(event.balance_before),
             "remaining_balance": float(event.remaining_balance),
+            "small_probe_count_24h": int(event.small_probe_count_24h),
+            "small_probe_total_24h": float(event.small_probe_total_24h),
+            "distinct_small_probe_recipients_24h": int(event.distinct_small_probe_recipients_24h),
+            "same_recipient_small_probe_count_24h": int(event.same_recipient_small_probe_count_24h),
+            "new_recipient_small_probe_count_24h": int(event.new_recipient_small_probe_count_24h),
+            "probe_then_large_risk_score": float(event.probe_then_large_risk_score),
+            "account_segment": normalize_account_segment(getattr(event, "account_segment", None)),
+            "account_category": normalize_account_category(
+                getattr(event, "account_category", None),
+                getattr(event, "account_segment", None),
+            ),
+            "account_tier": normalize_account_tier(
+                getattr(event, "account_category", None),
+                getattr(event, "account_tier", None),
+                getattr(event, "account_segment", None),
+            ),
+            "account_profile_code": build_account_profile_code(
+                getattr(event, "account_category", None),
+                getattr(event, "account_tier", None),
+                getattr(event, "account_segment", None),
+            ),
+            "account_profile_status": str(
+                getattr(event, "account_profile_status", "SYSTEM_ASSIGNED") or "SYSTEM_ASSIGNED"
+            ).upper(),
+            "account_profile_confidence": float(
+                getattr(event, "account_profile_confidence", 0.6) or 0.6
+            ),
+            "llm_note_risk_level": event.llm_note_risk_level,
+            "llm_signal_count": int(event.llm_signal_count),
+            "llm_rule_tags": list(event.llm_rule_tags),
+            "session_risk_level": event.session_risk_level,
+            "feedback_profile": getattr(app.state, "tx_feedback_profile", {}) or {},
         },
         "mongo_persist": mongo_persist,
         "admin_alert": admin_alert,
