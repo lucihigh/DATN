@@ -4156,6 +4156,7 @@ h3 {
   width: min(680px, calc(100vw - 48px));
   display: grid;
   gap: 12px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   padding: 16px;
   border-radius: 20px;
   border: 1px solid rgba(126, 173, 255, 0.22);
@@ -4169,6 +4170,11 @@ h3 {
   box-shadow:
     0 28px 52px rgba(2, 8, 22, 0.46),
     inset 0 1px 0 rgba(233, 242, 255, 0.08);
+}
+.transfer-ai-warning-body {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
 }
 .transfer-ai-warning-card.warning {
   border-color: rgba(245, 158, 11, 0.34);
@@ -7458,6 +7464,12 @@ body.theme-light .auth-form-shell {
   color: #b9c9ef;
   font-size: 12px;
   padding: 6px 10px;
+}
+
+.user-profile-pill.accent {
+  background: rgba(56, 189, 248, 0.12);
+  border-color: rgba(56, 189, 248, 0.28);
+  color: #d9f3ff;
 }
 .user-profile-grid {
   display: grid;
@@ -18073,9 +18085,17 @@ body:has(.ai-copilot-page) .ai-copilot-avatar-user img {
 
   .transfer-ai-warning-card {
     width: min(100%, calc(100vw - 28px)) !important;
+    max-height: calc(100dvh - 28px) !important;
     padding: 12px !important;
     gap: 10px !important;
     border-radius: 16px !important;
+  }
+
+  .transfer-ai-warning-body {
+    min-height: 0 !important;
+    overflow-y: auto !important;
+    overscroll-behavior: contain !important;
+    padding-right: 2px !important;
   }
 
   .transfer-ai-warning-head h4 {
@@ -18101,6 +18121,33 @@ body:has(.ai-copilot-page) .ai-copilot-avatar-user img {
   .transfer-ai-warning-section {
     padding: 10px !important;
     border-radius: 12px !important;
+  }
+
+  .transfer-ai-warning-grid {
+    padding-bottom: 4px !important;
+  }
+
+  .transfer-ai-warning-section ul {
+    gap: 6px !important;
+  }
+
+  .transfer-ai-warning-section small {
+    display: none !important;
+  }
+
+  .transfer-ai-warning-card .transfer-actions {
+    position: sticky !important;
+    bottom: 0 !important;
+    z-index: 2 !important;
+    margin-top: 0 !important;
+    padding-top: 8px !important;
+    padding-bottom: calc(4px + env(safe-area-inset-bottom, 0px)) !important;
+    background: linear-gradient(
+      180deg,
+      rgba(9, 21, 42, 0) 0%,
+      rgba(9, 21, 42, 0.92) 26%,
+      rgba(9, 21, 42, 0.99) 100%
+    ) !important;
   }
 
   .transfer-summary small {

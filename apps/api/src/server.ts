@@ -749,6 +749,10 @@ type AdminAlertResponse = {
   sameRecipientSmallProbeCount24h: number | null;
   newRecipientSmallProbeCount24h: number | null;
   probeThenLargeRiskScore: number | null;
+  recentInboundAmount24h: number | null;
+  recentAdminTopUpAmount24h: number | null;
+  recentSelfDepositAmount24h: number | null;
+  rapidCashOutRiskScore: number | null;
   analysisSignals: Record<string, unknown> | null;
 };
 
@@ -1468,6 +1472,15 @@ const buildAdminAlertSignals = (
     const country = asStringOrNull(detail.country);
     const paymentMethod = asStringOrNull(detail.paymentMethod);
     const merchantCategory = asStringOrNull(detail.merchantCategory);
+    const rapidCashOutRiskScore =
+      asNumberOrNull(detail.rapidCashOutRiskScore) ??
+      asNumberOrNull(detail.rapid_cash_out_risk_score);
+    const recentInboundAmount24h =
+      asNumberOrNull(detail.recentInboundAmount24h) ??
+      asNumberOrNull(detail.recent_inbound_amount_24h);
+    const recentAdminTopUpAmount24h =
+      asNumberOrNull(detail.recentAdminTopUpAmount24h) ??
+      asNumberOrNull(detail.recent_admin_topup_amount_24h);
     if (amount !== null) {
       signals.push({
         label: "Amount",
@@ -1495,6 +1508,33 @@ const buildAdminAlertSignals = (
         tone: "neutral",
       });
     }
+    if (rapidCashOutRiskScore !== null && rapidCashOutRiskScore >= 0.45) {
+      signals.push({
+        label: "AML pattern",
+        value: "Rapid cash-out after fresh funding",
+        tone: "warn",
+      });
+    }
+    if (recentInboundAmount24h !== null && recentInboundAmount24h > 0) {
+      signals.push({
+        label: "Fresh inflow 24h",
+        value: `${recentInboundAmount24h.toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })} ${currency}`,
+        tone: recentInboundAmount24h >= 1000 ? "warn" : "info",
+      });
+    }
+    if (recentAdminTopUpAmount24h !== null && recentAdminTopUpAmount24h > 0) {
+      signals.push({
+        label: "Admin top-up 24h",
+        value: `${recentAdminTopUpAmount24h.toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })} ${currency}`,
+        tone: "warn",
+      });
+    }
   }
 
   return signals;
@@ -1517,6 +1557,7 @@ const buildAdminAlertResponse = (log: {
   const mergedDetail = {
     ...aiMonitoring,
     ...detail,
+    ...analysisSignals,
   };
   const type = log.action === "AI_TRANSACTION_ALERT" ? "transaction" : "login";
   const reasons = toStringList(mergedDetail.reasons);
@@ -1624,6 +1665,18 @@ const buildAdminAlertResponse = (log: {
     ),
     probeThenLargeRiskScore: asNumberOrNull(
       analysisSignals.probe_then_large_risk_score,
+    ),
+    recentInboundAmount24h: asNumberOrNull(
+      analysisSignals.recent_inbound_amount_24h,
+    ),
+    recentAdminTopUpAmount24h: asNumberOrNull(
+      analysisSignals.recent_admin_topup_amount_24h,
+    ),
+    recentSelfDepositAmount24h: asNumberOrNull(
+      analysisSignals.recent_self_deposit_amount_24h,
+    ),
+    rapidCashOutRiskScore: asNumberOrNull(
+      analysisSignals.rapid_cash_out_risk_score,
     ),
     analysisSignals:
       Object.keys(analysisSignals).length > 0 ? analysisSignals : null,

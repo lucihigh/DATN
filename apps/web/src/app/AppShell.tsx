@@ -611,6 +611,14 @@ const translateTransferRiskCopy = (value?: string) => {
       "You had $1 recent transfer attempts near this amount that were reviewed or blocked before completion.",
     )
     .replace(
+      /^a large amount of funds entered this wallet recently and the current transfer would move most of it back out quickly\.?$/i,
+      "This wallet was funded recently and the current transfer would cash most of it back out too quickly.",
+    )
+    .replace(
+      /^recent admin top-up is being cashed out unusually quickly, which matches a source-in\/source-out laundering pattern\.?$/i,
+      "A recent admin top-up is being moved back out unusually quickly, which matches a source-in/source-out laundering pattern.",
+    )
+    .replace(
       /^verify the recipient using a phone number or channel you already trust\.?$/i,
       "Verify the recipient using a phone number or channel you already trust.",
     )
@@ -635,6 +643,7 @@ const translateTransferRiskCopy = (value?: string) => {
       "Pause the transfer and call the official support hotline.",
     )
     .replace(/^new recipient risk$/i, "New Recipient Risk")
+    .replace(/^rapid cash-out risk$/i, "Rapid Cash-Out Risk")
     .replace(/^continue carefully$/i, "I reviewed the warning, continue to OTP")
     .replace(/^otp plus live faceid check$/i, "OTP plus live FaceID check")
     .replace(/^review, then release otp$/i, "Review, then release OTP")
@@ -1143,6 +1152,7 @@ type AiMonitoringSummary = {
     mustDo?: string[];
     promptTemplateId?: string;
   } | null;
+  analysisSignals?: Record<string, unknown> | null;
 };
 
 function Ring({ value }: { value: number }) {
@@ -1744,14 +1754,10 @@ function DashboardView({
     effectiveTransferAdvisory?.severity === "blocked" ||
     effectiveTransferAdvisory?.requiresAcknowledgement === true;
   const transferContinueLabel = transferOtpBusy
-    ? isTransferPreOtpWarning && !transferAdvisoryAcknowledged
-      ? "Reviewing transfer..."
-      : "Preparing security check..."
+    ? "Preparing security check..."
     : isTransferHardBlocked
       ? "Blocked for safety review"
-      : isTransferPreOtpWarning && !transferAdvisoryAcknowledged
-        ? effectiveTransferAdvisory.confirmationLabel
-        : "Continue to security";
+      : "Continue to security";
   const ownQrPayload =
     wallet?.qrPayload ||
     (wallet?.accountNumber
@@ -2194,6 +2200,16 @@ function DashboardView({
               : null,
         ruleHits,
         warning,
+        analysisSignals:
+          data.analysisSignals &&
+          typeof data.analysisSignals === "object" &&
+          !Array.isArray(data.analysisSignals)
+            ? (data.analysisSignals as Record<string, unknown>)
+            : data.analysis_signals &&
+                typeof data.analysis_signals === "object" &&
+                !Array.isArray(data.analysis_signals)
+              ? (data.analysis_signals as Record<string, unknown>)
+              : null,
       };
     },
     [],
@@ -2663,6 +2679,38 @@ function DashboardView({
     const amount =
       Number(transferAmount.replace(/,/g, "")) || advisory?.amount || 0;
     const amountLabel = formatTransferAdvisoryAmount(amount, "USD");
+    const analysisSignals =
+      monitoring?.analysisSignals &&
+      typeof monitoring.analysisSignals === "object" &&
+      !Array.isArray(monitoring.analysisSignals)
+        ? monitoring.analysisSignals
+        : null;
+    const rapidCashOutRiskScore =
+      typeof analysisSignals?.rapidCashOutRiskScore === "number"
+        ? analysisSignals.rapidCashOutRiskScore
+        : typeof analysisSignals?.rapid_cash_out_risk_score === "number"
+          ? analysisSignals.rapid_cash_out_risk_score
+          : null;
+    const recentInboundAmount24h =
+      typeof analysisSignals?.recentInboundAmount24h === "number"
+        ? analysisSignals.recentInboundAmount24h
+        : typeof analysisSignals?.recent_inbound_amount_24h === "number"
+          ? analysisSignals.recent_inbound_amount_24h
+          : null;
+    const recentAdminTopUpAmount24h =
+      typeof analysisSignals?.recentAdminTopUpAmount24h === "number"
+        ? analysisSignals.recentAdminTopUpAmount24h
+        : typeof analysisSignals?.recent_admin_topup_amount_24h === "number"
+          ? analysisSignals.recent_admin_topup_amount_24h
+          : null;
+    const rapidCashOutSignal =
+      rapidCashOutRiskScore !== null && rapidCashOutRiskScore >= 0.45
+        ? recentAdminTopUpAmount24h && recentAdminTopUpAmount24h > 0
+          ? `A recent ${formatTransferAdvisoryAmount(recentAdminTopUpAmount24h, "USD")} admin top-up is being moved back out unusually quickly.`
+          : recentInboundAmount24h && recentInboundAmount24h > 0
+            ? `The wallet received ${formatTransferAdvisoryAmount(recentInboundAmount24h, "USD")} recently and this transfer would cash most of it back out too quickly.`
+            : "This transfer matches a rapid source-in/source-out cash-out pattern."
+        : null;
     const nextAction =
       tone === "blocked"
         ? "Pause and verify independently"
@@ -2682,6 +2730,7 @@ function DashboardView({
           ? `This transfer to ${recipientLabel} can still continue, but the behavior is unusual enough that FPIPay wants you to pause, confirm the recipient, and re-check the purpose before OTP is issued.`
           : `AI noticed a mild deviation for this transfer to ${recipientLabel}. Nothing is confirmed as fraud, but a short review helps prevent accidental or manipulated payments.`;
     const signals = [
+      rapidCashOutSignal,
       ...(advisory?.reasons || []),
       ...(monitoring?.reasons || []),
       ...((monitoring?.ruleHits || []).flatMap((hit) =>
@@ -2691,6 +2740,10 @@ function DashboardView({
         ),
       ) || []),
     ]
+      .filter(
+        (item): item is string =>
+          typeof item === "string" && item.trim().length > 0,
+      )
       .map((item) => translateTransferRiskCopy(item))
       .filter((item, index, arr) => item && arr.indexOf(item) === index)
       .slice(0, 2);
@@ -6901,74 +6954,76 @@ function DashboardView({
                     ×
                   </button>
                 </div>
-                <div className="transfer-ai-warning-summary">
-                  <div>
-                    <span>Status</span>
-                    <strong>{transferAiIntervention.statusLabel}</strong>
+                <div className="transfer-ai-warning-body">
+                  <div className="transfer-ai-warning-summary">
+                    <div>
+                      <span>Status</span>
+                      <strong>{transferAiIntervention.statusLabel}</strong>
+                    </div>
+                    <div>
+                      <span>Confidence</span>
+                      <strong>{transferAiIntervention.confidence}%</strong>
+                    </div>
+                    <div>
+                      <span>Next action</span>
+                      <strong>{transferAiIntervention.nextAction}</strong>
+                    </div>
                   </div>
-                  <div>
-                    <span>Confidence</span>
-                    <strong>{transferAiIntervention.confidence}%</strong>
-                  </div>
-                  <div>
-                    <span>Next action</span>
-                    <strong>{transferAiIntervention.nextAction}</strong>
-                  </div>
-                </div>
-                <div className="transfer-ai-warning-grid">
-                  <div className="transfer-ai-warning-section">
-                    <span className="transfer-ai-warning-section-label">
-                      Transfer snapshot
-                    </span>
-                    <strong>{transferAiIntervention.recipientLabel}</strong>
-                    <p>Amount: {transferAiIntervention.amountLabel}</p>
-                    {transferAiIntervention.archetype ? (
-                      <small>
-                        Pattern:{" "}
-                        {translateTransferRiskCopy(
-                          transferAiIntervention.archetype,
-                        )}
-                      </small>
-                    ) : null}
-                    {isTransferHoldActive ? (
-                      <small>
-                        Retry after {transferHoldRemainingLabel} or wait for
-                        manual review to clear the hold.
-                      </small>
-                    ) : null}
-                  </div>
-                  <div className="transfer-ai-warning-section">
-                    <span className="transfer-ai-warning-section-label">
-                      Why AI flagged this
-                    </span>
-                    {transferAiIntervention.signals.length > 0 ? (
+                  <div className="transfer-ai-warning-grid">
+                    <div className="transfer-ai-warning-section">
+                      <span className="transfer-ai-warning-section-label">
+                        Transfer snapshot
+                      </span>
+                      <strong>{transferAiIntervention.recipientLabel}</strong>
+                      <p>Amount: {transferAiIntervention.amountLabel}</p>
+                      {transferAiIntervention.archetype ? (
+                        <small>
+                          Pattern:{" "}
+                          {translateTransferRiskCopy(
+                            transferAiIntervention.archetype,
+                          )}
+                        </small>
+                      ) : null}
+                      {isTransferHoldActive ? (
+                        <small>
+                          Retry after {transferHoldRemainingLabel} or wait for
+                          manual review to clear the hold.
+                        </small>
+                      ) : null}
+                    </div>
+                    <div className="transfer-ai-warning-section">
+                      <span className="transfer-ai-warning-section-label">
+                        Why AI flagged this
+                      </span>
+                      {transferAiIntervention.signals.length > 0 ? (
+                        <ul>
+                          {transferAiIntervention.signals.map((item) => (
+                            <li key={item}>{item}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p>
+                          AI detected enough deviation from your normal behavior
+                          to trigger a safety review before OTP is sent.
+                        </p>
+                      )}
+                      {transferAiIntervention.timeline.length > 0 ? (
+                        <small>{transferAiIntervention.timeline[0]}</small>
+                      ) : null}
+                    </div>
+                    <div className="transfer-ai-warning-section">
+                      <span className="transfer-ai-warning-section-label">
+                        Before continuing
+                      </span>
                       <ul>
-                        {transferAiIntervention.signals.map((item) => (
+                        {transferAiIntervention.protectSteps.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                        {transferAiIntervention.stopList.map((item) => (
                           <li key={item}>{item}</li>
                         ))}
                       </ul>
-                    ) : (
-                      <p>
-                        AI detected enough deviation from your normal behavior
-                        to trigger a safety review before OTP is sent.
-                      </p>
-                    )}
-                    {transferAiIntervention.timeline.length > 0 ? (
-                      <small>{transferAiIntervention.timeline[0]}</small>
-                    ) : null}
-                  </div>
-                  <div className="transfer-ai-warning-section">
-                    <span className="transfer-ai-warning-section-label">
-                      Before continuing
-                    </span>
-                    <ul>
-                      {transferAiIntervention.protectSteps.map((item) => (
-                        <li key={item}>{item}</li>
-                      ))}
-                      {transferAiIntervention.stopList.map((item) => (
-                        <li key={item}>{item}</li>
-                      ))}
-                    </ul>
+                    </div>
                   </div>
                 </div>
                 <div className="transfer-actions">
@@ -9968,6 +10023,21 @@ function MyProfileView({
             <span className="user-profile-pill">
               Account: {accountNumber || "Not available"}
             </span>
+            <span className="user-profile-pill accent">
+              Tier:{" "}
+              {formatAccountProfileLabel(
+                accountProfile.category,
+                accountProfile.tier,
+              )}
+            </span>
+            <span className="user-profile-pill">
+              {formatAccountProfileAutomationMode(
+                accountProfile.automation?.mode,
+              )}
+            </span>
+            <span className="user-profile-pill">
+              Confidence {Math.round(accountProfile.confidence * 100)}%
+            </span>
           </div>
         </div>
       </div>
@@ -10050,38 +10120,18 @@ function MyProfileView({
               Users can no longer widen their own AI baseline manually.
             </p>
           </div>
-          <div className="account-profile-summary">
-            <span className="account-profile-badge">
-              Effective:{" "}
-              {formatAccountProfileLabel(
-                accountProfile.category,
-                accountProfile.tier,
-              )}
-            </span>
-            <span className="account-profile-badge neutral">
-              {formatAccountProfileAutomationMode(
-                accountProfile.automation?.mode,
-              )}
-            </span>
-            <span className="account-profile-badge neutral">
-              Confidence {Math.round(accountProfile.confidence * 100)}%
-            </span>
-          </div>
         </div>
 
         <div className="account-profile-meta-row">
           <span className="account-profile-meta-item">
-            <strong>Current tier</strong>
-            <em>
-              {formatAccountProfileLabel(
-                accountProfile.category,
-                accountProfile.tier,
-              )}
-            </em>
-          </span>
-          <span className="account-profile-meta-item">
             <strong>Status</strong>
             <em>{formatAccountProfileStatus(accountProfile.status)}</em>
+          </span>
+          <span className="account-profile-meta-item">
+            <strong>Completed</strong>
+            <em>
+              {accountProfile.automation?.stats.completedCount ?? 0} transfers
+            </em>
           </span>
           <span className="account-profile-meta-item">
             <strong>30d volume</strong>
@@ -10105,6 +10155,17 @@ function MyProfileView({
               %
             </em>
           </span>
+          {accountProfile.automation?.nextTier ? (
+            <span className="account-profile-meta-item">
+              <strong>Next target</strong>
+              <em>
+                {formatAccountProfileLabel(
+                  accountProfile.category,
+                  accountProfile.automation.nextTier,
+                )}
+              </em>
+            </span>
+          ) : null}
         </div>
 
         <div className="account-profile-compact-grid">
