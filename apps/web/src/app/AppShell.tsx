@@ -273,7 +273,7 @@ const NAV_ITEMS: {
   children?: { id: string; label: string }[];
 }[] = [
   { id: "Dashboard", label: "Dashboard" },
-  { id: "Copilot", label: "Copilot" },
+  { id: "Copilot", label: "VaultAI" },
   { id: "Card Center", label: "Card Center" },
   {
     id: "Support",
@@ -902,7 +902,7 @@ const buildSmartCopilotTitle = (input?: string) => {
 };
 
 const buildCopilotSessionTitle = (input?: string) => {
-  const cleaned = buildSmartCopilotTitle(input).replace(/\s+/g, " ").trim();
+  const cleaned = (input || "").replace(/\s+/g, " ").trim();
   if (!cleaned) return COPILOT_DEFAULT_TITLE;
   return cleaned.length <= 44
     ? cleaned
@@ -1389,7 +1389,6 @@ function DashboardView({
   const transferQrScanTimerRef = useRef<number | null>(null);
   const copilotThreadRef = useRef<HTMLDivElement>(null);
   const copilotPersistTimerRef = useRef<number | null>(null);
-  const copilotFreshOnOpenAppliedRef = useRef(false);
   const walletRefreshInFlightRef = useRef(false);
   const [wallet, setWallet] = useState<{
     id: string;
@@ -3648,25 +3647,19 @@ function DashboardView({
   }, [copilotHistoryHydrated, copilotStorageKey, copilotWorkspace, token]);
 
   useEffect(() => {
-    if (mode !== "copilot") {
-      copilotFreshOnOpenAppliedRef.current = false;
+    if (mode !== "copilot" || !copilotHistoryHydrated) {
       return;
     }
-    if (!copilotHistoryHydrated || copilotFreshOnOpenAppliedRef.current) {
-      return;
-    }
-    copilotFreshOnOpenAppliedRef.current = true;
-    const nextSession = buildDefaultCopilotSession();
-    setCopilotWorkspace((current) => ({
-      ...current,
-      activeSessionId: "",
-    }));
-    setCopilotDraftSession(nextSession);
-    setCopilotInput("");
+    setCopilotDraftSession((currentDraft) => {
+      if (copilotWorkspace.activeSessionId) {
+        return null;
+      }
+      return currentDraft || buildDefaultCopilotSession();
+    });
     setCopilotSessionMenuId("");
     setCopilotRenameSessionId("");
     setCopilotRenameDraft("");
-  }, [mode, copilotHistoryHydrated]);
+  }, [mode, copilotHistoryHydrated, copilotWorkspace.activeSessionId]);
 
   const resetCopilotConversation = useCallback(() => {
     const nextSession = buildDefaultCopilotSession();
@@ -5401,7 +5394,7 @@ function DashboardView({
                     </span>
                   </div>
                   <span className="ai-copilot-page-profile-subtitle">
-                    FPIPay Copilot workspace
+                    VaultAI workspace
                   </span>
                 </div>
               </div>
@@ -5564,7 +5557,7 @@ function DashboardView({
                 {copilotIsFreshSession ? (
                   <div className="ai-copilot-welcome-overlay">
                     <div className="ai-copilot-welcome-kicker">
-                      FPIPay Copilot ready
+                      VaultAI ready
                     </div>
                     <h4>Ask one focused finance question to get started.</h4>
                     <p>{copilotMessages[0]?.content}</p>
@@ -5586,9 +5579,7 @@ function DashboardView({
                         className={`ai-copilot-message-card ai-copilot-message-card-${message.role}`}
                       >
                         <span className="ai-copilot-message-label">
-                          {message.role === "assistant"
-                            ? "FPIPay Copilot"
-                            : "You"}
+                          {message.role === "assistant" ? "VaultAI" : "You"}
                         </span>
                         {renderCopilotMessageContent(message.content)}
                       </div>
@@ -5608,9 +5599,7 @@ function DashboardView({
                   <div className="ai-copilot-message-row ai-copilot-message-row-assistant">
                     <div className="ai-copilot-avatar">AI</div>
                     <div className="ai-copilot-message-card ai-copilot-message-card-assistant ai-copilot-bubble-thinking">
-                      <span className="ai-copilot-message-label">
-                        FPIPay Copilot
-                      </span>
+                      <span className="ai-copilot-message-label">VaultAI</span>
                       <div className="ai-copilot-typing" aria-hidden="true">
                         <span />
                         <span />
@@ -5807,7 +5796,7 @@ function DashboardView({
               openCopilotWorkspace();
             }}
           >
-            Open AI workspace
+            Open VaultAI workspace
           </button>
         </aside>
       </div>

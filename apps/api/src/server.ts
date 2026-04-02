@@ -266,8 +266,13 @@ const OLLAMA_NUM_PREDICT = Number(process.env.OLLAMA_NUM_PREDICT || "768");
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
 const OPENAI_REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || "low";
+const ALLOW_EXTERNAL_FINANCIAL_CONTEXT = !["0", "false", "no"].includes(
+  String(process.env.ALLOW_EXTERNAL_FINANCIAL_CONTEXT || "0")
+    .trim()
+    .toLowerCase(),
+);
 const ENABLE_TRANSFER_LLM_RULES = !["0", "false", "no"].includes(
-  String(process.env.ENABLE_TRANSFER_LLM_RULES || (OPENAI_API_KEY ? "1" : "0"))
+  String(process.env.ENABLE_TRANSFER_LLM_RULES || "0")
     .trim()
     .toLowerCase(),
 );
@@ -3033,7 +3038,11 @@ const analyzeTransferNoteWithLlm = async (input: {
   if (!note || isGenericTransferNote(note)) {
     return heuristic;
   }
-  if (!ENABLE_TRANSFER_LLM_RULES || !openaiClient) {
+  if (
+    !ENABLE_TRANSFER_LLM_RULES ||
+    !openaiClient ||
+    !ALLOW_EXTERNAL_FINANCIAL_CONTEXT
+  ) {
     return { ...heuristic, source: "disabled" };
   }
 
@@ -4278,6 +4287,10 @@ const classifyCopilotIntentHeuristically = (
   latestMessage: string,
 ): CopilotIntentClassification => {
   const normalized = normalizeCopilotText(latestMessage);
+  const asksAnalyticalMarketQuestion =
+    /\b(phan tich|danh gia|outlook|thesis|trend|xu huong|on dinh|bien dong|volatility|rui ro|risk|1 nam|1 year|one year|12 thang|12 months|dai han|long term|ngan han|short term|trung han|medium term)\b/.test(
+      normalized,
+    );
 
   if (
     /\b(scam|fraud|lua dao|otp|faceid|pin|mat khau|password|remote access|screen share|bat thuong|anomaly|suspicious|nghi ngo|safe account|tai khoan an toan)\b/.test(
@@ -4334,10 +4347,7 @@ const classifyCopilotIntentHeuristically = (
     };
   }
 
-  if (
-    isExplicitLiveQuoteRequest(latestMessage) ||
-    detectMarketIntent(latestMessage)
-  ) {
+  if (isExplicitLiveQuoteRequest(latestMessage)) {
     return {
       intent: "market_data",
       needs_tools: true,
@@ -4348,6 +4358,7 @@ const classifyCopilotIntentHeuristically = (
   }
 
   if (
+    (detectMarketIntent(latestMessage) && asksAnalyticalMarketQuestion) ||
     /\b(portfolio|allocation|phan bo|etf|index fund|diversif|da dang hoa|valuation|p\/e|eps|market cap|dividend|free cash flow|fcf|co phieu|chung khoan|watchlist)\b/.test(
       normalized,
     )
@@ -4403,9 +4414,10 @@ const classifyCopilotIntent = async (input: {
     (heuristic.intent === "spending_analysis" &&
       isSpendingComparisonIntent(latestUserMessage)) ||
     heuristic.intent === "anomaly_check" ||
+    (heuristic.intent === "portfolio_analysis" &&
+      Boolean(detectMarketIntent(latestUserMessage))) ||
     (heuristic.intent === "market_data" &&
-      (isExplicitLiveQuoteRequest(latestUserMessage) ||
-        Boolean(detectMarketIntent(latestUserMessage))));
+      isExplicitLiveQuoteRequest(latestUserMessage));
 
   if (isHighConfidenceHeuristic) {
     return heuristic;
@@ -4444,6 +4456,19 @@ const classifyCopilotIntent = async (input: {
   }
 
   return heuristic;
+};
+
+const shouldAllowExternalCopilotContext = (
+  classification: CopilotIntentClassification | null | undefined,
+) => {
+  if (ALLOW_EXTERNAL_FINANCIAL_CONTEXT) return true;
+  const intent = classification?.intent || "unsupported";
+  return (
+    intent === "finance_education" ||
+    intent === "portfolio_analysis" ||
+    intent === "market_data" ||
+    intent === "unsupported"
+  );
 };
 
 const summarizeCopilotConversation = (messages: CopilotMessagePayload[]) =>
@@ -4522,6 +4547,7 @@ const buildOpenAiCopilotInput = (input: {
   messages: CopilotMessagePayload[];
   language: CopilotLanguage;
   classification?: CopilotIntentClassification | null;
+  shareSensitiveContext?: boolean;
 }) => {
   const now = formatMarketTimestamp(new Date());
   const transactionSummary = summarizeCopilotTransactions(
@@ -4546,18 +4572,25 @@ const buildOpenAiCopilotInput = (input: {
         ? input.classification.required_tools.join(", ")
         : "none"
     }`,
-    `Wallet currency: ${input.currency}`,
-    `Wallet balance: ${input.currency} ${formatMarketPrice(
-      Math.max(0, input.currentBalance),
-    )}`,
-    `Estimated monthly income: ${input.currency} ${formatMarketPrice(
-      Math.max(0, input.monthlyIncome),
-    )}`,
-    `Estimated monthly expenses: ${input.currency} ${formatMarketPrice(
-      Math.max(0, input.monthlyExpenses),
-    )}`,
-    "Recent wallet transactions:",
-    transactionSummary || "No recent transactions available.",
+    ...(input.shareSensitiveContext === false
+      ? [
+          "Wallet context sharing policy:",
+          "Sensitive wallet balances and transaction records are withheld from this external model call. Answer using general finance reasoning plus the visible conversation only.",
+        ]
+      : [
+          `Wallet currency: ${input.currency}`,
+          `Wallet balance: ${input.currency} ${formatMarketPrice(
+            Math.max(0, input.currentBalance),
+          )}`,
+          `Estimated monthly income: ${input.currency} ${formatMarketPrice(
+            Math.max(0, input.monthlyIncome),
+          )}`,
+          `Estimated monthly expenses: ${input.currency} ${formatMarketPrice(
+            Math.max(0, input.monthlyExpenses),
+          )}`,
+          "Recent wallet transactions:",
+          transactionSummary || "No recent transactions available.",
+        ]),
     "Latest user message:",
     latestUserMessage || "No latest message available.",
     "Recognized finance entities:",
@@ -4577,6 +4610,7 @@ const buildCopilotClassificationInput = (input: {
   recentTransactions: CopilotTransactionPayload[];
   messages: CopilotMessagePayload[];
   language: CopilotLanguage;
+  shareSensitiveContext?: boolean;
 }) => {
   const latestUserMessage =
     [...input.messages].reverse().find((message) => message.role === "user")
@@ -4589,18 +4623,25 @@ const buildCopilotClassificationInput = (input: {
 
   return [
     `Preferred language context: ${input.language === "vi" ? "Vietnamese" : "English"}`,
-    `Wallet currency available: ${input.currency}`,
-    `Wallet balance available: ${input.currency} ${formatMarketPrice(
-      Math.max(0, input.currentBalance),
-    )}`,
-    `Estimated monthly income available: ${input.currency} ${formatMarketPrice(
-      Math.max(0, input.monthlyIncome),
-    )}`,
-    `Estimated monthly expenses available: ${input.currency} ${formatMarketPrice(
-      Math.max(0, input.monthlyExpenses),
-    )}`,
-    "Recent wallet transactions available to tools:",
-    transactionSummary || "No recent transactions available.",
+    ...(input.shareSensitiveContext === false
+      ? [
+          "Wallet context sharing policy:",
+          "Sensitive wallet balances and transaction records are withheld from this external classifier call.",
+        ]
+      : [
+          `Wallet currency available: ${input.currency}`,
+          `Wallet balance available: ${input.currency} ${formatMarketPrice(
+            Math.max(0, input.currentBalance),
+          )}`,
+          `Estimated monthly income available: ${input.currency} ${formatMarketPrice(
+            Math.max(0, input.monthlyIncome),
+          )}`,
+          `Estimated monthly expenses available: ${input.currency} ${formatMarketPrice(
+            Math.max(0, input.monthlyExpenses),
+          )}`,
+          "Recent wallet transactions available to tools:",
+          transactionSummary || "No recent transactions available.",
+        ]),
     "Latest user message:",
     latestUserMessage || "No latest user message available.",
     "Conversation transcript:",
@@ -4669,6 +4710,7 @@ const buildCopilotClassificationInstructions = () =>
     "Classify the user query into exactly one intent from this list:",
     "finance_education, market_data, portfolio_analysis, spending_analysis, budgeting_help, transaction_review, anomaly_check, unsupported.",
     "If the user asks for exact market prices, exchange rates, or ticker quotes, choose market_data.",
+    "If the user asks whether a stock has been stable over months or a year, or asks for trend, outlook, volatility, or risk analysis without needing an exact live price, choose portfolio_analysis.",
     "If the user asks to review transactions, statements, or recent wallet activity, choose transaction_review.",
     "If the user asks for spending trends, category insights, or outflow comparisons, choose spending_analysis.",
     "If the user asks for budgeting, savings planning, or cash-flow discipline, choose budgeting_help.",
@@ -4954,6 +4996,12 @@ const callOpenAiCopilot = async (input: {
   classification?: CopilotIntentClassification | null;
 }): Promise<OpenAiCopilotResult> => {
   if (!openaiClient) return { status: "disabled" };
+  const shareSensitiveContext = shouldAllowExternalCopilotContext(
+    input.classification,
+  );
+  if (!shareSensitiveContext && input.classification?.needs_tools) {
+    return { status: "disabled" };
+  }
 
   try {
     const response = await openaiClient.responses.create({
@@ -4962,7 +5010,10 @@ const callOpenAiCopilot = async (input: {
         effort: OPENAI_REASONING_EFFORT as "low" | "medium" | "high",
       },
       instructions: buildCopilotSystemInstructions(input.language),
-      input: buildOpenAiCopilotInput(input),
+      input: buildOpenAiCopilotInput({
+        ...input,
+        shareSensitiveContext,
+      }),
     });
 
     const responseText =
@@ -5019,6 +5070,9 @@ const callOpenAiCopilotClassifier = async (input: {
   language: CopilotLanguage;
 }): Promise<OpenAiCopilotClassificationResult> => {
   if (!openaiClient) return { status: "disabled" };
+  if (!ALLOW_EXTERNAL_FINANCIAL_CONTEXT) {
+    return { status: "disabled" };
+  }
 
   try {
     const response = await openaiClient.responses.create({
@@ -5027,7 +5081,10 @@ const callOpenAiCopilotClassifier = async (input: {
         effort: "low",
       },
       instructions: buildCopilotClassificationInstructions(),
-      input: buildCopilotClassificationInput(input),
+      input: buildCopilotClassificationInput({
+        ...input,
+        shareSensitiveContext: ALLOW_EXTERNAL_FINANCIAL_CONTEXT,
+      }),
     });
 
     const responseText =
@@ -6877,6 +6934,83 @@ const fetchCopilotTransactionsForUser = async (input: {
   });
 
   return mapTransactionsForCopilot(txns, input.context);
+};
+
+const buildCopilotSourceTruthContext = async (input: {
+  userId: string;
+  preferredCurrency?: string | null;
+}) => {
+  const wallets = await prisma.wallet.findMany({
+    where: { userId: input.userId },
+    select: { id: true, balance: true, currency: true },
+  });
+  const preferredCurrency =
+    typeof input.preferredCurrency === "string" &&
+    input.preferredCurrency.trim().length
+      ? input.preferredCurrency.trim().toUpperCase()
+      : null;
+  const resolvedCurrency =
+    preferredCurrency ||
+    wallets.find((wallet) => typeof wallet.currency === "string")?.currency ||
+    "USD";
+  const walletBalance = roundMoney(
+    wallets
+      .filter(
+        (wallet) =>
+          !preferredCurrency ||
+          (wallet.currency || "").toUpperCase() === resolvedCurrency,
+      )
+      .reduce(
+        (sum, wallet) => sum + Math.max(0, Number(wallet.balance || 0)),
+        0,
+      ),
+  );
+
+  const now = new Date();
+  const lookbackStart = new Date(now);
+  lookbackStart.setDate(lookbackStart.getDate() - 90);
+  const monthlyStart = new Date(now);
+  monthlyStart.setDate(monthlyStart.getDate() - 30);
+
+  const transactions = await fetchCopilotTransactionsForUser({
+    userId: input.userId,
+    startInclusive: lookbackStart,
+    endExclusive: now,
+    limit: 500,
+    context: "/ai/copilot-chat:source-truth",
+  });
+
+  const monthlyTransactions = transactions.filter(
+    (transaction) => transaction.createdAt >= monthlyStart,
+  );
+  const monthlyIncome = roundMoney(
+    monthlyTransactions.reduce(
+      (sum, transaction) =>
+        sum +
+        (transaction.direction === "credit"
+          ? Math.max(0, Number(transaction.amount || 0))
+          : 0),
+      0,
+    ),
+  );
+  const monthlyExpenses = roundMoney(
+    monthlyTransactions.reduce(
+      (sum, transaction) =>
+        sum +
+        (transaction.direction === "debit"
+          ? Math.max(0, Number(transaction.amount || 0))
+          : 0),
+      0,
+    ),
+  );
+
+  return {
+    currency: resolvedCurrency,
+    currentBalance: walletBalance,
+    monthlyIncome,
+    monthlyExpenses,
+    recentTransactions: transactions.slice(-120),
+  };
 };
 
 const sumDebitAmount = (
@@ -11282,6 +11416,11 @@ app.put("/ai/copilot-history", requireAuth, async (req, res) => {
 });
 
 app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
   const body = req.body as {
     currency?: unknown;
     currentBalance?: unknown;
@@ -11309,30 +11448,22 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
   }
   const language = detectCopilotLanguage(latestUserMessage.content);
 
-  const recentTransactions = Array.isArray(body.recentTransactions)
-    ? body.recentTransactions.filter(
-        (item): item is CopilotTransactionPayload =>
-          Boolean(item) &&
-          typeof item === "object" &&
-          typeof (item as { amount?: unknown }).amount === "number" &&
-          typeof (item as { type?: unknown }).type === "string" &&
-          typeof (item as { createdAt?: unknown }).createdAt === "string" &&
-          ((item as { direction?: unknown }).direction === "credit" ||
-            (item as { direction?: unknown }).direction === "debit"),
-      )
-    : [];
-
   const currency =
     typeof body.currency === "string" && body.currency.trim()
       ? body.currency.trim().toUpperCase()
       : "USD";
+  const sourceTruth = await buildCopilotSourceTruthContext({
+    userId,
+    preferredCurrency: currency,
+  });
+  const effectiveCurrency = sourceTruth.currency;
 
   const copilotBaseInput = {
-    currency,
-    currentBalance: Number(body.currentBalance || 0),
-    monthlyIncome: Number(body.monthlyIncome || 0),
-    monthlyExpenses: Number(body.monthlyExpenses || 0),
-    recentTransactions,
+    currency: effectiveCurrency,
+    currentBalance: sourceTruth.currentBalance,
+    monthlyIncome: sourceTruth.monthlyIncome,
+    monthlyExpenses: sourceTruth.monthlyExpenses,
+    recentTransactions: sourceTruth.recentTransactions,
     messages,
     language,
   };
@@ -11346,7 +11477,7 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
   ) {
     const weeklyReport = await buildWeeklyTransactionReportResponse({
       userId: req.user.sub,
-      currency,
+      currency: effectiveCurrency,
       language,
     });
     return res.json(weeklyReport);
@@ -11359,7 +11490,7 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
   ) {
     const todayReport = await buildTodayTransactionReportResponse({
       userId: req.user.sub,
-      currency,
+      currency: effectiveCurrency,
       language,
     });
     return res.json(todayReport);
@@ -11372,7 +11503,7 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
   ) {
     const monthlyReport = await buildMonthlyTransactionReportResponse({
       userId: req.user.sub,
-      currency,
+      currency: effectiveCurrency,
       language,
     });
     return res.json(monthlyReport);
@@ -11381,7 +11512,7 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
   if (req.user?.sub && intentClassification.intent === "transaction_review") {
     const recentReview = await buildRecentTransactionReviewResponse({
       userId: req.user.sub,
-      currency,
+      currency: effectiveCurrency,
       language,
     });
     return res.json(recentReview);
@@ -11390,7 +11521,7 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
   if (req.user?.sub && intentClassification.intent === "spending_analysis") {
     const spendingComparison = await buildSpendingComparisonResponse({
       userId: req.user.sub,
-      currency,
+      currency: effectiveCurrency,
       language,
     });
     return res.json(spendingComparison);
@@ -11417,7 +11548,7 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
     if (req.user?.sub) {
       const anomalyReview = await buildTransactionAnomalyReviewResponse({
         userId: req.user.sub,
-        currency,
+        currency: effectiveCurrency,
         language,
       });
       return res.json(anomalyReview);
