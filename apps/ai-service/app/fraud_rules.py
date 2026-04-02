@@ -410,6 +410,57 @@ def evaluate_transaction_rules(event: TransactionEvent, learned_countries: set[s
             tags=["cash_out", "irreversible"],
         )
 
+    if event.small_probe_count_24h >= 3 and amount >= 500:
+        _append_hit(
+            hits,
+            rule_id="TXR021",
+            title="Probe then escalate pattern",
+            category="account_takeover",
+            aml_stage="placement",
+            risk_level="HIGH" if event.probe_then_large_risk_score >= 0.75 else "MEDIUM",
+            reason="Several small outbound transfers appeared before a materially larger payment.",
+            user_warning="Co dau hieu thu giao dich nho de do tai khoan/nguoi nhan roi moi nang len giao dich lon.",
+            actions=[
+                "Tam dung giao dich va xac minh nguoi nhan qua kenh doc lap.",
+                "Kiem tra cac giao dich nho gan day truoc khi tiep tuc.",
+            ],
+            tags=["probe", "account_testing", "ato"],
+        )
+
+    if event.same_recipient_small_probe_count_24h >= 2 and amount >= 750:
+        _append_hit(
+            hits,
+            rule_id="TXR022",
+            title="Recipient validation before payout",
+            category="beneficiary_risk",
+            aml_stage="placement",
+            risk_level="HIGH" if not event.recipient_known else "MEDIUM",
+            reason="The same recipient was hit by repeated small-value tests before this transfer.",
+            user_warning="Nguoi nhan nay vua co nhieu giao dich nho thu nghiem truoc khi co lenh chuyen lon.",
+            actions=[
+                "Yeu cau xac minh nguoi nhan va muc dich giao dich.",
+                "Tang cuong buoc OTP va review thu cong neu can.",
+            ],
+            tags=["recipient_probe", "beneficiary_test"],
+        )
+
+    if event.distinct_small_probe_recipients_24h >= 3 and amount >= 500:
+        _append_hit(
+            hits,
+            rule_id="TXR023",
+            title="Multi-recipient probe burst",
+            category="velocity",
+            aml_stage="layering",
+            risk_level="MEDIUM",
+            reason="Small transfers touched multiple recipients in a short period before the current payment.",
+            user_warning="Nhieu nguoi nhan da bi thu giao dich nho trong thoi gian ngan.",
+            actions=[
+                "Kiem tra xem tai khoan co dang bi dung de do hoac relay tien hay khong.",
+                "Gioi han giao dich voi nguoi nhan moi cho den khi duoc xac minh.",
+            ],
+            tags=["multi_recipient_probe", "mule"],
+        )
+
     max_level = "LOW"
     score = 0
     for hit in hits:
@@ -434,7 +485,7 @@ def evaluate_transaction_rules(event: TransactionEvent, learned_countries: set[s
             "Khong tiep tuc neu khong xac minh duoc nguoi nhan.",
         ]
         must_do = [
-            "Tam dung giao dich va goi hotline chinh thuc.",
+            "Pause the transfer and call the official support hotline.",
             "Xac minh danh tinh nguoi nhan qua kenh doc lap.",
             "Bat xac thuc da lop va doi mat khau neu nghi ngo bi lo.",
         ]

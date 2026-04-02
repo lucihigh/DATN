@@ -158,14 +158,122 @@ const USER_STORAGE_KEY = "fpipay_user";
 const TOKEN_STORAGE_KEY = "fpipay_token";
 const TOKEN_EXPIRES_AT_STORAGE_KEY = "fpipay_token_expires_at";
 const SESSION_SECURITY_STORAGE_KEY = "fpipay_session_security";
+const LOGIN_SECURITY_SETTINGS_STORAGE_KEY = "fpipay_security";
 const DEFAULT_AVATAR = "https://i.pravatar.cc/80?img=12";
 const SESSION_EXPIRED_EVENT = "auth:session-expired";
 const SESSION_VERIFY_INTERVAL_MS = 60000;
 const PUBLIC_IP_CACHE_KEY = "fpipay_public_ip_cache";
 const PUBLIC_IP_CACHE_TTL_MS = 30 * 1000;
 const PUBLIC_IP_FETCH_TIMEOUT_MS = 5000;
+const AUTH_STORAGE_KEYS = [
+  USER_STORAGE_KEY,
+  TOKEN_STORAGE_KEY,
+  TOKEN_EXPIRES_AT_STORAGE_KEY,
+  SESSION_SECURITY_STORAGE_KEY,
+] as const;
 
 type SessionExpiredReason = "expired" | "replaced";
+
+const readStorageItem = (storage: Storage | null, key: string) => {
+  try {
+    return storage?.getItem(key) ?? null;
+  } catch {
+    return null;
+  }
+};
+
+const writeStorageItem = (
+  storage: Storage | null,
+  key: string,
+  value: string | null,
+) => {
+  if (!storage) return true;
+  try {
+    if (value === null) storage.removeItem(key);
+    else storage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const readSaveLoginPreference = () => {
+  if (typeof window === "undefined") return true;
+  try {
+    const raw = window.localStorage.getItem(
+      LOGIN_SECURITY_SETTINGS_STORAGE_KEY,
+    );
+    if (!raw) return true;
+    const parsed = JSON.parse(raw) as { saveLogin?: unknown } | null;
+    return typeof parsed?.saveLogin === "boolean" ? parsed.saveLogin : true;
+  } catch {
+    return true;
+  }
+};
+
+const persistSaveLoginPreference = (saveLogin: boolean) => {
+  if (typeof window === "undefined") return true;
+  try {
+    const raw = window.localStorage.getItem(
+      LOGIN_SECURITY_SETTINGS_STORAGE_KEY,
+    );
+    const parsed =
+      raw && typeof raw === "string"
+        ? (JSON.parse(raw) as Record<string, unknown> | null)
+        : null;
+    const next =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed
+        : {};
+    next.saveLogin = saveLogin;
+    window.localStorage.setItem(
+      LOGIN_SECURITY_SETTINGS_STORAGE_KEY,
+      JSON.stringify(next),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const readStoredAuthValue = (key: string) => {
+  if (typeof window === "undefined") return null;
+  const fromSession = readStorageItem(window.sessionStorage, key);
+  if (fromSession !== null) return fromSession;
+  return readStorageItem(window.localStorage, key);
+};
+
+const getInitialAuthPersistence = () => {
+  if (typeof window === "undefined") return readSaveLoginPreference();
+  if (readStorageItem(window.sessionStorage, TOKEN_STORAGE_KEY) !== null) {
+    return false;
+  }
+  if (readStorageItem(window.localStorage, TOKEN_STORAGE_KEY) !== null) {
+    return true;
+  }
+  return readSaveLoginPreference();
+};
+
+const persistAuthValue = (
+  key: string,
+  value: string | null,
+  persistent: boolean,
+) => {
+  if (typeof window === "undefined") return true;
+  const primary = persistent ? window.localStorage : window.sessionStorage;
+  const secondary = persistent ? window.sessionStorage : window.localStorage;
+  const primaryOk = writeStorageItem(primary, key, value);
+  const secondaryOk = writeStorageItem(secondary, key, null);
+  return primaryOk && secondaryOk;
+};
+
+const clearStoredAuth = () => {
+  if (typeof window === "undefined") return;
+  for (const key of AUTH_STORAGE_KEYS) {
+    writeStorageItem(window.sessionStorage, key, null);
+    writeStorageItem(window.localStorage, key, null);
+  }
+};
 
 const AuthContext = createContext<{
   user: User | null;
@@ -174,11 +282,13 @@ const AuthContext = createContext<{
     email: string,
     password: string,
     captcha: SliderCaptchaProof,
+    options?: { rememberSession?: boolean },
   ) => Promise<LoginResult>;
   verifyLoginOtp: (
     challengeId: string,
     otp: string,
     captcha: SliderCaptchaProof,
+    options?: { rememberSession?: boolean },
   ) => Promise<AuthCompletionResult>;
   requestRegisterOtp: (payload: {
     fullName: string;
@@ -661,6 +771,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       reason: SessionExpiredReason = "expired",
       sessionAlert?: SessionReplacementAlert,
     ) => {
+      clearStoredAuth();
       setUser(null);
       setToken(null);
       setTokenExpiresAt(null);
@@ -697,9 +808,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const [persistAuth, setPersistAuth] = useState<boolean>(() =>
+    getInitialAuthPersistence(),
+  );
   const [user, setUser] = useState<User | null>(() => {
     try {
-      const s = sessionStorage.getItem(USER_STORAGE_KEY);
+      const s = readStoredAuthValue(USER_STORAGE_KEY);
       if (!s) return null;
       const raw = JSON.parse(s) as Partial<User> & { email?: string };
       if (!raw?.email) return null;
@@ -716,19 +830,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   });
   const [token, setToken] = useState<string | null>(() => {
     try {
-      return sessionStorage.getItem(TOKEN_STORAGE_KEY);
+      return readStoredAuthValue(TOKEN_STORAGE_KEY);
     } catch {
       return null;
     }
   });
   const [tokenExpiresAt, setTokenExpiresAt] = useState<number | null>(() => {
     try {
-      const raw = sessionStorage.getItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
+      const raw = readStoredAuthValue(TOKEN_EXPIRES_AT_STORAGE_KEY);
       if (raw) {
         const parsed = Number(raw);
         if (Number.isFinite(parsed)) return parsed;
       }
-      const storedToken = sessionStorage.getItem(TOKEN_STORAGE_KEY);
+      const storedToken = readStoredAuthValue(TOKEN_STORAGE_KEY);
       return storedToken ? decodeJwtExpiresAt(storedToken) : null;
     } catch {
       return null;
@@ -737,7 +851,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [sessionSecurity, setSessionSecurity] = useState<SessionSecurity>(
     () => {
       try {
-        const raw = sessionStorage.getItem(SESSION_SECURITY_STORAGE_KEY);
+        const raw = readStoredAuthValue(SESSION_SECURITY_STORAGE_KEY);
         return parseSessionSecurity(raw ? JSON.parse(raw) : null);
       } catch {
         return parseSessionSecurity(null);
@@ -748,61 +862,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     useState<LoginMonitoring | null>(null);
 
   useEffect(() => {
-    try {
-      if (user) sessionStorage.setItem(USER_STORAGE_KEY, JSON.stringify(user));
-      else sessionStorage.removeItem(USER_STORAGE_KEY);
-    } catch (err) {
+    const ok = persistAuthValue(
+      USER_STORAGE_KEY,
+      user ? JSON.stringify(user) : null,
+      persistAuth,
+    );
+    if (!ok) {
       // Avoid crashing the app if storage is full (e.g., large avatar data URL).
-      console.warn("Cannot persist auth user to sessionStorage", err);
+      console.warn("Cannot persist auth user to browser storage");
     }
-  }, [user]);
+  }, [persistAuth, user]);
 
   useEffect(() => {
-    try {
-      if (token) sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
-      else sessionStorage.removeItem(TOKEN_STORAGE_KEY);
-    } catch (err) {
-      console.warn("Cannot persist auth token to sessionStorage", err);
+    const ok = persistAuthValue(TOKEN_STORAGE_KEY, token, persistAuth);
+    if (!ok) {
+      console.warn("Cannot persist auth token to browser storage");
     }
-  }, [token]);
+  }, [persistAuth, token]);
 
   useEffect(() => {
-    try {
-      if (tokenExpiresAt) {
-        sessionStorage.setItem(
-          TOKEN_EXPIRES_AT_STORAGE_KEY,
-          String(tokenExpiresAt),
-        );
-      } else {
-        sessionStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
-      }
-    } catch (err) {
-      console.warn("Cannot persist token expiration to sessionStorage", err);
+    const ok = persistAuthValue(
+      TOKEN_EXPIRES_AT_STORAGE_KEY,
+      token && tokenExpiresAt ? String(tokenExpiresAt) : null,
+      persistAuth,
+    );
+    if (!ok) {
+      console.warn("Cannot persist token expiration to browser storage");
     }
-  }, [tokenExpiresAt]);
+  }, [persistAuth, token, tokenExpiresAt]);
 
   useEffect(() => {
-    try {
-      sessionStorage.setItem(
-        SESSION_SECURITY_STORAGE_KEY,
-        JSON.stringify(sessionSecurity),
-      );
-    } catch (err) {
-      console.warn("Cannot persist session security to sessionStorage", err);
+    const ok = persistAuthValue(
+      SESSION_SECURITY_STORAGE_KEY,
+      token ? JSON.stringify(sessionSecurity) : null,
+      persistAuth,
+    );
+    if (!ok) {
+      console.warn("Cannot persist session security to browser storage");
     }
-  }, [sessionSecurity]);
-
-  useEffect(() => {
-    try {
-      // Remove legacy persistent auth data so closing/reopening web always requires login.
-      localStorage.removeItem(USER_STORAGE_KEY);
-      localStorage.removeItem(TOKEN_STORAGE_KEY);
-      localStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
-      localStorage.removeItem(SESSION_SECURITY_STORAGE_KEY);
-    } catch {
-      // ignore storage permission errors
-    }
-  }, []);
+  }, [persistAuth, sessionSecurity, token]);
 
   useEffect(() => {
     if (!token) return;
@@ -893,11 +991,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [expireSession, getSessionExpiredReason, token]);
 
   const completeLogin = useCallback(
-    (data: {
-      token: string;
-      user: { id: string; email: string; role: "USER" | "ADMIN" };
-      security?: SessionSecurity | null;
-    }) => {
+    (
+      data: {
+        token: string;
+        user: { id: string; email: string; role: "USER" | "ADMIN" };
+        security?: SessionSecurity | null;
+      },
+      options?: { rememberSession?: boolean },
+    ) => {
+      const rememberSession =
+        options?.rememberSession ?? readSaveLoginPreference();
+      setPersistAuth(rememberSession);
+      persistSaveLoginPreference(rememberSession);
       setToken(data.token);
       setTokenExpiresAt(decodeJwtExpiresAt(data.token));
       setSessionSecurity(
@@ -924,6 +1029,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       email: string,
       password: string,
       captcha: SliderCaptchaProof,
+      options?: { rememberSession?: boolean },
     ): Promise<LoginResult> => {
       try {
         const deviceContext = await collectBrowserDeviceContext();
@@ -963,11 +1069,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
 
         if (data?.token && data.user) {
-          completeLogin({
-            token: data.token,
-            user: data.user,
-            security: parseSessionSecurity(data.security),
-          });
+          completeLogin(
+            {
+              token: data.token,
+              user: data.user,
+              security: parseSessionSecurity(data.security),
+            },
+            options,
+          );
           return {
             status: "authenticated",
             notice: data.notice,
@@ -1002,6 +1111,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       challengeId: string,
       otp: string,
       captcha: SliderCaptchaProof,
+      options?: { rememberSession?: boolean },
     ): Promise<AuthCompletionResult> => {
       try {
         const deviceContext = await collectBrowserDeviceContext();
@@ -1033,11 +1143,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           );
         }
 
-        completeLogin({
-          token: data.token,
-          user: data.user,
-          security: parseSessionSecurity(data.security),
-        });
+        completeLogin(
+          {
+            token: data.token,
+            user: data.user,
+            security: parseSessionSecurity(data.security),
+          },
+          options,
+        );
         return {
           notice: data.notice,
           security: parseSessionSecurity(data.security),
@@ -1293,6 +1406,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(() => {
+    clearStoredAuth();
     setUser(null);
     setToken(null);
     setTokenExpiresAt(null);

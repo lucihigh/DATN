@@ -10,7 +10,8 @@ import fetch from "node-fetch";
 import helmet from "helmet";
 import morgan from "morgan";
 import OpenAI from "openai";
-import type { Wallet } from "@prisma/client";
+import { Prisma, type Wallet } from "@prisma/client";
+import { z } from "zod";
 
 import {
   PROFESSIONAL_PASSWORD_MIN_LENGTH,
@@ -88,9 +89,9 @@ import {
   type StoredCard,
 } from "./services/cards";
 import {
-  consumeOtpChallenge,
   createEmailOtpChallenge,
   maskEmail,
+  verifyAndConsumeEmailOtpChallenge,
   verifyEmailOtpChallenge,
 } from "./services/otp";
 
@@ -257,6 +258,14 @@ const OLLAMA_FALLBACK_TIMEOUT_MS = Number(
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
 const OPENAI_REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || "low";
+const ENABLE_TRANSFER_LLM_RULES = !["0", "false", "no"].includes(
+  String(process.env.ENABLE_TRANSFER_LLM_RULES || (OPENAI_API_KEY ? "1" : "0"))
+    .trim()
+    .toLowerCase(),
+);
+const TRANSFER_LLM_RULES_CACHE_TTL_MS = Number(
+  process.env.TRANSFER_LLM_RULES_CACHE_TTL_MS || "300000",
+);
 const APP_TIMEZONE = process.env.APP_TIMEZONE || "Asia/Ho_Chi_Minh";
 const APP_BASE_URL = (process.env.APP_BASE_URL || "").trim().replace(/\/$/, "");
 const DEFAULT_ADMIN_EMAIL = (process.env.DEFAULT_ADMIN_EMAIL || "")
@@ -296,6 +305,16 @@ const BALANCE_DRAIN_ADVISORY_MIN_AMOUNT = Number(
 const BALANCE_DRAIN_WARNING_MIN_AMOUNT = Number(
   process.env.BALANCE_DRAIN_WARNING_MIN_AMOUNT ||
     Math.max(LARGE_TRANSFER_ADVISORY_AMOUNT, 2000),
+);
+const TRANSFER_PROBE_SMALL_AMOUNT_MAX = Number(
+  process.env.TRANSFER_PROBE_SMALL_AMOUNT_MAX || "150",
+);
+const TRANSFER_PROBE_BURST_COUNT_24H = Number(
+  process.env.TRANSFER_PROBE_BURST_COUNT_24H || "3",
+);
+const TRANSFER_PROBE_LARGE_ESCALATION_MIN_AMOUNT = Number(
+  process.env.TRANSFER_PROBE_LARGE_ESCALATION_MIN_AMOUNT ||
+    HIGH_TRANSFER_ADVISORY_AMOUNT,
 );
 const TRANSFER_SCAM_BLOCK_MIN_AMOUNT = Number(
   process.env.TRANSFER_SCAM_BLOCK_MIN_AMOUNT || "100000",
@@ -523,6 +542,27 @@ type AnomalyResponse = {
   modelRiskLevel?: "low" | "medium" | "high";
   ruleScore?: number;
   ruleHitCount?: number;
+  baseScore?: number;
+  finalScore?: number;
+  mitigationScore?: number;
+  mitigationReasons?: string[];
+  counterArguments?: string[];
+  accountSegment?: "personal" | "sme" | "enterprise";
+  accountCategory?: "personal" | "business";
+  accountTier?: string | null;
+  accountProfileCode?: string | null;
+  accountProfileStatus?: string | null;
+  accountProfileConfidence?: number;
+  analysisSignals?: Record<string, unknown>;
+  finalAction?:
+    | "ALLOW"
+    | "ALLOW_WITH_WARNING"
+    | "REQUIRE_OTP"
+    | "REQUIRE_OTP_FACE_ID"
+    | "HOLD_REVIEW";
+  stepUpLevel?: string | null;
+  decisionComponents?: Record<string, number>;
+  adminSummary?: string | null;
   ruleHits?: Array<{
     ruleId?: string;
     title?: string;
@@ -588,6 +628,21 @@ type TransferBehaviorProfile = {
   maxCompletedOutflow90d: number;
   similarFlaggedAmountCount90d: number;
   sameRecipientFlaggedCount90d: number;
+  smallProbeCount24h: number;
+  smallProbeTotal24h: number;
+  distinctSmallProbeRecipients24h: number;
+  sameRecipientSmallProbeCount24h: number;
+  newRecipientSmallProbeCount24h: number;
+  probeThenLargeRiskScore: number;
+};
+
+type TransferNoteLlmAnalysis = {
+  riskLevel: "low" | "medium" | "high";
+  signals: string[];
+  ruleTags: string[];
+  summary: string | null;
+  source: "disabled" | "heuristic" | "openai" | "fallback";
+  model?: string | null;
 };
 
 type TransferStepUpPolicy = {
@@ -652,6 +707,23 @@ type AdminAlertResponse = {
   location: string | null;
   paymentMethod: string | null;
   merchantCategory: string | null;
+  baseScore: number | null;
+  finalScore: number | null;
+  mitigationScore: number | null;
+  mitigationReasons: string[];
+  counterArguments: string[];
+  accountSegment: AnomalyResponse["accountSegment"] | null;
+  adminSummary: string | null;
+  decisionComponents: Record<string, number> | null;
+  segmentHistoryCount30d: number | null;
+  segmentAmountP90_30d: number | null;
+  segmentAmountMedian30d: number | null;
+  smallProbeCount24h: number | null;
+  distinctSmallProbeRecipients24h: number | null;
+  sameRecipientSmallProbeCount24h: number | null;
+  newRecipientSmallProbeCount24h: number | null;
+  probeThenLargeRiskScore: number | null;
+  analysisSignals: Record<string, unknown> | null;
 };
 
 type SessionSecurityState = {
@@ -757,6 +829,8 @@ const DEFAULT_AI_RESPONSE: AnomalyResponse = {
   modelSource: "fallback",
   modelVersion: null,
   requestKey: null,
+  finalAction: "ALLOW",
+  finalScore: 0,
 };
 
 const buildHeuristicLoginAiResponse = (input: {
@@ -842,6 +916,22 @@ const normalizeRiskLevel = (value: unknown): AnomalyResponse["riskLevel"] => {
   return "low";
 };
 
+const normalizeAccountSegmentValue = (
+  value: unknown,
+): NonNullable<AnomalyResponse["accountSegment"]> => {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+  if (normalized === "enterprise" || normalized === "corporate") {
+    return "enterprise";
+  }
+  if (normalized === "sme" || normalized === "smallbusiness") {
+    return "sme";
+  }
+  return "personal";
+};
+
 const normalizeWarningPayload = (
   value: unknown,
 ): AnomalyResponse["warning"] => {
@@ -900,6 +990,15 @@ const normalizeRuleHits = (value: unknown): AnomalyResponse["ruleHits"] => {
 const normalizeAiResponse = (value: unknown): AnomalyResponse => {
   if (!value || typeof value !== "object") return DEFAULT_AI_RESPONSE;
   const data = value as Record<string, unknown>;
+  const rawAccountSegment = data.account_segment ?? data.accountSegment;
+  const rawAccountCategory = data.account_category ?? data.accountCategory;
+  const rawAccountTier = data.account_tier ?? data.accountTier;
+  const rawAccountProfileCode =
+    data.account_profile_code ?? data.accountProfileCode;
+  const rawAccountProfileStatus =
+    data.account_profile_status ?? data.accountProfileStatus;
+  const rawAccountProfileConfidence =
+    data.account_profile_confidence ?? data.accountProfileConfidence;
   const riskLevel = normalizeRiskLevel(data.risk_level ?? data.riskLevel);
   const reasons = toStringList(data.reasons);
   const requireOtp = Boolean(data.require_otp_sms ?? data.requireOtp);
@@ -1001,6 +1100,123 @@ const normalizeAiResponse = (value: unknown): AnomalyResponse => {
         : typeof data.ruleScore === "number"
           ? data.ruleScore
           : undefined,
+    baseScore:
+      typeof data.base_score === "number"
+        ? data.base_score
+        : typeof data.baseScore === "number"
+          ? data.baseScore
+          : undefined,
+    finalScore:
+      typeof data.final_score === "number"
+        ? data.final_score
+        : typeof data.finalScore === "number"
+          ? data.finalScore
+          : undefined,
+    mitigationScore:
+      typeof data.mitigation_score === "number"
+        ? data.mitigation_score
+        : typeof data.mitigationScore === "number"
+          ? data.mitigationScore
+          : undefined,
+    mitigationReasons: dedupeStringList([
+      ...(Array.isArray(data.mitigation_reasons)
+        ? data.mitigation_reasons.filter(
+            (item): item is string => typeof item === "string",
+          )
+        : []),
+      ...(Array.isArray(data.mitigationReasons)
+        ? data.mitigationReasons.filter(
+            (item): item is string => typeof item === "string",
+          )
+        : []),
+    ]).slice(0, 5),
+    counterArguments: dedupeStringList([
+      ...(Array.isArray(data.counter_arguments)
+        ? data.counter_arguments.filter(
+            (item): item is string => typeof item === "string",
+          )
+        : []),
+      ...(Array.isArray(data.counterArguments)
+        ? data.counterArguments.filter(
+            (item): item is string => typeof item === "string",
+          )
+        : []),
+    ]).slice(0, 4),
+    accountSegment:
+      rawAccountSegment === undefined || rawAccountSegment === null
+        ? undefined
+        : normalizeAccountSegmentValue(rawAccountSegment),
+    accountCategory:
+      typeof rawAccountCategory === "string" &&
+      rawAccountCategory.trim().toLowerCase() === "business"
+        ? "business"
+        : typeof rawAccountCategory === "string"
+          ? "personal"
+          : undefined,
+    accountTier:
+      typeof rawAccountTier === "string" && rawAccountTier.trim()
+        ? rawAccountTier.trim().toUpperCase()
+        : null,
+    accountProfileCode:
+      typeof rawAccountProfileCode === "string" && rawAccountProfileCode.trim()
+        ? rawAccountProfileCode.trim().toUpperCase()
+        : null,
+    accountProfileStatus:
+      typeof rawAccountProfileStatus === "string" &&
+      rawAccountProfileStatus.trim()
+        ? rawAccountProfileStatus.trim().toUpperCase()
+        : null,
+    accountProfileConfidence:
+      typeof rawAccountProfileConfidence === "number" &&
+      Number.isFinite(rawAccountProfileConfidence)
+        ? rawAccountProfileConfidence
+        : undefined,
+    analysisSignals:
+      data.analysis_signals &&
+      typeof data.analysis_signals === "object" &&
+      !Array.isArray(data.analysis_signals)
+        ? (data.analysis_signals as Record<string, unknown>)
+        : data.analysisSignals &&
+            typeof data.analysisSignals === "object" &&
+            !Array.isArray(data.analysisSignals)
+          ? (data.analysisSignals as Record<string, unknown>)
+          : undefined,
+    finalAction:
+      typeof data.final_action === "string"
+        ? (data.final_action as AnomalyResponse["finalAction"])
+        : typeof data.finalAction === "string"
+          ? (data.finalAction as AnomalyResponse["finalAction"])
+          : undefined,
+    stepUpLevel:
+      typeof data.step_up_level === "string"
+        ? data.step_up_level
+        : typeof data.stepUpLevel === "string"
+          ? data.stepUpLevel
+          : null,
+    decisionComponents:
+      data.decision_components &&
+      typeof data.decision_components === "object" &&
+      !Array.isArray(data.decision_components)
+        ? Object.fromEntries(
+            Object.entries(data.decision_components as Record<string, unknown>)
+              .filter(([, entry]) => typeof entry === "number")
+              .map(([key, entry]) => [key, entry as number]),
+          )
+        : data.decisionComponents &&
+            typeof data.decisionComponents === "object" &&
+            !Array.isArray(data.decisionComponents)
+          ? Object.fromEntries(
+              Object.entries(data.decisionComponents as Record<string, unknown>)
+                .filter(([, entry]) => typeof entry === "number")
+                .map(([key, entry]) => [key, entry as number]),
+            )
+          : undefined,
+    adminSummary:
+      typeof data.admin_summary === "string"
+        ? data.admin_summary
+        : typeof data.adminSummary === "string"
+          ? data.adminSummary
+          : null,
     ruleHitCount:
       typeof data.rule_hit_count === "number"
         ? data.rule_hit_count
@@ -1181,6 +1397,33 @@ const buildAdminAlertSignals = (
     });
   }
 
+  const finalScore = asNumberOrNull(detail.finalScore);
+  if (finalScore !== null) {
+    signals.push({
+      label: "Final risk",
+      value: `${Math.round(finalScore)}/100`,
+      tone: finalScore >= 80 ? "warn" : finalScore >= 60 ? "info" : "neutral",
+    });
+  }
+
+  const mitigationScore = asNumberOrNull(detail.mitigationScore);
+  if (mitigationScore !== null && mitigationScore > 0) {
+    signals.push({
+      label: "Mitigation",
+      value: `-${Math.round(mitigationScore)}`,
+      tone: "info",
+    });
+  }
+
+  const accountSegment = asStringOrNull(detail.accountSegment);
+  if (accountSegment) {
+    signals.push({
+      label: "Segment",
+      value: toTitleCase(accountSegment),
+      tone: "neutral",
+    });
+  }
+
   if (type === "login") {
     const ipAddress = asStringOrNull(detail.ipAddress);
     const country = asStringOrNull(detail.country);
@@ -1243,24 +1486,30 @@ const buildAdminAlertResponse = (log: {
 }): AdminAlertResponse => {
   const detail = normalizeRecord(log.details);
   const metadata = normalizeRecord(log.metadata);
+  const aiMonitoring = normalizeRecord(metadata.aiMonitoring);
+  const analysisSignals = normalizeRecord(aiMonitoring.analysisSignals);
+  const mergedDetail = {
+    ...aiMonitoring,
+    ...detail,
+  };
   const type = log.action === "AI_TRANSACTION_ALERT" ? "transaction" : "login";
-  const reasons = toStringList(detail.reasons);
+  const reasons = toStringList(mergedDetail.reasons);
   const riskLevel = normalizeRiskLevel(
-    detail.riskLevel ?? metadata.riskLevel ?? "low",
+    mergedDetail.riskLevel ?? metadata.riskLevel ?? "low",
   );
   const monitoringOnly = Boolean(
-    detail.monitoringOnly ?? metadata.monitoringOnly ?? true,
+    mergedDetail.monitoringOnly ?? metadata.monitoringOnly ?? true,
   );
   const explanation = buildAdminAlertExplanation({
     type,
     riskLevel,
     reasons,
     monitoringOnly,
-    aiDecision: asStringOrNull(detail.aiDecision),
+    aiDecision: asStringOrNull(mergedDetail.aiDecision),
   });
-  const country = asStringOrNull(detail.country);
-  const region = asStringOrNull(detail.region);
-  const city = asStringOrNull(detail.city);
+  const country = asStringOrNull(mergedDetail.country);
+  const region = asStringOrNull(mergedDetail.region);
+  const city = asStringOrNull(mergedDetail.city);
   const location =
     [city, region, country].filter(Boolean).join(", ") || country;
 
@@ -1271,40 +1520,87 @@ const buildAdminAlertResponse = (log: {
     actor: log.actor,
     userId: log.userId,
     createdAt: log.createdAt.toISOString(),
-    ipAddress: log.ipAddress ?? asStringOrNull(detail.ipAddress),
+    ipAddress: log.ipAddress ?? asStringOrNull(mergedDetail.ipAddress),
     riskLevel,
-    anomalyScore: toAnomalyScore(detail.anomalyScore ?? detail.score),
-    reasons,
-    summary: explanation.summary,
-    explanation: explanation.explanation,
-    keySignals: buildAdminAlertSignals(type, detail, riskLevel),
-    adminStatus: normalizeAdminAlertStatus(
-      detail.adminStatus ?? metadata.adminStatus,
+    anomalyScore: toAnomalyScore(
+      mergedDetail.anomalyScore ?? mergedDetail.score,
     ),
-    adminNote: asStringOrNull(detail.adminNote ?? metadata.adminNote),
-    reviewedAt: asStringOrNull(detail.reviewedAt ?? metadata.reviewedAt),
-    reviewedBy: asStringOrNull(detail.reviewedBy ?? metadata.reviewedBy),
+    reasons,
+    summary: asStringOrNull(mergedDetail.headline) ?? explanation.summary,
+    explanation: explanation.explanation,
+    keySignals: buildAdminAlertSignals(type, mergedDetail, riskLevel),
+    adminStatus: normalizeAdminAlertStatus(
+      mergedDetail.adminStatus ?? metadata.adminStatus,
+    ),
+    adminNote: asStringOrNull(mergedDetail.adminNote ?? metadata.adminNote),
+    reviewedAt: asStringOrNull(mergedDetail.reviewedAt ?? metadata.reviewedAt),
+    reviewedBy: asStringOrNull(mergedDetail.reviewedBy ?? metadata.reviewedBy),
     monitoringOnly,
-    aiDecision: asStringOrNull(detail.aiDecision),
+    aiDecision: asStringOrNull(mergedDetail.aiDecision),
     modelVersion:
-      asStringOrNull(detail.modelVersion) ??
+      asStringOrNull(mergedDetail.modelVersion) ??
       asStringOrNull(metadata.modelVersion),
     modelSource:
-      asStringOrNull(detail.modelSource) ??
+      asStringOrNull(mergedDetail.modelSource) ??
       asStringOrNull(metadata.modelSource),
     eventId:
-      asStringOrNull(detail.loginEventId) ??
-      asStringOrNull(detail.transactionEventId) ??
+      asStringOrNull(mergedDetail.loginEventId) ??
+      asStringOrNull(mergedDetail.transactionEventId) ??
       asStringOrNull(metadata.loginEventId) ??
       asStringOrNull(metadata.transactionEventId),
     transactionId:
-      asStringOrNull(detail.transactionId) ??
+      asStringOrNull(mergedDetail.transactionId) ??
       asStringOrNull(metadata.transactionId),
-    amount: asNumberOrNull(detail.amount),
-    currency: asStringOrNull(detail.currency),
+    amount: asNumberOrNull(mergedDetail.amount),
+    currency: asStringOrNull(mergedDetail.currency),
     location,
-    paymentMethod: asStringOrNull(detail.paymentMethod),
-    merchantCategory: asStringOrNull(detail.merchantCategory),
+    paymentMethod: asStringOrNull(mergedDetail.paymentMethod),
+    merchantCategory: asStringOrNull(mergedDetail.merchantCategory),
+    baseScore: asNumberOrNull(mergedDetail.baseScore),
+    finalScore: asNumberOrNull(mergedDetail.finalScore),
+    mitigationScore: asNumberOrNull(mergedDetail.mitigationScore),
+    mitigationReasons: toStringList(mergedDetail.mitigationReasons),
+    counterArguments: toStringList(mergedDetail.counterArguments),
+    accountSegment: asStringOrNull(mergedDetail.accountSegment)
+      ? normalizeAccountSegmentValue(mergedDetail.accountSegment)
+      : null,
+    adminSummary:
+      asStringOrNull(mergedDetail.adminSummary) ??
+      asStringOrNull(aiMonitoring.adminSummary),
+    decisionComponents:
+      mergedDetail.decisionComponents &&
+      typeof mergedDetail.decisionComponents === "object" &&
+      !Array.isArray(mergedDetail.decisionComponents)
+        ? Object.fromEntries(
+            Object.entries(
+              mergedDetail.decisionComponents as Record<string, unknown>,
+            ).filter(([, value]) => typeof value === "number"),
+          )
+        : null,
+    segmentHistoryCount30d: asNumberOrNull(
+      analysisSignals.segment_history_count_30d,
+    ),
+    segmentAmountP90_30d: asNumberOrNull(
+      analysisSignals.segment_amount_p90_30d,
+    ),
+    segmentAmountMedian30d: asNumberOrNull(
+      analysisSignals.segment_amount_median_30d,
+    ),
+    smallProbeCount24h: asNumberOrNull(analysisSignals.small_probe_count_24h),
+    distinctSmallProbeRecipients24h: asNumberOrNull(
+      analysisSignals.distinct_small_probe_recipients_24h,
+    ),
+    sameRecipientSmallProbeCount24h: asNumberOrNull(
+      analysisSignals.same_recipient_small_probe_count_24h,
+    ),
+    newRecipientSmallProbeCount24h: asNumberOrNull(
+      analysisSignals.new_recipient_small_probe_count_24h,
+    ),
+    probeThenLargeRiskScore: asNumberOrNull(
+      analysisSignals.probe_then_large_risk_score,
+    ),
+    analysisSignals:
+      Object.keys(analysisSignals).length > 0 ? analysisSignals : null,
   };
 };
 
@@ -1313,15 +1609,22 @@ const buildSessionSecurityState = (
   options?: {
     reviewReason?: string;
     verificationMethod?: "password" | "email_otp" | "sms_otp";
+    restrictLargeTransfers?: boolean;
+    maxTransferAmount?: number;
   },
-): SessionSecurityState => ({
-  riskLevel,
-  reviewReason: options?.reviewReason,
-  verificationMethod: options?.verificationMethod ?? "password",
-  restrictLargeTransfers: riskLevel === "medium",
-  maxTransferAmount:
-    riskLevel === "medium" ? MEDIUM_RISK_TRANSFER_LIMIT : undefined,
-});
+): SessionSecurityState => {
+  const restrictLargeTransfers =
+    options?.restrictLargeTransfers ?? riskLevel === "medium";
+  return {
+    riskLevel,
+    reviewReason: options?.reviewReason,
+    verificationMethod: options?.verificationMethod ?? "password",
+    restrictLargeTransfers,
+    maxTransferAmount: restrictLargeTransfers
+      ? (options?.maxTransferAmount ?? MEDIUM_RISK_TRANSFER_LIMIT)
+      : undefined,
+  };
+};
 
 const isTransferBlockedBySessionSecurity = (input: {
   amount: number;
@@ -1891,6 +2194,20 @@ const buildStoredAiMonitoring = (input: AnomalyResponse) => ({
   modelSource: input.modelSource ?? null,
   modelVersion: input.modelVersion ?? null,
   requestKey: input.requestKey ?? null,
+  baseScore: input.baseScore ?? null,
+  finalScore: input.finalScore ?? null,
+  mitigationScore: input.mitigationScore ?? null,
+  mitigationReasons: input.mitigationReasons ?? [],
+  counterArguments: input.counterArguments ?? [],
+  accountSegment: input.accountSegment ?? null,
+  accountCategory: input.accountCategory ?? null,
+  accountTier: input.accountTier ?? null,
+  accountProfileCode: input.accountProfileCode ?? null,
+  accountProfileStatus: input.accountProfileStatus ?? null,
+  accountProfileConfidence: input.accountProfileConfidence ?? null,
+  decisionComponents: input.decisionComponents ?? null,
+  adminSummary: input.adminSummary ?? null,
+  analysisSignals: input.analysisSignals ?? null,
   scoredAt: new Date().toISOString(),
 });
 
@@ -1951,6 +2268,7 @@ const logFundsFlowEvent = async (input: {
   toUserId?: string | null;
   transactionId?: string | null;
   reconciliationId?: string | null;
+  challengeId?: string | null;
   requestKey?: string | null;
   note?: string | null;
   sourceLabel?: string | null;
@@ -1990,6 +2308,7 @@ const logFundsFlowEvent = async (input: {
       toUserId: input.toUserId || null,
       transactionId: input.transactionId || null,
       reconciliationId: input.reconciliationId || null,
+      challengeId: input.challengeId || null,
       requestKey: input.requestKey || null,
       note: input.note || null,
       sourceLabel: input.sourceLabel || null,
@@ -2120,6 +2439,330 @@ const toFundsFlowDatasetRow = (log: {
   };
 };
 
+const buildTxTrainingEventFromFundsFlowLog = (log: {
+  id: string;
+  userId: string | null;
+  createdAt: Date;
+  metadata: unknown;
+}) => {
+  const metadata = normalizeMetadataRecord(log.metadata);
+  if (
+    metadata.channel !== "WALLET_TRANSFER" ||
+    metadata.direction !== "OUTFLOW" ||
+    metadata.lifecycle !== "COMPLETED"
+  ) {
+    return null;
+  }
+
+  const aiMonitoring = normalizeRecord(metadata.aiMonitoring);
+  const analysisSignals = normalizeRecord(aiMonitoring.analysisSignals);
+  const amount =
+    (typeof metadata.amount === "number" ? metadata.amount : null) ??
+    asNumberOrNull(analysisSignals.amount);
+  const currency =
+    (typeof metadata.currency === "string" ? metadata.currency : null) ??
+    asStringOrNull(analysisSignals.currency);
+  const userId =
+    (typeof metadata.fromUserId === "string" ? metadata.fromUserId : null) ??
+    log.userId;
+  if (!userId || amount === null || !currency) return null;
+
+  return {
+    userId,
+    transactionId:
+      (typeof metadata.transactionId === "string"
+        ? metadata.transactionId
+        : null) || log.id,
+    requestId:
+      typeof metadata.requestKey === "string" ? metadata.requestKey : log.id,
+    timestamp:
+      (typeof metadata.observedAt === "string" ? metadata.observedAt : null) ??
+      log.createdAt.toISOString(),
+    amount,
+    currency,
+    location:
+      asStringOrNull(analysisSignals.country) ??
+      asStringOrNull(analysisSignals.location) ??
+      "UNK",
+    paymentMethod:
+      asStringOrNull(analysisSignals.payment_method) ?? "wallet_balance",
+    merchantCategory:
+      asStringOrNull(analysisSignals.merchant_category) ?? "p2p_transfer",
+    accountSegment:
+      asStringOrNull(analysisSignals.account_segment) ?? "PERSONAL",
+    accountCategory:
+      asStringOrNull(analysisSignals.account_category) ?? "PERSONAL",
+    accountTier: asStringOrNull(analysisSignals.account_tier) ?? "STANDARD",
+    accountProfileStatus:
+      asStringOrNull(analysisSignals.account_profile_status) ??
+      asStringOrNull(aiMonitoring.accountProfileStatus) ??
+      "SYSTEM_ASSIGNED",
+    accountProfileConfidence:
+      asNumberOrNull(analysisSignals.account_profile_confidence) ??
+      asNumberOrNull(aiMonitoring.accountProfileConfidence) ??
+      0.6,
+    device: "",
+    channel: "web",
+    failedTx24h: asNumberOrNull(analysisSignals.failed_tx_24h) ?? 0,
+    velocity1h: asNumberOrNull(analysisSignals.velocity_1h) ?? 0,
+    dailySpendAvg30d: asNumberOrNull(analysisSignals.daily_spend_avg_30d) ?? 0,
+    todaySpendBefore: asNumberOrNull(analysisSignals.today_spend_before) ?? 0,
+    projectedDailySpend:
+      asNumberOrNull(analysisSignals.projected_daily_spend) ?? amount,
+    balanceBefore:
+      (typeof metadata.balanceBefore === "number"
+        ? metadata.balanceBefore
+        : null) ??
+      asNumberOrNull(analysisSignals.balance_before) ??
+      amount,
+    remainingBalance:
+      (typeof metadata.balanceAfter === "number"
+        ? metadata.balanceAfter
+        : null) ??
+      asNumberOrNull(analysisSignals.remaining_balance) ??
+      0,
+    recipientKnown:
+      typeof metadata.recipientKnown === "boolean"
+        ? metadata.recipientKnown
+        : Boolean(analysisSignals.recipient_known),
+    suspiciousNoteCount:
+      asNumberOrNull(analysisSignals.suspicious_note_count) ?? 0,
+    rollingOutflowAmount:
+      asNumberOrNull(analysisSignals.rolling_outflow_amount) ?? amount,
+    faceIdRequired: Boolean(analysisSignals.face_id_required),
+    sessionRestrictLargeTransfers: Boolean(
+      analysisSignals.session_restrict_large_transfers,
+    ),
+    recentReviewCount30d:
+      asNumberOrNull(analysisSignals.recent_review_count_30d) ?? 0,
+    recentBlockedCount30d:
+      asNumberOrNull(analysisSignals.recent_blocked_count_30d) ?? 0,
+    recentPendingOtpCount7d:
+      asNumberOrNull(analysisSignals.recent_pending_otp_count_7d) ?? 0,
+    smallProbeCount24h:
+      asNumberOrNull(analysisSignals.small_probe_count_24h) ?? 0,
+    smallProbeTotal24h:
+      asNumberOrNull(analysisSignals.small_probe_total_24h) ?? 0,
+    distinctSmallProbeRecipients24h:
+      asNumberOrNull(analysisSignals.distinct_small_probe_recipients_24h) ?? 0,
+    sameRecipientSmallProbeCount24h:
+      asNumberOrNull(analysisSignals.same_recipient_small_probe_count_24h) ?? 0,
+    newRecipientSmallProbeCount24h:
+      asNumberOrNull(analysisSignals.new_recipient_small_probe_count_24h) ?? 0,
+    probeThenLargeRiskScore:
+      asNumberOrNull(analysisSignals.probe_then_large_risk_score) ?? 0,
+    llmNoteRiskLevel: "LOW",
+    llmSignalCount: 0,
+    llmRuleTags: [],
+    sessionRiskLevel:
+      asStringOrNull(analysisSignals.session_risk_level) ?? "LOW",
+  };
+};
+
+const buildCompletedTransferReplayResponseFromLog = (log: {
+  id: string;
+  createdAt: Date;
+  metadata: unknown;
+}) => {
+  const metadata = normalizeMetadataRecord(log.metadata);
+  const aiMonitoring = normalizeAiResponse(metadata.aiMonitoring);
+  const amount = typeof metadata.amount === "number" ? metadata.amount : 0;
+  const toAccount =
+    typeof metadata.toAccount === "string" ? metadata.toAccount : "";
+  const transactionId =
+    typeof metadata.transactionId === "string"
+      ? metadata.transactionId
+      : log.id;
+  const note = typeof metadata.note === "string" ? metadata.note : "";
+  const reconciliationId =
+    typeof metadata.reconciliationId === "string"
+      ? metadata.reconciliationId
+      : null;
+
+  return {
+    status: "ok" as const,
+    otpRequired: false,
+    transferPinVerified: true,
+    idempotentReplay: true,
+    reconciliationId,
+    anomaly: aiMonitoring,
+    transaction: {
+      id: transactionId,
+      amount,
+      type: "TRANSFER" as const,
+      description: note || `Transfer to ${toAccount}`,
+      createdAt: log.createdAt.toISOString(),
+      toAccount,
+    },
+  };
+};
+
+const findCompletedTransferReplayResponse = async (input: {
+  userId: string;
+  challengeId?: string | null;
+  requestKey?: string | null;
+}) => {
+  const identityFilters: Array<Record<string, unknown>> = [];
+  if (input.challengeId) {
+    identityFilters.push({
+      metadata: {
+        path: ["challengeId"],
+        equals: input.challengeId,
+      },
+    });
+  }
+  if (input.requestKey) {
+    identityFilters.push({
+      metadata: {
+        path: ["requestKey"],
+        equals: input.requestKey,
+      },
+    });
+  }
+  if (identityFilters.length === 0) return null;
+
+  const completedEvent = await prisma.auditLog.findFirst({
+    where: {
+      userId: input.userId,
+      action: "FUNDS_FLOW_EVENT",
+      AND: [
+        {
+          metadata: {
+            path: ["channel"],
+            equals: "WALLET_TRANSFER",
+          },
+        },
+        {
+          metadata: {
+            path: ["direction"],
+            equals: "OUTFLOW",
+          },
+        },
+        {
+          metadata: {
+            path: ["lifecycle"],
+            equals: "COMPLETED",
+          },
+        },
+        {
+          metadata: {
+            path: ["sourceLabel"],
+            equals: "TRANSFER_CONFIRMED",
+          },
+        },
+        identityFilters.length === 1
+          ? identityFilters[0]
+          : { OR: identityFilters },
+      ],
+    },
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      createdAt: true,
+      metadata: true,
+    },
+  });
+
+  return completedEvent
+    ? buildCompletedTransferReplayResponseFromLog(completedEvent)
+    : null;
+};
+
+const findCompletedTransferReplayResponseByChallenge = async (input: {
+  userId: string;
+  challengeId: string;
+}) => {
+  const challenge = await prisma.otpChallenge.findFirst({
+    where: {
+      id: input.challengeId,
+      userId: input.userId,
+      purpose: "TRANSFER",
+      channel: "EMAIL",
+    },
+    select: {
+      metadata: true,
+    },
+  });
+  const challengeMetadata = normalizeMetadataRecord(challenge?.metadata);
+  const requestKey =
+    typeof challengeMetadata.requestKey === "string"
+      ? challengeMetadata.requestKey
+      : null;
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const replayResponse = await findCompletedTransferReplayResponse({
+      userId: input.userId,
+      challengeId: input.challengeId,
+      requestKey,
+    });
+    if (replayResponse) {
+      return replayResponse;
+    }
+    if (attempt < 3) {
+      await sleep(150);
+    }
+  }
+
+  return null;
+};
+
+const buildTxRetrainDataset = async (limit: number) => {
+  const suspiciousAlerts = await prisma.auditLog.findMany({
+    where: {
+      action: "AI_TRANSACTION_ALERT",
+    },
+    orderBy: { createdAt: "desc" },
+    take: Math.max(limit * 2, 400),
+    select: {
+      details: true,
+      metadata: true,
+    },
+  });
+  const excludedTransactionIds = new Set<string>();
+  for (const alert of suspiciousAlerts) {
+    const details = normalizeRecord(alert.details);
+    const metadata = normalizeRecord(alert.metadata);
+    const adminStatus = normalizeAdminAlertStatus(
+      details.adminStatus ?? metadata.adminStatus,
+    );
+    if (adminStatus !== "confirmed_risk" && adminStatus !== "escalated") {
+      continue;
+    }
+    const transactionId =
+      asStringOrNull(details.transactionId) ??
+      asStringOrNull(metadata.transactionId);
+    if (transactionId) {
+      excludedTransactionIds.add(transactionId);
+    }
+  }
+
+  const logs = await prisma.auditLog.findMany({
+    where: {
+      action: "FUNDS_FLOW_EVENT",
+    },
+    orderBy: { createdAt: "desc" },
+    take: Math.max(limit * 3, 600),
+    select: {
+      id: true,
+      userId: true,
+      createdAt: true,
+      metadata: true,
+    },
+  });
+
+  const events = logs
+    .map(buildTxTrainingEventFromFundsFlowLog)
+    .filter((event): event is NonNullable<typeof event> => Boolean(event))
+    .filter((event) => !excludedTransactionIds.has(event.transactionId))
+    .slice(0, limit);
+
+  return {
+    events,
+    excludedFlaggedCount: excludedTransactionIds.size,
+    rawCount: logs.length,
+  };
+};
+
 const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value));
 
@@ -2179,12 +2822,175 @@ const suspiciousTransferNotePatterns: Array<{
   },
 ];
 
+const transferNoteLlmAnalysisSchema = z.object({
+  riskLevel: z.enum(["low", "medium", "high"]).default("low"),
+  signals: z.array(z.string().min(1).max(180)).max(6).default([]),
+  ruleTags: z.array(z.string().min(1).max(48)).max(6).default([]),
+  summary: z.string().max(240).nullable().optional(),
+});
+
+const transferNoteLlmCache = new Map<
+  string,
+  { expiresAt: number; value: TransferNoteLlmAnalysis }
+>();
+
+const buildTransferNoteHeuristicAnalysis = (input: {
+  note: string;
+  suspiciousReasons: string[];
+}): TransferNoteLlmAnalysis => {
+  const signals = dedupeStringList(input.suspiciousReasons).slice(0, 6);
+  const riskLevel =
+    signals.length >= 2 ? "high" : signals.length >= 1 ? "medium" : "low";
+  return {
+    riskLevel,
+    signals,
+    ruleTags: signals.length ? ["regex_suspicious_note"] : [],
+    summary: signals[0] || null,
+    source: "heuristic",
+    model: null,
+  };
+};
+
 const getSuspiciousTransferNoteReasons = (note: string) => {
   const normalizedNote = note.trim();
   if (!normalizedNote) return [];
   return suspiciousTransferNotePatterns
     .filter((entry) => entry.pattern.test(normalizedNote))
     .map((entry) => entry.reason);
+};
+
+const buildTransferNoteLlmCacheKey = (input: {
+  note: string;
+  amount: number;
+  currency: string;
+}) =>
+  crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify({
+        note: input.note.trim().toLowerCase(),
+        amountBucket: roundMoney(Math.max(0, input.amount)),
+        currency: input.currency.trim().toUpperCase(),
+      }),
+    )
+    .digest("hex");
+
+const extractJsonObject = (value: string) => {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const fencedMatch = trimmed.match(/```(?:json)?\s*([\s\S]+?)```/i);
+  const candidate = fencedMatch?.[1]?.trim() || trimmed;
+  const firstBrace = candidate.indexOf("{");
+  const lastBrace = candidate.lastIndexOf("}");
+  if (firstBrace < 0 || lastBrace <= firstBrace) return null;
+  return candidate.slice(firstBrace, lastBrace + 1);
+};
+
+const normalizeTransferNoteRuleTag = (value: string) =>
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_\s-]/g, "")
+    .replace(/[\s-]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+const analyzeTransferNoteWithLlm = async (input: {
+  note: string;
+  amount: number;
+  currency: string;
+}): Promise<TransferNoteLlmAnalysis> => {
+  const note = input.note.trim();
+  const suspiciousReasons = getSuspiciousTransferNoteReasons(note);
+  const heuristic = buildTransferNoteHeuristicAnalysis({
+    note,
+    suspiciousReasons,
+  });
+
+  if (!note || isGenericTransferNote(note)) {
+    return heuristic;
+  }
+  if (!ENABLE_TRANSFER_LLM_RULES || !openaiClient) {
+    return { ...heuristic, source: "disabled" };
+  }
+
+  const cacheKey = buildTransferNoteLlmCacheKey(input);
+  const cached = transferNoteLlmCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value;
+  }
+
+  try {
+    const response = await openaiClient.responses.create({
+      model: OPENAI_MODEL,
+      reasoning: {
+        effort: OPENAI_REASONING_EFFORT as "low" | "medium" | "high",
+      },
+      instructions:
+        "You are a banking transfer safety analyst. Analyze only the transfer note text and infer scam-related rule hints. Return JSON only with keys riskLevel, signals, ruleTags, summary. Do not decide allow or block. Be conservative and avoid false positives for generic personal notes.",
+      input: JSON.stringify({
+        note,
+        amount: roundMoney(Math.max(0, input.amount)),
+        currency: input.currency.trim().toUpperCase(),
+        heuristicSignals: suspiciousReasons,
+      }),
+    });
+
+    const outputText =
+      typeof response.output_text === "string" ? response.output_text : "";
+    const parsedJson = extractJsonObject(outputText);
+    if (!parsedJson) {
+      throw new Error("OpenAI returned no JSON for transfer note analysis");
+    }
+
+    const safeParsed = transferNoteLlmAnalysisSchema.safeParse(
+      JSON.parse(parsedJson),
+    );
+    if (!safeParsed.success) {
+      throw new Error("Transfer note LLM payload failed schema validation");
+    }
+
+    const result: TransferNoteLlmAnalysis = {
+      riskLevel: normalizeRiskLevel(safeParsed.data.riskLevel),
+      signals: dedupeStringList([
+        ...suspiciousReasons,
+        ...safeParsed.data.signals,
+      ]).slice(0, 6),
+      ruleTags: dedupeStringList([
+        ...safeParsed.data.ruleTags.map(normalizeTransferNoteRuleTag),
+        ...(suspiciousReasons.length ? ["regex_suspicious_note"] : []),
+      ])
+        .filter(Boolean)
+        .slice(0, 6),
+      summary:
+        typeof safeParsed.data.summary === "string" &&
+        safeParsed.data.summary.trim()
+          ? safeParsed.data.summary.trim()
+          : heuristic.summary,
+      source: "openai",
+      model: OPENAI_MODEL,
+    };
+    const normalized: TransferNoteLlmAnalysis = {
+      ...result,
+      riskLevel:
+        heuristic.riskLevel === "high" ||
+        (heuristic.riskLevel === "medium" && result.riskLevel === "low")
+          ? heuristic.riskLevel
+          : result.riskLevel,
+    };
+    transferNoteLlmCache.set(cacheKey, {
+      value: normalized,
+      expiresAt: Date.now() + TRANSFER_LLM_RULES_CACHE_TTL_MS,
+    });
+    return normalized;
+  } catch (error) {
+    console.warn("Transfer note LLM analysis failed; falling back", error);
+    const fallback = { ...heuristic, source: "fallback" as const };
+    transferNoteLlmCache.set(cacheKey, {
+      value: fallback,
+      expiresAt: Date.now() + Math.min(TRANSFER_LLM_RULES_CACHE_TTL_MS, 60000),
+    });
+    return fallback;
+  }
 };
 
 const isGenericTransferNote = (note: string) => {
@@ -2320,6 +3126,10 @@ const buildTransferSafetyAdvisory = (input: {
   const qualifiesForRedWarning = amount >= TRANSFER_FACE_ID_THRESHOLD;
   const hasMaterialDrainAmount = amount >= BALANCE_DRAIN_ADVISORY_MIN_AMOUNT;
   const hasWarningDrainAmount = amount >= BALANCE_DRAIN_WARNING_MIN_AMOUNT;
+  const hasMeaningfulHistoricalRiskAmount =
+    amount >= Math.max(50, TRANSFER_PROBE_SMALL_AMOUNT_MAX);
+  const hasProbeEscalationAmount =
+    amount >= Math.max(300, TRANSFER_PROBE_SMALL_AMOUNT_MAX * 2);
   const noteRiskReasons = getSuspiciousTransferNoteReasons(input.note);
   const noteIsGeneric = isGenericTransferNote(input.note);
   const reasons: string[] = [];
@@ -2345,6 +3155,12 @@ const buildTransferSafetyAdvisory = (input: {
   const recipientLabel = input.recipientAccount
     ? `account ending ${input.recipientAccount.slice(-4)}`
     : "this recipient";
+  const accountSegmentLabel =
+    input.aiResult.accountSegment === "enterprise"
+      ? "enterprise"
+      : input.aiResult.accountSegment === "sme"
+        ? "SME"
+        : "consumer";
   const hasStrongWarningSignal =
     amount >= HIGH_TRANSFER_ADVISORY_AMOUNT ||
     (hasWarningDrainAmount && transferRatio >= BALANCE_DRAIN_WARNING_RATIO) ||
@@ -2390,7 +3206,7 @@ const buildTransferSafetyAdvisory = (input: {
 
   if (amount >= LARGE_TRANSFER_ADVISORY_AMOUNT) {
     addReason(
-      `This is a high-value transfer for a consumer wallet (${formatMoneyAmount(input.currency, amount)}).`,
+      `This is a high-value transfer for a ${accountSegmentLabel} wallet (${formatMoneyAmount(input.currency, amount)}).`,
     );
   }
   if (qualifiesForRedWarning) {
@@ -2445,7 +3261,10 @@ const buildTransferSafetyAdvisory = (input: {
     );
   }
 
-  if (input.behaviorProfile.similarFlaggedAmountCount90d > 0) {
+  if (
+    hasMeaningfulHistoricalRiskAmount &&
+    input.behaviorProfile.similarFlaggedAmountCount90d > 0
+  ) {
     addReason(
       `You had ${input.behaviorProfile.similarFlaggedAmountCount90d} recent transfer attempt${
         input.behaviorProfile.similarFlaggedAmountCount90d === 1 ? "" : "s"
@@ -2456,7 +3275,10 @@ const buildTransferSafetyAdvisory = (input: {
     }
   }
 
-  if (input.behaviorProfile.sameRecipientFlaggedCount90d > 0) {
+  if (
+    hasProbeEscalationAmount &&
+    input.behaviorProfile.sameRecipientFlaggedCount90d > 0
+  ) {
     addReason(
       `${recipientLabel} was already involved in ${input.behaviorProfile.sameRecipientFlaggedCount90d} reviewed or blocked transfer attempt${
         input.behaviorProfile.sameRecipientFlaggedCount90d === 1 ? "" : "s"
@@ -2468,18 +3290,77 @@ const buildTransferSafetyAdvisory = (input: {
   }
 
   if (
+    hasMeaningfulHistoricalRiskAmount &&
     input.behaviorProfile.recentReviewCount30d +
       input.behaviorProfile.recentBlockedCount30d >=
-    3
+      3
   ) {
     addReason(
       `Recent outbound transfer behavior has triggered ${input.behaviorProfile.recentReviewCount30d + input.behaviorProfile.recentBlockedCount30d} AI reviews or blocks in the last 30 days.`,
     );
   }
 
-  if (input.behaviorProfile.recentPendingOtpCount7d >= 4) {
+  if (
+    hasMeaningfulHistoricalRiskAmount &&
+    input.behaviorProfile.recentPendingOtpCount7d >= 4
+  ) {
     addReason(
       `You started ${input.behaviorProfile.recentPendingOtpCount7d} outbound transfer verification flows in the last 7 days, which is faster than your usual pace.`,
+    );
+  }
+
+  if (
+    hasProbeEscalationAmount &&
+    input.behaviorProfile.smallProbeCount24h >= TRANSFER_PROBE_BURST_COUNT_24H
+  ) {
+    archetype = archetype || "Probe Then Escalate Pattern";
+    addReason(
+      `The account initiated ${input.behaviorProfile.smallProbeCount24h} small transfer attempt${
+        input.behaviorProfile.smallProbeCount24h === 1 ? "" : "s"
+      } in the last 24 hours, which can indicate recipient or account probing before a larger payment.`,
+    );
+    addRecommendedAction(
+      "Pause and confirm why several small outbound transfers were attempted before this payment.",
+    );
+  }
+
+  if (
+    hasProbeEscalationAmount &&
+    input.behaviorProfile.distinctSmallProbeRecipients24h >= 2
+  ) {
+    addReason(
+      `Small outbound transfers touched ${input.behaviorProfile.distinctSmallProbeRecipients24h} recipient accounts in the last 24 hours.`,
+    );
+  }
+
+  if (
+    hasProbeEscalationAmount &&
+    input.behaviorProfile.sameRecipientSmallProbeCount24h >= 2
+  ) {
+    addReason(
+      `${recipientLabel} already received ${input.behaviorProfile.sameRecipientSmallProbeCount24h} recent small transfer attempt${
+        input.behaviorProfile.sameRecipientSmallProbeCount24h === 1 ? "" : "s"
+      }, which may indicate account validation before a larger payout.`,
+    );
+  }
+
+  if (
+    hasProbeEscalationAmount &&
+    input.behaviorProfile.newRecipientSmallProbeCount24h >= 2 &&
+    !input.recipientProfile.isKnownRecipient
+  ) {
+    addReason(
+      "Several recent small transfers targeted new recipients, increasing the chance of mule-account testing or scam escalation.",
+    );
+  }
+
+  if (
+    hasProbeEscalationAmount &&
+    input.behaviorProfile.probeThenLargeRiskScore >= 0.65
+  ) {
+    severity = "warning";
+    addReason(
+      "Behavior shows a probe-then-escalate pattern: repeated small transfers followed by a materially larger payout request.",
     );
   }
 
@@ -2551,6 +3432,20 @@ const buildTransferSafetyAdvisory = (input: {
       "Do not approve this transfer until you independently verify the request is legitimate.",
     );
   }
+  if (input.aiResult.finalAction === "REQUIRE_OTP_FACE_ID") {
+    severity = "warning";
+    addReason(
+      "The hybrid risk engine requires OTP plus biometric verification for this transfer.",
+    );
+  } else if (input.aiResult.finalAction === "REQUIRE_OTP") {
+    addReason(
+      "The hybrid risk engine requires OTP verification before this transfer can continue.",
+    );
+  } else if (input.aiResult.finalAction === "ALLOW_WITH_WARNING") {
+    addReason(
+      "The hybrid risk engine suggests continuing only after reviewing the warning details.",
+    );
+  }
 
   for (const aiReason of input.aiResult.reasons) {
     const cleaned = aiReason.replace(/\s+/g, " ").trim();
@@ -2567,17 +3462,27 @@ const buildTransferSafetyAdvisory = (input: {
     remainingBalance <= TRANSFER_SCAM_BLOCK_MAX_REMAINING_BALANCE;
   const hasSuspiciousNoteSignal = noteRiskReasons.length > 0;
   const hasRecipientFraudHistory =
-    input.behaviorProfile.sameRecipientFlaggedCount90d > 0 ||
-    input.behaviorProfile.similarFlaggedAmountCount90d > 0;
+    (hasProbeEscalationAmount &&
+      input.behaviorProfile.sameRecipientFlaggedCount90d > 0) ||
+    (hasMeaningfulHistoricalRiskAmount &&
+      input.behaviorProfile.similarFlaggedAmountCount90d > 0);
   const hasHighRiskAiSignal = input.aiResult.riskLevel === "high";
+  const hasProbeEscalationSignal =
+    hasProbeEscalationAmount &&
+    input.behaviorProfile.probeThenLargeRiskScore >= 0.75 &&
+    amount >= TRANSFER_PROBE_LARGE_ESCALATION_MIN_AMOUNT;
   const shouldBlock =
-    hasBlockSizedAmount &&
-    ((hasSuspiciousNoteSignal &&
-      (!input.recipientProfile.isKnownRecipient ||
-        hasNearZeroRemainingBalance)) ||
-      (hasNearZeroRemainingBalance &&
-        hasRecipientFraudHistory &&
-        hasHighRiskAiSignal));
+    input.aiResult.finalAction === "HOLD_REVIEW" ||
+    (hasBlockSizedAmount &&
+      ((hasSuspiciousNoteSignal &&
+        (!input.recipientProfile.isKnownRecipient ||
+          hasNearZeroRemainingBalance)) ||
+        (hasNearZeroRemainingBalance &&
+          hasRecipientFraudHistory &&
+          hasHighRiskAiSignal))) ||
+    (hasProbeEscalationSignal &&
+      hasHighRiskAiSignal &&
+      !input.recipientProfile.isKnownRecipient);
 
   if (shouldBlock) {
     const blockedUntil = new Date(
@@ -2956,6 +3861,106 @@ const buildAnomalyGuidance = (input: {
     nextStep,
     recommendedActions,
     timeline,
+  };
+};
+
+const softenLowValueTransferAiResult = (input: {
+  aiResult: AnomalyResponse;
+  amount: number;
+  recipientKnown: boolean;
+  suspiciousNoteCount: number;
+  failedTx24h: number;
+  velocity1h: number;
+  sessionRestrictLargeTransfers: boolean;
+  faceIdRequired: boolean;
+  behaviorProfile: TransferBehaviorProfile;
+}): AnomalyResponse => {
+  const amount = Math.max(0, Number(input.amount) || 0);
+  const lowValueThreshold = Math.max(
+    50,
+    Math.min(100, TRANSFER_PROBE_SMALL_AMOUNT_MAX),
+  );
+  const hasProbeBurst =
+    input.behaviorProfile.smallProbeCount24h >=
+      TRANSFER_PROBE_BURST_COUNT_24H ||
+    input.behaviorProfile.sameRecipientSmallProbeCount24h >= 2 ||
+    input.behaviorProfile.newRecipientSmallProbeCount24h >= 2 ||
+    input.behaviorProfile.distinctSmallProbeRecipients24h >= 3 ||
+    input.behaviorProfile.probeThenLargeRiskScore >= 0.45;
+  const hasEscalatingSessionSignals =
+    input.failedTx24h >= 1 ||
+    input.velocity1h >= 3 ||
+    input.sessionRestrictLargeTransfers ||
+    input.faceIdRequired;
+  const hasHistoricalRiskPattern =
+    input.behaviorProfile.recentBlockedCount30d >= 2 ||
+    input.behaviorProfile.sameRecipientFlaggedCount90d >= 2;
+
+  if (
+    amount > lowValueThreshold ||
+    input.suspiciousNoteCount > 0 ||
+    hasProbeBurst ||
+    hasEscalatingSessionSignals ||
+    hasHistoricalRiskPattern
+  ) {
+    return input.aiResult;
+  }
+
+  const relaxedReasons = input.recipientKnown
+    ? ["Low-value transfer remains under normal AI monitoring."]
+    : [
+        "Low-value first transfer is being monitored without step-up escalation.",
+      ];
+
+  return {
+    ...input.aiResult,
+    riskLevel: "low",
+    reasons: relaxedReasons,
+    archetype: input.recipientKnown
+      ? "Low Value Transfer"
+      : "Low Value New Recipient",
+    timeline: dedupeStringList([
+      input.recipientKnown
+        ? "This recipient already exists in your completed transfer history."
+        : "This is a first-time recipient, but the amount is still in the low-value band.",
+      "No repeated small-transfer burst or scam-pressure signal was confirmed for this payment.",
+      "The transfer stays under normal monitoring unless stronger signals appear.",
+    ]).slice(0, 3),
+    headline: input.recipientKnown
+      ? "Low-value transfer stays in normal monitoring"
+      : "Low-value first transfer stays under light monitoring",
+    summary: input.recipientKnown
+      ? "This payment is low value and does not show the repeated probing pattern needed for step-up protection."
+      : "This payment is low value and does not show the repeated small-transfer pattern that would justify scam escalation.",
+    nextStep:
+      "Allow the transfer and continue passive monitoring for repeated low-value bursts.",
+    recommendedActions: dedupeStringList([
+      ...(input.recipientKnown
+        ? []
+        : ["Double-check the recipient once before sending."]),
+      "Continue normal monitoring and escalate only if repeated low-value attempts appear in a short time.",
+    ]).slice(0, 3),
+    requireOtp: false,
+    otpReason: null,
+    finalAction: "ALLOW",
+    finalScore: input.recipientKnown ? 12 : 24,
+    baseScore:
+      typeof input.aiResult.baseScore === "number"
+        ? input.aiResult.baseScore
+        : 0,
+    mitigationScore:
+      typeof input.aiResult.baseScore === "number"
+        ? Math.max(
+            0,
+            input.aiResult.baseScore - (input.recipientKnown ? 12 : 24),
+          )
+        : input.aiResult.mitigationScore,
+    warning: null,
+    ruleHits: [],
+    ruleHitCount: 0,
+    ruleRiskLevel: "low",
+    modelRiskLevel: "low",
+    stepUpLevel: null,
   };
 };
 
@@ -5631,9 +6636,12 @@ const buildSpendingComparisonResponse = async (input: {
 
 const sanitizeUser = (user: UserEntity | null) => {
   if (!user) return null;
-  const { passwordHash, ...rest } = user;
+  const { passwordHash, metadata, ...rest } = user;
   void passwordHash;
-  return rest;
+  return {
+    ...rest,
+    metadata: buildPublicUserMetadata(metadata),
+  };
 };
 
 const safelyDecryptTransaction = (
@@ -6269,6 +7277,851 @@ const hasStoredTransferPin = (metadata: unknown) => {
   );
 };
 
+type AccountProfileCategory = "PERSONAL" | "BUSINESS";
+type PersonalAccountTier = "BASIC" | "STANDARD" | "PREMIUM";
+type BusinessAccountTier = "SMALL_BUSINESS" | "MEDIUM_BUSINESS" | "ENTERPRISE";
+type AccountProfileTier = PersonalAccountTier | BusinessAccountTier;
+type ResolvedAccountProfile = {
+  category: AccountProfileCategory;
+  tier: AccountProfileTier;
+  segment: "PERSONAL" | "SME" | "ENTERPRISE";
+  profileCode:
+    | "PERSONAL_BASIC"
+    | "PERSONAL_STANDARD"
+    | "PERSONAL_PREMIUM"
+    | "BUSINESS_SMALL_BUSINESS"
+    | "BUSINESS_MEDIUM_BUSINESS"
+    | "BUSINESS_ENTERPRISE";
+  label: string;
+  reviewBias: "strict" | "balanced" | "high_value";
+  status: "SYSTEM_ASSIGNED" | "PENDING_REVIEW" | "VERIFIED" | "REQUIRES_REVIEW";
+  confidence: number;
+  effectiveCategory: AccountProfileCategory;
+  effectiveTier: AccountProfileTier;
+  declaredCategory: AccountProfileCategory;
+  declaredTier: AccountProfileTier;
+  requestedCategory: AccountProfileCategory | null;
+  requestedTier: AccountProfileTier | null;
+  hasPendingRequest: boolean;
+};
+
+type AccountProfileAutomationSummary = {
+  mode: "AUTOMATIC" | "ADMIN_CONTROLLED";
+  reviewWindowDays: number;
+  lastEvaluatedAt: string;
+  autoUpgradeApplied: boolean;
+  eligibleForUpgrade: boolean;
+  recommendedCategory: AccountProfileCategory;
+  recommendedTier: AccountProfileTier;
+  nextTier: AccountProfileTier | null;
+  rationale: string[];
+  milestones: string[];
+  stats: {
+    completedCount: number;
+    totalVolume: number;
+    outgoingVolume: number;
+    incomingVolume: number;
+    largeTransferCount: number;
+    counterpartyCount: number;
+    sourceCoverageRatio: number;
+    cleanActivityRatio: number;
+  };
+};
+
+const PERSONAL_ACCOUNT_TIERS = ["BASIC", "STANDARD", "PREMIUM"] as const;
+const BUSINESS_ACCOUNT_TIERS = [
+  "SMALL_BUSINESS",
+  "MEDIUM_BUSINESS",
+  "ENTERPRISE",
+] as const;
+const ACCOUNT_PROFILE_AUTO_REVIEW_WINDOW_DAYS = 30;
+const PERSONAL_ACCOUNT_TIER_ORDER: PersonalAccountTier[] = [
+  "BASIC",
+  "STANDARD",
+  "PREMIUM",
+];
+
+const normalizeAccountProfileCategory = (
+  value: unknown,
+  fallbackSegment?: unknown,
+): AccountProfileCategory => {
+  const normalized = String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[\s_-]+/g, "");
+  if (
+    normalized === "BUSINESS" ||
+    normalized === "ENTERPRISE" ||
+    normalized === "SME" ||
+    normalized === "CORPORATE" ||
+    normalized === "SMALLBUSINESS"
+  ) {
+    return "BUSINESS";
+  }
+  if (normalized === "PERSONAL") return "PERSONAL";
+  const segment = String(fallbackSegment || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[\s_-]+/g, "");
+  return segment === "SME" || segment === "ENTERPRISE"
+    ? "BUSINESS"
+    : "PERSONAL";
+};
+
+const normalizeAccountProfileTier = (
+  category: AccountProfileCategory,
+  value: unknown,
+  fallbackSegment?: unknown,
+): AccountProfileTier => {
+  const normalized = String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[\s_-]+/g, "");
+  const normalizedTier =
+    normalized === "PRIVATE"
+      ? "PREMIUM"
+      : normalized === "SME" || normalized === "SMALLBUSINESS"
+        ? "SMALL_BUSINESS"
+        : normalized === "MEDIUMBUSINESS" || normalized === "B2MEDIUMBUSINESS"
+          ? "MEDIUM_BUSINESS"
+          : normalized === "B1SMALLBUSINESS"
+            ? "SMALL_BUSINESS"
+            : normalized === "B3ENTERPRISE"
+              ? "ENTERPRISE"
+              : normalized === "P1BASIC"
+                ? "BASIC"
+                : normalized === "P2STANDARD"
+                  ? "STANDARD"
+                  : normalized === "P3PREMIUM"
+                    ? "PREMIUM"
+                    : normalized;
+  if (
+    category === "PERSONAL" &&
+    PERSONAL_ACCOUNT_TIERS.includes(normalizedTier as PersonalAccountTier)
+  ) {
+    return normalizedTier as PersonalAccountTier;
+  }
+  if (
+    category === "BUSINESS" &&
+    BUSINESS_ACCOUNT_TIERS.includes(normalizedTier as BusinessAccountTier)
+  ) {
+    return normalizedTier as BusinessAccountTier;
+  }
+  const fallback = String(fallbackSegment || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[\s_-]+/g, "");
+  if (category === "BUSINESS") {
+    if (fallback === "ENTERPRISE") return "ENTERPRISE";
+    if (fallback === "SME") return "MEDIUM_BUSINESS";
+    return "SMALL_BUSINESS";
+  }
+  return "STANDARD";
+};
+
+const deriveAccountProfileSegment = (
+  category: AccountProfileCategory,
+  tier: AccountProfileTier,
+): ResolvedAccountProfile["segment"] => {
+  if (category === "BUSINESS") {
+    return tier === "ENTERPRISE" ? "ENTERPRISE" : "SME";
+  }
+  return "PERSONAL";
+};
+
+const buildAccountProfileLabel = (
+  category: AccountProfileCategory,
+  tier: AccountProfileTier,
+) => {
+  if (category === "BUSINESS") {
+    if (tier === "ENTERPRISE") return "Business Enterprise";
+    if (tier === "MEDIUM_BUSINESS") return "Business Medium";
+    return "Business Small";
+  }
+  if (tier === "BASIC") return "Personal Basic";
+  if (tier === "PREMIUM") return "Personal Premium";
+  return "Personal Standard";
+};
+
+const buildAccountProfileReviewBias = (
+  category: AccountProfileCategory,
+  tier: AccountProfileTier,
+): ResolvedAccountProfile["reviewBias"] => {
+  if (category === "BUSINESS") return "high_value";
+  return tier === "BASIC" ? "strict" : "balanced";
+};
+
+const comparePersonalAccountTiers = (
+  left: PersonalAccountTier,
+  right: PersonalAccountTier,
+) =>
+  PERSONAL_ACCOUNT_TIER_ORDER.indexOf(left) -
+  PERSONAL_ACCOUNT_TIER_ORDER.indexOf(right);
+
+const buildPersonalAccountAutoMilestones = (input: {
+  currentTier: PersonalAccountTier;
+  recommendedTier: PersonalAccountTier;
+  stats: AccountProfileAutomationSummary["stats"];
+}) => {
+  const milestones: string[] = [];
+  if (input.recommendedTier === "BASIC") {
+    milestones.push(
+      input.stats.completedCount >= 6
+        ? "Monthly activity is active enough for the next tier."
+        : `Complete at least 6 clean transactions in ${ACCOUNT_PROFILE_AUTO_REVIEW_WINDOW_DAYS} days.`,
+    );
+    milestones.push(
+      input.stats.totalVolume >= 3000
+        ? "Monthly transaction value already meets the P2 volume target."
+        : "Build at least $3,000 in completed monthly volume.",
+    );
+    milestones.push(
+      input.stats.sourceCoverageRatio >= 0.65
+        ? "Incoming funds already explain most outgoing transfers."
+        : "Maintain incoming funds that cover at least 65% of outgoing value.",
+    );
+    return milestones;
+  }
+  if (input.recommendedTier === "STANDARD") {
+    milestones.push(
+      input.stats.completedCount >= 16
+        ? "Activity count is already close to premium review volume."
+        : `Build toward 16 or more completed transactions in ${ACCOUNT_PROFILE_AUTO_REVIEW_WINDOW_DAYS} days.`,
+    );
+    milestones.push(
+      input.stats.totalVolume >= 15000
+        ? "Monthly transaction value already meets the premium volume target."
+        : "Reach at least $15,000 in total completed monthly volume.",
+    );
+    milestones.push(
+      input.stats.largeTransferCount >= 3
+        ? "Large-transfer history is already established."
+        : "Maintain at least 3 larger clean transfers for premium review.",
+    );
+    milestones.push(
+      input.stats.counterpartyCount >= 4
+        ? "Counterparty diversity already supports a broader baseline."
+        : "Build a stable history with at least 4 counterparties.",
+    );
+    return milestones;
+  }
+  milestones.push("You are already at the highest automatic personal tier.");
+  milestones.push(
+    "Continue maintaining clean, explainable flow so AI can keep using a stable premium baseline.",
+  );
+  return milestones;
+};
+
+const normalizeAccountProfileRequestContext = (
+  value: unknown,
+  category?: AccountProfileCategory,
+) => {
+  const source =
+    value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : {};
+  const usagePurpose =
+    typeof source.usagePurpose === "string" ? source.usagePurpose.trim() : "";
+  const expectedTransactionLevel =
+    typeof source.expectedTransactionLevel === "string"
+      ? source.expectedTransactionLevel.trim().toUpperCase()
+      : "";
+  const expectedTransactionFrequency =
+    typeof source.expectedTransactionFrequency === "string"
+      ? source.expectedTransactionFrequency.trim().toUpperCase()
+      : "";
+  const businessSize =
+    typeof source.businessSize === "string"
+      ? source.businessSize.trim().toUpperCase()
+      : "";
+  const justification =
+    typeof source.justification === "string"
+      ? source.justification.trim().slice(0, 280)
+      : "";
+
+  return {
+    ...(usagePurpose ? { usagePurpose } : {}),
+    ...(expectedTransactionLevel ? { expectedTransactionLevel } : {}),
+    ...(expectedTransactionFrequency ? { expectedTransactionFrequency } : {}),
+    ...(category === "BUSINESS" && businessSize ? { businessSize } : {}),
+    ...(justification ? { justification } : {}),
+  };
+};
+
+const normalizeAccountProfileStatus = (
+  value: unknown,
+): ResolvedAccountProfile["status"] => {
+  const normalized = String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[\s_-]+/g, "_");
+  if (
+    normalized === "PENDING_REVIEW" ||
+    normalized === "VERIFIED" ||
+    normalized === "REQUIRES_REVIEW"
+  ) {
+    return normalized;
+  }
+  return "SYSTEM_ASSIGNED";
+};
+
+const defaultAccountProfileConfidence = (
+  status: ResolvedAccountProfile["status"],
+) => {
+  if (status === "VERIFIED") return 0.92;
+  if (status === "PENDING_REVIEW") return 0.45;
+  if (status === "REQUIRES_REVIEW") return 0.35;
+  return 0.6;
+};
+
+const buildResolvedAccountProfile = (
+  metadata: unknown,
+): ResolvedAccountProfile => {
+  const root =
+    metadata && typeof metadata === "object"
+      ? (metadata as Record<string, unknown>)
+      : {};
+  const accountProfile =
+    root.accountProfile && typeof root.accountProfile === "object"
+      ? (root.accountProfile as Record<string, unknown>)
+      : {};
+  const businessProfile =
+    root.businessProfile && typeof root.businessProfile === "object"
+      ? (root.businessProfile as Record<string, unknown>)
+      : {};
+  const rawSegment =
+    accountProfile.effectiveSegment ??
+    accountProfile.segment ??
+    root.accountSegment ??
+    root.segment ??
+    businessProfile.segment ??
+    businessProfile.accountType ??
+    root.accountType;
+  const effectiveCategory = normalizeAccountProfileCategory(
+    accountProfile.effectiveCategory ??
+      accountProfile.category ??
+      root.accountCategory ??
+      root.accountType,
+    rawSegment,
+  );
+  const effectiveTier = normalizeAccountProfileTier(
+    effectiveCategory,
+    accountProfile.effectiveTier ??
+      accountProfile.tier ??
+      root.accountTier ??
+      businessProfile.tier ??
+      businessProfile.segment,
+    rawSegment,
+  );
+  const segment = deriveAccountProfileSegment(effectiveCategory, effectiveTier);
+  const declaredCategory = normalizeAccountProfileCategory(
+    accountProfile.declaredCategory ?? effectiveCategory,
+    segment,
+  );
+  const declaredTier = normalizeAccountProfileTier(
+    declaredCategory,
+    accountProfile.declaredTier ?? effectiveTier,
+    segment,
+  );
+  const requestedCategoryRaw = accountProfile.requestedCategory;
+  const requestedTierRaw = accountProfile.requestedTier;
+  const requestedCategory =
+    requestedCategoryRaw === undefined || requestedCategoryRaw === null
+      ? null
+      : normalizeAccountProfileCategory(requestedCategoryRaw, segment);
+  const requestedTier =
+    requestedCategory === null
+      ? null
+      : normalizeAccountProfileTier(
+          requestedCategory,
+          requestedTierRaw,
+          segment,
+        );
+  const status = normalizeAccountProfileStatus(
+    accountProfile.status ??
+      (requestedCategory && requestedTier
+        ? "PENDING_REVIEW"
+        : "SYSTEM_ASSIGNED"),
+  );
+  const confidence = clamp(
+    typeof accountProfile.confidence === "number"
+      ? accountProfile.confidence
+      : defaultAccountProfileConfidence(status),
+    0.1,
+    0.99,
+  );
+  const profileCode =
+    `${effectiveCategory}_${effectiveTier}` as ResolvedAccountProfile["profileCode"];
+  const label = buildAccountProfileLabel(effectiveCategory, effectiveTier);
+  const reviewBias = buildAccountProfileReviewBias(
+    effectiveCategory,
+    effectiveTier,
+  );
+
+  return {
+    category: effectiveCategory,
+    tier: effectiveTier,
+    segment,
+    profileCode,
+    label,
+    reviewBias,
+    status,
+    confidence,
+    effectiveCategory,
+    effectiveTier,
+    declaredCategory,
+    declaredTier,
+    requestedCategory,
+    requestedTier,
+    hasPendingRequest:
+      requestedCategory !== null &&
+      requestedTier !== null &&
+      (requestedCategory !== effectiveCategory ||
+        requestedTier !== effectiveTier),
+  };
+};
+
+const evaluateAutomaticAccountProfileForUser = async (input: {
+  userId: string;
+  metadata: unknown;
+}): Promise<{
+  metadata: Record<string, unknown>;
+  accountProfile: ResolvedAccountProfile;
+  automation: AccountProfileAutomationSummary;
+}> => {
+  const currentProfile = buildResolvedAccountProfile(input.metadata);
+  const baseMetadata =
+    input.metadata && typeof input.metadata === "object"
+      ? { ...(input.metadata as Record<string, unknown>) }
+      : {};
+  const nowIso = new Date().toISOString();
+
+  if (currentProfile.category !== "PERSONAL") {
+    const automation: AccountProfileAutomationSummary = {
+      mode: "ADMIN_CONTROLLED",
+      reviewWindowDays: ACCOUNT_PROFILE_AUTO_REVIEW_WINDOW_DAYS,
+      lastEvaluatedAt: nowIso,
+      autoUpgradeApplied: false,
+      eligibleForUpgrade: false,
+      recommendedCategory: currentProfile.category,
+      recommendedTier: currentProfile.tier,
+      nextTier: null,
+      rationale: [
+        "Business profiles stay under admin control so enterprise-like behavior can be reviewed manually for demos and investigations.",
+      ],
+      milestones: [
+        "Admin can still set business tiers directly for scenario-based demonstrations.",
+      ],
+      stats: {
+        completedCount: 0,
+        totalVolume: 0,
+        outgoingVolume: 0,
+        incomingVolume: 0,
+        largeTransferCount: 0,
+        counterpartyCount: 0,
+        sourceCoverageRatio: 0,
+        cleanActivityRatio: 1,
+      },
+    };
+    return {
+      metadata: {
+        ...baseMetadata,
+        accountProfile: {
+          ...(baseMetadata.accountProfile &&
+          typeof baseMetadata.accountProfile === "object"
+            ? (baseMetadata.accountProfile as Record<string, unknown>)
+            : {}),
+          automation,
+        },
+      },
+      accountProfile: currentProfile,
+      automation,
+    };
+  }
+
+  const reviewWindowStart = new Date(
+    Date.now() - ACCOUNT_PROFILE_AUTO_REVIEW_WINDOW_DAYS * 24 * 60 * 60 * 1000,
+  );
+  const walletIds = (
+    await prisma.wallet.findMany({
+      where: { userId: input.userId },
+      select: { id: true },
+    })
+  ).map((wallet) => wallet.id);
+
+  const transactionWhere: Prisma.TransactionWhereInput = {
+    status: "COMPLETED",
+    createdAt: { gte: reviewWindowStart },
+    OR: [
+      { fromUserId: input.userId },
+      { toUserId: input.userId },
+      ...(walletIds.length
+        ? [
+            { walletId: { in: walletIds } },
+            { counterpartyWalletId: { in: walletIds } },
+          ]
+        : []),
+    ],
+  };
+
+  const transactionRows = await prisma.transaction.findMany({
+    where: transactionWhere,
+    select: {
+      id: true,
+      amount: true,
+      type: true,
+      fromUserId: true,
+      toUserId: true,
+      counterpartyWalletId: true,
+      metadata: true,
+    },
+  });
+  const uniqueTransactions = Array.from(
+    new Map(transactionRows.map((row) => [row.id, row])).values(),
+  );
+
+  let totalVolume = 0;
+  let outgoingVolume = 0;
+  let incomingVolume = 0;
+  let largeTransferCount = 0;
+  const counterpartyKeys = new Set<string>();
+  for (const tx of uniqueTransactions) {
+    const amount = Math.abs(Number(tx.amount || 0));
+    totalVolume += amount;
+    const metadata = normalizeRecord(tx.metadata);
+    const outbound =
+      tx.fromUserId === input.userId ||
+      metadata.entry === "DEBIT" ||
+      tx.type === "WITHDRAW";
+    const inbound =
+      tx.toUserId === input.userId ||
+      metadata.entry === "CREDIT" ||
+      tx.type === "DEPOSIT";
+
+    if (outbound) {
+      outgoingVolume += amount;
+      if (tx.type === "TRANSFER" && amount >= 3000) {
+        largeTransferCount += 1;
+      }
+      const counterparty =
+        asStringOrNull(metadata.toAccount) ??
+        asStringOrNull(metadata.counterpartyAccount) ??
+        asStringOrNull(tx.toUserId) ??
+        asStringOrNull(tx.counterpartyWalletId);
+      if (counterparty) {
+        counterpartyKeys.add(counterparty);
+      }
+    }
+    if (inbound) {
+      incomingVolume += amount;
+    }
+  }
+
+  const recentAlerts = await prisma.auditLog.findMany({
+    where: {
+      userId: input.userId,
+      action: "AI_TRANSACTION_ALERT",
+      createdAt: { gte: reviewWindowStart },
+    },
+    select: {
+      details: true,
+      metadata: true,
+    },
+  });
+  let confirmedRiskCount = 0;
+  for (const alert of recentAlerts) {
+    const details = normalizeRecord(alert.details);
+    const metadata = normalizeRecord(alert.metadata);
+    const adminStatus = normalizeAdminAlertStatus(
+      details.adminStatus ?? metadata.adminStatus,
+    );
+    if (adminStatus === "confirmed_risk" || adminStatus === "escalated") {
+      confirmedRiskCount += 1;
+    }
+  }
+
+  const completedCount = uniqueTransactions.length;
+  const sourceCoverageRatio =
+    outgoingVolume > 0
+      ? clamp(incomingVolume / outgoingVolume, 0, 3)
+      : incomingVolume > 0
+        ? 1
+        : 0;
+  const cleanActivityRatio =
+    completedCount > 0
+      ? clamp(1 - confirmedRiskCount / completedCount, 0, 1)
+      : 1;
+
+  let recommendedTier: PersonalAccountTier = "BASIC";
+  const rationale: string[] = [];
+  if (
+    completedCount >= 6 &&
+    totalVolume >= 3000 &&
+    outgoingVolume >= 1200 &&
+    sourceCoverageRatio >= 0.65 &&
+    cleanActivityRatio >= 0.9
+  ) {
+    recommendedTier = "STANDARD";
+    rationale.push(
+      "Completed activity over the last 30 days is strong enough for a broader personal baseline.",
+    );
+  }
+  if (
+    completedCount >= 16 &&
+    totalVolume >= 15000 &&
+    outgoingVolume >= 8000 &&
+    largeTransferCount >= 3 &&
+    counterpartyKeys.size >= 4 &&
+    sourceCoverageRatio >= 0.85 &&
+    cleanActivityRatio >= 0.96
+  ) {
+    recommendedTier = "PREMIUM";
+    rationale.push(
+      "High-value behavior is sustained, counterparties are diverse, and incoming funds explain the transfer pattern cleanly enough for premium treatment.",
+    );
+  }
+  if (rationale.length === 0) {
+    rationale.push(
+      "Automatic tiering is still collecting enough clean monthly activity before widening the AI baseline.",
+    );
+  }
+
+  const currentTier = currentProfile.tier as PersonalAccountTier;
+  const upgradeEligible =
+    comparePersonalAccountTiers(recommendedTier, currentTier) > 0 &&
+    !currentProfile.hasPendingRequest;
+  const nextTier =
+    currentTier === "BASIC"
+      ? "STANDARD"
+      : currentTier === "STANDARD"
+        ? "PREMIUM"
+        : null;
+  const milestones = buildPersonalAccountAutoMilestones({
+    currentTier,
+    recommendedTier,
+    stats: {
+      completedCount,
+      totalVolume,
+      outgoingVolume,
+      incomingVolume,
+      largeTransferCount,
+      counterpartyCount: counterpartyKeys.size,
+      sourceCoverageRatio,
+      cleanActivityRatio,
+    },
+  });
+
+  let effectiveMetadata = baseMetadata;
+  let effectiveProfile = currentProfile;
+  if (upgradeEligible) {
+    effectiveMetadata = setEffectiveAccountProfileMetadata(
+      baseMetadata,
+      {
+        category: "PERSONAL",
+        tier: recommendedTier,
+        status: "VERIFIED",
+        confidence:
+          recommendedTier === "PREMIUM"
+            ? Math.max(currentProfile.confidence, 0.95)
+            : Math.max(currentProfile.confidence, 0.88),
+      },
+      "automatic-tiering",
+    );
+    effectiveProfile = buildResolvedAccountProfile(effectiveMetadata);
+    rationale.unshift(
+      `FPIPay automatically upgraded this account to ${buildAccountProfileLabel("PERSONAL", recommendedTier)} based on the last ${ACCOUNT_PROFILE_AUTO_REVIEW_WINDOW_DAYS} days of clean activity.`,
+    );
+  }
+
+  const automation: AccountProfileAutomationSummary = {
+    mode: "AUTOMATIC",
+    reviewWindowDays: ACCOUNT_PROFILE_AUTO_REVIEW_WINDOW_DAYS,
+    lastEvaluatedAt: nowIso,
+    autoUpgradeApplied: upgradeEligible,
+    eligibleForUpgrade: upgradeEligible,
+    recommendedCategory: "PERSONAL",
+    recommendedTier,
+    nextTier,
+    rationale,
+    milestones,
+    stats: {
+      completedCount,
+      totalVolume,
+      outgoingVolume,
+      incomingVolume,
+      largeTransferCount,
+      counterpartyCount: counterpartyKeys.size,
+      sourceCoverageRatio,
+      cleanActivityRatio,
+    },
+  };
+
+  return {
+    metadata: {
+      ...effectiveMetadata,
+      accountProfile: {
+        ...(effectiveMetadata.accountProfile &&
+        typeof effectiveMetadata.accountProfile === "object"
+          ? (effectiveMetadata.accountProfile as Record<string, unknown>)
+          : {}),
+        automation,
+      },
+    },
+    accountProfile: effectiveProfile,
+    automation,
+  };
+};
+
+const setEffectiveAccountProfileMetadata = (
+  existingMetadata: unknown,
+  input: {
+    category?: unknown;
+    tier?: unknown;
+    status?: ResolvedAccountProfile["status"];
+    confidence?: unknown;
+    clearPendingRequest?: boolean;
+  },
+  updatedBy: string,
+) => {
+  const root =
+    existingMetadata && typeof existingMetadata === "object"
+      ? { ...(existingMetadata as Record<string, unknown>) }
+      : {};
+  const currentAccountProfileRoot =
+    root.accountProfile && typeof root.accountProfile === "object"
+      ? (root.accountProfile as Record<string, unknown>)
+      : {};
+  const current = buildResolvedAccountProfile(root);
+  const category = normalizeAccountProfileCategory(
+    input.category ?? current.effectiveCategory,
+    current.segment,
+  );
+  const tier = normalizeAccountProfileTier(
+    category,
+    input.tier ?? current.effectiveTier,
+    current.segment,
+  );
+  const segment = deriveAccountProfileSegment(category, tier);
+  const status = input.status ?? "VERIFIED";
+  const confidence = clamp(
+    typeof input.confidence === "number"
+      ? input.confidence
+      : status === "VERIFIED"
+        ? Math.max(current.confidence, 0.9)
+        : defaultAccountProfileConfidence(status),
+    0.1,
+    0.99,
+  );
+
+  return {
+    ...root,
+    accountCategory: category,
+    accountTier: tier,
+    accountSegment: segment,
+    accountType: category === "BUSINESS" ? "business" : "personal",
+    segment,
+    accountProfile: {
+      ...currentAccountProfileRoot,
+      category,
+      tier,
+      segment,
+      effectiveCategory: category,
+      effectiveTier: tier,
+      effectiveSegment: segment,
+      declaredCategory: category,
+      declaredTier: tier,
+      requestedCategory:
+        input.clearPendingRequest === false ? current.requestedCategory : null,
+      requestedTier:
+        input.clearPendingRequest === false ? current.requestedTier : null,
+      requestContext:
+        input.clearPendingRequest === false
+          ? typeof currentAccountProfileRoot.requestContext === "object"
+            ? (currentAccountProfileRoot.requestContext as Record<
+                string,
+                unknown
+              >)
+            : null
+          : null,
+      requestedAt:
+        input.clearPendingRequest === false
+          ? typeof currentAccountProfileRoot.requestedAt === "string"
+            ? currentAccountProfileRoot.requestedAt
+            : null
+          : null,
+      requestedBy:
+        input.clearPendingRequest === false
+          ? typeof currentAccountProfileRoot.requestedBy === "string"
+            ? currentAccountProfileRoot.requestedBy
+            : null
+          : null,
+      status,
+      confidence,
+      profileCode: `${category}_${tier}`,
+      label: buildAccountProfileLabel(category, tier),
+      reviewBias: buildAccountProfileReviewBias(category, tier),
+      reviewedAt: new Date().toISOString(),
+      reviewedBy: updatedBy,
+      updatedAt: new Date().toISOString(),
+      updatedBy,
+    },
+  };
+};
+
+const requestAccountProfileChangeMetadata = (
+  existingMetadata: unknown,
+  input: {
+    category?: unknown;
+    tier?: unknown;
+    requestContext?: unknown;
+  },
+  requestedBy: string,
+) => {
+  const root =
+    existingMetadata && typeof existingMetadata === "object"
+      ? { ...(existingMetadata as Record<string, unknown>) }
+      : {};
+  const current = buildResolvedAccountProfile(root);
+  const requestedCategory = normalizeAccountProfileCategory(
+    input.category ?? current.declaredCategory,
+    current.segment,
+  );
+  const requestedTier = normalizeAccountProfileTier(
+    requestedCategory,
+    input.tier ?? current.declaredTier,
+    current.segment,
+  );
+  const noMaterialChange =
+    requestedCategory === current.effectiveCategory &&
+    requestedTier === current.effectiveTier;
+  const requestContext = normalizeAccountProfileRequestContext(
+    input.requestContext,
+    requestedCategory,
+  );
+
+  return {
+    ...root,
+    accountProfile: {
+      ...(root.accountProfile && typeof root.accountProfile === "object"
+        ? (root.accountProfile as Record<string, unknown>)
+        : {}),
+      declaredCategory: requestedCategory,
+      declaredTier: requestedTier,
+      requestedCategory: noMaterialChange ? null : requestedCategory,
+      requestedTier: noMaterialChange ? null : requestedTier,
+      status: noMaterialChange ? current.status : "PENDING_REVIEW",
+      confidence: noMaterialChange
+        ? current.confidence
+        : Math.min(current.confidence, 0.45),
+      requestContext: noMaterialChange ? null : requestContext,
+      requestedAt: noMaterialChange ? null : new Date().toISOString(),
+      requestedBy: noMaterialChange ? null : requestedBy,
+      updatedAt: new Date().toISOString(),
+      updatedBy: requestedBy,
+    },
+  };
+};
+
 const buildPublicUserMetadata = (metadata: unknown) => {
   const source =
     metadata && typeof metadata === "object"
@@ -6286,7 +8139,35 @@ const buildPublicUserMetadata = (metadata: unknown) => {
       ? faceId.lastVerifiedAt
       : null;
   source.transferPinEnabled = hasStoredTransferPin(metadata);
+  const accountProfile = buildResolvedAccountProfile(metadata);
+  source.accountCategory = accountProfile.category;
+  source.accountTier = accountProfile.tier;
+  source.accountSegment = accountProfile.segment;
+  source.accountProfile = {
+    ...(source.accountProfile && typeof source.accountProfile === "object"
+      ? (source.accountProfile as Record<string, unknown>)
+      : {}),
+    category: accountProfile.category,
+    tier: accountProfile.tier,
+    segment: accountProfile.segment,
+    profileCode: accountProfile.profileCode,
+    label: accountProfile.label,
+    reviewBias: accountProfile.reviewBias,
+    status: accountProfile.status,
+    confidence: accountProfile.confidence,
+    declaredCategory: accountProfile.declaredCategory,
+    declaredTier: accountProfile.declaredTier,
+    effectiveCategory: accountProfile.effectiveCategory,
+    effectiveTier: accountProfile.effectiveTier,
+    requestedCategory: accountProfile.requestedCategory,
+    requestedTier: accountProfile.requestedTier,
+    hasPendingRequest: accountProfile.hasPendingRequest,
+  };
   return source;
+};
+
+const resolveUserAccountSegment = (metadata: unknown) => {
+  return buildResolvedAccountProfile(metadata).segment;
 };
 
 const normalizeRecentTransferRecipients = (value: unknown) => {
@@ -6561,49 +8442,78 @@ const buildLoginFailureMessage = (input: {
   return `Incorrect password. ${input.remainingAttempts} attempt${input.remainingAttempts === 1 ? "" : "s"} remaining before a temporary ${input.lockoutMinutes}-minute lock.`;
 };
 
-const countRecentFailedTransfers = async (userId: string, hours: number) =>
-  prisma.transaction.count({
-    where: {
-      fromUserId: userId,
-      status: "FAILED",
-      createdAt: {
-        gte: new Date(Date.now() - hours * 60 * 60 * 1000),
-      },
-    },
+const getRecentUserTransferRows = async (
+  userId: string,
+  since: Date,
+  take = 500,
+) => {
+  const wallets = await prisma.wallet.findMany({
+    where: { userId },
+    select: { id: true },
+    take: 10,
   });
+  const walletIds = wallets
+    .map((wallet) => wallet.id)
+    .filter(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    );
+  if (walletIds.length === 0) return [];
 
-const countRecentTransferVelocity = async (userId: string, hours: number) =>
-  prisma.transaction.count({
+  return prisma.transaction.findMany({
     where: {
-      fromUserId: userId,
-      type: "TRANSFER",
+      walletId: { in: walletIds },
       createdAt: {
-        gte: new Date(Date.now() - hours * 60 * 60 * 1000),
+        gte: since,
       },
     },
+    orderBy: { createdAt: "desc" },
+    take,
   });
+};
+
+const countRecentFailedTransfers = async (userId: string, hours: number) => {
+  const since = new Date(Date.now() - hours * 60 * 60 * 1000);
+  const rows = await getRecentUserTransferRows(userId, since, 200);
+  let count = 0;
+  for (const row of rows) {
+    const tx = safelyDecryptTransaction(row, "countRecentFailedTransfers");
+    if (!tx) continue;
+    if (tx.type !== "TRANSFER" || tx.status !== "FAILED") continue;
+    if (tx.fromUserId !== userId) continue;
+    count += 1;
+  }
+  return count;
+};
+
+const countRecentTransferVelocity = async (userId: string, hours: number) => {
+  const since = new Date(Date.now() - hours * 60 * 60 * 1000);
+  const rows = await getRecentUserTransferRows(userId, since, 200);
+  let count = 0;
+  for (const row of rows) {
+    const tx = safelyDecryptTransaction(row, "countRecentTransferVelocity");
+    if (!tx) continue;
+    if (tx.type !== "TRANSFER") continue;
+    if (tx.fromUserId !== userId) continue;
+    const metadata = normalizeMetadataRecord(tx.metadata);
+    if (metadata.entry && metadata.entry !== "DEBIT") continue;
+    count += 1;
+  }
+  return count;
+};
 
 const getTransferSpendProfile = async (
   userId: string,
   pendingAmount: number,
 ): Promise<TransferSpendProfile> => {
   const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-  const rows = await prisma.transaction.findMany({
-    where: {
-      fromUserId: userId,
-      type: "TRANSFER",
-      status: "COMPLETED",
-      createdAt: {
-        gte: since,
-      },
-    },
-    orderBy: { createdAt: "desc" },
-  });
+  const rows = await getRecentUserTransferRows(userId, since, 500);
 
   const dailyTotals = new Map<string, number>();
   for (const row of rows) {
     const tx = safelyDecryptTransaction(row, "getTransferSpendProfile");
     if (!tx) continue;
+    if (tx.type !== "TRANSFER" || tx.status !== "COMPLETED") continue;
+    if (tx.fromUserId !== userId) continue;
     const metadata =
       tx.metadata && typeof tx.metadata === "object"
         ? (tx.metadata as Record<string, unknown>)
@@ -6645,17 +8555,7 @@ const getTransferRecipientProfile = async (input: {
   const since = new Date(
     Date.now() - KNOWN_RECIPIENT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
   );
-  const rows = await prisma.transaction.findMany({
-    where: {
-      fromUserId: input.userId,
-      type: "TRANSFER",
-      status: "COMPLETED",
-      createdAt: {
-        gte: since,
-      },
-    },
-    orderBy: { createdAt: "desc" },
-  });
+  const rows = await getRecentUserTransferRows(input.userId, since, 500);
 
   let completedTransfers = 0;
   let totalSent = 0;
@@ -6664,6 +8564,8 @@ const getTransferRecipientProfile = async (input: {
   for (const row of rows) {
     const tx = safelyDecryptTransaction(row, "getTransferRecipientProfile");
     if (!tx) continue;
+    if (tx.type !== "TRANSFER" || tx.status !== "COMPLETED") continue;
+    if (tx.fromUserId !== input.userId) continue;
     const metadata = normalizeMetadataRecord(tx.metadata);
     if (metadata.entry !== "DEBIT") continue;
     const txToAccount =
@@ -6695,7 +8597,7 @@ const getTransferBehaviorProfile = async (input: {
   const since90d = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
   const since30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
   const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-  const similarAmountTolerance = Math.max(250, input.amount * 0.2);
+  const similarAmountTolerance = Math.max(5, Math.min(75, input.amount * 0.25));
 
   const rows = await prisma.auditLog.findMany({
     where: {
@@ -6723,6 +8625,12 @@ const getTransferBehaviorProfile = async (input: {
   let maxCompletedOutflow90d = 0;
   let similarFlaggedAmountCount90d = 0;
   let sameRecipientFlaggedCount90d = 0;
+  let smallProbeCount24h = 0;
+  let smallProbeTotal24h = 0;
+  let sameRecipientSmallProbeCount24h = 0;
+  let newRecipientSmallProbeCount24h = 0;
+  const distinctSmallProbeRecipients24h = new Set<string>();
+  const since24hMs = Date.now() - 24 * 60 * 60 * 1000;
 
   for (const row of rows) {
     const event = toFundsFlowDatasetRow(row);
@@ -6740,12 +8648,33 @@ const getTransferBehaviorProfile = async (input: {
       Boolean(input.toAccount) &&
       Boolean(event.toAccount) &&
       event.toAccount === input.toAccount;
+    const isProbeSizedAmount =
+      event.amount > 0 && event.amount <= TRANSFER_PROBE_SMALL_AMOUNT_MAX;
+    const isProbeLifecycle =
+      event.lifecycle === "COMPLETED" ||
+      event.lifecycle === "PENDING_OTP" ||
+      event.lifecycle === "REVIEW_REQUIRED" ||
+      event.lifecycle === "BLOCKED";
 
     if (event.lifecycle === "COMPLETED") {
       completedOutflowSum90d += event.amount;
       completedOutflowCount90d += 1;
       if (event.amount > maxCompletedOutflow90d) {
         maxCompletedOutflow90d = event.amount;
+      }
+    }
+
+    if (createdAtMs >= since24hMs && isProbeLifecycle && isProbeSizedAmount) {
+      smallProbeCount24h += 1;
+      smallProbeTotal24h += event.amount;
+      if (event.toAccount) {
+        distinctSmallProbeRecipients24h.add(event.toAccount);
+      }
+      if (sameRecipient) {
+        sameRecipientSmallProbeCount24h += 1;
+      }
+      if (event.recipientKnown === false) {
+        newRecipientSmallProbeCount24h += 1;
       }
     }
 
@@ -6777,6 +8706,16 @@ const getTransferBehaviorProfile = async (input: {
     }
   }
 
+  const probeThenLargeRiskScore = clamp(
+    (input.amount >= TRANSFER_PROBE_LARGE_ESCALATION_MIN_AMOUNT ? 0.35 : 0) +
+      Math.min(0.3, smallProbeCount24h * 0.08) +
+      Math.min(0.15, distinctSmallProbeRecipients24h.size * 0.05) +
+      Math.min(0.2, sameRecipientSmallProbeCount24h * 0.1) +
+      Math.min(0.15, newRecipientSmallProbeCount24h * 0.05),
+    0,
+    0.99,
+  );
+
   return {
     recentReviewCount30d,
     recentBlockedCount30d,
@@ -6788,6 +8727,12 @@ const getTransferBehaviorProfile = async (input: {
     maxCompletedOutflow90d: roundMoney(maxCompletedOutflow90d),
     similarFlaggedAmountCount90d,
     sameRecipientFlaggedCount90d,
+    smallProbeCount24h,
+    smallProbeTotal24h: roundMoney(smallProbeTotal24h),
+    distinctSmallProbeRecipients24h: distinctSmallProbeRecipients24h.size,
+    sameRecipientSmallProbeCount24h,
+    newRecipientSmallProbeCount24h,
+    probeThenLargeRiskScore: Number(probeThenLargeRiskScore.toFixed(3)),
   };
 };
 
@@ -7239,14 +9184,12 @@ const executeTransfer = async (input: {
   aiMonitoring?: AnomalyResponse;
   transferAdvisory?: TransferSafetyAdvisory | null;
 }) => {
-  return prisma.$transaction(async (tx) => {
+  return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     const senderWallet = await tx.wallet.findFirst({
       where: { userId: input.senderUserId },
     });
     if (!senderWallet) throw new Error("SENDER_WALLET_NOT_FOUND");
-    if (Number(senderWallet.balance) < input.amount) {
-      throw new Error("INSUFFICIENT_BALANCE");
-    }
+    const senderBalanceBefore = Number(senderWallet.balance);
 
     const receiverWallet =
       (input.receiverWalletByAccount
@@ -7272,14 +9215,36 @@ const executeTransfer = async (input: {
 
     const reconciliationId = crypto.randomUUID();
 
-    await tx.wallet.update({
-      where: { id: senderWallet.id },
+    const debitResult = await tx.wallet.updateMany({
+      where: {
+        id: senderWallet.id,
+        balance: {
+          gte: new Prisma.Decimal(input.amount),
+        },
+      },
       data: { balance: { decrement: input.amount } },
     });
+    if (debitResult.count !== 1) {
+      throw new Error("INSUFFICIENT_BALANCE");
+    }
     await tx.wallet.update({
       where: { id: receiverWallet.id },
       data: { balance: { increment: input.amount } },
     });
+    const senderWalletAfter = await tx.wallet.findUnique({
+      where: { id: senderWallet.id },
+      select: { balance: true },
+    });
+    const receiverWalletAfter = await tx.wallet.findUnique({
+      where: { id: receiverWallet.id },
+      select: { balance: true },
+    });
+    const senderBalanceAfter = senderWalletAfter
+      ? Number(senderWalletAfter.balance)
+      : Math.max(senderBalanceBefore - input.amount, 0);
+    const receiverBalanceAfter = receiverWalletAfter
+      ? Number(receiverWalletAfter.balance)
+      : input.amount;
 
     const debitTxId = generateEncryptedTransactionId();
     const debitTx = decryptStoredTransaction(
@@ -7355,8 +9320,8 @@ const executeTransfer = async (input: {
       transaction: debitTx,
       reconciliationId,
       receiverAccountNumber: input.receiverAccountNumber,
-      senderBalance: Number(senderWallet.balance) - input.amount,
-      receiverBalance: Number(receiverWallet.balance) + input.amount,
+      senderBalance: senderBalanceAfter,
+      receiverBalance: receiverBalanceAfter,
       currency: senderWallet.currency,
     };
   });
@@ -7394,6 +9359,7 @@ const completeAuthorizedTransfer = async (input: {
   transferAiResult: AnomalyResponse;
   transferAdvisory: TransferSafetyAdvisory | null;
   transferSpendProfile?: Record<string, unknown>;
+  transferRequestKey?: string | null;
   verificationMethod: "pin" | "otp";
   verifiedChallengeId?: string | null;
   faceIdRequired: boolean;
@@ -7460,6 +9426,11 @@ const completeAuthorizedTransfer = async (input: {
     aiMonitoring: input.transferAiResult,
     transferAdvisory: input.transferAdvisory,
   });
+  const effectiveRequestKey =
+    input.transferRequestKey ||
+    input.transferAiResult.requestKey ||
+    input.transferAdvisory?.requestKey ||
+    null;
 
   await logAuditEvent({
     actor: input.req.user?.email,
@@ -7476,10 +9447,7 @@ const completeAuthorizedTransfer = async (input: {
       transferAdvisorySeverity: input.transferAdvisory?.severity || null,
     },
     metadata: {
-      requestKey:
-        input.transferAiResult.requestKey ||
-        input.transferAdvisory?.requestKey ||
-        null,
+      requestKey: effectiveRequestKey,
       spendProfile: input.transferSpendProfile,
       transferAdvisory: input.transferAdvisory || undefined,
       aiMonitoring: buildStoredAiMonitoring(input.transferAiResult),
@@ -7503,10 +9471,8 @@ const completeAuthorizedTransfer = async (input: {
     toUserId: context.resolvedReceiverUserId,
     transactionId: transferResult.transaction.id,
     reconciliationId: transferResult.reconciliationId,
-    requestKey:
-      input.transferAiResult.requestKey ||
-      input.transferAdvisory?.requestKey ||
-      null,
+    challengeId: input.verifiedChallengeId || null,
+    requestKey: effectiveRequestKey,
     note: context.note,
     riskLevel: input.transferAiResult.riskLevel,
     riskScore: input.transferAiResult.score,
@@ -7535,10 +9501,8 @@ const completeAuthorizedTransfer = async (input: {
     toUserId: context.resolvedReceiverUserId,
     transactionId: transferResult.transaction.id,
     reconciliationId: transferResult.reconciliationId,
-    requestKey:
-      input.transferAiResult.requestKey ||
-      input.transferAdvisory?.requestKey ||
-      null,
+    challengeId: input.verifiedChallengeId || null,
+    requestKey: effectiveRequestKey,
     note: context.note,
     riskLevel: input.transferAiResult.riskLevel,
     riskScore: input.transferAiResult.score,
@@ -8252,36 +10216,40 @@ app.post("/auth/register", async (req, res) => {
       phone: parsed.data.phone?.trim(),
       address: parsed.data.address?.trim(),
       dob: parsed.data.dob?.trim(),
-      metadata: {
-        ...(parsed.data.userName
-          ? { userName: parsed.data.userName.trim() }
-          : {}),
-        faceId: {
-          enabled: true,
-          enrolledAt: new Date().toISOString(),
-          challengeNonce: verifiedFace.challenge.nonce,
-          challengeSteps: verifiedFace.challenge.steps,
-          descriptor: faceEnrollment.descriptor,
-          descriptorHash: crypto
-            .createHash("sha256")
-            .update(faceEnrollment.descriptor)
-            .digest("hex"),
-          livenessScore: faceEnrollment.livenessScore,
-          motionScore: faceEnrollment.motionScore,
-          faceCoverage: faceEnrollment.faceCoverage,
-          sampleCount: faceEnrollment.sampleCount,
-          previewImage: faceEnrollment.previewImage,
-          antiSpoof: {
-            spoofScore: verifiedFace.antiSpoof.spoofScore,
-            confidence: verifiedFace.antiSpoof.confidence,
-            riskLevel: verifiedFace.antiSpoof.riskLevel,
-            reasons: verifiedFace.antiSpoof.reasons,
-            modelSource: verifiedFace.antiSpoof.modelSource,
-            modelVersion: verifiedFace.antiSpoof.modelVersion,
+      metadata: setEffectiveAccountProfileMetadata(
+        {
+          ...(parsed.data.userName
+            ? { userName: parsed.data.userName.trim() }
+            : {}),
+          faceId: {
+            enabled: true,
+            enrolledAt: new Date().toISOString(),
+            challengeNonce: verifiedFace.challenge.nonce,
+            challengeSteps: verifiedFace.challenge.steps,
+            descriptor: faceEnrollment.descriptor,
+            descriptorHash: crypto
+              .createHash("sha256")
+              .update(faceEnrollment.descriptor)
+              .digest("hex"),
+            livenessScore: faceEnrollment.livenessScore,
+            motionScore: faceEnrollment.motionScore,
+            faceCoverage: faceEnrollment.faceCoverage,
+            sampleCount: faceEnrollment.sampleCount,
+            previewImage: faceEnrollment.previewImage,
+            antiSpoof: {
+              spoofScore: verifiedFace.antiSpoof.spoofScore,
+              confidence: verifiedFace.antiSpoof.confidence,
+              riskLevel: verifiedFace.antiSpoof.riskLevel,
+              reasons: verifiedFace.antiSpoof.reasons,
+              modelSource: verifiedFace.antiSpoof.modelSource,
+              modelVersion: verifiedFace.antiSpoof.modelVersion,
+            },
+            lastVerifiedAt: new Date().toISOString(),
           },
-          lastVerifiedAt: new Date().toISOString(),
         },
-      },
+        { category: "PERSONAL", tier: "STANDARD" },
+        "register",
+      ),
     };
     const pendingUser = existingUser
       ? await (async () => {
@@ -8438,7 +10406,7 @@ app.post("/auth/register/verify", async (req, res) => {
       return res.status(404).json({ error: "OTP challenge not found" });
     }
 
-    await verifyEmailOtpChallenge({
+    await verifyAndConsumeEmailOtpChallenge({
       userId: challenge.userId,
       purpose: "REGISTER",
       challengeId,
@@ -8468,7 +10436,6 @@ app.post("/auth/register/verify", async (req, res) => {
       ipAddress: currentIp,
       userAgent: currentUserAgent,
     });
-    await consumeOtpChallenge(challengeId);
     await getOrCreateWalletByUserId(userDoc.id);
     await logAuditEvent({
       actor: userDoc.email,
@@ -8803,6 +10770,7 @@ app.post("/auth/login", loginRateLimiter, async (req, res) => {
           sessionSecurity: buildSessionSecurityState("high", {
             reviewReason,
             verificationMethod: "email_otp",
+            restrictLargeTransfers: true,
           }),
         },
       });
@@ -9007,7 +10975,7 @@ app.post("/auth/login/verify", async (req, res) => {
       challenge.metadata && typeof challenge.metadata === "object"
         ? (challenge.metadata as Record<string, unknown>)
         : {};
-    await verifyEmailOtpChallenge({
+    await verifyAndConsumeEmailOtpChallenge({
       userId: challengeUserId,
       purpose: loginPurpose,
       challengeId,
@@ -9022,7 +10990,6 @@ app.post("/auth/login/verify", async (req, res) => {
       return res.status(423).json({ error: "Account is not active" });
     }
 
-    await consumeOtpChallenge(challengeId);
     await userRepository.touchLastLogin(userDoc.id);
     const anomalyScore =
       typeof metadata.anomalyScore === "number" ? metadata.anomalyScore : 0;
@@ -9041,6 +11008,7 @@ app.post("/auth/login/verify", async (req, res) => {
         ? buildSessionSecurityState("high", {
             reviewReason: "New-device sign-in verified by email OTP",
             verificationMethod: "email_otp",
+            restrictLargeTransfers: true,
           })
         : buildSessionSecurityState("low");
     const nextAuthState = recordSuccessfulLoginIp(
@@ -9288,7 +11256,7 @@ app.post("/auth/password/reset", async (req, res) => {
     const userDoc = await userRepository.findByEmail(email);
     if (!userDoc) return res.status(404).json({ error: "Email not found" });
 
-    await verifyEmailOtpChallenge({
+    await verifyAndConsumeEmailOtpChallenge({
       userId: userDoc.id,
       purpose: "RESET_PASSWORD",
       challengeId,
@@ -9297,14 +11265,22 @@ app.post("/auth/password/reset", async (req, res) => {
 
     const passwordHash = await hashPassword(newPassword);
     await userRepository.updatePassword(userDoc.id, passwordHash);
-    await consumeOtpChallenge(challengeId);
+    const authSecurityState = clearActiveAuthSession(
+      getAuthSecurityState(userDoc.metadata),
+    );
+    await persistAuthSecurityState(userRepository, userDoc, authSecurityState);
 
     await logAuditEvent({
       actor: userDoc.email,
       userId: userDoc.id,
       action: "RESET_PASSWORD",
+      details: {
+        revokedActiveSession:
+          authSecurityState.activeSession?.sessionId ?? null,
+      },
       ipAddress: getRequestIp(req),
     });
+    invalidateUserResponseCache(userDoc.id, ["auth", "security"]);
 
     return res.status(204).send();
   } catch (err) {
@@ -9328,8 +11304,41 @@ app.post("/auth/password/reset", async (req, res) => {
   }
 });
 
-app.post("/auth/logout", (_req, res) => {
-  res.status(204).send();
+app.post("/auth/logout", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const userRepository = createUserRepository();
+  const userDoc = await userRepository.findValidatedById(userId);
+  if (!userDoc) return res.status(404).json({ error: "User not found" });
+
+  const currentSid = typeof req.user?.sid === "string" ? req.user.sid : "";
+  const authSecurityState = getAuthSecurityState(userDoc.metadata);
+  const activeSession = authSecurityState.activeSession;
+
+  if (activeSession?.sessionId && activeSession.sessionId === currentSid) {
+    await persistAuthSecurityState(
+      userRepository,
+      userDoc,
+      clearActiveAuthSession(authSecurityState),
+    );
+  }
+
+  await logAuditEvent({
+    actor: req.user?.email || userDoc.email,
+    userId: userDoc.id,
+    action: "LOGOUT",
+    details: {
+      sessionId: currentSid || null,
+      clearedActiveSession:
+        activeSession?.sessionId === currentSid ? currentSid : null,
+    },
+    ipAddress: getRequestIp(req),
+  });
+
+  invalidateUserResponseCache(userDoc.id, ["auth", "security"]);
+
+  return res.status(204).send();
 });
 
 app.post("/auth/session-alert/respond", async (req, res) => {
@@ -9735,11 +11744,50 @@ app.get("/auth/me", requireAuth, async (req, res) => {
         throw new Error("AUTH_USER_NOT_FOUND");
       }
 
-      const metadata =
-        userDoc.metadata && typeof userDoc.metadata === "object"
-          ? (userDoc.metadata as Record<string, unknown>)
+      const evaluatedProfile = await evaluateAutomaticAccountProfileForUser({
+        userId,
+        metadata: userDoc.metadata,
+      });
+      const previousProfile = buildResolvedAccountProfile(userDoc.metadata);
+      let metadata = evaluatedProfile.metadata;
+      if (JSON.stringify(metadata) !== JSON.stringify(userDoc.metadata ?? {})) {
+        const updatedUser = await userRepository.updateMetadata(
+          userId,
+          metadata,
+        );
+        metadata =
+          updatedUser.metadata && typeof updatedUser.metadata === "object"
+            ? (updatedUser.metadata as Record<string, unknown>)
+            : {};
+        if (
+          previousProfile.category !==
+            evaluatedProfile.accountProfile.category ||
+          previousProfile.tier !== evaluatedProfile.accountProfile.tier
+        ) {
+          await logAuditEvent({
+            actor: "automatic-tiering",
+            userId,
+            action: "ACCOUNT_PROFILE_AUTO_UPGRADED",
+            details: {
+              previousProfile,
+              upgradedProfile: evaluatedProfile.accountProfile,
+              automation: evaluatedProfile.automation,
+            },
+            ipAddress: getRequestIp(req),
+          });
+        }
+      }
+      const authSecurityState = getAuthSecurityState(metadata);
+      const publicMetadata = buildPublicUserMetadata(metadata);
+      const publicAccountProfile =
+        publicMetadata.accountProfile &&
+        typeof publicMetadata.accountProfile === "object"
+          ? (publicMetadata.accountProfile as Record<string, unknown>)
           : {};
-      const authSecurityState = getAuthSecurityState(userDoc.metadata);
+      publicMetadata.accountProfile = {
+        ...publicAccountProfile,
+        automation: evaluatedProfile.automation,
+      };
 
       return {
         id: userDoc.id,
@@ -9751,7 +11799,7 @@ app.get("/auth/me", requireAuth, async (req, res) => {
         dob: typeof userDoc.dob === "string" ? userDoc.dob : "",
         avatar:
           typeof metadata.avatar === "string" ? metadata.avatar : undefined,
-        metadata: buildPublicUserMetadata(metadata),
+        metadata: publicMetadata,
         security:
           authSecurityState.activeSession?.security ??
           buildSessionSecurityState("low"),
@@ -9816,15 +11864,30 @@ app.patch("/auth/me", requireAuth, async (req, res) => {
     ...(avatar ? { avatar } : {}),
   };
   delete (safeMetadata as Record<string, unknown>).faceId;
+  delete (safeMetadata as Record<string, unknown>).transferSecurity;
+  delete (safeMetadata as Record<string, unknown>).accountCategory;
+  delete (safeMetadata as Record<string, unknown>).accountTier;
+  delete (safeMetadata as Record<string, unknown>).accountSegment;
+  delete (safeMetadata as Record<string, unknown>).accountType;
+  delete (safeMetadata as Record<string, unknown>).segment;
+  delete (safeMetadata as Record<string, unknown>).accountProfile;
 
   try {
     const userRepository = createUserRepository();
+    const existingUser = await userRepository.findValidatedById(userId);
+    const normalizedMetadata = {
+      ...(existingUser?.metadata ?? {}),
+      ...safeMetadata,
+    };
+    if (avatar) {
+      normalizedMetadata.avatar = avatar;
+    }
     const updated = await userRepository.updateProfile(userId, {
       fullName: fullName || undefined,
       phone: phone || undefined,
       address: address || undefined,
       dob: dob || undefined,
-      metadata: safeMetadata,
+      metadata: normalizedMetadata,
     });
 
     await logAuditEvent({
@@ -9857,6 +11920,13 @@ app.patch("/auth/me", requireAuth, async (req, res) => {
     console.error("Failed to update profile", err);
     return res.status(500).json({ error: "Internal error" });
   }
+});
+
+app.put("/auth/me/account-profile", requireAuth, async (req, res) => {
+  return res.status(403).json({
+    error:
+      "Self-service profile changes are disabled. FPIPay now upgrades personal tiers automatically from clean monthly activity, while admins can still set profiles manually for reviews and demos.",
+  });
 });
 
 app.get("/cards", requireAuth, async (req, res) => {
@@ -10173,13 +12243,12 @@ app.post("/card/details/otp/verify", requireAuth, async (req, res) => {
   }
 
   try {
-    await verifyEmailOtpChallenge({
+    await verifyAndConsumeEmailOtpChallenge({
       userId,
       purpose: "CARD_DETAILS",
       challengeId,
       otp,
     });
-    await consumeOtpChallenge(challengeId);
 
     const userRepository = createUserRepository();
     const userDoc = await userRepository.findValidatedById(userId);
@@ -10599,6 +12668,8 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
     const userRepository = createUserRepository();
     const user = await userRepository.findValidatedById(senderUserId);
     if (!user) return res.status(404).json({ error: "User not found" });
+    const accountProfile = buildResolvedAccountProfile(user.metadata);
+    const accountSegment = accountProfile.segment;
 
     const storedFaceId = getInternalFaceIdMetadata(user.metadata);
     const hasTransferFaceId =
@@ -10607,6 +12678,11 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
       storedFaceId.descriptor.length > 0;
     const transferStepUpPolicy = await evaluateTransferStepUpPolicy({
       userId: senderUserId,
+      amount: context.amount,
+      currency: context.senderWallet.currency,
+    });
+    const transferNoteLlmPromise = analyzeTransferNoteWithLlm({
+      note: context.note,
       amount: context.amount,
       currency: context.senderWallet.currency,
     });
@@ -10632,6 +12708,10 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
         amount: context.amount,
       }),
     ]);
+    const suspiciousNoteReasons = getSuspiciousTransferNoteReasons(
+      context.note,
+    );
+    const transferNoteLlm = await transferNoteLlmPromise;
 
     let aiResult = DEFAULT_AI_RESPONSE;
     try {
@@ -10644,6 +12724,11 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
           timestamp: new Date().toISOString(),
           amount: context.amount,
           currency: context.senderWallet.currency,
+          accountSegment,
+          accountCategory: accountProfile.category,
+          accountTier: accountProfile.tier,
+          accountProfileStatus: accountProfile.status,
+          accountProfileConfidence: accountProfile.confidence,
           location: getRequestLocation(req),
           paymentMethod: "wallet_balance",
           merchantCategory: "p2p_transfer",
@@ -10662,6 +12747,29 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
             0,
             Number(context.senderWallet.balance) - context.amount,
           ),
+          recipientKnown: recipientProfile.isKnownRecipient,
+          suspiciousNoteCount: suspiciousNoteReasons.length,
+          llmNoteRiskLevel: transferNoteLlm.riskLevel,
+          llmSignalCount: transferNoteLlm.signals.length,
+          llmRuleTags: transferNoteLlm.ruleTags,
+          sessionRiskLevel: req.sessionSecurity?.riskLevel || "low",
+          rollingOutflowAmount: transferStepUpPolicy.rollingOutflowAmount,
+          faceIdRequired: transferStepUpPolicy.faceIdRequired,
+          sessionRestrictLargeTransfers: Boolean(
+            req.sessionSecurity?.restrictLargeTransfers,
+          ),
+          recentReviewCount30d: behaviorProfile.recentReviewCount30d,
+          recentBlockedCount30d: behaviorProfile.recentBlockedCount30d,
+          recentPendingOtpCount7d: behaviorProfile.recentPendingOtpCount7d,
+          smallProbeCount24h: behaviorProfile.smallProbeCount24h,
+          smallProbeTotal24h: behaviorProfile.smallProbeTotal24h,
+          distinctSmallProbeRecipients24h:
+            behaviorProfile.distinctSmallProbeRecipients24h,
+          sameRecipientSmallProbeCount24h:
+            behaviorProfile.sameRecipientSmallProbeCount24h,
+          newRecipientSmallProbeCount24h:
+            behaviorProfile.newRecipientSmallProbeCount24h,
+          probeThenLargeRiskScore: behaviorProfile.probeThenLargeRiskScore,
         }),
       });
       const rawResult = (await aiResp.json().catch(() => null)) as unknown;
@@ -10674,6 +12782,20 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
     } catch (err) {
       console.warn("AI transaction preview not reachable, using default", err);
     }
+
+    aiResult = softenLowValueTransferAiResult({
+      aiResult,
+      amount: context.amount,
+      recipientKnown: recipientProfile.isKnownRecipient,
+      suspiciousNoteCount: suspiciousNoteReasons.length,
+      failedTx24h,
+      velocity1h,
+      sessionRestrictLargeTransfers: Boolean(
+        req.sessionSecurity?.restrictLargeTransfers,
+      ),
+      faceIdRequired: transferStepUpPolicy.faceIdRequired,
+      behaviorProfile,
+    });
 
     const transferAdvisory = buildTransferSafetyAdvisory({
       amount: context.amount,
@@ -10688,7 +12810,9 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
       requestKey: aiResult.requestKey,
     });
     const shouldForceFaceIdForHighRisk =
-      aiResult.riskLevel === "high" && hasTransferFaceId;
+      aiResult.finalAction === "REQUIRE_OTP_FACE_ID" &&
+      context.amount >= Math.max(500, TRANSFER_PROBE_SMALL_AMOUNT_MAX * 3) &&
+      hasTransferFaceId;
     const effectiveFaceIdRequired =
       transferStepUpPolicy.faceIdRequired || shouldForceFaceIdForHighRisk;
     const effectiveFaceIdReason =
@@ -10783,6 +12907,8 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
     const userRepository = createUserRepository();
     const user = await userRepository.findValidatedById(senderUserId);
     if (!user) return res.status(404).json({ error: "User not found" });
+    const accountProfile = buildResolvedAccountProfile(user.metadata);
+    const accountSegment = accountProfile.segment;
     if (!hasStoredTransferPin(user.metadata)) {
       return res.status(403).json({
         error:
@@ -10915,6 +13041,12 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       }
     }
 
+    const transferNoteLlmPromise = analyzeTransferNoteWithLlm({
+      note: context.note,
+      amount: context.amount,
+      currency: context.senderWallet.currency,
+    });
+
     const [
       failedTx24h,
       velocity1h,
@@ -10936,6 +13068,10 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
         amount: context.amount,
       }),
     ]);
+    const suspiciousNoteReasons = getSuspiciousTransferNoteReasons(
+      context.note,
+    );
+    const transferNoteLlm = await transferNoteLlmPromise;
 
     let aiResult = DEFAULT_AI_RESPONSE;
     try {
@@ -10948,6 +13084,11 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
           timestamp: new Date().toISOString(),
           amount: context.amount,
           currency: context.senderWallet.currency,
+          accountSegment,
+          accountCategory: accountProfile.category,
+          accountTier: accountProfile.tier,
+          accountProfileStatus: accountProfile.status,
+          accountProfileConfidence: accountProfile.confidence,
           location: getRequestLocation(req),
           paymentMethod: "wallet_balance",
           merchantCategory: "p2p_transfer",
@@ -10966,6 +13107,29 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
             0,
             Number(context.senderWallet.balance) - context.amount,
           ),
+          recipientKnown: recipientProfile.isKnownRecipient,
+          suspiciousNoteCount: suspiciousNoteReasons.length,
+          llmNoteRiskLevel: transferNoteLlm.riskLevel,
+          llmSignalCount: transferNoteLlm.signals.length,
+          llmRuleTags: transferNoteLlm.ruleTags,
+          sessionRiskLevel: req.sessionSecurity?.riskLevel || "low",
+          rollingOutflowAmount: transferStepUpPolicy.rollingOutflowAmount,
+          faceIdRequired: transferStepUpPolicy.faceIdRequired,
+          sessionRestrictLargeTransfers: Boolean(
+            req.sessionSecurity?.restrictLargeTransfers,
+          ),
+          recentReviewCount30d: behaviorProfile.recentReviewCount30d,
+          recentBlockedCount30d: behaviorProfile.recentBlockedCount30d,
+          recentPendingOtpCount7d: behaviorProfile.recentPendingOtpCount7d,
+          smallProbeCount24h: behaviorProfile.smallProbeCount24h,
+          smallProbeTotal24h: behaviorProfile.smallProbeTotal24h,
+          distinctSmallProbeRecipients24h:
+            behaviorProfile.distinctSmallProbeRecipients24h,
+          sameRecipientSmallProbeCount24h:
+            behaviorProfile.sameRecipientSmallProbeCount24h,
+          newRecipientSmallProbeCount24h:
+            behaviorProfile.newRecipientSmallProbeCount24h,
+          probeThenLargeRiskScore: behaviorProfile.probeThenLargeRiskScore,
         }),
       });
       const rawResult = (await aiResp.json().catch(() => null)) as unknown;
@@ -10983,6 +13147,20 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       spendProfile.dailySpendAvg30d > 0 &&
       spendProfile.projectedDailySpend >= spendProfile.dailySpendAvg30d * 100 &&
       spendProfile.projectedDailySpend - spendProfile.dailySpendAvg30d >= 20000;
+    aiResult = softenLowValueTransferAiResult({
+      aiResult,
+      amount: context.amount,
+      recipientKnown: recipientProfile.isKnownRecipient,
+      suspiciousNoteCount: suspiciousNoteReasons.length,
+      failedTx24h,
+      velocity1h,
+      sessionRestrictLargeTransfers: Boolean(
+        req.sessionSecurity?.restrictLargeTransfers,
+      ),
+      faceIdRequired: transferStepUpPolicy.faceIdRequired,
+      behaviorProfile,
+    });
+
     const transferAdvisory = buildTransferSafetyAdvisory({
       amount: context.amount,
       senderBalance: Number(context.senderWallet.balance),
@@ -11035,7 +13213,9 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
     }
 
     const shouldForceFaceIdForHighRisk =
-      aiResult.riskLevel === "high" && hasTransferFaceId;
+      aiResult.finalAction === "REQUIRE_OTP_FACE_ID" &&
+      context.amount >= Math.max(500, TRANSFER_PROBE_SMALL_AMOUNT_MAX * 3) &&
+      hasTransferFaceId;
     const effectiveFaceIdRequired =
       transferStepUpPolicy.faceIdRequired || shouldForceFaceIdForHighRisk;
     const effectiveFaceIdReason =
@@ -11217,6 +13397,10 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       (context.amount >= TRANSFER_MEDIUM_RISK_OTP_MIN_AMOUNT ||
         transferAdvisory?.severity === "warning" ||
         transferAdvisory?.requiresAcknowledgement === true);
+    const transferRequestKey =
+      transferAdvisory?.requestKey ||
+      aiResult.requestKey ||
+      crypto.randomUUID();
     const requiresOtp =
       shouldRequireOtpForMediumRisk ||
       aiResult.riskLevel === "high" ||
@@ -11233,6 +13417,7 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
         transferAiResult: aiResult,
         transferAdvisory,
         transferSpendProfile: spendProfile,
+        transferRequestKey,
         verificationMethod: "pin",
         faceIdRequired: false,
         faceIdReason: null,
@@ -11263,6 +13448,7 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
         txSpendProfile: spendProfile,
         txRecipientProfile: recipientProfile,
         transferAdvisory,
+        requestKey: transferRequestKey,
         faceIdRequired: effectiveFaceIdRequired,
         faceIdReason: effectiveFaceIdReason,
         rollingOutflowAmount: transferStepUpPolicy.rollingOutflowAmount,
@@ -11314,7 +13500,7 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
         transferAdvisorySeverity: transferAdvisory?.severity || null,
       },
       metadata: {
-        requestKey: aiResult.requestKey || null,
+        requestKey: transferRequestKey,
         spendProfile,
         recipientProfile,
         transferAdvisory: transferAdvisory || undefined,
@@ -11336,7 +13522,7 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       toAccount: context.receiverAccountNumber,
       fromUserId: senderUserId,
       toUserId: context.resolvedReceiverUserId,
-      requestKey: transferAdvisory?.requestKey || aiResult.requestKey || null,
+      requestKey: transferRequestKey,
       note: context.note,
       recipientKnown: recipientProfile.isKnownRecipient,
       riskLevel: aiResult.riskLevel,
@@ -11591,6 +13777,10 @@ app.post("/transfer/otp/verify", requireAuth, async (req, res) => {
       typeof metadata.rollingOutflowAmount === "number"
         ? metadata.rollingOutflowAmount
         : null;
+    const transferRequestKey =
+      typeof metadata.requestKey === "string" && metadata.requestKey.trim()
+        ? metadata.requestKey.trim()
+        : transferAiResult.requestKey || transferAdvisory?.requestKey || null;
 
     await logAuditEvent({
       actor: req.user?.email,
@@ -11605,8 +13795,7 @@ app.post("/transfer/otp/verify", requireAuth, async (req, res) => {
         transferAdvisorySeverity: transferAdvisory?.severity || null,
       },
       metadata: {
-        requestKey:
-          transferAiResult.requestKey || transferAdvisory?.requestKey || null,
+        requestKey: transferRequestKey,
         transferAdvisory: transferAdvisory || undefined,
         aiMonitoring: buildStoredAiMonitoring(transferAiResult),
       },
@@ -11625,8 +13814,8 @@ app.post("/transfer/otp/verify", requireAuth, async (req, res) => {
       toAccount: toAccount || null,
       fromUserId: senderUserId,
       toUserId: toUserId || null,
-      requestKey:
-        transferAiResult.requestKey || transferAdvisory?.requestKey || null,
+      challengeId: challenge.id,
+      requestKey: transferRequestKey,
       note: typeof metadata.note === "string" ? metadata.note : null,
       riskLevel: transferAiResult.riskLevel,
       riskScore: transferAiResult.score,
@@ -11704,7 +13893,7 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
     const senderUser = await userRepository.findValidatedById(senderUserId);
     if (!senderUser) return res.status(404).json({ error: "User not found" });
 
-    const { challenge, metadata } = await verifyEmailOtpChallenge({
+    const { challenge, metadata } = await verifyAndConsumeEmailOtpChallenge({
       userId: senderUserId,
       purpose: "TRANSFER",
       challengeId,
@@ -11736,6 +13925,10 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
       metadata.faceIdRequired === true || amount > TRANSFER_FACE_ID_THRESHOLD;
     const faceIdReason =
       typeof metadata.faceIdReason === "string" ? metadata.faceIdReason : null;
+    const transferRequestKey =
+      typeof metadata.requestKey === "string" && metadata.requestKey.trim()
+        ? metadata.requestKey.trim()
+        : transferAdvisory?.requestKey || transferAiResult.requestKey || null;
     const completedTransfer = await completeAuthorizedTransfer({
       req,
       senderUser,
@@ -11747,14 +13940,13 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
       transferAiResult,
       transferAdvisory,
       transferSpendProfile,
+      transferRequestKey,
       verificationMethod: "otp",
       verifiedChallengeId: challenge.id,
       faceIdRequired,
       faceIdReason,
       transferFaceEnrollment,
     });
-
-    await consumeOtpChallenge(challenge.id);
 
     return res.json({
       status: "ok",
@@ -11767,6 +13959,14 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
       return res.status(404).json({ error: "OTP challenge not found" });
     }
     if (err instanceof Error && err.message === "OTP_CHALLENGE_ALREADY_USED") {
+      const replayResponse =
+        await findCompletedTransferReplayResponseByChallenge({
+          userId: senderUserId,
+          challengeId,
+        });
+      if (replayResponse) {
+        return res.json(replayResponse);
+      }
       return res.status(400).json({ error: "OTP challenge already used" });
     }
     if (err instanceof Error && err.message === "OTP_EXPIRED") {
@@ -12123,6 +14323,81 @@ app.get(
     const docs = await userRepository.findMany(200);
     const users = docs.map(sanitizeUser).filter(Boolean);
     res.json(users);
+  },
+);
+
+app.patch(
+  "/admin/users/:id/account-profile",
+  requireAuth,
+  requireRole(["ADMIN"]),
+  async (req, res) => {
+    try {
+      const userRepository = createUserRepository();
+      const existingUser = await userRepository.findValidatedById(
+        req.params.id,
+      );
+      if (!existingUser) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const body = req.body as {
+        category?: unknown;
+        tier?: unknown;
+        approvePending?: unknown;
+        confidence?: unknown;
+        status?: unknown;
+      };
+      const currentProfile = buildResolvedAccountProfile(existingUser.metadata);
+      const usePendingRequest =
+        body.approvePending === true &&
+        currentProfile.requestedCategory &&
+        currentProfile.requestedTier;
+      const nextMetadata = setEffectiveAccountProfileMetadata(
+        existingUser.metadata,
+        {
+          category:
+            body.category ??
+            (usePendingRequest ? currentProfile.requestedCategory : undefined),
+          tier:
+            body.tier ??
+            (usePendingRequest ? currentProfile.requestedTier : undefined),
+          confidence: body.confidence,
+          status: normalizeAccountProfileStatus(body.status ?? "VERIFIED"),
+          clearPendingRequest: true,
+        },
+        req.user?.email || "admin",
+      );
+      const updated = await userRepository.updateMetadata(
+        req.params.id,
+        nextMetadata,
+      );
+      const sanitized = sanitizeUser(updated);
+
+      await logAuditEvent({
+        actor: req.user?.email || "admin",
+        userId: req.params.id,
+        action: "ADMIN_ACCOUNT_PROFILE_UPDATED",
+        details: {
+          previousProfile: currentProfile,
+          accountProfile: buildResolvedAccountProfile(updated.metadata),
+        },
+        ipAddress: getRequestIp(req),
+      });
+
+      invalidateUserResponseCache(req.params.id, [
+        "auth",
+        "security",
+        "transactions",
+      ]);
+
+      return res.json({
+        user: sanitized,
+        accountProfile: buildResolvedAccountProfile(updated.metadata),
+      });
+    } catch (err) {
+      console.error("Failed to update admin account profile", err);
+      return res.status(400).json({ error: "Invalid user id" });
+    }
   },
 );
 
@@ -12769,6 +15044,99 @@ app.get(
       },
       rows,
     });
+  },
+);
+
+app.post(
+  "/admin/ai/tx/retrain",
+  requireAuth,
+  requireRole(["ADMIN"]),
+  async (req, res) => {
+    const limit = Math.min(
+      Math.max(parseInt(String(req.body?.limit ?? "800"), 10) || 800, 50),
+      2500,
+    );
+    try {
+      const dataset = await buildTxRetrainDataset(limit);
+      if (dataset.events.length < 10) {
+        return res.status(400).json({
+          error:
+            "Not enough clean completed transfer events are available for retraining.",
+          count: dataset.events.length,
+        });
+      }
+
+      const modelVersion = `admin_tx_iforest_${new Date()
+        .toISOString()
+        .slice(0, 19)
+        .replace(/[:T]/g, "_")}`;
+      const response = await fetch(
+        `${AI_URL}/ai/tx/train?persist=true&promote=true&model_version=${encodeURIComponent(
+          modelVersion,
+        )}`,
+        {
+          method: "POST",
+          headers: buildAiServiceHeaders(),
+          body: JSON.stringify({ events: dataset.events }),
+        },
+      );
+      const payload = (await response.json().catch(() => null)) as Record<
+        string,
+        unknown
+      > | null;
+      if (!response.ok) {
+        return res.status(502).json({
+          error:
+            (typeof payload?.detail === "string" && payload.detail) ||
+            "AI service rejected transaction retraining.",
+        });
+      }
+
+      await logAuditEvent({
+        actor: req.user?.email || "admin",
+        userId: req.user?.sub,
+        action: "ADMIN_TX_MODEL_RETRAINED",
+        ipAddress: getRequestIp(req),
+        details: {
+          modelVersion:
+            typeof payload?.model_version === "string"
+              ? payload.model_version
+              : modelVersion,
+          trainSize: dataset.events.length,
+          rawCount: dataset.rawCount,
+          excludedFlaggedCount: dataset.excludedFlaggedCount,
+        },
+        metadata: {
+          modelVersion:
+            typeof payload?.model_version === "string"
+              ? payload.model_version
+              : modelVersion,
+          trainSize: dataset.events.length,
+          rawCount: dataset.rawCount,
+          excludedFlaggedCount: dataset.excludedFlaggedCount,
+        },
+      });
+
+      return res.json({
+        status: "trained",
+        modelVersion:
+          typeof payload?.model_version === "string"
+            ? payload.model_version
+            : modelVersion,
+        trainedAt:
+          typeof payload?.trained_at === "string"
+            ? payload.trained_at
+            : new Date().toISOString(),
+        trainSize: dataset.events.length,
+        rawCount: dataset.rawCount,
+        excludedFlaggedCount: dataset.excludedFlaggedCount,
+      });
+    } catch (err) {
+      console.error("Failed to retrain transaction AI model", err);
+      return res.status(500).json({
+        error: "Failed to retrain transaction AI model",
+      });
+    }
   },
 );
 
