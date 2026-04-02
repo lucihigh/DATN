@@ -56,6 +56,7 @@ import {
   sendPasswordResetOtpEmail,
   sendRegisterOtpEmail,
   sendTransferRiskAlertEmail,
+  sendTransferPinOtpEmail,
   sendTransferOtpEmail,
 } from "./services/email";
 import {
@@ -265,8 +266,13 @@ const OLLAMA_NUM_PREDICT = Number(process.env.OLLAMA_NUM_PREDICT || "768");
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
 const OPENAI_REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || "low";
+const ALLOW_EXTERNAL_FINANCIAL_CONTEXT = !["0", "false", "no"].includes(
+  String(process.env.ALLOW_EXTERNAL_FINANCIAL_CONTEXT || "0")
+    .trim()
+    .toLowerCase(),
+);
 const ENABLE_TRANSFER_LLM_RULES = !["0", "false", "no"].includes(
-  String(process.env.ENABLE_TRANSFER_LLM_RULES || (OPENAI_API_KEY ? "1" : "0"))
+  String(process.env.ENABLE_TRANSFER_LLM_RULES || "0")
     .trim()
     .toLowerCase(),
 );
@@ -362,6 +368,9 @@ const RESET_PASSWORD_OTP_TTL_MINUTES = Number(
 );
 const CARD_DETAILS_OTP_TTL_MINUTES = Number(
   process.env.CARD_DETAILS_OTP_TTL_MINUTES || "5",
+);
+const TRANSFER_PIN_OTP_TTL_MINUTES = Number(
+  process.env.TRANSFER_PIN_OTP_TTL_MINUTES || "5",
 );
 const OTP_MAX_ATTEMPTS = Number(process.env.OTP_MAX_ATTEMPTS || "5");
 const CAPTCHA_TRACK_WIDTH_PX = Number(
@@ -647,12 +656,16 @@ type TransferBehaviorProfile = {
   maxCompletedOutflow90d: number;
   similarFlaggedAmountCount90d: number;
   sameRecipientFlaggedCount90d: number;
+  recentInboundAmount24h: number;
+  recentAdminTopUpAmount24h: number;
+  recentSelfDepositAmount24h: number;
   smallProbeCount24h: number;
   smallProbeTotal24h: number;
   distinctSmallProbeRecipients24h: number;
   sameRecipientSmallProbeCount24h: number;
   newRecipientSmallProbeCount24h: number;
   probeThenLargeRiskScore: number;
+  rapidCashOutRiskScore: number;
 };
 
 type TransferNoteLlmAnalysis = {
@@ -745,6 +758,10 @@ type AdminAlertResponse = {
   sameRecipientSmallProbeCount24h: number | null;
   newRecipientSmallProbeCount24h: number | null;
   probeThenLargeRiskScore: number | null;
+  recentInboundAmount24h: number | null;
+  recentAdminTopUpAmount24h: number | null;
+  recentSelfDepositAmount24h: number | null;
+  rapidCashOutRiskScore: number | null;
   analysisSignals: Record<string, unknown> | null;
 };
 
@@ -1464,6 +1481,15 @@ const buildAdminAlertSignals = (
     const country = asStringOrNull(detail.country);
     const paymentMethod = asStringOrNull(detail.paymentMethod);
     const merchantCategory = asStringOrNull(detail.merchantCategory);
+    const rapidCashOutRiskScore =
+      asNumberOrNull(detail.rapidCashOutRiskScore) ??
+      asNumberOrNull(detail.rapid_cash_out_risk_score);
+    const recentInboundAmount24h =
+      asNumberOrNull(detail.recentInboundAmount24h) ??
+      asNumberOrNull(detail.recent_inbound_amount_24h);
+    const recentAdminTopUpAmount24h =
+      asNumberOrNull(detail.recentAdminTopUpAmount24h) ??
+      asNumberOrNull(detail.recent_admin_topup_amount_24h);
     if (amount !== null) {
       signals.push({
         label: "Amount",
@@ -1491,6 +1517,33 @@ const buildAdminAlertSignals = (
         tone: "neutral",
       });
     }
+    if (rapidCashOutRiskScore !== null && rapidCashOutRiskScore >= 0.45) {
+      signals.push({
+        label: "AML pattern",
+        value: "Rapid cash-out after fresh funding",
+        tone: "warn",
+      });
+    }
+    if (recentInboundAmount24h !== null && recentInboundAmount24h > 0) {
+      signals.push({
+        label: "Fresh inflow 24h",
+        value: `${recentInboundAmount24h.toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })} ${currency}`,
+        tone: recentInboundAmount24h >= 1000 ? "warn" : "info",
+      });
+    }
+    if (recentAdminTopUpAmount24h !== null && recentAdminTopUpAmount24h > 0) {
+      signals.push({
+        label: "Admin top-up 24h",
+        value: `${recentAdminTopUpAmount24h.toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })} ${currency}`,
+        tone: "warn",
+      });
+    }
   }
 
   return signals;
@@ -1513,6 +1566,7 @@ const buildAdminAlertResponse = (log: {
   const mergedDetail = {
     ...aiMonitoring,
     ...detail,
+    ...analysisSignals,
   };
   const type = log.action === "AI_TRANSACTION_ALERT" ? "transaction" : "login";
   const reasons = toStringList(mergedDetail.reasons);
@@ -1620,6 +1674,18 @@ const buildAdminAlertResponse = (log: {
     ),
     probeThenLargeRiskScore: asNumberOrNull(
       analysisSignals.probe_then_large_risk_score,
+    ),
+    recentInboundAmount24h: asNumberOrNull(
+      analysisSignals.recent_inbound_amount_24h,
+    ),
+    recentAdminTopUpAmount24h: asNumberOrNull(
+      analysisSignals.recent_admin_topup_amount_24h,
+    ),
+    recentSelfDepositAmount24h: asNumberOrNull(
+      analysisSignals.recent_self_deposit_amount_24h,
+    ),
+    rapidCashOutRiskScore: asNumberOrNull(
+      analysisSignals.rapid_cash_out_risk_score,
     ),
     analysisSignals:
       Object.keys(analysisSignals).length > 0 ? analysisSignals : null,
@@ -1915,6 +1981,29 @@ type CopilotResponsePayload = {
   followUpQuestion?: string | null;
 };
 
+type CopilotIntent =
+  | "finance_education"
+  | "market_data"
+  | "portfolio_analysis"
+  | "spending_analysis"
+  | "budgeting_help"
+  | "transaction_review"
+  | "anomaly_check"
+  | "unsupported";
+
+type CopilotIntentTool =
+  | "wallet_summary"
+  | "wallet_transactions"
+  | "market_quote"
+  | "security_signals";
+
+type CopilotIntentClassification = {
+  intent: CopilotIntent;
+  needs_tools: boolean;
+  required_tools: CopilotIntentTool[];
+  reason: string;
+};
+
 type StoredCopilotSessionState = {
   messages: CopilotMessagePayload[];
   insight: {
@@ -1971,6 +2060,24 @@ type OpenAiCopilotResult =
 type OllamaCopilotResult =
   | { status: "disabled" }
   | { status: "ok"; payload: CopilotResponsePayload }
+  | {
+      status: "error";
+      code: string;
+      message: string;
+    };
+
+type OpenAiCopilotClassificationResult =
+  | { status: "disabled" }
+  | { status: "ok"; payload: CopilotIntentClassification }
+  | {
+      status: "error";
+      code: string;
+      message: string;
+    };
+
+type OllamaCopilotClassificationResult =
+  | { status: "disabled" }
+  | { status: "ok"; payload: CopilotIntentClassification }
   | {
       status: "error";
       code: string;
@@ -2931,7 +3038,11 @@ const analyzeTransferNoteWithLlm = async (input: {
   if (!note || isGenericTransferNote(note)) {
     return heuristic;
   }
-  if (!ENABLE_TRANSFER_LLM_RULES || !openaiClient) {
+  if (
+    !ENABLE_TRANSFER_LLM_RULES ||
+    !openaiClient ||
+    !ALLOW_EXTERNAL_FINANCIAL_CONTEXT
+  ) {
     return { ...heuristic, source: "disabled" };
   }
 
@@ -4107,6 +4218,259 @@ const parseOpenAiCopilotPayload = (
   }
 };
 
+const normalizeCopilotIntent = (value: unknown): CopilotIntent => {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (
+    normalized === "finance_education" ||
+    normalized === "market_data" ||
+    normalized === "portfolio_analysis" ||
+    normalized === "spending_analysis" ||
+    normalized === "budgeting_help" ||
+    normalized === "transaction_review" ||
+    normalized === "anomaly_check"
+  ) {
+    return normalized;
+  }
+  return "unsupported";
+};
+
+const normalizeCopilotIntentTool = (
+  value: unknown,
+): CopilotIntentTool | null => {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (
+    normalized === "wallet_summary" ||
+    normalized === "wallet_transactions" ||
+    normalized === "market_quote" ||
+    normalized === "security_signals"
+  ) {
+    return normalized;
+  }
+  return null;
+};
+
+const parseCopilotIntentClassification = (
+  value: string,
+): CopilotIntentClassification | null => {
+  try {
+    const parsed = JSON.parse(extractCopilotJsonCandidate(value)) as Record<
+      string,
+      unknown
+    >;
+    const reason =
+      typeof parsed.reason === "string" && parsed.reason.trim()
+        ? parsed.reason.trim()
+        : "";
+    if (!reason) return null;
+    const requiredTools = Array.isArray(parsed.required_tools)
+      ? parsed.required_tools
+          .map((item) => normalizeCopilotIntentTool(item))
+          .filter((item): item is CopilotIntentTool => Boolean(item))
+      : [];
+
+    return {
+      intent: normalizeCopilotIntent(parsed.intent),
+      needs_tools: parsed.needs_tools === true,
+      required_tools: requiredTools,
+      reason,
+    };
+  } catch {
+    return null;
+  }
+};
+
+const classifyCopilotIntentHeuristically = (
+  latestMessage: string,
+): CopilotIntentClassification => {
+  const normalized = normalizeCopilotText(latestMessage);
+  const asksAnalyticalMarketQuestion =
+    /\b(phan tich|danh gia|outlook|thesis|trend|xu huong|on dinh|bien dong|volatility|rui ro|risk|1 nam|1 year|one year|12 thang|12 months|dai han|long term|ngan han|short term|trung han|medium term)\b/.test(
+      normalized,
+    );
+
+  if (
+    /\b(scam|fraud|lua dao|otp|faceid|pin|mat khau|password|remote access|screen share|bat thuong|anomaly|suspicious|nghi ngo|safe account|tai khoan an toan)\b/.test(
+      normalized,
+    )
+  ) {
+    return {
+      intent: "anomaly_check",
+      needs_tools: true,
+      required_tools: ["security_signals", "wallet_transactions"],
+      reason:
+        "The user is asking about suspicious activity, scam signals, or abnormal transaction behavior.",
+    };
+  }
+
+  if (
+    isTodayTransactionReportIntent(latestMessage) ||
+    isWeeklyTransactionReportIntent(latestMessage) ||
+    isMonthlyTransactionReportIntent(latestMessage) ||
+    /\b(statement|sao ke|transaction history|lich su giao dich|giao dich cua toi|my transactions)\b/.test(
+      normalized,
+    )
+  ) {
+    return {
+      intent: "transaction_review",
+      needs_tools: true,
+      required_tools: ["wallet_transactions"],
+      reason:
+        "The user is asking to review recorded transactions or account statement activity.",
+    };
+  }
+
+  if (isSpendingComparisonIntent(latestMessage)) {
+    return {
+      intent: "spending_analysis",
+      needs_tools: true,
+      required_tools: ["wallet_transactions", "wallet_summary"],
+      reason:
+        "The user wants spending trends, comparisons, or outflow analysis based on transaction history.",
+    };
+  }
+
+  if (
+    /\b(budget|budgeting|ngan sach|chi tieu hop ly|saving plan|tiet kiem|emergency fund|quy du phong|cash flow plan|ke hoach chi tieu)\b/.test(
+      normalized,
+    )
+  ) {
+    return {
+      intent: "budgeting_help",
+      needs_tools: true,
+      required_tools: ["wallet_summary", "wallet_transactions"],
+      reason:
+        "The user is asking for budgeting, savings planning, or cash-flow guidance.",
+    };
+  }
+
+  if (isExplicitLiveQuoteRequest(latestMessage)) {
+    return {
+      intent: "market_data",
+      needs_tools: true,
+      required_tools: ["market_quote"],
+      reason:
+        "The user is asking for a market price, live quote, exchange rate, or ticker-specific market data.",
+    };
+  }
+
+  if (
+    (detectMarketIntent(latestMessage) && asksAnalyticalMarketQuestion) ||
+    /\b(portfolio|allocation|phan bo|etf|index fund|diversif|da dang hoa|valuation|p\/e|eps|market cap|dividend|free cash flow|fcf|co phieu|chung khoan|watchlist)\b/.test(
+      normalized,
+    )
+  ) {
+    return {
+      intent: "portfolio_analysis",
+      needs_tools: false,
+      required_tools: [],
+      reason:
+        "The user is asking for educational portfolio, stock, valuation, or diversification analysis rather than exact live data.",
+    };
+  }
+
+  if (
+    /\b(finance|tai chinh|interest rate|lai suat|inflation|lam phat|bond|trai phieu|mutual fund|fundamentals|valuation basics|what is|la gi)\b/.test(
+      normalized,
+    )
+  ) {
+    return {
+      intent: "finance_education",
+      needs_tools: false,
+      required_tools: [],
+      reason:
+        "The user is asking for general finance or market education that does not require live account data.",
+    };
+  }
+
+  return {
+    intent: "unsupported",
+    needs_tools: false,
+    required_tools: [],
+    reason:
+      "The request does not clearly match the supported finance, spending, transaction, or anomaly-review workflows.",
+  };
+};
+
+const classifyCopilotIntent = async (input: {
+  currency: string;
+  currentBalance: number;
+  monthlyIncome: number;
+  monthlyExpenses: number;
+  recentTransactions: CopilotTransactionPayload[];
+  messages: CopilotMessagePayload[];
+  language: CopilotLanguage;
+}): Promise<CopilotIntentClassification> => {
+  const latestUserMessage =
+    [...input.messages].reverse().find((message) => message.role === "user")
+      ?.content || "";
+  const heuristic = classifyCopilotIntentHeuristically(latestUserMessage);
+
+  const isHighConfidenceHeuristic =
+    heuristic.intent === "transaction_review" ||
+    (heuristic.intent === "spending_analysis" &&
+      isSpendingComparisonIntent(latestUserMessage)) ||
+    heuristic.intent === "anomaly_check" ||
+    (heuristic.intent === "portfolio_analysis" &&
+      Boolean(detectMarketIntent(latestUserMessage))) ||
+    (heuristic.intent === "market_data" &&
+      isExplicitLiveQuoteRequest(latestUserMessage));
+
+  if (isHighConfidenceHeuristic) {
+    return heuristic;
+  }
+
+  const classifierInput = {
+    currency: input.currency,
+    currentBalance: input.currentBalance,
+    monthlyIncome: input.monthlyIncome,
+    monthlyExpenses: input.monthlyExpenses,
+    recentTransactions: input.recentTransactions,
+    messages: input.messages,
+    language: input.language,
+  };
+
+  const ollamaResult = await callOllamaCopilotClassifier(classifierInput);
+  if (ollamaResult.status === "ok") {
+    const payload = ollamaResult.payload;
+    if (
+      payload.intent !== "unsupported" ||
+      heuristic.intent === "unsupported"
+    ) {
+      return payload;
+    }
+  }
+
+  const openAiResult = await callOpenAiCopilotClassifier(classifierInput);
+  if (openAiResult.status === "ok") {
+    const payload = openAiResult.payload;
+    if (
+      payload.intent !== "unsupported" ||
+      heuristic.intent === "unsupported"
+    ) {
+      return payload;
+    }
+  }
+
+  return heuristic;
+};
+
+const shouldAllowExternalCopilotContext = (
+  classification: CopilotIntentClassification | null | undefined,
+) => {
+  if (ALLOW_EXTERNAL_FINANCIAL_CONTEXT) return true;
+  const intent = classification?.intent || "unsupported";
+  return (
+    intent === "finance_education" ||
+    intent === "portfolio_analysis" ||
+    intent === "market_data" ||
+    intent === "unsupported"
+  );
+};
+
 const summarizeCopilotConversation = (messages: CopilotMessagePayload[]) =>
   messages
     .slice(-12)
@@ -4182,6 +4546,8 @@ const buildOpenAiCopilotInput = (input: {
   recentTransactions: CopilotTransactionPayload[];
   messages: CopilotMessagePayload[];
   language: CopilotLanguage;
+  classification?: CopilotIntentClassification | null;
+  shareSensitiveContext?: boolean;
 }) => {
   const now = formatMarketTimestamp(new Date());
   const transactionSummary = summarizeCopilotTransactions(
@@ -4199,45 +4565,113 @@ const buildOpenAiCopilotInput = (input: {
   return [
     `Current time: ${now}`,
     `Preferred response language: ${input.language === "vi" ? "Vietnamese" : "English"}`,
-    `Wallet currency: ${input.currency}`,
-    `Wallet balance: ${input.currency} ${formatMarketPrice(
-      Math.max(0, input.currentBalance),
-    )}`,
-    `Estimated monthly income: ${input.currency} ${formatMarketPrice(
-      Math.max(0, input.monthlyIncome),
-    )}`,
-    `Estimated monthly expenses: ${input.currency} ${formatMarketPrice(
-      Math.max(0, input.monthlyExpenses),
-    )}`,
-    "Recent wallet transactions:",
-    transactionSummary || "No recent transactions available.",
+    `Intent classification: ${input.classification?.intent || "unsupported"}`,
+    `Classification reason: ${input.classification?.reason || "No classifier reason available."}`,
+    `Required tools: ${
+      input.classification?.required_tools?.length
+        ? input.classification.required_tools.join(", ")
+        : "none"
+    }`,
+    ...(input.shareSensitiveContext === false
+      ? [
+          "Wallet context sharing policy:",
+          "Sensitive wallet balances and transaction records are withheld from this external model call. Answer using general finance reasoning plus the visible conversation only.",
+        ]
+      : [
+          `Wallet currency: ${input.currency}`,
+          `Wallet balance: ${input.currency} ${formatMarketPrice(
+            Math.max(0, input.currentBalance),
+          )}`,
+          `Estimated monthly income: ${input.currency} ${formatMarketPrice(
+            Math.max(0, input.monthlyIncome),
+          )}`,
+          `Estimated monthly expenses: ${input.currency} ${formatMarketPrice(
+            Math.max(0, input.monthlyExpenses),
+          )}`,
+          "Recent wallet transactions:",
+          transactionSummary || "No recent transactions available.",
+        ]),
     "Latest user message:",
     latestUserMessage || "No latest message available.",
     "Recognized finance entities:",
     financeKnowledgeSummary,
+    "Source-of-truth policy:",
+    "Use only wallet context, transaction records, and tool results from this prompt as facts. Never invent prices, balances, portfolio values, or transaction history. If exact data is unavailable, state that clearly.",
     "Conversation transcript:",
     conversationSummary,
   ].join("\n\n");
 };
 
+const buildCopilotClassificationInput = (input: {
+  currency: string;
+  currentBalance: number;
+  monthlyIncome: number;
+  monthlyExpenses: number;
+  recentTransactions: CopilotTransactionPayload[];
+  messages: CopilotMessagePayload[];
+  language: CopilotLanguage;
+  shareSensitiveContext?: boolean;
+}) => {
+  const latestUserMessage =
+    [...input.messages].reverse().find((message) => message.role === "user")
+      ?.content || "";
+  const conversationSummary = summarizeCopilotConversation(input.messages);
+  const transactionSummary = summarizeCopilotTransactions(
+    input.recentTransactions,
+    input.currency,
+  );
+
+  return [
+    `Preferred language context: ${input.language === "vi" ? "Vietnamese" : "English"}`,
+    ...(input.shareSensitiveContext === false
+      ? [
+          "Wallet context sharing policy:",
+          "Sensitive wallet balances and transaction records are withheld from this external classifier call.",
+        ]
+      : [
+          `Wallet currency available: ${input.currency}`,
+          `Wallet balance available: ${input.currency} ${formatMarketPrice(
+            Math.max(0, input.currentBalance),
+          )}`,
+          `Estimated monthly income available: ${input.currency} ${formatMarketPrice(
+            Math.max(0, input.monthlyIncome),
+          )}`,
+          `Estimated monthly expenses available: ${input.currency} ${formatMarketPrice(
+            Math.max(0, input.monthlyExpenses),
+          )}`,
+          "Recent wallet transactions available to tools:",
+          transactionSummary || "No recent transactions available.",
+        ]),
+    "Latest user message:",
+    latestUserMessage || "No latest user message available.",
+    "Conversation transcript:",
+    conversationSummary || "No prior transcript available.",
+  ].join("\n\n");
+};
+
 const buildCopilotSystemInstructions = (language: CopilotLanguage) =>
   [
-    "You are FPIPay Financial Copilot.",
-    "Answer like a polished, thoughtful conversational assistant, not like a rigid template engine.",
-    "Act as a strong finance-native chat assistant inside a wallet app.",
-    "Use the wallet context and transaction context provided.",
+    "You are a financial copilot integrated into a secure academic e-wallet system.",
+    "Explain finance, stock market, and personal spending concepts clearly.",
+    "Use tool results and database results as the source of truth.",
+    "Never invent prices, balances, portfolio values, transaction records, or unsupported historical facts.",
+    "If real-time data is unavailable, explicitly say that the data is unavailable.",
+    "Do not provide definitive investment advice, guarantee returns, or present speculation as certainty.",
+    "For personal-finance questions, prioritize budgeting, risk awareness, and spending insights.",
+    "For stock-related questions, provide educational and analytical support only.",
     `Reply in ${language === "vi" ? "Vietnamese" : "English"} and keep the same language as the user's latest message.`,
+    "Be concise, structured, and easy to understand.",
+    "If confidence is low, say what is uncertain.",
+    "Always separate facts, calculations, and suggestions in the reply when that improves clarity.",
     "Maintain continuity with the conversation transcript and resolve references like 'that', 'this', 'last one', or 'in the past week' using recent context.",
     "Start with the answer immediately. The first sentence must address the user's question directly.",
-    "Do not begin with permission-seeking, throat-clearing, generic offers to help, or by repeating the user's question.",
-    "Never start the reply with lines such as 'Do you want me to help', 'I can help', or equivalent Vietnamese phrasing.",
-    "Sound sharp, premium, natural, and insight-driven, not like a helpdesk bot.",
+    "Do not begin with permission-seeking, generic offers to help, or by repeating the user's question.",
     "Prefer natural paragraphs first. Use bullets only when they genuinely improve clarity.",
     "Use Markdown tables only when numeric comparisons materially benefit from a table. Do not force tables for every answer.",
-    "For short questions, answer compactly and naturally. For complex questions, organize the answer cleanly without sounding robotic.",
-    "If data is unavailable, say that in one sentence, then still give the most useful next-best analysis instead of a generic refusal.",
+    "For short questions, answer compactly and naturally. For complex questions, organize the answer cleanly.",
+    "If data is unavailable, say that in one sentence, then still give the most useful next-best analysis.",
     "Only ask a follow-up question after you have already delivered a useful answer.",
-    "Use followUpQuestion very sparingly; set it to null unless it materially deepens the discussion.",
+    "Use followUpQuestion sparingly; set it to null unless it materially deepens the discussion.",
     "Keep suggestedActions empty unless there are truly useful concrete next steps.",
     "Prioritize user safety over convenience when the message contains signs of fraud, impersonation, urgency, OTP harvesting, remote-access setup, fake refunds, fake investment schemes, or account-takeover attempts.",
     "If a message looks like a scam, clearly say so, tell the user not to send money or codes, and recommend official verification steps.",
@@ -4248,10 +4682,10 @@ const buildCopilotSystemInstructions = (language: CopilotLanguage) =>
     "When the user asks whether buying a stock is sensible, do not collapse the answer into a live quote. Answer with thesis, valuation, downside risk, time horizon, and position-sizing guidance.",
     "You can also help build long-term saving plans and summarize spending across daily, weekly, and monthly periods using wallet context.",
     "When the user asks for a statement or spending comparison, explicitly compare today vs yesterday, this week vs last week, and this month vs last month when relevant.",
-    "If the user asks a general finance question and wallet context is not needed, still answer helpfully with practical education, decision frameworks, and clear caveats instead of refusing.",
+    "If the user asks a general finance question and wallet context is not needed, still answer helpfully with practical education, decision frameworks, and clear caveats.",
     "If the user asks a conversational follow-up, answer that follow-up directly instead of resetting to a generic wallet introduction.",
     "Do not claim real-time market prices unless they were already provided by another tool in the app context.",
-    "If the user asks for exact live market prices and no live quote is present, say that live quote support should be used.",
+    "If the user asks for exact live market prices and no live quote is present, say that the data is unavailable.",
     "Return valid JSON only with these keys:",
     "reply, topic, suggestedActions, suggestedDepositAmount, riskLevel, confidence, followUpQuestion",
     "The reply field may contain Markdown.",
@@ -4263,6 +4697,33 @@ const buildCopilotSystemInstructions = (language: CopilotLanguage) =>
     "followUpQuestion must be a string or null.",
   ].join(" ");
 
+const buildCopilotClassificationInstructions = () =>
+  [
+    "You are a financial copilot query classifier integrated into a secure academic e-wallet system.",
+    "Use tool results and database results as the source of truth.",
+    "Never invent prices, balances, portfolio values, or transaction records.",
+    "If real-time data is unavailable, the downstream assistant must say that the data is unavailable.",
+    "Do not provide definitive investment advice or guarantee returns.",
+    "For personal finance questions, prioritize budgeting, risk awareness, and spending insights.",
+    "For stock-related questions, provide educational and analytical support only.",
+    "Be concise, structured, and easy to understand.",
+    "Classify the user query into exactly one intent from this list:",
+    "finance_education, market_data, portfolio_analysis, spending_analysis, budgeting_help, transaction_review, anomaly_check, unsupported.",
+    "If the user asks for exact market prices, exchange rates, or ticker quotes, choose market_data.",
+    "If the user asks whether a stock has been stable over months or a year, or asks for trend, outlook, volatility, or risk analysis without needing an exact live price, choose portfolio_analysis.",
+    "If the user asks to review transactions, statements, or recent wallet activity, choose transaction_review.",
+    "If the user asks for spending trends, category insights, or outflow comparisons, choose spending_analysis.",
+    "If the user asks for budgeting, savings planning, or cash-flow discipline, choose budgeting_help.",
+    "If the user asks about scams, suspicious transfers, anomalies, or risky behavior, choose anomaly_check.",
+    "If the user asks for stock, ETF, diversification, valuation, or portfolio concepts without needing exact live prices, choose portfolio_analysis.",
+    "If the user asks for broad finance concepts, choose finance_education.",
+    "Use required_tools only from this list: wallet_summary, wallet_transactions, market_quote, security_signals.",
+    "Return JSON only with these keys:",
+    "intent, needs_tools, required_tools, reason",
+    "needs_tools must be boolean.",
+    "reason must be one short sentence.",
+  ].join(" ");
+
 const callOllamaCopilotWithModel = async (
   input: {
     currency: string;
@@ -4272,6 +4733,7 @@ const callOllamaCopilotWithModel = async (
     recentTransactions: CopilotTransactionPayload[];
     messages: CopilotMessagePayload[];
     language: CopilotLanguage;
+    classification?: CopilotIntentClassification | null;
   },
   options: { model: string; timeoutMs: number },
 ): Promise<OllamaCopilotResult> => {
@@ -4365,6 +4827,7 @@ const callOllamaCopilot = async (input: {
   recentTransactions: CopilotTransactionPayload[];
   messages: CopilotMessagePayload[];
   language: CopilotLanguage;
+  classification?: CopilotIntentClassification | null;
 }): Promise<OllamaCopilotResult> => {
   if (!OLLAMA_MODEL.trim()) return { status: "disabled" };
 
@@ -4397,6 +4860,131 @@ const callOllamaCopilot = async (input: {
   return fallbackResult.status === "ok" ? fallbackResult : primaryResult;
 };
 
+const callOllamaCopilotClassifierWithModel = async (
+  input: {
+    currency: string;
+    currentBalance: number;
+    monthlyIncome: number;
+    monthlyExpenses: number;
+    recentTransactions: CopilotTransactionPayload[];
+    messages: CopilotMessagePayload[];
+    language: CopilotLanguage;
+  },
+  options: { model: string; timeoutMs: number },
+): Promise<OllamaCopilotClassificationResult> => {
+  if (!options.model.trim()) return { status: "disabled" };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
+
+  try {
+    const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: options.model,
+        prompt: buildCopilotClassificationInput(input),
+        system: buildCopilotClassificationInstructions(),
+        format: "json",
+        stream: false,
+        options: {
+          temperature: 0.05,
+          top_p: 0.3,
+          repeat_penalty: 1,
+          num_ctx: Math.min(OLLAMA_NUM_CTX, 2048),
+          num_predict: 220,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      return {
+        status: "error",
+        code:
+          response.status === 404
+            ? "ollama_model_not_found"
+            : response.status === 400
+              ? "ollama_bad_request"
+              : `ollama_http_${response.status}`,
+        message:
+          errorText || `Ollama request failed with status ${response.status}`,
+      };
+    }
+
+    const payload = (await response.json().catch(() => null)) as Record<
+      string,
+      unknown
+    > | null;
+    const responseText =
+      payload && typeof payload.response === "string"
+        ? payload.response.trim()
+        : "";
+    if (!responseText) {
+      return {
+        status: "error",
+        code: "ollama_empty_response",
+        message: "Ollama returned an empty classifier response.",
+      };
+    }
+
+    const parsed = parseCopilotIntentClassification(responseText);
+    if (!parsed) {
+      return {
+        status: "error",
+        code: "ollama_invalid_response_format",
+        message:
+          "Ollama returned a classifier response that did not match the expected format.",
+      };
+    }
+
+    return { status: "ok", payload: parsed };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const code =
+      message.includes("ECONNREFUSED") || message.includes("fetch failed")
+        ? "ollama_unreachable"
+        : message.includes("aborted")
+          ? "ollama_timeout"
+          : "ollama_unknown_error";
+    return { status: "error", code, message };
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+const callOllamaCopilotClassifier = async (input: {
+  currency: string;
+  currentBalance: number;
+  monthlyIncome: number;
+  monthlyExpenses: number;
+  recentTransactions: CopilotTransactionPayload[];
+  messages: CopilotMessagePayload[];
+  language: CopilotLanguage;
+}): Promise<OllamaCopilotClassificationResult> => {
+  if (!OLLAMA_MODEL.trim()) return { status: "disabled" };
+
+  const primaryResult = await callOllamaCopilotClassifierWithModel(input, {
+    model: OLLAMA_MODEL,
+    timeoutMs: Math.min(OLLAMA_TIMEOUT_MS, 12000),
+  });
+  if (primaryResult.status === "ok" || primaryResult.status === "disabled") {
+    return primaryResult;
+  }
+
+  const fallbackModel = OLLAMA_FALLBACK_MODEL.trim();
+  if (!fallbackModel || fallbackModel === OLLAMA_MODEL.trim()) {
+    return primaryResult;
+  }
+
+  const fallbackResult = await callOllamaCopilotClassifierWithModel(input, {
+    model: fallbackModel,
+    timeoutMs: Math.min(OLLAMA_FALLBACK_TIMEOUT_MS, 8000),
+  });
+  return fallbackResult.status === "ok" ? fallbackResult : primaryResult;
+};
+
 const callOpenAiCopilot = async (input: {
   currency: string;
   currentBalance: number;
@@ -4405,8 +4993,15 @@ const callOpenAiCopilot = async (input: {
   recentTransactions: CopilotTransactionPayload[];
   messages: CopilotMessagePayload[];
   language: CopilotLanguage;
+  classification?: CopilotIntentClassification | null;
 }): Promise<OpenAiCopilotResult> => {
   if (!openaiClient) return { status: "disabled" };
+  const shareSensitiveContext = shouldAllowExternalCopilotContext(
+    input.classification,
+  );
+  if (!shareSensitiveContext && input.classification?.needs_tools) {
+    return { status: "disabled" };
+  }
 
   try {
     const response = await openaiClient.responses.create({
@@ -4415,7 +5010,10 @@ const callOpenAiCopilot = async (input: {
         effort: OPENAI_REASONING_EFFORT as "low" | "medium" | "high",
       },
       instructions: buildCopilotSystemInstructions(input.language),
-      input: buildOpenAiCopilotInput(input),
+      input: buildOpenAiCopilotInput({
+        ...input,
+        shareSensitiveContext,
+      }),
     });
 
     const responseText =
@@ -4454,6 +5052,76 @@ const callOpenAiCopilot = async (input: {
       err instanceof Error && err.message
         ? err.message
         : "OpenAI request failed";
+    return {
+      status: "error",
+      code: errorCode,
+      message: errorMessage,
+    };
+  }
+};
+
+const callOpenAiCopilotClassifier = async (input: {
+  currency: string;
+  currentBalance: number;
+  monthlyIncome: number;
+  monthlyExpenses: number;
+  recentTransactions: CopilotTransactionPayload[];
+  messages: CopilotMessagePayload[];
+  language: CopilotLanguage;
+}): Promise<OpenAiCopilotClassificationResult> => {
+  if (!openaiClient) return { status: "disabled" };
+  if (!ALLOW_EXTERNAL_FINANCIAL_CONTEXT) {
+    return { status: "disabled" };
+  }
+
+  try {
+    const response = await openaiClient.responses.create({
+      model: OPENAI_MODEL,
+      reasoning: {
+        effort: "low",
+      },
+      instructions: buildCopilotClassificationInstructions(),
+      input: buildCopilotClassificationInput({
+        ...input,
+        shareSensitiveContext: ALLOW_EXTERNAL_FINANCIAL_CONTEXT,
+      }),
+    });
+
+    const responseText =
+      typeof response.output_text === "string" && response.output_text.trim()
+        ? response.output_text.trim()
+        : "";
+    if (!responseText) {
+      return {
+        status: "error",
+        code: "empty_response",
+        message: "OpenAI returned an empty classifier response.",
+      };
+    }
+
+    const parsed = parseCopilotIntentClassification(responseText);
+    if (!parsed) {
+      return {
+        status: "error",
+        code: "invalid_response_format",
+        message:
+          "OpenAI returned a classifier response that did not match the expected format.",
+      };
+    }
+
+    return { status: "ok", payload: parsed };
+  } catch (err) {
+    const errorCode =
+      err &&
+      typeof err === "object" &&
+      "code" in err &&
+      typeof err.code === "string"
+        ? err.code
+        : "unknown_error";
+    const errorMessage =
+      err instanceof Error && err.message
+        ? err.message
+        : "OpenAI classifier request failed";
     return {
       status: "error",
       code: errorCode,
@@ -6249,7 +6917,7 @@ const fetchCopilotTransactionsForUser = async (input: {
     where: { userId: input.userId },
     select: { id: true },
   });
-  const walletIds = wallets.map((wallet) => wallet.id);
+  const walletIds = wallets.map((wallet: { id: string }) => wallet.id);
 
   const txns = await prisma.transaction.findMany({
     where: {
@@ -6266,6 +6934,83 @@ const fetchCopilotTransactionsForUser = async (input: {
   });
 
   return mapTransactionsForCopilot(txns, input.context);
+};
+
+const buildCopilotSourceTruthContext = async (input: {
+  userId: string;
+  preferredCurrency?: string | null;
+}) => {
+  const wallets = await prisma.wallet.findMany({
+    where: { userId: input.userId },
+    select: { id: true, balance: true, currency: true },
+  });
+  const preferredCurrency =
+    typeof input.preferredCurrency === "string" &&
+    input.preferredCurrency.trim().length
+      ? input.preferredCurrency.trim().toUpperCase()
+      : null;
+  const resolvedCurrency =
+    preferredCurrency ||
+    wallets.find((wallet) => typeof wallet.currency === "string")?.currency ||
+    "USD";
+  const walletBalance = roundMoney(
+    wallets
+      .filter(
+        (wallet) =>
+          !preferredCurrency ||
+          (wallet.currency || "").toUpperCase() === resolvedCurrency,
+      )
+      .reduce(
+        (sum, wallet) => sum + Math.max(0, Number(wallet.balance || 0)),
+        0,
+      ),
+  );
+
+  const now = new Date();
+  const lookbackStart = new Date(now);
+  lookbackStart.setDate(lookbackStart.getDate() - 90);
+  const monthlyStart = new Date(now);
+  monthlyStart.setDate(monthlyStart.getDate() - 30);
+
+  const transactions = await fetchCopilotTransactionsForUser({
+    userId: input.userId,
+    startInclusive: lookbackStart,
+    endExclusive: now,
+    limit: 500,
+    context: "/ai/copilot-chat:source-truth",
+  });
+
+  const monthlyTransactions = transactions.filter(
+    (transaction) => transaction.createdAt >= monthlyStart,
+  );
+  const monthlyIncome = roundMoney(
+    monthlyTransactions.reduce(
+      (sum, transaction) =>
+        sum +
+        (transaction.direction === "credit"
+          ? Math.max(0, Number(transaction.amount || 0))
+          : 0),
+      0,
+    ),
+  );
+  const monthlyExpenses = roundMoney(
+    monthlyTransactions.reduce(
+      (sum, transaction) =>
+        sum +
+        (transaction.direction === "debit"
+          ? Math.max(0, Number(transaction.amount || 0))
+          : 0),
+      0,
+    ),
+  );
+
+  return {
+    currency: resolvedCurrency,
+    currentBalance: walletBalance,
+    monthlyIncome,
+    monthlyExpenses,
+    recentTransactions: transactions.slice(-120),
+  };
 };
 
 const sumDebitAmount = (
@@ -6319,7 +7064,7 @@ const buildTodayTransactionReportResponse = async (input: {
     where: { userId: input.userId },
     select: { id: true },
   });
-  const walletIds = wallets.map((wallet) => wallet.id);
+  const walletIds = wallets.map((wallet: { id: string }) => wallet.id);
   const now = new Date();
   const startOfDay = new Date(now);
   startOfDay.setHours(0, 0, 0, 0);
@@ -6423,7 +7168,7 @@ const buildWeeklyTransactionReportResponse = async (input: {
     where: { userId: input.userId },
     select: { id: true },
   });
-  const walletIds = wallets.map((wallet) => wallet.id);
+  const walletIds = wallets.map((wallet: { id: string }) => wallet.id);
   const endExclusive = new Date();
   const startInclusive = new Date(endExclusive);
   startInclusive.setHours(0, 0, 0, 0);
@@ -6723,6 +7468,229 @@ const buildSpendingComparisonResponse = async (input: {
     ),
   };
 };
+
+const buildRecentTransactionReviewResponse = async (input: {
+  userId: string;
+  currency: string;
+  language: CopilotLanguage;
+}): Promise<CopilotResponsePayload> => {
+  const endExclusive = new Date();
+  const startInclusive = new Date(endExclusive);
+  startInclusive.setDate(startInclusive.getDate() - 30);
+
+  const transactions = await fetchCopilotTransactionsForUser({
+    userId: input.userId,
+    startInclusive,
+    endExclusive,
+    limit: 20,
+    context: "/ai/copilot-chat:recent-transaction-review",
+  });
+
+  return {
+    reply: buildTransactionReportReply({
+      language: input.language,
+      currency: input.currency,
+      transactions,
+      periodLabel:
+        input.language === "vi"
+          ? `Tong hop giao dich gan day trong 30 ngay (${formatCopilotCalendarDate(input.language, startInclusive)} - ${formatCopilotCalendarDate(input.language, endExclusive)}):`
+          : `Recent transaction review for the last 30 days (${formatCopilotCalendarDate(input.language, startInclusive)} - ${formatCopilotCalendarDate(input.language, endExclusive)}):`,
+      detailMode: "datetime",
+    }),
+    topic: "recent-transaction-review",
+    suggestedActions:
+      input.language === "vi"
+        ? [
+            "Hoi rieng sao ke hom nay, tuan nay, hoac thang nay neu ban muon khung thoi gian cu the hon.",
+            "Hoi toi giao dich nao co gia tri lon nhat neu ban muon xem diem nong nhanh.",
+            "Hoi toi so sanh chi tieu voi ky truoc neu ban muon xem xu huong.",
+          ]
+        : [
+            "Ask for today's, this week's, or this month's statement if you want a tighter period.",
+            "Ask which transaction was the largest if you want the main driver quickly.",
+            "Ask for a spending comparison if you want a trend view.",
+          ],
+    suggestedDepositAmount: null,
+    riskLevel: "low",
+    confidence: 0.98,
+    followUpQuestion: localizeCopilotText(
+      input.language,
+      "Ban co muon toi tach them theo giao dich vao va ra khong?",
+      "Do you want this split further into inflows and outflows?",
+    ),
+  };
+};
+
+const buildTransactionAnomalyReviewResponse = async (input: {
+  userId: string;
+  currency: string;
+  language: CopilotLanguage;
+}): Promise<CopilotResponsePayload> => {
+  const endExclusive = new Date();
+  const startInclusive = new Date(endExclusive);
+  startInclusive.setDate(startInclusive.getDate() - 14);
+
+  const transactions = await fetchCopilotTransactionsForUser({
+    userId: input.userId,
+    startInclusive,
+    endExclusive,
+    limit: 120,
+    context: "/ai/copilot-chat:anomaly-review",
+  });
+
+  const inflows = transactions.filter(
+    (transaction) => transaction.direction === "credit",
+  );
+  const outflows = transactions.filter(
+    (transaction) => transaction.direction === "debit",
+  );
+  const totalInflow = roundMoney(
+    inflows.reduce((sum, transaction) => sum + transaction.amount, 0),
+  );
+  const totalOutflow = roundMoney(
+    outflows.reduce((sum, transaction) => sum + transaction.amount, 0),
+  );
+  const largestOutflow = outflows.reduce(
+    (max, transaction) => Math.max(max, transaction.amount),
+    0,
+  );
+  const outflowCoverage =
+    totalInflow > 0 ? roundMoney((totalOutflow / totalInflow) * 100) : null;
+
+  const facts = [
+    input.language === "vi"
+      ? `Da ra soat ${transactions.length} giao dich trong 14 ngay gan day tu du lieu vi.`
+      : `Reviewed ${transactions.length} wallet transactions from the last 14 days.`,
+    input.language === "vi"
+      ? `Tong tien vao: ${formatCopilotMoney(input.currency, totalInflow)}. Tong tien ra: ${formatCopilotMoney(input.currency, totalOutflow)}.`
+      : `Total inflow: ${formatCopilotMoney(input.currency, totalInflow)}. Total outflow: ${formatCopilotMoney(input.currency, totalOutflow)}.`,
+    input.language === "vi"
+      ? `Giao dich ra lon nhat: ${formatCopilotMoney(input.currency, largestOutflow)}.`
+      : `Largest outflow: ${formatCopilotMoney(input.currency, largestOutflow)}.`,
+    localizeCopilotText(
+      input.language,
+      "Trong route chat nay, diem bat thuong realtime co the khong san sang; phan nay chi dua tren ban ghi giao dich va tom tat vi.",
+      "A real-time anomaly score may be unavailable in this chat route; this review is based on wallet records and transaction summaries only.",
+    ),
+  ];
+
+  const calculations = [
+    outflowCoverage !== null
+      ? localizeCopilotText(
+          input.language,
+          `Ty le tien ra / tien vao 14 ngay: ${outflowCoverage.toFixed(2)}%.`,
+          `14-day outflow-to-inflow ratio: ${outflowCoverage.toFixed(2)}%.`,
+        )
+      : localizeCopilotText(
+          input.language,
+          "Khong co dong tien vao de tinh ty le bao phu tien ra.",
+          "There is no inflow data available to calculate an outflow coverage ratio.",
+        ),
+    localizeCopilotText(
+      input.language,
+      `So giao dich ra: ${outflows.length}. So giao dich vao: ${inflows.length}.`,
+      `Outflow count: ${outflows.length}. Inflow count: ${inflows.length}.`,
+    ),
+  ];
+
+  const suggestions =
+    input.language === "vi"
+      ? [
+          "Neu ban nghi ngo mot giao dich cu the, hay dua thoi gian hoac so tien de toi khoanh vung sat hon.",
+          "Neu co dau hieu bi thuc giuc chuyen tien, khong chia se OTP hoac ma xac minh.",
+          "Neu muon kiem tra tong quat, vao Alerts/Admin de xem risk signals thay vi chat route.",
+        ]
+      : [
+          "If you are concerned about one specific transfer, give me the time or amount and I can narrow the review.",
+          "If someone is pressuring you to move funds, do not share OTPs or verification codes.",
+          "For full security signals, check the Alerts/Admin review path rather than this chat route.",
+        ];
+
+  return {
+    reply: [
+      input.language === "vi" ? "Facts:" : "Facts:",
+      ...facts.map((fact) => `- ${fact}`),
+      "",
+      input.language === "vi" ? "Calculations:" : "Calculations:",
+      ...calculations.map((calculation) => `- ${calculation}`),
+      "",
+      input.language === "vi" ? "Suggestions:" : "Suggestions:",
+      ...suggestions.map((suggestion) => `- ${suggestion}`),
+    ].join("\n"),
+    topic: "transaction-anomaly-review",
+    suggestedActions: suggestions,
+    suggestedDepositAmount: null,
+    riskLevel:
+      largestOutflow >= 5000 ||
+      (outflowCoverage !== null && outflowCoverage > 90)
+        ? "medium"
+        : "low",
+    confidence: transactions.length ? 0.83 : 0.68,
+    followUpQuestion: localizeCopilotText(
+      input.language,
+      "Ban co muon toi ra soat mot giao dich cu the theo so tien, thoi gian, hoac nguoi nhan khong?",
+      "Do you want me to review one specific transfer by amount, time, or recipient?",
+    ),
+  };
+};
+
+const buildMarketDataUnavailableCopilotResponse = (input: {
+  language: CopilotLanguage;
+}): CopilotResponsePayload => ({
+  reply: localizeCopilotText(
+    input.language,
+    "Du lieu thi truong realtime hien khong kha dung trong ngu canh nay, nen toi khong the xac nhan gia song mot cach chinh xac.",
+    "Real-time market data is unavailable in this context, so I cannot confirm a live price accurately.",
+  ),
+  topic: "market-data-unavailable",
+  suggestedActions:
+    input.language === "vi"
+      ? [
+          "Hoi toi ve cach doc dinh gia, rui ro, va luan diem dau tu cua ma ban dang quan tam.",
+          "Neu ban bat du lieu quote song, toi co the xu ly lai cau hoi theo gia realtime.",
+        ]
+      : [
+          "Ask me about valuation, downside risk, and the investment thesis of the symbol you care about.",
+          "If you enable a live quote source, I can revisit the question with real-time prices.",
+        ],
+  suggestedDepositAmount: null,
+  riskLevel: "low",
+  confidence: 0.95,
+  followUpQuestion: localizeCopilotText(
+    input.language,
+    "Ban muon phan tich giao duc ve co phieu, ETF, hay dinh gia thay vi gia realtime khong?",
+    "Do you want an educational analysis of the stock, ETF, or valuation instead of a live price?",
+  ),
+});
+
+const buildUnsupportedCopilotResponse = (input: {
+  language: CopilotLanguage;
+}): CopilotResponsePayload => ({
+  reply: localizeCopilotText(
+    input.language,
+    "Toi co the ho tro giao duc tai chinh, chi tieu ca nhan, sao ke giao dich, kiem tra bat thuong, va phan tich thi truong o muc giao duc. Yeu cau vua roi nam ngoai cac nhom ho tro do.",
+    "I can help with finance education, spending insights, transaction reviews, anomaly checks, and educational market analysis. The last request falls outside those supported areas.",
+  ),
+  topic: "unsupported-copilot-request",
+  suggestedActions:
+    input.language === "vi"
+      ? [
+          "Hoi ve chi tieu, ngan sach, sao ke giao dich, hoac kiem tra rui ro giao dich.",
+          "Hoi ve co phieu hoac ETF theo huong giao duc va phan tich, khong phai khuyen nghi mua ban.",
+        ]
+      : [
+          "Ask about spending, budgeting, transaction statements, or transfer-risk checks.",
+          "Ask about stocks or ETFs in an educational, analytical way rather than as a buy or sell instruction.",
+        ],
+  suggestedDepositAmount: null,
+  riskLevel: "low",
+  confidence: 0.9,
+  followUpQuestion: localizeCopilotText(
+    input.language,
+    "Ban muon toi giup ve ngan sach, giao dich, hay kien thuc thi truong?",
+    "Do you want help with budgeting, transactions, or market education?",
+  ),
+});
 
 const sanitizeUser = (user: UserEntity | null) => {
   if (!user) return null;
@@ -7837,7 +8805,7 @@ const evaluateAutomaticAccountProfileForUser = async (input: {
       where: { userId: input.userId },
       select: { id: true },
     })
-  ).map((wallet) => wallet.id);
+  ).map((wallet: { id: string }) => wallet.id);
 
   const transactionWhere: Prisma.TransactionWhereInput = {
     status: "COMPLETED",
@@ -7866,9 +8834,14 @@ const evaluateAutomaticAccountProfileForUser = async (input: {
       metadata: true,
     },
   });
-  const uniqueTransactions = Array.from(
-    new Map(transactionRows.map((row) => [row.id, row])).values(),
-  );
+  const uniqueTransactions: Array<(typeof transactionRows)[number]> =
+    Array.from(
+      new Map<string, (typeof transactionRows)[number]>(
+        transactionRows.map(
+          (row: (typeof transactionRows)[number]) => [row.id, row] as const,
+        ),
+      ).values(),
+    );
 
   let totalVolume = 0;
   let outgoingVolume = 0;
@@ -8351,6 +9324,7 @@ const hardenTransferAiResultForAccountProfile = (input: {
   faceIdRequired: boolean;
   sessionRestrictLargeTransfers: boolean;
   spendProfile: TransferSpendProfile;
+  behaviorProfile: TransferBehaviorProfile;
 }): AnomalyResponse => {
   const amount = Math.max(0, Number(input.amount) || 0);
   if (amount <= 0) return input.aiResult;
@@ -8385,6 +9359,18 @@ const hardenTransferAiResultForAccountProfile = (input: {
         : input.accountProfile.reviewBias === "balanced"
           ? 10
           : 12);
+  const rapidCashOutSignal =
+    input.behaviorProfile.rapidCashOutRiskScore >= 0.7 &&
+    amount >= Math.max(1000, thresholds.mediumAmount * 0.5);
+  const recentTopUpCashOutSignal =
+    (input.behaviorProfile.recentAdminTopUpAmount24h > 0 ||
+      input.behaviorProfile.recentSelfDepositAmount24h > 0) &&
+    amount >=
+      Math.max(
+        1000,
+        input.behaviorProfile.recentInboundAmount24h * 0.75,
+        thresholds.mediumAmount * 0.5,
+      );
   const shouldForceHardReview =
     exceedsExtremeBand ||
     (isStrictPersonalTier &&
@@ -8393,7 +9379,9 @@ const hardenTransferAiResultForAccountProfile = (input: {
     (aiUnavailable &&
       exceedsHighBand &&
       (!input.recipientKnown || drainRatio >= 0.75)) ||
-    (exceedsHighBand && drainRatio >= 0.9);
+    (exceedsHighBand && drainRatio >= 0.9) ||
+    rapidCashOutSignal ||
+    recentTopUpCashOutSignal;
 
   if (
     !exceedsMediumBand &&
@@ -8430,6 +9418,13 @@ const hardenTransferAiResultForAccountProfile = (input: {
       : null,
     hasStrongSpendBreak
       ? "Transfer amount is materially above the user's recent clean spending baseline."
+      : null,
+    rapidCashOutSignal
+      ? "A large amount of funds entered this wallet recently and the current transfer would move most of it back out quickly."
+      : null,
+    input.behaviorProfile.recentAdminTopUpAmount24h > 0 &&
+    recentTopUpCashOutSignal
+      ? "Recent admin top-up is being cashed out unusually quickly, which matches a source-in/source-out laundering pattern."
       : null,
     aiUnavailable
       ? "AI scoring was unavailable, so the platform applied strict account-tier protection instead of silently allowing the transfer."
@@ -8508,7 +9503,7 @@ const hardenTransferAiResultForAccountProfile = (input: {
             ? "Require OTP and review the recipient, amount, and note again before sending."
             : input.aiResult.nextStep,
     recommendedActions: dedupeStringList([
-      ...input.aiResult.recommendedActions,
+      ...(input.aiResult.recommendedActions || []),
       "Confirm the recipient and payment purpose independently before continuing.",
       shouldForceHardReview
         ? "Do not release this transfer automatically while the account remains on the current tier."
@@ -8538,6 +9533,12 @@ const hardenTransferAiResultForAccountProfile = (input: {
       amountVsTierHigh: roundMoney(amount / Math.max(thresholds.highAmount, 1)),
       aiUnavailable,
       balanceDrainRatio: Number(drainRatio.toFixed(3)),
+      recentInboundAmount24h: input.behaviorProfile.recentInboundAmount24h,
+      recentAdminTopUpAmount24h:
+        input.behaviorProfile.recentAdminTopUpAmount24h,
+      recentSelfDepositAmount24h:
+        input.behaviorProfile.recentSelfDepositAmount24h,
+      rapidCashOutRiskScore: input.behaviorProfile.rapidCashOutRiskScore,
     },
   };
 };
@@ -8825,7 +9826,7 @@ const getRecentUserTransferRows = async (
     take: 10,
   });
   const walletIds = wallets
-    .map((wallet) => wallet.id)
+    .map((wallet: { id: string }) => wallet.id)
     .filter(
       (value): value is string => typeof value === "string" && value.length > 0,
     );
@@ -8997,6 +9998,9 @@ const getTransferBehaviorProfile = async (input: {
   let maxCompletedOutflow90d = 0;
   let similarFlaggedAmountCount90d = 0;
   let sameRecipientFlaggedCount90d = 0;
+  let recentInboundAmount24h = 0;
+  let recentAdminTopUpAmount24h = 0;
+  let recentSelfDepositAmount24h = 0;
   let smallProbeCount24h = 0;
   let smallProbeTotal24h = 0;
   let sameRecipientSmallProbeCount24h = 0;
@@ -9008,13 +10012,32 @@ const getTransferBehaviorProfile = async (input: {
     const event = toFundsFlowDatasetRow(row);
     if (
       !event ||
-      event.channel !== "WALLET_TRANSFER" ||
-      event.direction !== "OUTFLOW"
+      (event.channel !== "WALLET_TRANSFER" &&
+        event.channel !== "WALLET_DEPOSIT" &&
+        event.channel !== "ADMIN_TOPUP")
     ) {
       continue;
     }
 
     const createdAtMs = new Date(event.createdAt).getTime();
+    if (
+      createdAtMs >= since24hMs &&
+      event.lifecycle === "COMPLETED" &&
+      event.direction === "INFLOW"
+    ) {
+      recentInboundAmount24h += event.amount;
+      if (event.sourceLabel === "ADMIN_TOPUP") {
+        recentAdminTopUpAmount24h += event.amount;
+      }
+      if (event.sourceLabel === "SELF_DEPOSIT") {
+        recentSelfDepositAmount24h += event.amount;
+      }
+    }
+
+    if (event.channel !== "WALLET_TRANSFER" || event.direction !== "OUTFLOW") {
+      continue;
+    }
+
     const amountDelta = Math.abs(event.amount - input.amount);
     const sameRecipient =
       Boolean(input.toAccount) &&
@@ -9087,6 +10110,26 @@ const getTransferBehaviorProfile = async (input: {
     0,
     0.99,
   );
+  const rapidCashOutRiskScore = clamp(
+    (recentInboundAmount24h > 0 &&
+    input.amount >= Math.max(500, recentInboundAmount24h * 0.7)
+      ? 0.45
+      : 0) +
+      (recentInboundAmount24h > 0 &&
+      input.amount >= Math.max(1000, recentInboundAmount24h * 0.9)
+        ? 0.2
+        : 0) +
+      (recentAdminTopUpAmount24h > 0 &&
+      input.amount >= Math.max(1000, recentAdminTopUpAmount24h * 0.75)
+        ? 0.25
+        : 0) +
+      (recentSelfDepositAmount24h > 0 &&
+      input.amount >= Math.max(1000, recentSelfDepositAmount24h * 0.85)
+        ? 0.15
+        : 0),
+    0,
+    0.99,
+  );
 
   return {
     recentReviewCount30d,
@@ -9099,12 +10142,16 @@ const getTransferBehaviorProfile = async (input: {
     maxCompletedOutflow90d: roundMoney(maxCompletedOutflow90d),
     similarFlaggedAmountCount90d,
     sameRecipientFlaggedCount90d,
+    recentInboundAmount24h: roundMoney(recentInboundAmount24h),
+    recentAdminTopUpAmount24h: roundMoney(recentAdminTopUpAmount24h),
+    recentSelfDepositAmount24h: roundMoney(recentSelfDepositAmount24h),
     smallProbeCount24h,
     smallProbeTotal24h: roundMoney(smallProbeTotal24h),
     distinctSmallProbeRecipients24h: distinctSmallProbeRecipients24h.size,
     sameRecipientSmallProbeCount24h,
     newRecipientSmallProbeCount24h,
     probeThenLargeRiskScore: Number(probeThenLargeRiskScore.toFixed(3)),
+    rapidCashOutRiskScore: Number(rapidCashOutRiskScore.toFixed(3)),
   };
 };
 
@@ -10374,6 +11421,11 @@ app.put("/ai/copilot-history", requireAuth, async (req, res) => {
 });
 
 app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
   const body = req.body as {
     currency?: unknown;
     currentBalance?: unknown;
@@ -10401,31 +11453,36 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
   }
   const language = detectCopilotLanguage(latestUserMessage.content);
 
-  const recentTransactions = Array.isArray(body.recentTransactions)
-    ? body.recentTransactions.filter(
-        (item): item is CopilotTransactionPayload =>
-          Boolean(item) &&
-          typeof item === "object" &&
-          typeof (item as { amount?: unknown }).amount === "number" &&
-          typeof (item as { type?: unknown }).type === "string" &&
-          typeof (item as { createdAt?: unknown }).createdAt === "string" &&
-          ((item as { direction?: unknown }).direction === "credit" ||
-            (item as { direction?: unknown }).direction === "debit"),
-      )
-    : [];
-
   const currency =
     typeof body.currency === "string" && body.currency.trim()
       ? body.currency.trim().toUpperCase()
       : "USD";
+  const sourceTruth = await buildCopilotSourceTruthContext({
+    userId,
+    preferredCurrency: currency,
+  });
+  const effectiveCurrency = sourceTruth.currency;
+
+  const copilotBaseInput = {
+    currency: effectiveCurrency,
+    currentBalance: sourceTruth.currentBalance,
+    monthlyIncome: sourceTruth.monthlyIncome,
+    monthlyExpenses: sourceTruth.monthlyExpenses,
+    recentTransactions: sourceTruth.recentTransactions,
+    messages,
+    language,
+  };
+
+  const intentClassification = await classifyCopilotIntent(copilotBaseInput);
 
   if (
     req.user?.sub &&
+    intentClassification.intent === "transaction_review" &&
     isWeeklyTransactionReportIntent(latestUserMessage.content)
   ) {
     const weeklyReport = await buildWeeklyTransactionReportResponse({
       userId: req.user.sub,
-      currency,
+      currency: effectiveCurrency,
       language,
     });
     return res.json(weeklyReport);
@@ -10433,11 +11490,12 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
 
   if (
     req.user?.sub &&
+    intentClassification.intent === "transaction_review" &&
     isTodayTransactionReportIntent(latestUserMessage.content)
   ) {
     const todayReport = await buildTodayTransactionReportResponse({
       userId: req.user.sub,
-      currency,
+      currency: effectiveCurrency,
       language,
     });
     return res.json(todayReport);
@@ -10445,40 +11503,70 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
 
   if (
     req.user?.sub &&
+    intentClassification.intent === "transaction_review" &&
     isMonthlyTransactionReportIntent(latestUserMessage.content)
   ) {
     const monthlyReport = await buildMonthlyTransactionReportResponse({
       userId: req.user.sub,
-      currency,
+      currency: effectiveCurrency,
       language,
     });
     return res.json(monthlyReport);
   }
 
-  if (req.user?.sub && isSpendingComparisonIntent(latestUserMessage.content)) {
+  if (req.user?.sub && intentClassification.intent === "transaction_review") {
+    const recentReview = await buildRecentTransactionReviewResponse({
+      userId: req.user.sub,
+      currency: effectiveCurrency,
+      language,
+    });
+    return res.json(recentReview);
+  }
+
+  if (req.user?.sub && intentClassification.intent === "spending_analysis") {
     const spendingComparison = await buildSpendingComparisonResponse({
       userId: req.user.sub,
-      currency,
+      currency: effectiveCurrency,
       language,
     });
     return res.json(spendingComparison);
   }
 
-  const marketResponse = await buildLiveMarketCopilotResponse(
-    latestUserMessage.content,
-  );
-  if (marketResponse) {
-    return res.json(marketResponse);
+  if (intentClassification.intent === "market_data") {
+    const marketResponse = await buildLiveMarketCopilotResponse(
+      latestUserMessage.content,
+    );
+    if (marketResponse) {
+      return res.json(marketResponse);
+    }
+    return res.json(buildMarketDataUnavailableCopilotResponse({ language }));
+  }
+
+  if (intentClassification.intent === "anomaly_check") {
+    const scamProtectionResponse = buildHeuristicScamProtectionResponse({
+      latestMessage: latestUserMessage.content,
+      language,
+    });
+    if (scamProtectionResponse) {
+      return res.json(scamProtectionResponse);
+    }
+    if (req.user?.sub) {
+      const anomalyReview = await buildTransactionAnomalyReviewResponse({
+        userId: req.user.sub,
+        currency: effectiveCurrency,
+        language,
+      });
+      return res.json(anomalyReview);
+    }
+  }
+
+  if (intentClassification.intent === "unsupported") {
+    return res.json(buildUnsupportedCopilotResponse({ language }));
   }
 
   const copilotInput = {
-    currency,
-    currentBalance: Number(body.currentBalance || 0),
-    monthlyIncome: Number(body.monthlyIncome || 0),
-    monthlyExpenses: Number(body.monthlyExpenses || 0),
-    recentTransactions,
-    messages,
-    language,
+    ...copilotBaseInput,
+    classification: intentClassification,
   };
 
   const ollamaResult = await callOllamaCopilot(copilotInput);
@@ -12095,6 +13183,8 @@ app.post("/security/transfer-pin", requireAuth, async (req, res) => {
   const body = req.body as {
     currentPin?: unknown;
     newPin?: unknown;
+    otpChallengeId?: unknown;
+    otp?: unknown;
   };
   const currentPin =
     typeof body.currentPin === "string"
@@ -12102,9 +13192,18 @@ app.post("/security/transfer-pin", requireAuth, async (req, res) => {
       : "";
   const newPin =
     typeof body.newPin === "string" ? body.newPin.replace(/\D/g, "") : "";
+  const otpChallengeId =
+    typeof body.otpChallengeId === "string" ? body.otpChallengeId.trim() : "";
+  const otp = typeof body.otp === "string" ? body.otp.replace(/\D/g, "") : "";
   if (!/^\d{6}$/.test(newPin)) {
     return res.status(400).json({
       error: "Transfer password must be exactly 6 digits",
+    });
+  }
+  if (!otpChallengeId || !/^\d{6}$/.test(otp)) {
+    return res.status(400).json({
+      error:
+        "Email OTP confirmation is required before creating or changing the transfer PIN.",
     });
   }
 
@@ -12126,6 +13225,45 @@ app.post("/security/transfer-pin", requireAuth, async (req, res) => {
           error: "Current transfer PIN is incorrect",
         });
       }
+    }
+
+    try {
+      await verifyAndConsumeEmailOtpChallenge({
+        userId,
+        purpose: "TRANSFER_PIN",
+        challengeId: otpChallengeId,
+        otp,
+      });
+    } catch (err) {
+      if (err instanceof Error && err.message === "OTP_CHALLENGE_NOT_FOUND") {
+        return res.status(400).json({ error: "Transfer PIN OTP is invalid." });
+      }
+      if (
+        err instanceof Error &&
+        err.message === "OTP_CHALLENGE_ALREADY_USED"
+      ) {
+        return res.status(409).json({
+          error:
+            "This transfer PIN OTP was already used. Request a new code and try again.",
+        });
+      }
+      if (err instanceof Error && err.message === "OTP_EXPIRED") {
+        return res.status(400).json({
+          error: "Transfer PIN OTP expired. Request a new code.",
+        });
+      }
+      if (err instanceof Error && err.message === "OTP_TOO_MANY_ATTEMPTS") {
+        return res.status(429).json({
+          error:
+            "Too many incorrect transfer PIN OTP attempts. Request a new code.",
+        });
+      }
+      if (err instanceof Error && err.message === "OTP_INCORRECT") {
+        return res.status(400).json({
+          error: "Transfer PIN OTP is incorrect.",
+        });
+      }
+      throw err;
     }
 
     const nowIso = new Date().toISOString();
@@ -12151,6 +13289,7 @@ app.post("/security/transfer-pin", requireAuth, async (req, res) => {
         : "TRANSFER_PIN_CREATED",
       details: {
         transferPinEnabled: true,
+        otpChallengeId,
       },
       ipAddress: getRequestIp(req),
     });
@@ -12167,6 +13306,69 @@ app.post("/security/transfer-pin", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("Failed to update transfer PIN", err);
     return res.status(500).json({ error: "Failed to update transfer PIN" });
+  }
+});
+
+app.post("/security/transfer-pin/otp/send", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  try {
+    const userRepository = createUserRepository();
+    const userDoc = await userRepository.findValidatedById(userId);
+    if (!userDoc) return res.status(404).json({ error: "User not found" });
+    if (userDoc.status !== "ACTIVE") {
+      return res.status(423).json({ error: "Account is not active" });
+    }
+
+    const otpChallenge = await createEmailOtpChallenge({
+      userId,
+      purpose: "TRANSFER_PIN",
+      destination: userDoc.email,
+      ttlMinutes: TRANSFER_PIN_OTP_TTL_MINUTES,
+      maxAttempts: OTP_MAX_ATTEMPTS,
+    });
+
+    runAsyncSideEffect("sendTransferPinOtpEmail", () =>
+      sendTransferPinOtpEmail({
+        to: userDoc.email,
+        recipientName: getRecipientName(userDoc),
+        otpCode: otpChallenge.otpCode,
+        expiresInMinutes: TRANSFER_PIN_OTP_TTL_MINUTES,
+      }),
+    );
+
+    await logAuditEvent({
+      actor: req.user?.email,
+      userId,
+      action: "TRANSFER_PIN_OTP_SENT",
+      details: {
+        challengeId: otpChallenge.challengeId,
+      },
+      ipAddress: getRequestIp(req),
+    });
+
+    return res.json({
+      status: "ok",
+      challengeId: otpChallenge.challengeId,
+      expiresAt: otpChallenge.expiresAt.toISOString(),
+      retryAfterSeconds: otpChallenge.retryAfterSeconds,
+      destination: maskEmail(userDoc.email),
+      message: "Transfer PIN OTP sent successfully.",
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === "OTP_COOLDOWN_ACTIVE") {
+      return res.status(429).json({
+        error:
+          "A transfer PIN OTP was sent recently. Please wait before retrying.",
+        retryAfterSeconds:
+          "retryAfterSeconds" in err
+            ? (err as { retryAfterSeconds: number }).retryAfterSeconds
+            : 60,
+      });
+    }
+    console.error("Failed to send transfer PIN OTP", err);
+    return res.status(500).json({ error: "Failed to send transfer PIN OTP" });
   }
 });
 
@@ -13259,6 +14461,10 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
           recentReviewCount30d: behaviorProfile.recentReviewCount30d,
           recentBlockedCount30d: behaviorProfile.recentBlockedCount30d,
           recentPendingOtpCount7d: behaviorProfile.recentPendingOtpCount7d,
+          recentInboundAmount24h: behaviorProfile.recentInboundAmount24h,
+          recentAdminTopUpAmount24h: behaviorProfile.recentAdminTopUpAmount24h,
+          recentSelfDepositAmount24h:
+            behaviorProfile.recentSelfDepositAmount24h,
           smallProbeCount24h: behaviorProfile.smallProbeCount24h,
           smallProbeTotal24h: behaviorProfile.smallProbeTotal24h,
           distinctSmallProbeRecipients24h:
@@ -13268,6 +14474,7 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
           newRecipientSmallProbeCount24h:
             behaviorProfile.newRecipientSmallProbeCount24h,
           probeThenLargeRiskScore: behaviorProfile.probeThenLargeRiskScore,
+          rapidCashOutRiskScore: behaviorProfile.rapidCashOutRiskScore,
         }),
       });
       const rawResult = (await aiResp.json().catch(() => null)) as unknown;
@@ -13305,6 +14512,7 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
         req.sessionSecurity?.restrictLargeTransfers,
       ),
       spendProfile,
+      behaviorProfile,
     });
 
     const transferAdvisory = buildTransferSafetyAdvisory({
@@ -13661,6 +14869,10 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
           recentReviewCount30d: behaviorProfile.recentReviewCount30d,
           recentBlockedCount30d: behaviorProfile.recentBlockedCount30d,
           recentPendingOtpCount7d: behaviorProfile.recentPendingOtpCount7d,
+          recentInboundAmount24h: behaviorProfile.recentInboundAmount24h,
+          recentAdminTopUpAmount24h: behaviorProfile.recentAdminTopUpAmount24h,
+          recentSelfDepositAmount24h:
+            behaviorProfile.recentSelfDepositAmount24h,
           smallProbeCount24h: behaviorProfile.smallProbeCount24h,
           smallProbeTotal24h: behaviorProfile.smallProbeTotal24h,
           distinctSmallProbeRecipients24h:
@@ -13670,6 +14882,7 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
           newRecipientSmallProbeCount24h:
             behaviorProfile.newRecipientSmallProbeCount24h,
           probeThenLargeRiskScore: behaviorProfile.probeThenLargeRiskScore,
+          rapidCashOutRiskScore: behaviorProfile.rapidCashOutRiskScore,
         }),
       });
       const rawResult = (await aiResp.json().catch(() => null)) as unknown;
@@ -13711,6 +14924,7 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
         req.sessionSecurity?.restrictLargeTransfers,
       ),
       spendProfile,
+      behaviorProfile,
     });
 
     const transferAdvisory = buildTransferSafetyAdvisory({

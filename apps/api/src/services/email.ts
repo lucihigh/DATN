@@ -297,6 +297,32 @@ export const sendCardDetailsOtpEmail = async (input: {
     debug: { otpCode: input.otpCode },
   });
 
+export const sendTransferPinOtpEmail = async (input: {
+  to: string;
+  recipientName: string;
+  otpCode: string;
+  expiresInMinutes: number;
+}) =>
+  sendEmail({
+    to: input.to,
+    subject: "FPIPay transfer PIN verification code",
+    text: `Your FPIPay transfer PIN OTP is ${input.otpCode}. It expires in ${input.expiresInMinutes} minutes.`,
+    html: renderOtpEmailHtml({
+      preheader: "Verify your transfer PIN change with this one-time password.",
+      title: "Transfer PIN verification code",
+      subtitle:
+        "We received a request to create or update the transfer PIN that protects outgoing payments in your FPIPay account.",
+      recipientName: input.recipientName,
+      otpCode: input.otpCode,
+      expiresInMinutes: input.expiresInMinutes,
+      summaryLabel: "Request type",
+      summaryValue: "Transfer PIN change approval",
+      securityNote:
+        "If you did not request a transfer PIN change, do not share this code and review recent account activity immediately.",
+    }),
+    debug: { otpCode: input.otpCode },
+  });
+
 export const sendLoginRiskAlertEmail = async (input: {
   to: string;
   recipientName: string;

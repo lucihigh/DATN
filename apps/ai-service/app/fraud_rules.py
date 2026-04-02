@@ -461,6 +461,47 @@ def evaluate_transaction_rules(event: TransactionEvent, learned_countries: set[s
             tags=["multi_recipient_probe", "mule"],
         )
 
+    if (
+        event.rapid_cash_out_risk_score >= 0.7
+        and amount >= 1000
+        and event.recent_inbound_amount_24h > 0
+    ):
+        _append_hit(
+            hits,
+            rule_id="TXR024",
+            title="Rapid source-in/source-out pattern",
+            category="rapid_cash_out",
+            aml_stage="layering",
+            risk_level="HIGH",
+            reason="A large recent inflow is being transferred back out unusually quickly.",
+            user_warning="Funds entered this wallet recently and are now leaving too quickly, which resembles a laundering or mule-account cash-out pattern.",
+            actions=[
+                "Place the transfer on hold and verify the source of funds before releasing it.",
+                "Review whether the recent inflow and this outflow are commercially or personally explainable.",
+            ],
+            tags=["rapid_cash_out", "source_of_funds", "aml"],
+        )
+
+    if (
+        event.recent_admin_topup_amount_24h > 0
+        and amount >= max(1000, event.recent_admin_topup_amount_24h * 0.75)
+    ):
+        _append_hit(
+            hits,
+            rule_id="TXR025",
+            title="Admin top-up followed by quick cash-out",
+            category="topup_cashout",
+            aml_stage="layering",
+            risk_level="HIGH",
+            reason="Recent admin-provided funds are being moved out almost immediately.",
+            user_warning="A recent top-up is being cashed out unusually quickly and needs manual verification before release.",
+            actions=[
+                "Pause the transfer and confirm why recently credited funds are leaving the wallet immediately.",
+                "Require manual review before approving this payout.",
+            ],
+            tags=["admin_topup", "cash_out", "aml"],
+        )
+
     max_level = "LOW"
     score = 0
     for hit in hits:

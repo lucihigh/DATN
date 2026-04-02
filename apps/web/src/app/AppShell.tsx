@@ -273,7 +273,7 @@ const NAV_ITEMS: {
   children?: { id: string; label: string }[];
 }[] = [
   { id: "Dashboard", label: "Dashboard" },
-  { id: "Copilot", label: "Copilot" },
+  { id: "Copilot", label: "VaultAI" },
   { id: "Card Center", label: "Card Center" },
   {
     id: "Support",
@@ -611,6 +611,14 @@ const translateTransferRiskCopy = (value?: string) => {
       "You had $1 recent transfer attempts near this amount that were reviewed or blocked before completion.",
     )
     .replace(
+      /^a large amount of funds entered this wallet recently and the current transfer would move most of it back out quickly\.?$/i,
+      "This wallet was funded recently and the current transfer would cash most of it back out too quickly.",
+    )
+    .replace(
+      /^recent admin top-up is being cashed out unusually quickly, which matches a source-in\/source-out laundering pattern\.?$/i,
+      "A recent admin top-up is being moved back out unusually quickly, which matches a source-in/source-out laundering pattern.",
+    )
+    .replace(
       /^verify the recipient using a phone number or channel you already trust\.?$/i,
       "Verify the recipient using a phone number or channel you already trust.",
     )
@@ -635,6 +643,7 @@ const translateTransferRiskCopy = (value?: string) => {
       "Pause the transfer and call the official support hotline.",
     )
     .replace(/^new recipient risk$/i, "New Recipient Risk")
+    .replace(/^rapid cash-out risk$/i, "Rapid Cash-Out Risk")
     .replace(/^continue carefully$/i, "I reviewed the warning, continue to OTP")
     .replace(/^otp plus live faceid check$/i, "OTP plus live FaceID check")
     .replace(/^review, then release otp$/i, "Review, then release OTP")
@@ -893,7 +902,7 @@ const buildSmartCopilotTitle = (input?: string) => {
 };
 
 const buildCopilotSessionTitle = (input?: string) => {
-  const cleaned = buildSmartCopilotTitle(input).replace(/\s+/g, " ").trim();
+  const cleaned = (input || "").replace(/\s+/g, " ").trim();
   if (!cleaned) return COPILOT_DEFAULT_TITLE;
   return cleaned.length <= 44
     ? cleaned
@@ -1143,6 +1152,7 @@ type AiMonitoringSummary = {
     mustDo?: string[];
     promptTemplateId?: string;
   } | null;
+  analysisSignals?: Record<string, unknown> | null;
 };
 
 function Ring({ value }: { value: number }) {
@@ -1379,7 +1389,6 @@ function DashboardView({
   const transferQrScanTimerRef = useRef<number | null>(null);
   const copilotThreadRef = useRef<HTMLDivElement>(null);
   const copilotPersistTimerRef = useRef<number | null>(null);
-  const copilotFreshOnOpenAppliedRef = useRef(false);
   const walletRefreshInFlightRef = useRef(false);
   const [wallet, setWallet] = useState<{
     id: string;
@@ -1744,14 +1753,10 @@ function DashboardView({
     effectiveTransferAdvisory?.severity === "blocked" ||
     effectiveTransferAdvisory?.requiresAcknowledgement === true;
   const transferContinueLabel = transferOtpBusy
-    ? isTransferPreOtpWarning && !transferAdvisoryAcknowledged
-      ? "Reviewing transfer..."
-      : "Preparing security check..."
+    ? "Preparing security check..."
     : isTransferHardBlocked
       ? "Blocked for safety review"
-      : isTransferPreOtpWarning && !transferAdvisoryAcknowledged
-        ? effectiveTransferAdvisory.confirmationLabel
-        : "Continue to security";
+      : "Continue to security";
   const ownQrPayload =
     wallet?.qrPayload ||
     (wallet?.accountNumber
@@ -2194,6 +2199,16 @@ function DashboardView({
               : null,
         ruleHits,
         warning,
+        analysisSignals:
+          data.analysisSignals &&
+          typeof data.analysisSignals === "object" &&
+          !Array.isArray(data.analysisSignals)
+            ? (data.analysisSignals as Record<string, unknown>)
+            : data.analysis_signals &&
+                typeof data.analysis_signals === "object" &&
+                !Array.isArray(data.analysis_signals)
+              ? (data.analysis_signals as Record<string, unknown>)
+              : null,
       };
     },
     [],
@@ -2663,6 +2678,38 @@ function DashboardView({
     const amount =
       Number(transferAmount.replace(/,/g, "")) || advisory?.amount || 0;
     const amountLabel = formatTransferAdvisoryAmount(amount, "USD");
+    const analysisSignals =
+      monitoring?.analysisSignals &&
+      typeof monitoring.analysisSignals === "object" &&
+      !Array.isArray(monitoring.analysisSignals)
+        ? monitoring.analysisSignals
+        : null;
+    const rapidCashOutRiskScore =
+      typeof analysisSignals?.rapidCashOutRiskScore === "number"
+        ? analysisSignals.rapidCashOutRiskScore
+        : typeof analysisSignals?.rapid_cash_out_risk_score === "number"
+          ? analysisSignals.rapid_cash_out_risk_score
+          : null;
+    const recentInboundAmount24h =
+      typeof analysisSignals?.recentInboundAmount24h === "number"
+        ? analysisSignals.recentInboundAmount24h
+        : typeof analysisSignals?.recent_inbound_amount_24h === "number"
+          ? analysisSignals.recent_inbound_amount_24h
+          : null;
+    const recentAdminTopUpAmount24h =
+      typeof analysisSignals?.recentAdminTopUpAmount24h === "number"
+        ? analysisSignals.recentAdminTopUpAmount24h
+        : typeof analysisSignals?.recent_admin_topup_amount_24h === "number"
+          ? analysisSignals.recent_admin_topup_amount_24h
+          : null;
+    const rapidCashOutSignal =
+      rapidCashOutRiskScore !== null && rapidCashOutRiskScore >= 0.45
+        ? recentAdminTopUpAmount24h && recentAdminTopUpAmount24h > 0
+          ? `A recent ${formatTransferAdvisoryAmount(recentAdminTopUpAmount24h, "USD")} admin top-up is being moved back out unusually quickly.`
+          : recentInboundAmount24h && recentInboundAmount24h > 0
+            ? `The wallet received ${formatTransferAdvisoryAmount(recentInboundAmount24h, "USD")} recently and this transfer would cash most of it back out too quickly.`
+            : "This transfer matches a rapid source-in/source-out cash-out pattern."
+        : null;
     const nextAction =
       tone === "blocked"
         ? "Pause and verify independently"
@@ -2682,6 +2729,7 @@ function DashboardView({
           ? `This transfer to ${recipientLabel} can still continue, but the behavior is unusual enough that FPIPay wants you to pause, confirm the recipient, and re-check the purpose before OTP is issued.`
           : `AI noticed a mild deviation for this transfer to ${recipientLabel}. Nothing is confirmed as fraud, but a short review helps prevent accidental or manipulated payments.`;
     const signals = [
+      rapidCashOutSignal,
       ...(advisory?.reasons || []),
       ...(monitoring?.reasons || []),
       ...((monitoring?.ruleHits || []).flatMap((hit) =>
@@ -2691,6 +2739,10 @@ function DashboardView({
         ),
       ) || []),
     ]
+      .filter(
+        (item): item is string =>
+          typeof item === "string" && item.trim().length > 0,
+      )
       .map((item) => translateTransferRiskCopy(item))
       .filter((item, index, arr) => item && arr.indexOf(item) === index)
       .slice(0, 2);
@@ -3595,25 +3647,19 @@ function DashboardView({
   }, [copilotHistoryHydrated, copilotStorageKey, copilotWorkspace, token]);
 
   useEffect(() => {
-    if (mode !== "copilot") {
-      copilotFreshOnOpenAppliedRef.current = false;
+    if (mode !== "copilot" || !copilotHistoryHydrated) {
       return;
     }
-    if (!copilotHistoryHydrated || copilotFreshOnOpenAppliedRef.current) {
-      return;
-    }
-    copilotFreshOnOpenAppliedRef.current = true;
-    const nextSession = buildDefaultCopilotSession();
-    setCopilotWorkspace((current) => ({
-      ...current,
-      activeSessionId: "",
-    }));
-    setCopilotDraftSession(nextSession);
-    setCopilotInput("");
+    setCopilotDraftSession((currentDraft) => {
+      if (copilotWorkspace.activeSessionId) {
+        return null;
+      }
+      return currentDraft || buildDefaultCopilotSession();
+    });
     setCopilotSessionMenuId("");
     setCopilotRenameSessionId("");
     setCopilotRenameDraft("");
-  }, [mode, copilotHistoryHydrated]);
+  }, [mode, copilotHistoryHydrated, copilotWorkspace.activeSessionId]);
 
   const resetCopilotConversation = useCallback(() => {
     const nextSession = buildDefaultCopilotSession();
@@ -5348,7 +5394,7 @@ function DashboardView({
                     </span>
                   </div>
                   <span className="ai-copilot-page-profile-subtitle">
-                    FPIPay Copilot workspace
+                    VaultAI workspace
                   </span>
                 </div>
               </div>
@@ -5511,7 +5557,7 @@ function DashboardView({
                 {copilotIsFreshSession ? (
                   <div className="ai-copilot-welcome-overlay">
                     <div className="ai-copilot-welcome-kicker">
-                      FPIPay Copilot ready
+                      VaultAI ready
                     </div>
                     <h4>Ask one focused finance question to get started.</h4>
                     <p>{copilotMessages[0]?.content}</p>
@@ -5533,9 +5579,7 @@ function DashboardView({
                         className={`ai-copilot-message-card ai-copilot-message-card-${message.role}`}
                       >
                         <span className="ai-copilot-message-label">
-                          {message.role === "assistant"
-                            ? "FPIPay Copilot"
-                            : "You"}
+                          {message.role === "assistant" ? "VaultAI" : "You"}
                         </span>
                         {renderCopilotMessageContent(message.content)}
                       </div>
@@ -5555,9 +5599,7 @@ function DashboardView({
                   <div className="ai-copilot-message-row ai-copilot-message-row-assistant">
                     <div className="ai-copilot-avatar">AI</div>
                     <div className="ai-copilot-message-card ai-copilot-message-card-assistant ai-copilot-bubble-thinking">
-                      <span className="ai-copilot-message-label">
-                        FPIPay Copilot
-                      </span>
+                      <span className="ai-copilot-message-label">VaultAI</span>
                       <div className="ai-copilot-typing" aria-hidden="true">
                         <span />
                         <span />
@@ -5754,7 +5796,7 @@ function DashboardView({
               openCopilotWorkspace();
             }}
           >
-            Open AI workspace
+            Open VaultAI workspace
           </button>
         </aside>
       </div>
@@ -6901,74 +6943,76 @@ function DashboardView({
                     ×
                   </button>
                 </div>
-                <div className="transfer-ai-warning-summary">
-                  <div>
-                    <span>Status</span>
-                    <strong>{transferAiIntervention.statusLabel}</strong>
+                <div className="transfer-ai-warning-body">
+                  <div className="transfer-ai-warning-summary">
+                    <div>
+                      <span>Status</span>
+                      <strong>{transferAiIntervention.statusLabel}</strong>
+                    </div>
+                    <div>
+                      <span>Confidence</span>
+                      <strong>{transferAiIntervention.confidence}%</strong>
+                    </div>
+                    <div>
+                      <span>Next action</span>
+                      <strong>{transferAiIntervention.nextAction}</strong>
+                    </div>
                   </div>
-                  <div>
-                    <span>Confidence</span>
-                    <strong>{transferAiIntervention.confidence}%</strong>
-                  </div>
-                  <div>
-                    <span>Next action</span>
-                    <strong>{transferAiIntervention.nextAction}</strong>
-                  </div>
-                </div>
-                <div className="transfer-ai-warning-grid">
-                  <div className="transfer-ai-warning-section">
-                    <span className="transfer-ai-warning-section-label">
-                      Transfer snapshot
-                    </span>
-                    <strong>{transferAiIntervention.recipientLabel}</strong>
-                    <p>Amount: {transferAiIntervention.amountLabel}</p>
-                    {transferAiIntervention.archetype ? (
-                      <small>
-                        Pattern:{" "}
-                        {translateTransferRiskCopy(
-                          transferAiIntervention.archetype,
-                        )}
-                      </small>
-                    ) : null}
-                    {isTransferHoldActive ? (
-                      <small>
-                        Retry after {transferHoldRemainingLabel} or wait for
-                        manual review to clear the hold.
-                      </small>
-                    ) : null}
-                  </div>
-                  <div className="transfer-ai-warning-section">
-                    <span className="transfer-ai-warning-section-label">
-                      Why AI flagged this
-                    </span>
-                    {transferAiIntervention.signals.length > 0 ? (
+                  <div className="transfer-ai-warning-grid">
+                    <div className="transfer-ai-warning-section">
+                      <span className="transfer-ai-warning-section-label">
+                        Transfer snapshot
+                      </span>
+                      <strong>{transferAiIntervention.recipientLabel}</strong>
+                      <p>Amount: {transferAiIntervention.amountLabel}</p>
+                      {transferAiIntervention.archetype ? (
+                        <small>
+                          Pattern:{" "}
+                          {translateTransferRiskCopy(
+                            transferAiIntervention.archetype,
+                          )}
+                        </small>
+                      ) : null}
+                      {isTransferHoldActive ? (
+                        <small>
+                          Retry after {transferHoldRemainingLabel} or wait for
+                          manual review to clear the hold.
+                        </small>
+                      ) : null}
+                    </div>
+                    <div className="transfer-ai-warning-section">
+                      <span className="transfer-ai-warning-section-label">
+                        Why AI flagged this
+                      </span>
+                      {transferAiIntervention.signals.length > 0 ? (
+                        <ul>
+                          {transferAiIntervention.signals.map((item) => (
+                            <li key={item}>{item}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p>
+                          AI detected enough deviation from your normal behavior
+                          to trigger a safety review before OTP is sent.
+                        </p>
+                      )}
+                      {transferAiIntervention.timeline.length > 0 ? (
+                        <small>{transferAiIntervention.timeline[0]}</small>
+                      ) : null}
+                    </div>
+                    <div className="transfer-ai-warning-section">
+                      <span className="transfer-ai-warning-section-label">
+                        Before continuing
+                      </span>
                       <ul>
-                        {transferAiIntervention.signals.map((item) => (
+                        {transferAiIntervention.protectSteps.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                        {transferAiIntervention.stopList.map((item) => (
                           <li key={item}>{item}</li>
                         ))}
                       </ul>
-                    ) : (
-                      <p>
-                        AI detected enough deviation from your normal behavior
-                        to trigger a safety review before OTP is sent.
-                      </p>
-                    )}
-                    {transferAiIntervention.timeline.length > 0 ? (
-                      <small>{transferAiIntervention.timeline[0]}</small>
-                    ) : null}
-                  </div>
-                  <div className="transfer-ai-warning-section">
-                    <span className="transfer-ai-warning-section-label">
-                      Before continuing
-                    </span>
-                    <ul>
-                      {transferAiIntervention.protectSteps.map((item) => (
-                        <li key={item}>{item}</li>
-                      ))}
-                      {transferAiIntervention.stopList.map((item) => (
-                        <li key={item}>{item}</li>
-                      ))}
-                    </ul>
+                    </div>
                   </div>
                 </div>
                 <div className="transfer-actions">
@@ -8337,12 +8381,95 @@ const MAX_PROFILE_AVATAR_FILE_SIZE = 6 * 1024 * 1024;
 const MAX_PROFILE_AVATAR_OUTPUT_BYTES = 900 * 1024;
 const PROFILE_AVATAR_MAX_DIMENSION = 640;
 
+type SettingSecurityDevice = {
+  id: string;
+  name: string;
+  lastUsed: string;
+  trusted: boolean;
+};
+
+type SettingSecurityState = {
+  twofa: boolean;
+  saveLogin: boolean;
+  devices: SettingSecurityDevice[];
+};
+
+const DEFAULT_SETTING_SECURITY: SettingSecurityState = {
+  twofa: false,
+  saveLogin: true,
+  devices: [
+    {
+      id: "mbp-16",
+      name: 'MacBook Pro 16"',
+      lastUsed: "2026-02-22 / San Francisco, US",
+      trusted: true,
+    },
+    {
+      id: "iphone-14",
+      name: "iPhone 14 Pro",
+      lastUsed: "2026-02-23 / San Francisco, US",
+      trusted: true,
+    },
+    {
+      id: "office-pc",
+      name: "Windows PC",
+      lastUsed: "2026-02-10 / Ho Chi Minh, VN",
+      trusted: false,
+    },
+  ],
+};
+
+const normalizeStoredSettingSecurity = (
+  value: unknown,
+): SettingSecurityState => {
+  const source =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  const devices = Array.isArray(source.devices)
+    ? source.devices
+        .map((item, index) => {
+          const device =
+            item && typeof item === "object" && !Array.isArray(item)
+              ? (item as Record<string, unknown>)
+              : null;
+          if (!device) return null;
+          const name =
+            typeof device.name === "string" && device.name.trim()
+              ? device.name.trim()
+              : `Device ${index + 1}`;
+          const lastUsed =
+            typeof device.lastUsed === "string" && device.lastUsed.trim()
+              ? device.lastUsed.trim()
+              : "Recent activity";
+          return {
+            id:
+              typeof device.id === "string" && device.id.trim()
+                ? device.id.trim()
+                : `device-${index + 1}`,
+            name,
+            lastUsed,
+            trusted: device.trusted === true,
+          } satisfies SettingSecurityDevice;
+        })
+        .filter((item): item is SettingSecurityDevice => Boolean(item))
+    : DEFAULT_SETTING_SECURITY.devices;
+
+  return {
+    twofa: source.twofa === true,
+    saveLogin:
+      typeof source.saveLogin === "boolean"
+        ? source.saveLogin
+        : DEFAULT_SETTING_SECURITY.saveLogin,
+    devices,
+  };
+};
+
 const readStoredSaveLoginPreference = () => {
   try {
     const raw = localStorage.getItem(SETTING_SECURITY_KEY);
     if (!raw) return true;
-    const parsed = JSON.parse(raw) as { saveLogin?: unknown } | null;
-    return typeof parsed?.saveLogin === "boolean" ? parsed.saveLogin : true;
+    return normalizeStoredSettingSecurity(JSON.parse(raw)).saveLogin;
   } catch {
     return true;
   }
@@ -8864,43 +8991,24 @@ function SettingView() {
     confirm: "",
   });
   const [transferPinBusy, setTransferPinBusy] = useState(false);
+  const [transferPinOtpBusy, setTransferPinOtpBusy] = useState(false);
   const [transferPinEnabledStatus, setTransferPinEnabledStatus] =
     useState(false);
-  const [security, setSecurity] = useState(() => {
+  const [transferPinOtp, setTransferPinOtp] = useState({
+    challengeId: "",
+    code: "",
+    destination: "",
+    expiresAt: "",
+    retryAfterSeconds: 0,
+  });
+  const [security, setSecurity] = useState<SettingSecurityState>(() => {
     try {
       const s = localStorage.getItem(SETTING_SECURITY_KEY);
       return s
-        ? JSON.parse(s)
-        : {
-            twofa: false,
-            saveLogin: true,
-            devices: [
-              {
-                id: "mbp-16",
-                name: 'MacBook Pro 16"',
-                lastUsed: "2026-02-22 / San Francisco, US",
-                trusted: true,
-              },
-              {
-                id: "iphone-14",
-                name: "iPhone 14 Pro",
-                lastUsed: "2026-02-23 / San Francisco, US",
-                trusted: true,
-              },
-              {
-                id: "office-pc",
-                name: "Windows PC",
-                lastUsed: "2026-02-10 / Ho Chi Minh, VN",
-                trusted: false,
-              },
-            ],
-          };
+        ? normalizeStoredSettingSecurity(JSON.parse(s))
+        : DEFAULT_SETTING_SECURITY;
     } catch {
-      return {
-        twofa: false,
-        saveLogin: true,
-        devices: [],
-      };
+      return { ...DEFAULT_SETTING_SECURITY, devices: [] };
     }
   });
   const [avatarUrl, setAvatarUrl] = useState(() => {
@@ -8924,7 +9032,7 @@ function SettingView() {
     setAvatarUrl(readStoredProfileAvatar(user));
   }, [user?.avatar, user?.id]);
 
-  const persistSecurity = (next: typeof security) => {
+  const persistSecurity = (next: SettingSecurityState) => {
     setSecurity(next);
     localStorage.setItem(SETTING_SECURITY_KEY, JSON.stringify(next));
   };
@@ -9008,6 +9116,13 @@ function SettingView() {
       toast("Transfer PIN confirmation does not match", "error");
       return;
     }
+    if (!transferPinOtp.challengeId || !/^\d{6}$/.test(transferPinOtp.code)) {
+      toast(
+        "Enter the OTP sent to your email before updating the transfer PIN",
+        "error",
+      );
+      return;
+    }
 
     setTransferPinBusy(true);
     try {
@@ -9020,6 +9135,8 @@ function SettingView() {
         body: JSON.stringify({
           currentPin: transferPinForm.current || undefined,
           newPin: transferPinForm.next,
+          otpChallengeId: transferPinOtp.challengeId,
+          otp: transferPinOtp.code,
         }),
       });
       const data = (await resp.json().catch(() => null)) as {
@@ -9034,9 +9151,67 @@ function SettingView() {
 
       setTransferPinEnabledStatus(data?.metadata?.transferPinEnabled === true);
       setTransferPinForm({ current: "", next: "", confirm: "" });
+      setTransferPinOtp({
+        challengeId: "",
+        code: "",
+        destination: "",
+        expiresAt: "",
+        retryAfterSeconds: 0,
+      });
       toast(data?.message || "Transfer PIN updated successfully");
     } finally {
       setTransferPinBusy(false);
+    }
+  };
+
+  const sendTransferPinOtp = async () => {
+    if (!token) {
+      toast("Session expired. Please login again.", "error");
+      return;
+    }
+
+    setTransferPinOtpBusy(true);
+    try {
+      const resp = await fetch(`${API_BASE}/security/transfer-pin/otp/send`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      const data = (await resp.json().catch(() => null)) as {
+        error?: string;
+        message?: string;
+        challengeId?: string;
+        destination?: string;
+        expiresAt?: string;
+        retryAfterSeconds?: number;
+      } | null;
+      if (!resp.ok) {
+        const retryNote =
+          typeof data?.retryAfterSeconds === "number"
+            ? ` Please wait ${data.retryAfterSeconds}s before requesting another code.`
+            : "";
+        toast(
+          `${data?.error || "Failed to send transfer PIN OTP"}${retryNote}`,
+          "error",
+        );
+        return;
+      }
+
+      setTransferPinOtp((prev) => ({
+        ...prev,
+        challengeId: data?.challengeId || "",
+        destination: data?.destination || "",
+        expiresAt: data?.expiresAt || "",
+        retryAfterSeconds: data?.retryAfterSeconds || 0,
+        code: "",
+      }));
+      toast(
+        data?.message ||
+          `Transfer PIN OTP sent${data?.destination ? ` to ${data.destination}` : ""}`,
+      );
+    } finally {
+      setTransferPinOtpBusy(false);
     }
   };
 
@@ -9469,8 +9644,8 @@ function SettingView() {
             <div className="setting-block">
               <h4 className="setting-block-head">Transfer PIN</h4>
               <p className="setting-block-desc muted">
-                Every transfer starts with your 6-digit transfer PIN. OTP is
-                only added when AI classifies the risk as medium.
+                Every transfer starts with your 6-digit transfer PIN. Creating
+                or changing it now requires an email OTP confirmation.
               </p>
               <div className="form-grid setting-form">
                 {transferPinEnabledStatus && (
@@ -9526,8 +9701,46 @@ function SettingView() {
                     }
                   />
                 </div>
+                <div className="form-group">
+                  <label>Email OTP</label>
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    maxLength={6}
+                    placeholder="Enter 6-digit OTP"
+                    value={transferPinOtp.code}
+                    onChange={(e) =>
+                      setTransferPinOtp((prev) => ({
+                        ...prev,
+                        code: e.target.value.replace(/\D/g, "").slice(0, 6),
+                      }))
+                    }
+                  />
+                  <small className="muted">
+                    {transferPinOtp.destination
+                      ? `OTP sent to ${transferPinOtp.destination}${
+                          transferPinOtp.expiresAt
+                            ? ` · expires ${new Date(
+                                transferPinOtp.expiresAt,
+                              ).toLocaleTimeString("en-US", {
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })}`
+                            : ""
+                        }`
+                      : "Send an OTP to your registered email before saving the new PIN."}
+                  </small>
+                </div>
               </div>
               <div className="setting-actions">
+                <button
+                  type="button"
+                  className="pill"
+                  onClick={sendTransferPinOtp}
+                  disabled={transferPinOtpBusy}
+                >
+                  {transferPinOtpBusy ? "Sending OTP..." : "Send OTP"}
+                </button>
                 <button
                   type="button"
                   className="btn-primary"
@@ -9968,6 +10181,21 @@ function MyProfileView({
             <span className="user-profile-pill">
               Account: {accountNumber || "Not available"}
             </span>
+            <span className="user-profile-pill accent">
+              Tier:{" "}
+              {formatAccountProfileLabel(
+                accountProfile.category,
+                accountProfile.tier,
+              )}
+            </span>
+            <span className="user-profile-pill">
+              {formatAccountProfileAutomationMode(
+                accountProfile.automation?.mode,
+              )}
+            </span>
+            <span className="user-profile-pill">
+              Confidence {Math.round(accountProfile.confidence * 100)}%
+            </span>
           </div>
         </div>
       </div>
@@ -10050,38 +10278,18 @@ function MyProfileView({
               Users can no longer widen their own AI baseline manually.
             </p>
           </div>
-          <div className="account-profile-summary">
-            <span className="account-profile-badge">
-              Effective:{" "}
-              {formatAccountProfileLabel(
-                accountProfile.category,
-                accountProfile.tier,
-              )}
-            </span>
-            <span className="account-profile-badge neutral">
-              {formatAccountProfileAutomationMode(
-                accountProfile.automation?.mode,
-              )}
-            </span>
-            <span className="account-profile-badge neutral">
-              Confidence {Math.round(accountProfile.confidence * 100)}%
-            </span>
-          </div>
         </div>
 
         <div className="account-profile-meta-row">
           <span className="account-profile-meta-item">
-            <strong>Current tier</strong>
-            <em>
-              {formatAccountProfileLabel(
-                accountProfile.category,
-                accountProfile.tier,
-              )}
-            </em>
-          </span>
-          <span className="account-profile-meta-item">
             <strong>Status</strong>
             <em>{formatAccountProfileStatus(accountProfile.status)}</em>
+          </span>
+          <span className="account-profile-meta-item">
+            <strong>Completed</strong>
+            <em>
+              {accountProfile.automation?.stats.completedCount ?? 0} transfers
+            </em>
           </span>
           <span className="account-profile-meta-item">
             <strong>30d volume</strong>
@@ -10105,6 +10313,17 @@ function MyProfileView({
               %
             </em>
           </span>
+          {accountProfile.automation?.nextTier ? (
+            <span className="account-profile-meta-item">
+              <strong>Next target</strong>
+              <em>
+                {formatAccountProfileLabel(
+                  accountProfile.category,
+                  accountProfile.automation.nextTier,
+                )}
+              </em>
+            </span>
+          ) : null}
         </div>
 
         <div className="account-profile-compact-grid">

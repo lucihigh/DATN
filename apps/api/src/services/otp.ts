@@ -14,6 +14,28 @@ export const generateOtpCode = () =>
 export const hashOtpCode = (code: string) =>
   crypto.createHash("sha256").update(code).digest("hex");
 
+const toSafeJsonValue = (value: unknown): Prisma.InputJsonValue | undefined => {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => {
+      const normalized = toSafeJsonValue(item);
+      return normalized === undefined ? null : normalized;
+    });
+  }
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .map(([key, entry]) => [key, toSafeJsonValue(entry)] as const)
+      .filter(([, entry]) => entry !== undefined);
+    return Object.fromEntries(entries) as Prisma.InputJsonObject;
+  }
+  return null;
+};
+
 export const maskEmail = (email: string) => {
   const [local, domain] = email.split("@");
   if (!local || !domain) return email;
@@ -91,7 +113,7 @@ export const createEmailOtpChallenge = async (input: {
       codeHash: hashOtpCode(otpCode),
       expiresAt,
       maxAttempts: input.maxAttempts,
-      metadata: input.metadata as never,
+      metadata: toSafeJsonValue(input.metadata) as never,
     },
   });
 
