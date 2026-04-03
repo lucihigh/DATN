@@ -160,6 +160,13 @@ export const faceIdEnrollmentSchema = z.object({
     .startsWith("data:image/jpeg;base64,")
     .max(2_000_000)
     .optional(),
+  videoEvidence: z
+    .string()
+    .startsWith("data:video/")
+    .max(18_000_000)
+    .optional(),
+  videoDurationMs: z.number().min(4_500).max(30_000).optional(),
+  videoMimeType: z.string().min(6).max(120).optional(),
 });
 
 export const registerSchema = z.object({

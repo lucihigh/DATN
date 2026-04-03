@@ -546,6 +546,15 @@ def _build_tx_score_details(
 ) -> dict[str, Any]:
     model_version = str(getattr(app.state, "tx_model_version", None) or "unknown")
     feature_names = _active_tx_feature_names()
+    input_contract = _build_tx_input_contract(event)
+    ml_analysis = _build_tx_ml_analysis(
+        features=features,
+        anomaly_score=anomaly_score,
+        raw_score=raw_score,
+        risk_level_base=risk_level_base,
+        risk_level_adjusted=risk_level_final,
+    )
+    llm_analysis = _build_tx_llm_analysis(event)
     return {
         "requestKey": request_key,
         "requestId": event.request_id,
@@ -594,10 +603,17 @@ def _build_tx_score_details(
             "probeThenLargeRiskScore": float(event.probe_then_large_risk_score),
             "llmNoteRiskLevel": event.llm_note_risk_level,
             "llmSignalCount": int(event.llm_signal_count),
+            "llmSignals": list(event.llm_signals),
             "llmRuleTags": list(event.llm_rule_tags),
+            "llmSummary": event.llm_summary,
+            "llmSource": event.llm_source,
+            "llmModel": event.llm_model,
             "sessionRiskLevel": event.session_risk_level,
         },
+        "inputContract": input_contract,
         "features": _feature_vector_to_dict(feature_names, features),
+        "mlAnalysis": ml_analysis,
+        "llmAnalysis": llm_analysis,
         "result": {
             "anomalyScore": float(anomaly_score),
             "rawScore": float(raw_score),
@@ -1468,6 +1484,159 @@ def dedupe_list(values: list[str]) -> list[str]:
         seen.add(key)
         result.append(cleaned)
     return result
+
+
+def _normalize_output_risk_level(value: str | None) -> str:
+    normalized = str(value or "").strip().upper()
+    if normalized in {"LOW", "MEDIUM", "HIGH"}:
+        return normalized
+    return "LOW"
+
+
+def _build_tx_input_contract(event: TransactionEvent) -> dict[str, Any]:
+    return {
+        "version": "tx_risk_input_v2",
+        "accountProfile": {
+            "segment": normalize_account_segment(getattr(event, "account_segment", None)).lower(),
+            "category": normalize_account_category(
+                getattr(event, "account_category", None),
+                getattr(event, "account_segment", None),
+            ).lower(),
+            "tier": normalize_account_tier(
+                getattr(event, "account_category", None),
+                getattr(event, "account_tier", None),
+                getattr(event, "account_segment", None),
+            ).lower(),
+            "status": str(getattr(event, "account_profile_status", "SYSTEM_ASSIGNED") or "SYSTEM_ASSIGNED").lower(),
+            "confidence": round(float(getattr(event, "account_profile_confidence", 0.6) or 0.6), 3),
+        },
+        "transferContext": {
+            "channel": getattr(event, "channel", None),
+            "paymentMethod": getattr(event, "payment_method", None),
+            "merchantCategory": getattr(event, "merchant_category", None),
+            "balanceBefore": float(getattr(event, "balance_before", 0.0) or 0.0),
+            "remainingBalance": float(getattr(event, "remaining_balance", 0.0) or 0.0),
+            "recipientKnown": bool(getattr(event, "recipient_known", False)),
+            "rollingOutflowAmount": float(getattr(event, "rolling_outflow_amount", 0.0) or 0.0),
+            "faceIdRequired": bool(getattr(event, "face_id_required", False)),
+            "sessionRiskLevel": _normalize_output_risk_level(
+                getattr(event, "session_risk_level", "LOW")
+            ).lower(),
+            "sessionRestrictLargeTransfers": bool(
+                getattr(event, "session_restrict_large_transfers", False)
+            ),
+        },
+        "behaviorSnapshot": {
+            "failedTx24h": int(getattr(event, "failed_tx_24h", 0) or 0),
+            "velocity1h": int(getattr(event, "velocity_1h", 0) or 0),
+            "dailySpendAvg30d": float(getattr(event, "daily_spend_avg_30d", 0.0) or 0.0),
+            "todaySpendBefore": float(getattr(event, "today_spend_before", 0.0) or 0.0),
+            "projectedDailySpend": float(getattr(event, "projected_daily_spend", 0.0) or 0.0),
+            "recentReviewCount30d": int(getattr(event, "recent_review_count_30d", 0) or 0),
+            "recentBlockedCount30d": int(getattr(event, "recent_blocked_count_30d", 0) or 0),
+            "recentPendingOtpCount7d": int(getattr(event, "recent_pending_otp_count_7d", 0) or 0),
+            "smallProbeCount24h": int(getattr(event, "small_probe_count_24h", 0) or 0),
+            "smallProbeTotal24h": float(getattr(event, "small_probe_total_24h", 0.0) or 0.0),
+            "distinctSmallProbeRecipients24h": int(
+                getattr(event, "distinct_small_probe_recipients_24h", 0) or 0
+            ),
+            "sameRecipientSmallProbeCount24h": int(
+                getattr(event, "same_recipient_small_probe_count_24h", 0) or 0
+            ),
+            "newRecipientSmallProbeCount24h": int(
+                getattr(event, "new_recipient_small_probe_count_24h", 0) or 0
+            ),
+            "probeThenLargeRiskScore": float(
+                getattr(event, "probe_then_large_risk_score", 0.0) or 0.0
+            ),
+            "rapidCashOutRiskScore": float(
+                getattr(event, "rapid_cash_out_risk_score", 0.0) or 0.0
+            ),
+        },
+    }
+
+
+def _build_tx_top_feature_signals(
+    *,
+    features: np.ndarray,
+    feature_mean: np.ndarray | None,
+    feature_std: np.ndarray | None,
+    feature_names: list[str],
+    max_items: int = 5,
+) -> list[dict[str, Any]]:
+    if feature_mean is None or feature_std is None:
+        return []
+
+    mean = np.asarray(feature_mean, dtype=float)
+    std = np.asarray(feature_std, dtype=float).copy()
+    std[std == 0] = 1.0
+    values = np.asarray(features, dtype=float)
+    limit = min(len(values), len(mean), len(std), len(feature_names))
+    if limit <= 0:
+        return []
+
+    top_signals: list[dict[str, Any]] = []
+    z_scores = (values[:limit] - mean[:limit]) / std[:limit]
+    ranked = np.argsort(np.abs(z_scores))[::-1]
+    for idx in ranked:
+        z_score = float(z_scores[int(idx)])
+        if abs(z_score) < 0.75:
+            continue
+        direction = "high" if z_score > 0 else "low" if z_score < 0 else "neutral"
+        top_signals.append(
+            {
+                "feature": _camel_case_feature_name(feature_names[int(idx)]),
+                "value": float(values[int(idx)]),
+                "zScore": round(z_score, 3),
+                "baselineMean": round(float(mean[int(idx)]), 3),
+                "baselineStd": round(float(std[int(idx)]), 3),
+                "direction": direction,
+            }
+        )
+        if len(top_signals) >= max_items:
+            break
+    return top_signals
+
+
+def _build_tx_ml_analysis(
+    *,
+    features: np.ndarray,
+    anomaly_score: float,
+    raw_score: float,
+    risk_level_base: str,
+    risk_level_adjusted: str,
+) -> dict[str, Any]:
+    return {
+        "anomalyScore": float(anomaly_score),
+        "rawScore": float(raw_score),
+        "baseRiskLevel": _normalize_output_risk_level(risk_level_base).lower(),
+        "adjustedRiskLevel": _normalize_output_risk_level(risk_level_adjusted).lower(),
+        "model": {
+            "name": "pyod_iforest",
+            "version": str(getattr(app.state, "tx_model_version", None) or "unknown"),
+            "source": getattr(app.state, "tx_model_source", "unknown"),
+        },
+        "topSignals": _build_tx_top_feature_signals(
+            features=features,
+            feature_mean=getattr(app.state, "tx_feature_mean", None),
+            feature_std=getattr(app.state, "tx_feature_std", None),
+            feature_names=_active_tx_feature_names(),
+        ),
+    }
+
+
+def _build_tx_llm_analysis(event: TransactionEvent) -> dict[str, Any]:
+    return {
+        "riskLevel": _normalize_output_risk_level(
+            getattr(event, "llm_note_risk_level", "LOW")
+        ).lower(),
+        "signalCount": int(getattr(event, "llm_signal_count", 0) or 0),
+        "signals": dedupe_list(list(getattr(event, "llm_signals", []) or []))[:6],
+        "ruleTags": dedupe_list(list(getattr(event, "llm_rule_tags", []) or []))[:6],
+        "summary": getattr(event, "llm_summary", None),
+        "source": getattr(event, "llm_source", None),
+        "model": getattr(event, "llm_model", None),
+    }
 
 
 def _risk_level_to_score(level: str) -> int:
@@ -3805,6 +3974,25 @@ def score_transaction(
         reasons=reasons,
         tx_history_signals=tx_history_signals,
     )
+    input_contract = _build_tx_input_contract(event)
+    ml_analysis = _build_tx_ml_analysis(
+        features=features,
+        anomaly_score=anomaly_score,
+        raw_score=score_value,
+        risk_level_base=risk_level_base,
+        risk_level_adjusted=model_adjusted_risk,
+    )
+    llm_analysis = _build_tx_llm_analysis(event)
+    final_decision = {
+        "riskLevel": _normalize_output_risk_level(risk_level).lower(),
+        "finalAction": decision["finalAction"],
+        "finalScore": int(decision["finalScore"]),
+        "headline": decision["headline"],
+        "summary": decision["summary"],
+        "nextStep": decision["nextStep"],
+        "recommendedActions": list(decision["recommendedActions"]),
+        "stepUpLevel": decision["stepUpLevel"],
+    }
     if decision["finalAction"] == "HOLD_REVIEW":
         warning_vi = {
             "title": "Canh bao do: Giao dich tam dung de review",
@@ -3918,6 +4106,10 @@ def score_transaction(
         "model_source": app.state.tx_model_source,
         "model_version": getattr(app.state, "tx_model_version", "unknown"),
         "request_key": request_key,
+        "input_contract": input_contract,
+        "ml_analysis": ml_analysis,
+        "llm_analysis": llm_analysis,
+        "final_decision": final_decision,
         "analysis_signals": {
             "history_available": bool(tx_history_signals.get("available")),
             "history_source": tx_history_signals.get("history_source"),
@@ -3971,7 +4163,11 @@ def score_transaction(
             ),
             "llm_note_risk_level": event.llm_note_risk_level,
             "llm_signal_count": int(event.llm_signal_count),
+            "llm_signals": list(event.llm_signals),
             "llm_rule_tags": list(event.llm_rule_tags),
+            "llm_summary": event.llm_summary,
+            "llm_source": event.llm_source,
+            "llm_model": event.llm_model,
             "session_risk_level": event.session_risk_level,
             "feedback_profile": getattr(app.state, "tx_feedback_profile", {}) or {},
         },

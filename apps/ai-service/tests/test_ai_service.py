@@ -245,6 +245,101 @@ def test_train_and_score_transaction_monitoring_only():
         assert isinstance(body["rule_hits"], list)
         assert "warning_vi" in body
         assert "title" in body["warning_vi"]
+        assert body["input_contract"]["version"] == "tx_risk_input_v2"
+        assert isinstance(body["ml_analysis"]["topSignals"], list)
+        assert body["llm_analysis"]["signalCount"] >= 0
+        assert body["final_decision"]["finalAction"] in {
+            "ALLOW",
+            "ALLOW_WITH_WARNING",
+            "REQUIRE_OTP",
+            "REQUIRE_OTP_FACE_ID",
+            "HOLD_REVIEW",
+        }
+
+
+def test_tx_score_accepts_grouped_clean_input_contract():
+    tx_events = []
+    for i in range(20):
+        tx_events.append(
+            {
+                "user_id": f"u-{i}",
+                "transaction_id": f"tx-{i}",
+                "timestamp": f"2026-03-0{1 + (i % 3)}T12:{i:02d}:00Z",
+                "amount": 45 + i * 2,
+                "currency": "USD",
+                "country": "US",
+                "payment_method": "wallet_balance",
+                "merchant_category": "p2p_transfer",
+                "device": "Mozilla/5.0 Chrome",
+                "failed_tx_24h": 0,
+                "velocity_1h": 1,
+            }
+        )
+
+    with TestClient(app) as client:
+        train_res = client.post("/ai/tx/train", json={"events": tx_events}, headers=_auth_headers())
+        assert train_res.status_code == 200
+
+        payload = {
+            "userId": "u-clean-1",
+            "transactionId": "tx-clean-1",
+            "timestamp": "2026-03-05T03:12:00Z",
+            "amount": 2400,
+            "currency": "USD",
+            "location": "US",
+            "paymentMethod": "wallet_balance",
+            "merchantCategory": "p2p_transfer",
+            "device": "Mozilla/5.0 Chrome",
+            "accountProfile": {
+                "segment": "PERSONAL",
+                "category": "PERSONAL",
+                "tier": "STANDARD",
+                "status": "SYSTEM_ASSIGNED",
+                "confidence": 0.88,
+            },
+            "transferContext": {
+                "channel": "web",
+                "balanceBefore": 5000,
+                "remainingBalance": 2600,
+                "recipientKnown": False,
+                "rollingOutflowAmount": 2800,
+                "faceIdRequired": False,
+                "sessionRiskLevel": "MEDIUM",
+                "sessionRestrictLargeTransfers": False,
+            },
+            "behaviorSnapshot": {
+                "failedTx24h": 1,
+                "velocity1h": 2,
+                "dailySpendAvg30d": 220,
+                "todaySpendBefore": 180,
+                "projectedDailySpend": 2580,
+                "recentReviewCount30d": 1,
+                "recentBlockedCount30d": 0,
+                "recentPendingOtpCount7d": 0,
+                "smallProbeCount24h": 0,
+                "smallProbeTotal24h": 0,
+                "distinctSmallProbeRecipients24h": 0,
+                "sameRecipientSmallProbeCount24h": 0,
+                "newRecipientSmallProbeCount24h": 0,
+                "probeThenLargeRiskScore": 0.0,
+                "rapidCashOutRiskScore": 0.0,
+            },
+            "llmContext": {
+                "riskLevel": "medium",
+                "signalCount": 2,
+                "signals": ["Urgency phrasing", "First-time recipient"],
+                "ruleTags": ["urgent_wording", "first_time_recipient"],
+                "summary": "Transfer note and context suggest mild scam pressure.",
+                "source": "openai",
+                "model": "gpt-5-mini",
+            },
+        }
+        score_res = client.post("/ai/tx/score", json=payload, headers=_auth_headers())
+        assert score_res.status_code == 200
+        body = score_res.json()
+        assert body["input_contract"]["accountProfile"]["category"] == "personal"
+        assert body["llm_analysis"]["riskLevel"] == "medium"
+        assert body["llm_analysis"]["signalCount"] == 2
 
 
 def test_rule_engine_returns_high_risk_for_crypto_burst_drain():

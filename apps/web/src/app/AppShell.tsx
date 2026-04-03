@@ -74,7 +74,7 @@ function DeferredFaceIdCapture(props: {
 }) {
   return (
     <Suspense
-      fallback={<div className="faceid-card">Loading FaceID scanner...</div>}
+      fallback={<div className="faceid-card">Loading 5-second FaceID video capture...</div>}
     >
       <LazyFaceIdCapture {...props} />
     </Suspense>
@@ -671,6 +671,19 @@ const truncateNotificationCopy = (value: string, maxLength: number) =>
     ? value
     : `${value.slice(0, maxLength - 3).trimEnd()}...`;
 
+const humanizeRiskKey = (value: string) =>
+  value
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^./, (char) => char.toUpperCase());
+
+const formatRiskNumber = (value: number | null | undefined, digits = 2) =>
+  typeof value === "number" && Number.isFinite(value)
+    ? value.toFixed(digits)
+    : "N/A";
+
 const getNotificationDayLabel = (createdAt: string) => {
   const date = new Date(createdAt);
   if (Number.isNaN(date.getTime())) return "Recent";
@@ -1153,6 +1166,50 @@ type AiMonitoringSummary = {
     promptTemplateId?: string;
   } | null;
   analysisSignals?: Record<string, unknown> | null;
+  inputContract?: {
+    version?: string;
+    accountProfile?: Record<string, unknown> | null;
+    transferContext?: Record<string, unknown> | null;
+    behaviorSnapshot?: Record<string, unknown> | null;
+  } | null;
+  mlAnalysis?: {
+    anomalyScore: number;
+    rawScore: number;
+    baseRiskLevel: string;
+    adjustedRiskLevel: string;
+    model?: {
+      name?: string;
+      version?: string | null;
+      source?: string | null;
+    } | null;
+    topSignals?: Array<{
+      feature: string;
+      value: number;
+      zScore?: number | null;
+      baselineMean?: number | null;
+      baselineStd?: number | null;
+      direction?: "high" | "low" | "neutral";
+    }>;
+  } | null;
+  llmAnalysis?: {
+    riskLevel: string;
+    signalCount: number;
+    signals: string[];
+    ruleTags: string[];
+    summary?: string | null;
+    source?: string | null;
+    model?: string | null;
+  } | null;
+  finalDecision?: {
+    riskLevel: string;
+    finalAction?: string;
+    finalScore?: number;
+    headline?: string | null;
+    summary?: string | null;
+    nextStep?: string | null;
+    recommendedActions?: string[];
+    stepUpLevel?: string | null;
+  } | null;
 };
 
 function Ring({ value }: { value: number }) {
@@ -2209,6 +2266,280 @@ function DashboardView({
                 !Array.isArray(data.analysis_signals)
               ? (data.analysis_signals as Record<string, unknown>)
               : null,
+        inputContract:
+          data.inputContract &&
+          typeof data.inputContract === "object" &&
+          !Array.isArray(data.inputContract)
+            ? (data.inputContract as AiMonitoringSummary["inputContract"])
+            : data.input_contract &&
+                typeof data.input_contract === "object" &&
+                !Array.isArray(data.input_contract)
+              ? (data.input_contract as AiMonitoringSummary["inputContract"])
+              : null,
+        mlAnalysis:
+          data.mlAnalysis &&
+          typeof data.mlAnalysis === "object" &&
+          !Array.isArray(data.mlAnalysis)
+            ? {
+                anomalyScore:
+                  typeof (data.mlAnalysis as Record<string, unknown>)
+                    .anomalyScore === "number"
+                    ? ((data.mlAnalysis as Record<string, unknown>)
+                        .anomalyScore as number)
+                    : 0,
+                rawScore:
+                  typeof (data.mlAnalysis as Record<string, unknown>).rawScore ===
+                  "number"
+                    ? ((data.mlAnalysis as Record<string, unknown>)
+                        .rawScore as number)
+                    : 0,
+                baseRiskLevel:
+                  typeof (data.mlAnalysis as Record<string, unknown>)
+                    .baseRiskLevel === "string"
+                    ? ((data.mlAnalysis as Record<string, unknown>)
+                        .baseRiskLevel as string)
+                    : "low",
+                adjustedRiskLevel:
+                  typeof (data.mlAnalysis as Record<string, unknown>)
+                    .adjustedRiskLevel === "string"
+                    ? ((data.mlAnalysis as Record<string, unknown>)
+                        .adjustedRiskLevel as string)
+                    : "low",
+                model:
+                  (data.mlAnalysis as Record<string, unknown>).model &&
+                  typeof (data.mlAnalysis as Record<string, unknown>).model ===
+                    "object" &&
+                  !Array.isArray(
+                    (data.mlAnalysis as Record<string, unknown>).model,
+                  )
+                    ? ((data.mlAnalysis as Record<string, unknown>).model as {
+                        name?: string;
+                        version?: string | null;
+                        source?: string | null;
+                      })
+                    : null,
+                topSignals: Array.isArray(
+                  (data.mlAnalysis as Record<string, unknown>).topSignals,
+                )
+                  ? (
+                      (data.mlAnalysis as Record<string, unknown>)
+                        .topSignals as unknown[]
+                    ).flatMap((entry) => {
+                      if (!entry || typeof entry !== "object") return [];
+                      const item = entry as Record<string, unknown>;
+                      if (
+                        typeof item.feature !== "string" ||
+                        typeof item.value !== "number"
+                      ) {
+                        return [];
+                      }
+                      const direction =
+                        item.direction === "high" ||
+                        item.direction === "low" ||
+                        item.direction === "neutral"
+                          ? item.direction
+                          : "neutral";
+                      return [
+                        {
+                          feature: item.feature,
+                          value: item.value,
+                          zScore:
+                            typeof item.zScore === "number"
+                              ? item.zScore
+                              : null,
+                          baselineMean:
+                            typeof item.baselineMean === "number"
+                              ? item.baselineMean
+                              : null,
+                          baselineStd:
+                            typeof item.baselineStd === "number"
+                              ? item.baselineStd
+                              : null,
+                          direction,
+                        },
+                      ];
+                    })
+                  : [],
+              }
+            : data.ml_analysis &&
+                typeof data.ml_analysis === "object" &&
+                !Array.isArray(data.ml_analysis)
+              ? {
+                  anomalyScore:
+                    typeof (data.ml_analysis as Record<string, unknown>)
+                      .anomalyScore === "number"
+                      ? ((data.ml_analysis as Record<string, unknown>)
+                          .anomalyScore as number)
+                      : 0,
+                  rawScore:
+                    typeof (data.ml_analysis as Record<string, unknown>)
+                      .rawScore === "number"
+                      ? ((data.ml_analysis as Record<string, unknown>)
+                          .rawScore as number)
+                      : 0,
+                  baseRiskLevel:
+                    typeof (data.ml_analysis as Record<string, unknown>)
+                      .baseRiskLevel === "string"
+                      ? ((data.ml_analysis as Record<string, unknown>)
+                          .baseRiskLevel as string)
+                      : "low",
+                  adjustedRiskLevel:
+                    typeof (data.ml_analysis as Record<string, unknown>)
+                      .adjustedRiskLevel === "string"
+                      ? ((data.ml_analysis as Record<string, unknown>)
+                          .adjustedRiskLevel as string)
+                      : "low",
+                  model:
+                    (data.ml_analysis as Record<string, unknown>).model &&
+                    typeof (data.ml_analysis as Record<string, unknown>).model ===
+                      "object" &&
+                    !Array.isArray(
+                      (data.ml_analysis as Record<string, unknown>).model,
+                    )
+                      ? ((data.ml_analysis as Record<string, unknown>).model as {
+                          name?: string;
+                          version?: string | null;
+                          source?: string | null;
+                        })
+                      : null,
+                  topSignals: Array.isArray(
+                    (data.ml_analysis as Record<string, unknown>).topSignals,
+                  )
+                    ? (
+                        (data.ml_analysis as Record<string, unknown>)
+                          .topSignals as unknown[]
+                      ).flatMap((entry) => {
+                        if (!entry || typeof entry !== "object") return [];
+                        const item = entry as Record<string, unknown>;
+                        if (
+                          typeof item.feature !== "string" ||
+                          typeof item.value !== "number"
+                        ) {
+                          return [];
+                        }
+                        const direction =
+                          item.direction === "high" ||
+                          item.direction === "low" ||
+                          item.direction === "neutral"
+                            ? item.direction
+                            : "neutral";
+                        return [
+                          {
+                            feature: item.feature,
+                            value: item.value,
+                            zScore:
+                              typeof item.zScore === "number"
+                                ? item.zScore
+                                : null,
+                            baselineMean:
+                              typeof item.baselineMean === "number"
+                                ? item.baselineMean
+                                : null,
+                            baselineStd:
+                              typeof item.baselineStd === "number"
+                                ? item.baselineStd
+                                : null,
+                            direction,
+                          },
+                        ];
+                      })
+                    : [],
+                }
+              : null,
+        llmAnalysis:
+          data.llmAnalysis &&
+          typeof data.llmAnalysis === "object" &&
+          !Array.isArray(data.llmAnalysis)
+            ? {
+                riskLevel:
+                  typeof (data.llmAnalysis as Record<string, unknown>)
+                    .riskLevel === "string"
+                    ? ((data.llmAnalysis as Record<string, unknown>)
+                        .riskLevel as string)
+                    : "low",
+                signalCount:
+                  typeof (data.llmAnalysis as Record<string, unknown>)
+                    .signalCount === "number"
+                    ? ((data.llmAnalysis as Record<string, unknown>)
+                        .signalCount as number)
+                    : 0,
+                signals: asStringList(
+                  (data.llmAnalysis as Record<string, unknown>).signals,
+                ),
+                ruleTags: asStringList(
+                  (data.llmAnalysis as Record<string, unknown>).ruleTags,
+                ),
+                summary:
+                  typeof (data.llmAnalysis as Record<string, unknown>)
+                    .summary === "string"
+                    ? ((data.llmAnalysis as Record<string, unknown>)
+                        .summary as string)
+                    : null,
+                source:
+                  typeof (data.llmAnalysis as Record<string, unknown>)
+                    .source === "string"
+                    ? ((data.llmAnalysis as Record<string, unknown>)
+                        .source as string)
+                    : null,
+                model:
+                  typeof (data.llmAnalysis as Record<string, unknown>)
+                    .model === "string"
+                    ? ((data.llmAnalysis as Record<string, unknown>)
+                        .model as string)
+                    : null,
+              }
+            : data.llm_analysis &&
+                typeof data.llm_analysis === "object" &&
+                !Array.isArray(data.llm_analysis)
+              ? {
+                  riskLevel:
+                    typeof (data.llm_analysis as Record<string, unknown>)
+                      .riskLevel === "string"
+                      ? ((data.llm_analysis as Record<string, unknown>)
+                          .riskLevel as string)
+                      : "low",
+                  signalCount:
+                    typeof (data.llm_analysis as Record<string, unknown>)
+                      .signalCount === "number"
+                      ? ((data.llm_analysis as Record<string, unknown>)
+                          .signalCount as number)
+                      : 0,
+                  signals: asStringList(
+                    (data.llm_analysis as Record<string, unknown>).signals,
+                  ),
+                  ruleTags: asStringList(
+                    (data.llm_analysis as Record<string, unknown>).ruleTags,
+                  ),
+                  summary:
+                    typeof (data.llm_analysis as Record<string, unknown>)
+                      .summary === "string"
+                      ? ((data.llm_analysis as Record<string, unknown>)
+                          .summary as string)
+                      : null,
+                  source:
+                    typeof (data.llm_analysis as Record<string, unknown>)
+                      .source === "string"
+                      ? ((data.llm_analysis as Record<string, unknown>)
+                          .source as string)
+                      : null,
+                  model:
+                    typeof (data.llm_analysis as Record<string, unknown>).model ===
+                    "string"
+                      ? ((data.llm_analysis as Record<string, unknown>)
+                          .model as string)
+                      : null,
+                }
+              : null,
+        finalDecision:
+          data.finalDecision &&
+          typeof data.finalDecision === "object" &&
+          !Array.isArray(data.finalDecision)
+            ? (data.finalDecision as AiMonitoringSummary["finalDecision"])
+            : data.final_decision &&
+                typeof data.final_decision === "object" &&
+                !Array.isArray(data.final_decision)
+              ? (data.final_decision as AiMonitoringSummary["finalDecision"])
+              : null,
       };
     },
     [],
@@ -2583,6 +2914,11 @@ function DashboardView({
               <dd>{afterTransferLabel}</dd>
             </div>
           </dl>
+          <div className="transfer-ai-detail-grid">
+            {renderTransferDecisionSummary(monitoring)}
+            {renderTransferMlInsights(monitoring, { compact: true })}
+            {renderTransferLlmInsights(monitoring, { compact: true })}
+          </div>
           {reasons.length > 0 ? (
             <ul>
               {reasons.map((reason) => (
@@ -2618,8 +2954,153 @@ function DashboardView({
       transferServerFaceIdReason,
       transferStep,
       wallet?.balance,
+      renderTransferDecisionSummary,
+      renderTransferLlmInsights,
+      renderTransferMlInsights,
     ],
   );
+
+  function renderTransferMlInsights(
+    monitoring: AiMonitoringSummary | null,
+    options?: { compact?: boolean },
+  ) {
+    const compact = Boolean(options?.compact);
+    const ml = monitoring?.mlAnalysis;
+    if (!ml) return null;
+    const signals = (ml.topSignals || []).slice(0, compact ? 2 : 3);
+    const modelMeta = [ml.model?.name, ml.model?.version]
+      .filter((item): item is string => typeof item === "string" && Boolean(item))
+      .join(" / ");
+
+    return (
+      <div className="transfer-ai-detail-card">
+        <div className="transfer-ai-detail-head">
+          <span className="transfer-ai-detail-kicker">ML analysis</span>
+          <strong>{humanizeRiskKey(ml.adjustedRiskLevel)} risk</strong>
+        </div>
+        <div className="transfer-ai-detail-meta">
+          <span>Score {Math.round(ml.anomalyScore * 100)}%</span>
+          <span>Raw {formatRiskNumber(ml.rawScore)}</span>
+          <span>Base {humanizeRiskKey(ml.baseRiskLevel)}</span>
+        </div>
+        {signals.length > 0 ? (
+          <div className="transfer-ai-signal-list">
+            {signals.map((signal) => (
+              <div
+                key={`${signal.feature}-${signal.value}`}
+                className="transfer-ai-signal-chip"
+              >
+                <strong>{humanizeRiskKey(signal.feature)}</strong>
+                <span>
+                  {signal.direction === "high"
+                    ? "Higher than usual"
+                    : signal.direction === "low"
+                      ? "Lower than usual"
+                      : "Notable shift"}
+                  {signal.zScore !== null && signal.zScore !== undefined
+                    ? ` (z=${formatRiskNumber(signal.zScore)})`
+                    : ""}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="transfer-ai-detail-copy">
+            The anomaly model flagged this transfer from its feature pattern,
+            but no single feature dominated the decision.
+          </p>
+        )}
+        {modelMeta ? (
+          <small className="transfer-ai-detail-foot">Model: {modelMeta}</small>
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderTransferLlmInsights(
+    monitoring: AiMonitoringSummary | null,
+    options?: { compact?: boolean },
+  ) {
+    const compact = Boolean(options?.compact);
+    const llm = monitoring?.llmAnalysis;
+    if (!llm) return null;
+    const signals = llm.signals.slice(0, compact ? 2 : 3);
+    const tags = llm.ruleTags.slice(0, compact ? 2 : 3);
+    const summary = llm.summary?.trim() || "";
+    const isDisabledReview =
+      llm.riskLevel === "low" &&
+      llm.signalCount === 0 &&
+      signals.length === 0 &&
+      tags.length === 0 &&
+      (!summary || summary.toLowerCase().includes("disabled"));
+
+    if (isDisabledReview) {
+      return null;
+    }
+
+    return (
+      <div className="transfer-ai-detail-card">
+        <div className="transfer-ai-detail-head">
+          <span className="transfer-ai-detail-kicker">LLM review</span>
+          <strong>{humanizeRiskKey(llm.riskLevel)} concern</strong>
+        </div>
+        <div className="transfer-ai-detail-meta">
+          <span>
+            {llm.signalCount} signal{llm.signalCount === 1 ? "" : "s"}
+          </span>
+          {llm.source ? <span>{humanizeRiskKey(llm.source)}</span> : null}
+          {llm.model ? <span>{llm.model}</span> : null}
+        </div>
+        {summary ? (
+          <p className="transfer-ai-detail-copy">{summary}</p>
+        ) : null}
+        {signals.length > 0 ? (
+          <ul className="transfer-ai-detail-list">
+            {signals.map((signal) => (
+              <li key={signal}>{translateTransferRiskCopy(signal)}</li>
+            ))}
+          </ul>
+        ) : null}
+        {tags.length > 0 ? (
+          <div className="transfer-ai-tag-row">
+            {tags.map((tag) => (
+              <span key={tag} className="transfer-ai-tag">
+                {humanizeRiskKey(tag)}
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderTransferDecisionSummary(monitoring: AiMonitoringSummary | null) {
+    const decision = monitoring?.finalDecision;
+    if (!decision) return null;
+    return (
+      <div className="transfer-ai-detail-card decision">
+        <div className="transfer-ai-detail-head">
+          <span className="transfer-ai-detail-kicker">Decision summary</span>
+          <strong>
+            {decision.finalAction
+              ? humanizeRiskKey(decision.finalAction)
+              : humanizeRiskKey(decision.riskLevel)}
+          </strong>
+        </div>
+        <div className="transfer-ai-detail-meta">
+          {typeof decision.finalScore === "number" ? (
+            <span>Final {decision.finalScore}%</span>
+          ) : null}
+          {decision.stepUpLevel ? (
+            <span>{humanizeRiskKey(decision.stepUpLevel)}</span>
+          ) : null}
+        </div>
+        {decision.summary ? (
+          <p className="transfer-ai-detail-copy">{decision.summary}</p>
+        ) : null}
+      </div>
+    );
+  }
 
   const visibleTransferMonitoring = useMemo(() => {
     if (!transferMonitoring) return null;
@@ -2718,16 +3199,16 @@ function DashboardView({
           : "Review, then release OTP";
     const title =
       tone === "blocked"
-        ? "Transfer paused before funds leave your wallet"
+        ? "Transfer paused before OTP"
         : tone === "warning"
-          ? "AI wants one more review before sending OTP"
-          : "Quick AI safety review before OTP";
+          ? "Review this transfer before OTP"
+          : "Quick safety check before OTP";
     const summary =
       tone === "blocked"
-        ? `This transfer to ${recipientLabel} matches patterns that often appear when attackers test small payments, pressure victims, or route money through unfamiliar recipients. Funds stay in your wallet until the risk clears.`
+        ? `FPIPay paused OTP for ${recipientLabel} because this payment matches a stronger risk pattern.`
         : tone === "warning"
-          ? `This transfer to ${recipientLabel} can still continue, but the behavior is unusual enough that FPIPay wants you to pause, confirm the recipient, and re-check the purpose before OTP is issued.`
-          : `AI noticed a mild deviation for this transfer to ${recipientLabel}. Nothing is confirmed as fraud, but a short review helps prevent accidental or manipulated payments.`;
+          ? `This transfer to ${recipientLabel} can continue, but FPIPay wants a quick manual check first.`
+          : `FPIPay noticed a mild deviation for this transfer to ${recipientLabel}.`;
     const signals = [
       rapidCashOutSignal,
       ...(advisory?.reasons || []),
@@ -2923,10 +3404,10 @@ function DashboardView({
   ]);
 
   useEffect(() => {
-    if (!transferOpen || transferStep !== 3) {
+    if (!transferOpen || transferStep !== 3 || transferOtpRequired) {
       setTransferAiInterventionOpen(false);
     }
-  }, [transferOpen, transferStep]);
+  }, [transferOpen, transferOtpRequired, transferStep]);
 
   const renderAiMonitoringPanel = useCallback(
     (monitoring: AiMonitoringSummary | null, title: string) => {
@@ -5275,7 +5756,7 @@ function DashboardView({
 
   const handleTransferFaceConfirm = useCallback(async () => {
     if (!transferFaceProof) {
-      setTransferOtpError("Complete the live FaceID scan first.");
+      setTransferOtpError("Complete the 5-second FaceID video first.");
       return;
     }
     setTransferOtpError("");
@@ -6819,7 +7300,7 @@ function DashboardView({
                     <h3>Transfer FaceID Verification</h3>
                     <p>
                       {transferServerFaceIdReason ||
-                        `OTP is ready. Complete FaceID now to approve this transfer above $${TRANSFER_FACE_ID_THRESHOLD.toLocaleString(
+                        `OTP is ready. Record a 5-second FaceID video now to approve this transfer above $${TRANSFER_FACE_ID_THRESHOLD.toLocaleString(
                           "en-US",
                         )}.`}
                     </p>
@@ -6837,7 +7318,7 @@ function DashboardView({
                   <small className="transfer-faceid-summary-copy">
                     {transferServerFaceIdReason
                       ? `OTP was verified. ${transferServerFaceIdReason}`
-                      : `OTP was entered successfully. FaceID is required to release this transfer above $${TRANSFER_FACE_ID_THRESHOLD.toLocaleString(
+                      : `OTP was entered successfully. A 5-second FaceID video is required to release this transfer above $${TRANSFER_FACE_ID_THRESHOLD.toLocaleString(
                           "en-US",
                         )}.`}
                   </small>
@@ -6946,63 +7427,39 @@ function DashboardView({
                 <div className="transfer-ai-warning-body">
                   <div className="transfer-ai-warning-summary">
                     <div>
+                      <span>Recipient</span>
+                      <strong>{transferAiIntervention.recipientLabel}</strong>
+                    </div>
+                    <div>
+                      <span>Amount</span>
+                      <strong>{transferAiIntervention.amountLabel}</strong>
+                    </div>
+                    <div>
                       <span>Status</span>
                       <strong>{transferAiIntervention.statusLabel}</strong>
                     </div>
                     <div>
-                      <span>Confidence</span>
-                      <strong>{transferAiIntervention.confidence}%</strong>
-                    </div>
-                    <div>
-                      <span>Next action</span>
+                      <span>Next step</span>
                       <strong>{transferAiIntervention.nextAction}</strong>
                     </div>
                   </div>
                   <div className="transfer-ai-warning-grid">
                     <div className="transfer-ai-warning-section">
                       <span className="transfer-ai-warning-section-label">
-                        Transfer snapshot
+                        Why this popped up
                       </span>
-                      <strong>{transferAiIntervention.recipientLabel}</strong>
-                      <p>Amount: {transferAiIntervention.amountLabel}</p>
-                      {transferAiIntervention.archetype ? (
-                        <small>
-                          Pattern:{" "}
-                          {translateTransferRiskCopy(
-                            transferAiIntervention.archetype,
-                          )}
-                        </small>
-                      ) : null}
-                      {isTransferHoldActive ? (
-                        <small>
-                          Retry after {transferHoldRemainingLabel} or wait for
-                          manual review to clear the hold.
-                        </small>
-                      ) : null}
-                    </div>
-                    <div className="transfer-ai-warning-section">
-                      <span className="transfer-ai-warning-section-label">
-                        Why AI flagged this
-                      </span>
+                      <p>{transferAiIntervention.summary}</p>
                       {transferAiIntervention.signals.length > 0 ? (
                         <ul>
                           {transferAiIntervention.signals.map((item) => (
                             <li key={item}>{item}</li>
                           ))}
                         </ul>
-                      ) : (
-                        <p>
-                          AI detected enough deviation from your normal behavior
-                          to trigger a safety review before OTP is sent.
-                        </p>
-                      )}
-                      {transferAiIntervention.timeline.length > 0 ? (
-                        <small>{transferAiIntervention.timeline[0]}</small>
                       ) : null}
                     </div>
                     <div className="transfer-ai-warning-section">
                       <span className="transfer-ai-warning-section-label">
-                        Before continuing
+                        Before OTP
                       </span>
                       <ul>
                         {transferAiIntervention.protectSteps.map((item) => (
@@ -7012,6 +7469,21 @@ function DashboardView({
                           <li key={item}>{item}</li>
                         ))}
                       </ul>
+                      {transferAiIntervention.archetype ? (
+                        <small>
+                          Pattern:{" "}
+                          {translateTransferRiskCopy(
+                            transferAiIntervention.archetype,
+                          )}
+                        </small>
+                      ) : isTransferHoldActive ? (
+                        <small>
+                          Retry after {transferHoldRemainingLabel} or wait for
+                          manual review to clear the hold.
+                        </small>
+                      ) : transferAiIntervention.timeline.length > 0 ? (
+                        <small>{transferAiIntervention.timeline[0]}</small>
+                      ) : null}
                     </div>
                   </div>
                 </div>
@@ -10681,7 +11153,7 @@ function App() {
       return;
     }
     if (!faceEnrollmentProof) {
-      toast("Complete the live FaceID scan first.", "error");
+      toast("Complete the 5-second FaceID video first.", "error");
       return;
     }
 
@@ -10703,6 +11175,10 @@ function App() {
         metadata?: Record<string, unknown>;
       } | null;
       if (!resp.ok) {
+        console.error(
+          `FaceID enroll failed: ${resp.status} ${data?.error || "Unknown error"}`,
+          data,
+        );
         toast(data?.error || "Failed to enroll FaceID", "error");
         return;
       }
@@ -10711,6 +11187,7 @@ function App() {
       closeFaceEnrollmentModal();
       toast(data?.message || "FaceID enrolled successfully.");
     } catch {
+      console.error("FaceID enroll request crashed before completion");
       toast("Cannot connect to API server.", "error");
     } finally {
       setFaceEnrollmentBusy(false);
@@ -11409,8 +11886,8 @@ function App() {
                       </h3>
                       <p>
                         {faceIdStatus.enabled
-                          ? "Complete a fresh live face scan to replace the current FaceID sample for this wallet."
-                          : "Complete one live face scan to bind this wallet account to your protected identity profile."}
+                          ? "Record a fresh 5-second face video to replace the current FaceID sample for this wallet."
+                          : "Record one 5-second face video to bind this wallet account to your protected identity profile."}
                       </p>
                     </div>
                     <button
@@ -11440,7 +11917,7 @@ function App() {
                     <button
                       type="button"
                       className="btn-primary"
-                      disabled={faceEnrollmentBusy || !faceEnrollmentProof}
+                      disabled={faceEnrollmentBusy}
                       onClick={() => void handleEnrollFaceId()}
                     >
                       {faceEnrollmentBusy
@@ -11748,7 +12225,7 @@ function AuthShell({
 
   const submitSignupOtpRequest = async () => {
     if (!signupFaceEnrollment) {
-      toast("Please complete the FaceID scan to continue", "error");
+      toast("Please complete the 5-second FaceID video to continue", "error");
       return;
     }
     setAuthBusy(true);
@@ -12985,7 +13462,7 @@ function AuthShell({
                     <div>
                       <h3>Create Account with FaceID</h3>
                       <p>
-                        Complete one live face scan to finish your account
+                        Complete one 5-second face video to finish your account
                         protection setup before we send the signup code.
                       </p>
                     </div>
