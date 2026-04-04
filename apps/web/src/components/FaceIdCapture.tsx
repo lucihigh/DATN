@@ -28,6 +28,7 @@ export type FaceIdProof = {
   descriptor: string;
   livenessScore: number;
   motionScore: number;
+  eyeMotionScore: number;
   faceCoverage: number;
   sampleCount: number;
   completedSteps: FaceIdStepId[];
@@ -50,6 +51,10 @@ type FaceIdCaptureProps = {
   disabled?: boolean;
   mode?: "enroll" | "verify";
   onChange: (value: FaceIdProof | null) => void;
+  onFeedbackChange?: (input: {
+    status: "idle" | "loading" | "ready" | "scanning" | "verified" | "error";
+    message: string;
+  }) => void;
 };
 
 type CameraOption = {
@@ -107,6 +112,12 @@ type RecordedVideoEvidence = {
   dataUrl: string;
   durationMs: number;
   mimeType: string;
+};
+
+type EyeMetrics = {
+  leftEar: number;
+  rightEar: number;
+  averageEar: number;
 };
 
 const STEP_COLORS: Record<FaceIdStepId, string> = {
@@ -188,6 +199,43 @@ const averagePoint = (
     count += 1;
   }
   return count ? { x: sumX / count, y: sumY / count } : null;
+};
+
+const getEyeAspectRatio = (
+  landmarks: Array<{ x: number; y: number }>,
+  indices: number[],
+) => {
+  if (indices.length < 4) return null;
+  const outer = landmarks[indices[0]];
+  const inner = landmarks[indices[1]];
+  const upper = landmarks[indices[2]];
+  const lower = landmarks[indices[3]];
+  if (!outer || !inner || !upper || !lower) return null;
+
+  const width = Math.hypot(inner.x - outer.x, inner.y - outer.y);
+  const height = Math.hypot(lower.x - upper.x, lower.y - upper.y);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1) {
+    return null;
+  }
+
+  return height / width;
+};
+
+const getEyeMetrics = (landmarks?: Array<{ x: number; y: number }>) => {
+  if (!landmarks?.length) return null;
+  const leftEar = getEyeAspectRatio(landmarks, LEFT_EYE_INDICES);
+  const rightEar = getEyeAspectRatio(landmarks, RIGHT_EYE_INDICES);
+  if (
+    !Number.isFinite(leftEar ?? Number.NaN) ||
+    !Number.isFinite(rightEar ?? Number.NaN)
+  ) {
+    return null;
+  }
+  return {
+    leftEar: leftEar as number,
+    rightEar: rightEar as number,
+    averageEar: ((leftEar as number) + (rightEar as number)) / 2,
+  } satisfies EyeMetrics;
 };
 
 const waitForVideoReady = (video: HTMLVideoElement) =>
@@ -537,6 +585,7 @@ export function FaceIdCapture({
   disabled = false,
   mode = "enroll",
   onChange,
+  onFeedbackChange,
 }: FaceIdCaptureProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -553,7 +602,10 @@ export function FaceIdCapture({
     y: number;
     coverage: number;
   } | null>(null);
+  const prevEyeMetricsRef = useRef<EyeMetrics | null>(null);
   const motionAccumulatorRef = useRef(0);
+  const eyeMotionAccumulatorRef = useRef(0);
+  const eyeMotionPeakRef = useRef(0);
   const cueAccumulatorRef = useRef(0);
   const sampleCountRef = useRef(0);
   const scanStartedAtRef = useRef(0);
@@ -570,12 +622,11 @@ export function FaceIdCapture({
   const recordingStartedAtRef = useRef(0);
   const recordingAccumulatedMsRef = useRef(0);
   const recordingTickStartedAtRef = useRef(0);
-  const recordingStopPromiseRef = useRef<Promise<RecordedVideoEvidence | null> | null>(
-    null,
-  );
-  const capturePhaseRef = useRef<"idle" | "scanning" | "finalizing" | "verified">(
-    "idle",
-  );
+  const recordingStopPromiseRef =
+    useRef<Promise<RecordedVideoEvidence | null> | null>(null);
+  const capturePhaseRef = useRef<
+    "idle" | "scanning" | "finalizing" | "verified"
+  >("idle");
   const finalizeRequestedRef = useRef(false);
   const readyFrameStreakRef = useRef(0);
   const centerSnapshotRef = useRef<{
@@ -606,6 +657,10 @@ export function FaceIdCapture({
   const [faceAligned, setFaceAligned] = useState(false);
   const [alignmentGlow, setAlignmentGlow] = useState(0);
   const isVerifyMode = mode === "verify";
+
+  useEffect(() => {
+    onFeedbackChange?.({ status, message });
+  }, [message, onFeedbackChange, status]);
 
   const activeStep = challenge?.steps[stepIndex] ?? null;
   const activeCueColor = activeStep ? STEP_COLORS[activeStep.id] : "#38bdf8";
@@ -654,7 +709,10 @@ export function FaceIdCapture({
     setDiagnostic("");
     stepStreakRef.current = 0;
     prevFaceCenterRef.current = null;
+    prevEyeMetricsRef.current = null;
     motionAccumulatorRef.current = 0;
+    eyeMotionAccumulatorRef.current = 0;
+    eyeMotionPeakRef.current = 0;
     cueAccumulatorRef.current = 0;
     sampleCountRef.current = 0;
     scanStartedAtRef.current = 0;
@@ -950,10 +1008,7 @@ export function FaceIdCapture({
       (scanTickStartedAtRef.current
         ? Math.max(0, performance.now() - scanTickStartedAtRef.current)
         : 0);
-    return Math.max(
-      0,
-      MIN_SCAN_DURATION_MS - elapsedMs,
-    );
+    return Math.max(0, MIN_SCAN_DURATION_MS - elapsedMs);
   }, []);
 
   const getTimedScanProgress = useCallback((now: number) => {
@@ -963,11 +1018,7 @@ export function FaceIdCapture({
       (scanTickStartedAtRef.current
         ? Math.max(0, now - scanTickStartedAtRef.current)
         : 0);
-    return clamp(
-      elapsedMs / MIN_SCAN_DURATION_MS,
-      0,
-      1,
-    );
+    return clamp(elapsedMs / MIN_SCAN_DURATION_MS, 0, 1);
   }, []);
 
   const pauseVideoRecording = useCallback((now: number) => {
@@ -993,90 +1044,105 @@ export function FaceIdCapture({
     }
   }, []);
 
-  const startVideoRecording = useCallback((stream: MediaStream, now: number) => {
-    if (typeof MediaRecorder === "undefined") {
-      throw new Error(
-        "5-second FaceID video capture is unavailable on this browser. Use the latest Chrome or Edge.",
+  const startVideoRecording = useCallback(
+    (stream: MediaStream, now: number) => {
+      if (typeof MediaRecorder === "undefined") {
+        throw new Error(
+          "5-second FaceID video capture is unavailable on this browser. Use the latest Chrome or Edge.",
+        );
+      }
+      const mimeType = pickVideoMimeType();
+      const recorderOptions = {
+        ...(mimeType ? { mimeType } : {}),
+        videoBitsPerSecond: 900_000,
+      };
+      const recorder = new MediaRecorder(stream, recorderOptions);
+      recordedChunksRef.current = [];
+      recordingStartedAtRef.current = now;
+      recordingAccumulatedMsRef.current = 0;
+      recordingTickStartedAtRef.current = now;
+      const stopPromise = new Promise<RecordedVideoEvidence | null>(
+        (resolve) => {
+          recorder.ondataavailable = (event) => {
+            if (event.data && event.data.size > 0) {
+              recordedChunksRef.current.push(event.data);
+            }
+          };
+          recorder.onerror = () => {
+            resolve(null);
+          };
+          recorder.onstop = () => {
+            const elapsedMs =
+              recordingAccumulatedMsRef.current +
+              (recordingTickStartedAtRef.current
+                ? Math.max(
+                    0,
+                    performance.now() - recordingTickStartedAtRef.current,
+                  )
+                : 0);
+            const chunks = recordedChunksRef.current.slice();
+            recordedChunksRef.current = [];
+            mediaRecorderRef.current = null;
+            recordingAccumulatedMsRef.current = 0;
+            recordingTickStartedAtRef.current = 0;
+            if (!chunks.length) {
+              resolve(null);
+              return;
+            }
+            const blob = new Blob(chunks, {
+              type: recorder.mimeType || mimeType || "video/webm",
+            });
+            void blobToDataUrl(blob)
+              .then((dataUrl) =>
+                resolve({
+                  dataUrl,
+                  durationMs: elapsedMs,
+                  mimeType:
+                    blob.type || recorder.mimeType || mimeType || "video/webm",
+                }),
+              )
+              .catch(() => resolve(null));
+          };
+        },
       );
-    }
-    const mimeType = pickVideoMimeType();
-    const recorderOptions = {
-      ...(mimeType ? { mimeType } : {}),
-      videoBitsPerSecond: 900_000,
-    };
-    const recorder = new MediaRecorder(stream, recorderOptions);
-    recordedChunksRef.current = [];
-    recordingStartedAtRef.current = now;
-    recordingAccumulatedMsRef.current = 0;
-    recordingTickStartedAtRef.current = now;
-    const stopPromise = new Promise<RecordedVideoEvidence | null>((resolve) => {
-      recorder.ondataavailable = (event) => {
-        if (event.data && event.data.size > 0) {
-          recordedChunksRef.current.push(event.data);
-        }
-      };
-      recorder.onerror = () => {
-        resolve(null);
-      };
-      recorder.onstop = () => {
-        const elapsedMs =
-          recordingAccumulatedMsRef.current +
-          (recordingTickStartedAtRef.current
-            ? Math.max(0, performance.now() - recordingTickStartedAtRef.current)
-            : 0);
-        const chunks = recordedChunksRef.current.slice();
-        recordedChunksRef.current = [];
-        mediaRecorderRef.current = null;
-        recordingAccumulatedMsRef.current = 0;
-        recordingTickStartedAtRef.current = 0;
-        if (!chunks.length) {
-          resolve(null);
-          return;
-        }
-        const blob = new Blob(chunks, {
-          type: recorder.mimeType || mimeType || "video/webm",
-        });
-        void blobToDataUrl(blob)
-          .then((dataUrl) =>
-            resolve({
-              dataUrl,
-              durationMs: elapsedMs,
-              mimeType: blob.type || recorder.mimeType || mimeType || "video/webm",
-            }),
-          )
-          .catch(() => resolve(null));
-      };
-    });
 
-    mediaRecorderRef.current = recorder;
-    recordingStopPromiseRef.current = stopPromise;
-    recorder.start(250);
-  }, []);
+      mediaRecorderRef.current = recorder;
+      recordingStopPromiseRef.current = stopPromise;
+      recorder.start(250);
+    },
+    [],
+  );
 
-  const resumeVideoRecording = useCallback((now: number) => {
-    const stream = streamRef.current;
-    if (!stream) {
-      return;
-    }
-
-    const recorder = mediaRecorderRef.current;
-    if (!recorder) {
-      startVideoRecording(stream, now);
-      return;
-    }
-
-    if (recorder.state === "paused") {
-      try {
-        recorder.resume();
-      } catch {
+  const resumeVideoRecording = useCallback(
+    (now: number) => {
+      const stream = streamRef.current;
+      if (!stream) {
         return;
       }
-    }
 
-    if (recorder.state === "recording" && !recordingTickStartedAtRef.current) {
-      recordingTickStartedAtRef.current = now;
-    }
-  }, [startVideoRecording]);
+      const recorder = mediaRecorderRef.current;
+      if (!recorder) {
+        startVideoRecording(stream, now);
+        return;
+      }
+
+      if (recorder.state === "paused") {
+        try {
+          recorder.resume();
+        } catch {
+          return;
+        }
+      }
+
+      if (
+        recorder.state === "recording" &&
+        !recordingTickStartedAtRef.current
+      ) {
+        recordingTickStartedAtRef.current = now;
+      }
+    },
+    [startVideoRecording],
+  );
 
   const discardVideoRecording = useCallback(() => {
     recordingAccumulatedMsRef.current = 0;
@@ -1101,31 +1167,37 @@ export function FaceIdCapture({
     }
   }, []);
 
-  const pauseTimedCapture = useCallback((now: number) => {
-    if (scanTickStartedAtRef.current) {
-      accumulatedScanMsRef.current += Math.max(
-        0,
-        now - scanTickStartedAtRef.current,
-      );
-      scanTickStartedAtRef.current = 0;
-    }
-    pauseVideoRecording(now);
-    if (!lostTrackStartedAtRef.current) {
-      lostTrackStartedAtRef.current = now;
-    }
-  }, [pauseVideoRecording]);
+  const pauseTimedCapture = useCallback(
+    (now: number) => {
+      if (scanTickStartedAtRef.current) {
+        accumulatedScanMsRef.current += Math.max(
+          0,
+          now - scanTickStartedAtRef.current,
+        );
+        scanTickStartedAtRef.current = 0;
+      }
+      pauseVideoRecording(now);
+      if (!lostTrackStartedAtRef.current) {
+        lostTrackStartedAtRef.current = now;
+      }
+    },
+    [pauseVideoRecording],
+  );
 
-  const resumeTimedCapture = useCallback((now: number) => {
-    if (!scanStartedAtRef.current) {
-      scanStartedAtRef.current = now;
-      accumulatedScanMsRef.current = 0;
-    }
-    if (!scanTickStartedAtRef.current) {
-      scanTickStartedAtRef.current = now;
-    }
-    lostTrackStartedAtRef.current = 0;
-    resumeVideoRecording(now);
-  }, [resumeVideoRecording]);
+  const resumeTimedCapture = useCallback(
+    (now: number) => {
+      if (!scanStartedAtRef.current) {
+        scanStartedAtRef.current = now;
+        accumulatedScanMsRef.current = 0;
+      }
+      if (!scanTickStartedAtRef.current) {
+        scanTickStartedAtRef.current = now;
+      }
+      lostTrackStartedAtRef.current = 0;
+      resumeVideoRecording(now);
+    },
+    [resumeVideoRecording],
+  );
 
   const resetTimedCaptureProgress = useCallback(() => {
     scanStartedAtRef.current = 0;
@@ -1159,10 +1231,14 @@ export function FaceIdCapture({
     const videoEvidence = await stopPromise;
     recordingStopPromiseRef.current = null;
     if (!videoEvidence || !videoEvidence.dataUrl.startsWith("data:video/")) {
-      throw new Error("FaceID video evidence could not be recorded. Please try again.");
+      throw new Error(
+        "FaceID video evidence could not be recorded. Please try again.",
+      );
     }
     if (videoEvidence.durationMs < MIN_VIDEO_DURATION_MS - 250) {
-      throw new Error("Keep recording for the full 5 seconds before finishing FaceID.");
+      throw new Error(
+        "Keep recording for the full 5 seconds before finishing FaceID.",
+      );
     }
     return videoEvidence;
   }, []);
@@ -1213,6 +1289,14 @@ export function FaceIdCapture({
             ? resolvedSteps.length / challenge.steps.length
             : 0;
         const motionScore = clamp(motionAccumulatorRef.current / 0.45, 0, 1);
+        const eyeMotionScore = clamp(
+          Math.max(
+            eyeMotionAccumulatorRef.current / 0.1,
+            eyeMotionPeakRef.current / 0.02,
+          ),
+          0,
+          1,
+        );
         const cueScore = clamp(
           sampleCountRef.current > 0
             ? cueAccumulatorRef.current / sampleCountRef.current
@@ -1226,7 +1310,10 @@ export function FaceIdCapture({
           1,
         );
         const livenessScore = clamp(
-          completedRatio * 0.4 + motionScore * 0.4 + cueScore * 0.2,
+          completedRatio * 0.35 +
+            motionScore * 0.25 +
+            eyeMotionScore * 0.25 +
+            cueScore * 0.15,
           0,
           1,
         );
@@ -1239,6 +1326,7 @@ export function FaceIdCapture({
           descriptor,
           livenessScore,
           motionScore,
+          eyeMotionScore,
           faceCoverage,
           sampleCount: sampleCountRef.current,
           completedSteps: resolvedSteps,
@@ -1384,9 +1472,7 @@ export function FaceIdCapture({
 
   const canContinueTimedCapture = useCallback(
     (alignment: AlignmentSnapshot, motionMetric: number) =>
-      alignment.aligned &&
-      alignment.coverage >= 0.072 &&
-      motionMetric <= 0.24,
+      alignment.aligned && alignment.coverage >= 0.072 && motionMetric <= 0.24,
     [],
   );
 
@@ -1610,6 +1696,7 @@ export function FaceIdCapture({
         if (!faces.length) {
           noDetectionFramesRef.current += 1;
           lastDetectedFaceRef.current = null;
+          prevEyeMetricsRef.current = null;
           if (scanStartedAtRef.current > 0) {
             pauseTimedCapture(now);
             const pausedProgress = getTimedScanProgress(now);
@@ -1698,6 +1785,24 @@ export function FaceIdCapture({
           coverage: alignment.coverage,
         };
 
+        const eyeMetrics = getEyeMetrics(detectedFace.landmarks);
+        if (eyeMetrics && prevEyeMetricsRef.current) {
+          const eyeDelta =
+            Math.abs(
+              eyeMetrics.averageEar - prevEyeMetricsRef.current.averageEar,
+            ) +
+            Math.abs(eyeMetrics.leftEar - prevEyeMetricsRef.current.leftEar) *
+              0.7 +
+            Math.abs(eyeMetrics.rightEar - prevEyeMetricsRef.current.rightEar) *
+              0.7;
+          eyeMotionAccumulatorRef.current += Math.min(0.05, eyeDelta * 1.8);
+          eyeMotionPeakRef.current = Math.max(
+            eyeMotionPeakRef.current,
+            eyeDelta,
+          );
+        }
+        prevEyeMetricsRef.current = eyeMetrics;
+
         const sampleX = clamp(Math.round(box.x), 0, canvas.width - 1);
         const sampleY = clamp(Math.round(box.y), 0, canvas.height - 1);
         const sampleW = clamp(Math.round(box.width), 1, canvas.width - sampleX);
@@ -1759,9 +1864,7 @@ export function FaceIdCapture({
             setFaceAligned(false);
             setAlignmentGlow(Math.max(alignment.glow * 0.35, 0.12));
             setScanProgress(pausedProgress);
-            setMessage(
-              "Hold your face inside the oval to continue recording.",
-            );
+            setMessage("Hold your face inside the oval to continue recording.");
           }
           rafRef.current = window.requestAnimationFrame(
             () => void processFrame(),
@@ -1818,6 +1921,7 @@ export function FaceIdCapture({
           return;
         }
       } else {
+        prevEyeMetricsRef.current = null;
         const box = getCompatibilityBox(canvas);
         const sampleX = clamp(Math.round(box.x), 0, canvas.width - 1);
         const sampleY = clamp(Math.round(box.y), 0, canvas.height - 1);
@@ -1888,7 +1992,9 @@ export function FaceIdCapture({
         }
 
         const progressRatio = clamp(compatScanProgressRef.current, 0, 1);
-        setScanProgress(scanStartedAtRef.current ? getTimedScanProgress(now) : 0);
+        setScanProgress(
+          scanStartedAtRef.current ? getTimedScanProgress(now) : 0,
+        );
 
         if (!frameHasSignal) {
           setMessage("Align your face inside the oval to start auto scan.");
@@ -1979,7 +2085,9 @@ export function FaceIdCapture({
   const startCapture = useCallback(async () => {
     if (disabled) return;
     setStatus("loading");
-    setMessage("Starting camera and preparing your 5-second face verification...");
+    setMessage(
+      "Starting camera and preparing your 5-second face verification...",
+    );
     onChange(null);
 
     try {
@@ -2109,7 +2217,10 @@ export function FaceIdCapture({
 
       stepStreakRef.current = 0;
       prevFaceCenterRef.current = null;
+      prevEyeMetricsRef.current = null;
       motionAccumulatorRef.current = 0;
+      eyeMotionAccumulatorRef.current = 0;
+      eyeMotionPeakRef.current = 0;
       cueAccumulatorRef.current = 0;
       sampleCountRef.current = 0;
       scanStartedAtRef.current = 0;

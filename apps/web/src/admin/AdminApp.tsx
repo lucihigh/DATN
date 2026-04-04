@@ -180,6 +180,33 @@ type AdminAlertApi = {
   recentAdminTopUpAmount24h?: number | null;
   recentSelfDepositAmount24h?: number | null;
   rapidCashOutRiskScore?: number | null;
+  transferAdvisorySeverity?: "caution" | "warning" | "blocked" | null;
+  transferAdvisoryTitle?: string | null;
+  transferAdvisoryMessage?: string | null;
+  transferBlockedUntil?: string | null;
+  finalAction?:
+    | "ALLOW"
+    | "ALLOW_WITH_WARNING"
+    | "REQUIRE_OTP"
+    | "REQUIRE_OTP_FACE_ID"
+    | "HOLD_REVIEW"
+    | null;
+  stepUpLevel?: string | null;
+  nextStep?: string | null;
+  archetype?: string | null;
+  timeline?: string[];
+  recommendedActions?: string[];
+  ruleHits?: Array<{
+    ruleId?: string;
+    title?: string;
+    reason?: string;
+    userWarning?: string;
+    riskLevel?: string;
+  }>;
+  warningTitle?: string | null;
+  warningMessage?: string | null;
+  warningMustDo?: string[];
+  warningDoNot?: string[];
   analysisSignals?: Record<string, unknown> | null;
 };
 
@@ -330,6 +357,17 @@ const pickAuditString = (...values: Array<unknown>): string | undefined => {
   return undefined;
 };
 
+const readAuditDeviceContext = (source?: Record<string, unknown>) => {
+  if (!source || typeof source !== "object" || Array.isArray(source)) {
+    return undefined;
+  }
+  const raw = source.deviceContext;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return undefined;
+  }
+  return raw as Record<string, unknown>;
+};
+
 const buildAuditLocationLabel = (
   source?: Record<string, unknown>,
   ipAddress?: string | null,
@@ -393,6 +431,14 @@ const formatAlertOrigin = (
 const summarizeAuditUserAgent = (value?: string) => {
   const userAgent = asTrimmedString(value);
   if (!userAgent) return "-";
+  if (
+    !/Mozilla\/|AppleWebKit|Chrome\/|Firefox\/|Safari\/|Edg\//i.test(
+      userAgent,
+    ) &&
+    / \| /.test(userAgent)
+  ) {
+    return userAgent;
+  }
 
   const browser = userAgent.match(/Edg\/(\d+)/)?.[1]
     ? `Edge ${userAgent.match(/Edg\/(\d+)/)?.[1]}`
@@ -431,6 +477,22 @@ const mapAuditDocToView = (doc: AuditLogDoc): AuditLogView => {
     doc.details && typeof doc.details === "object" ? doc.details : undefined;
   const metadataObj =
     doc.metadata && typeof doc.metadata === "object" ? doc.metadata : undefined;
+  const detailsDeviceContext = readAuditDeviceContext(detailsObj);
+  const metadataDeviceContext = readAuditDeviceContext(metadataObj);
+  const deviceTitle = pickAuditString(
+    detailsObj?.deviceTitle,
+    detailsDeviceContext?.deviceTitle,
+    metadataObj?.deviceTitle,
+    metadataDeviceContext?.deviceTitle,
+  );
+  const deviceDetail = pickAuditString(
+    detailsObj?.deviceDetail,
+    detailsDeviceContext?.deviceDetail,
+    metadataObj?.deviceDetail,
+    metadataDeviceContext?.deviceDetail,
+  );
+  const fallbackDeviceSummary =
+    [deviceTitle, deviceDetail].filter(Boolean).join(" | ") || undefined;
   const detail =
     typeof doc.details === "string"
       ? doc.details
@@ -466,10 +528,15 @@ const mapAuditDocToView = (doc: AuditLogDoc): AuditLogView => {
         detailsObj?.currentUserAgent,
         detailsObj?.previousUserAgent,
         detailsObj?.device,
+        detailsObj?.deviceDetail,
         metadataObj?.userAgent,
         metadataObj?.currentUserAgent,
         metadataObj?.previousUserAgent,
-      ) ?? "",
+        metadataObj?.device,
+        metadataObj?.deviceDetail,
+      ) ??
+      fallbackDeviceSummary ??
+      "",
     requestId:
       pickAuditString(
         detailsObj?.requestId,
@@ -509,6 +576,32 @@ const formatAlertStatusLabel = (value: AdminAlertStatus) => {
 
 const formatAlertTypeLabel = (value: AdminAlertApi["type"]) =>
   value === "transaction" ? "Transaction" : "Login";
+
+const formatAdvisorySeverityLabel = (
+  value?: AdminAlertApi["transferAdvisorySeverity"],
+) => {
+  if (value === "blocked") return "Blocked";
+  if (value === "warning") return "Warning";
+  if (value === "caution") return "Caution";
+  return "N/A";
+};
+
+const formatFinalActionLabel = (value?: AdminAlertApi["finalAction"]) => {
+  switch (value) {
+    case "ALLOW":
+      return "Allow";
+    case "ALLOW_WITH_WARNING":
+      return "Allow with warning";
+    case "REQUIRE_OTP":
+      return "Require OTP";
+    case "REQUIRE_OTP_FACE_ID":
+      return "Require OTP + FaceID";
+    case "HOLD_REVIEW":
+      return "Hold for review";
+    default:
+      return "Monitoring only";
+  }
+};
 
 const formatAlertScore = (value?: number | null) => {
   if (value == null || !Number.isFinite(value)) return "N/A";
@@ -2312,7 +2405,21 @@ function AdminApp() {
         alert.location,
         alert.transactionId,
         alert.eventId,
+        alert.transferAdvisoryTitle,
+        alert.transferAdvisoryMessage,
+        alert.nextStep,
+        alert.archetype,
         ...(alert.reasons || []),
+        ...(alert.timeline || []),
+        ...(alert.recommendedActions || []),
+        ...(alert.warningMustDo || []),
+        ...(alert.warningDoNot || []),
+        ...(alert.ruleHits || []).flatMap((item) => [
+          item.title,
+          item.reason,
+          item.userWarning,
+          item.ruleId,
+        ]),
         ...(alert.keySignals || []).map(
           (signal) => `${signal.label} ${signal.value}`,
         ),
@@ -4002,6 +4109,23 @@ function AdminApp() {
                       ? new Date(alert.reviewedAt)
                       : null;
                     const isExpanded = expandedAlert === alert.id;
+                    const ruleHitItems =
+                      (alert.ruleHits || []).flatMap((item) =>
+                        [item.userWarning, item.reason, item.title].filter(
+                          (value): value is string =>
+                            typeof value === "string" &&
+                            value.trim().length > 0,
+                        ),
+                      ) || [];
+                    const protectSteps = [
+                      ...(alert.warningMustDo || []),
+                      ...(alert.recommendedActions || []),
+                    ].filter(
+                      (item, index, arr) => item && arr.indexOf(item) === index,
+                    );
+                    const stopSteps = (alert.warningDoNot || []).filter(
+                      (item, index, arr) => item && arr.indexOf(item) === index,
+                    );
                     return (
                       <article
                         key={alert.id}
@@ -4055,7 +4179,9 @@ function AdminApp() {
                         </div>
 
                         <p className="alerts-one-line">
-                          {alert.reasons[0] ||
+                          {alert.transferAdvisoryMessage ||
+                            alert.warningMessage ||
+                            alert.reasons[0] ||
                             alert.explanation ||
                             "Open details to review this alert."}
                         </p>
@@ -4066,8 +4192,33 @@ function AdminApp() {
                               <div className="alerts-core-grid">
                                 <div className="alerts-primary">
                                   <p className="alerts-explanation compact">
-                                    {alert.explanation}
+                                    {alert.transferAdvisoryMessage ||
+                                      alert.warningMessage ||
+                                      alert.explanation}
                                   </p>
+                                  {alert.transferAdvisoryTitle ||
+                                  alert.transferAdvisorySeverity ? (
+                                    <div className="alerts-meta-line">
+                                      <span className="alerts-tone-pill">
+                                        {formatAdvisorySeverityLabel(
+                                          alert.transferAdvisorySeverity,
+                                        )}
+                                      </span>
+                                      {alert.transferAdvisoryTitle ? (
+                                        <span>
+                                          {alert.transferAdvisoryTitle}
+                                        </span>
+                                      ) : null}
+                                      {alert.finalAction ? (
+                                        <span>
+                                          AI action:{" "}
+                                          {formatFinalActionLabel(
+                                            alert.finalAction,
+                                          )}
+                                        </span>
+                                      ) : null}
+                                    </div>
+                                  ) : null}
                                   <div className="alerts-compact-reasons">
                                     {alert.reasons.map((reason) => (
                                       <span
@@ -4075,6 +4226,14 @@ function AdminApp() {
                                         className="alerts-reason"
                                       >
                                         {reason}
+                                      </span>
+                                    ))}
+                                    {ruleHitItems.map((item) => (
+                                      <span
+                                        key={`${alert.id}-rule-${item}`}
+                                        className="alerts-reason"
+                                      >
+                                        {item}
                                       </span>
                                     ))}
                                   </div>
@@ -4199,6 +4358,43 @@ function AdminApp() {
                                       </span>
                                     </div>
                                   ) : null}
+                                  {alert.transferAdvisorySeverity ? (
+                                    <div
+                                      className="alerts-signal"
+                                      data-tone={
+                                        alert.transferAdvisorySeverity ===
+                                        "blocked"
+                                          ? "warn"
+                                          : "info"
+                                      }
+                                    >
+                                      <strong>Transfer advisory</strong>
+                                      <span>
+                                        {formatAdvisorySeverityLabel(
+                                          alert.transferAdvisorySeverity,
+                                        )}
+                                      </span>
+                                    </div>
+                                  ) : null}
+                                  {alert.finalAction ? (
+                                    <div
+                                      className="alerts-signal"
+                                      data-tone={
+                                        alert.finalAction === "HOLD_REVIEW" ||
+                                        alert.finalAction ===
+                                          "REQUIRE_OTP_FACE_ID"
+                                          ? "warn"
+                                          : "info"
+                                      }
+                                    >
+                                      <strong>AI action</strong>
+                                      <span>
+                                        {formatFinalActionLabel(
+                                          alert.finalAction,
+                                        )}
+                                      </span>
+                                    </div>
+                                  ) : null}
                                 </div>
                               </div>
 
@@ -4257,13 +4453,36 @@ function AdminApp() {
                               <div>
                                 <strong>Analyst summary</strong>
                                 <span>
-                                  {alert.adminSummary || alert.explanation}
+                                  {alert.adminSummary ||
+                                    alert.transferAdvisoryMessage ||
+                                    alert.warningMessage ||
+                                    alert.explanation}
                                 </span>
                               </div>
                               <div>
                                 <strong>AI action</strong>
                                 <span>
-                                  {alert.aiDecision || "Monitoring only"}
+                                  {formatFinalActionLabel(alert.finalAction) !==
+                                  "Monitoring only"
+                                    ? formatFinalActionLabel(alert.finalAction)
+                                    : alert.aiDecision || "Monitoring only"}
+                                </span>
+                              </div>
+                              <div>
+                                <strong>Transfer advisory</strong>
+                                <span>
+                                  {alert.transferAdvisoryTitle ||
+                                  alert.transferAdvisorySeverity
+                                    ? `${formatAdvisorySeverityLabel(alert.transferAdvisorySeverity)}${alert.transferAdvisoryTitle ? ` - ${alert.transferAdvisoryTitle}` : ""}`
+                                    : "No transfer advisory recorded"}
+                                </span>
+                              </div>
+                              <div>
+                                <strong>Next step</strong>
+                                <span>
+                                  {alert.nextStep ||
+                                    alert.stepUpLevel ||
+                                    "No next step recorded"}
                                 </span>
                               </div>
                               <div>
@@ -4340,6 +4559,55 @@ function AdminApp() {
                                   alert.rapidCashOutRiskScore >= 0.45
                                     ? `Score ${Math.round(alert.rapidCashOutRiskScore * 100)}%, fresh inflow ${formatUsdAmount(alert.recentInboundAmount24h, alert.currency)}, admin top-up ${formatUsdAmount(alert.recentAdminTopUpAmount24h, alert.currency)}, self deposit ${formatUsdAmount(alert.recentSelfDepositAmount24h, alert.currency)}`
                                     : "No rapid cash-out laundering signal recorded"}
+                                </span>
+                              </div>
+                              <div>
+                                <strong>Pattern</strong>
+                                <span>
+                                  {alert.archetype ||
+                                    "No risk pattern label recorded"}
+                                </span>
+                              </div>
+                              <div>
+                                <strong>Timeline</strong>
+                                <span>
+                                  {alert.timeline?.length
+                                    ? alert.timeline.join(" | ")
+                                    : "No timeline recorded"}
+                                </span>
+                              </div>
+                              <div>
+                                <strong>Protective steps</strong>
+                                <span>
+                                  {protectSteps.length
+                                    ? protectSteps.join(" | ")
+                                    : "No protective steps recorded"}
+                                </span>
+                              </div>
+                              <div>
+                                <strong>Do not</strong>
+                                <span>
+                                  {stopSteps.length
+                                    ? stopSteps.join(" | ")
+                                    : "No explicit do-not guidance recorded"}
+                                </span>
+                              </div>
+                              <div>
+                                <strong>Rule hits</strong>
+                                <span>
+                                  {ruleHitItems.length
+                                    ? ruleHitItems.join(" | ")
+                                    : "No rule hits recorded"}
+                                </span>
+                              </div>
+                              <div>
+                                <strong>Blocked until</strong>
+                                <span>
+                                  {alert.transferBlockedUntil
+                                    ? new Date(
+                                        alert.transferBlockedUntil,
+                                      ).toLocaleString("en-US")
+                                    : "No active hold"}
                                 </span>
                               </div>
                             </div>

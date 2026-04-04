@@ -51,6 +51,9 @@ const PROFESSIONAL_PASSWORD_MIN_LENGTH = 12;
 const TRANSFER_FACE_ID_THRESHOLD = 1000;
 const FORCE_AUTH_HERO_MOTION_CLASS = "force-auth-hero-motion";
 const SIGNUP_TEST_BALANCE_AMOUNT = 99999;
+const PUBLIC_IP_CACHE_KEY = "fpipay_public_ip_cache";
+const PUBLIC_IP_CACHE_TTL_MS = 30 * 1000;
+const PUBLIC_IP_FETCH_TIMEOUT_MS = 5000;
 
 const getSignupTestBalanceBonus = (userId?: string | null) => {
   if (!userId || typeof window === "undefined") return 0;
@@ -71,10 +74,18 @@ function DeferredFaceIdCapture(props: {
   disabled?: boolean;
   mode?: "enroll" | "verify";
   onChange: (value: FaceIdProof | null) => void;
+  onFeedbackChange?: (input: {
+    status: "idle" | "loading" | "ready" | "scanning" | "verified" | "error";
+    message: string;
+  }) => void;
 }) {
   return (
     <Suspense
-      fallback={<div className="faceid-card">Loading 5-second FaceID video capture...</div>}
+      fallback={
+        <div className="faceid-card">
+          Loading 5-second FaceID video capture...
+        </div>
+      }
     >
       <LazyFaceIdCapture {...props} />
     </Suspense>
@@ -216,6 +227,35 @@ const parseUsdLikeNumber = (value?: string) => {
   const normalized = (value || "").replace(/[^0-9.-]/g, "");
   const amount = Number(normalized);
   return Number.isFinite(amount) ? amount : 0;
+};
+
+const formatFaceIdActionError = (
+  raw: string | null | undefined,
+  mode: "enroll" | "transfer",
+) => {
+  const message = String(raw || "").trim();
+  if (!message) {
+    return mode === "transfer"
+      ? "FaceID verification failed for this transfer. Please try again."
+      : "FaceID update failed. Please scan again and retry.";
+  }
+  if (/cannot connect to api server/i.test(message)) {
+    return mode === "transfer"
+      ? "Cannot connect to the server while verifying FaceID for this transfer."
+      : "Cannot connect to the server while updating FaceID.";
+  }
+  if (/otp verification failed/i.test(message)) {
+    return "FaceID verification failed. Please scan again and retry.";
+  }
+  if (/otp challenge already used/i.test(message)) {
+    return mode === "transfer"
+      ? "This OTP is no longer valid for the transfer. Please request a new OTP and try again."
+      : "This OTP is no longer valid. Please request a new code and try again.";
+  }
+  if (/failed to enroll faceid/i.test(message)) {
+    return "FaceID update failed. Please review the error and scan again.";
+  }
+  return message;
 };
 
 const loadImageFromBlob = (blob: Blob) =>
@@ -427,6 +467,22 @@ type SecurityTrustedDeviceItem = {
   lastSeenAt: string;
   lastVerifiedAt: string;
   current: boolean;
+};
+
+type BrowserDeviceContext = {
+  browser?: string;
+  browserVersion?: string;
+  platform?: string;
+  deviceType?: string;
+  mobile?: boolean;
+  deviceTitle?: string;
+  deviceDetail?: string;
+};
+
+type PublicIpProvider = {
+  url: string;
+  responseType: "json" | "text";
+  field?: string;
 };
 
 type SecurityOverviewAlert = {
@@ -1009,6 +1065,196 @@ const summarizeDeviceUserAgent = (value?: string) => {
   };
 };
 
+const readCachedPublicIp = () => {
+  if (typeof window === "undefined") return "";
+  try {
+    const raw = sessionStorage.getItem(PUBLIC_IP_CACHE_KEY);
+    if (!raw) return "";
+    const parsed = JSON.parse(raw) as {
+      ip?: unknown;
+      fetchedAt?: unknown;
+    };
+    if (
+      typeof parsed.ip !== "string" ||
+      !parsed.ip.trim() ||
+      typeof parsed.fetchedAt !== "number" ||
+      !Number.isFinite(parsed.fetchedAt) ||
+      Date.now() - parsed.fetchedAt > PUBLIC_IP_CACHE_TTL_MS
+    ) {
+      return "";
+    }
+    return parsed.ip.trim();
+  } catch {
+    return "";
+  }
+};
+
+const cachePublicIp = (ip: string) => {
+  if (typeof window === "undefined" || !ip) return;
+  try {
+    sessionStorage.setItem(
+      PUBLIC_IP_CACHE_KEY,
+      JSON.stringify({
+        ip,
+        fetchedAt: Date.now(),
+      }),
+    );
+  } catch {
+    // ignore storage errors
+  }
+};
+
+const normalizePublicIpCandidate = (value: unknown) => {
+  if (typeof value !== "string") return "";
+  return value.trim().replace(/\s+/g, "");
+};
+
+const PUBLIC_IP_PROVIDERS: PublicIpProvider[] = [
+  {
+    url: "https://api64.ipify.org?format=json",
+    responseType: "json",
+    field: "ip",
+  },
+  {
+    url: "https://api.ipify.org?format=json",
+    responseType: "json",
+    field: "ip",
+  },
+  {
+    url: "https://ipwho.is/",
+    responseType: "json",
+    field: "ip",
+  },
+  {
+    url: "https://api.myip.com",
+    responseType: "json",
+    field: "ip",
+  },
+];
+
+const fetchPublicIpFromProvider = async (provider: PublicIpProvider) => {
+  if (typeof window === "undefined") return "";
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(
+    () => controller.abort(),
+    PUBLIC_IP_FETCH_TIMEOUT_MS,
+  );
+
+  try {
+    const resp = await fetch(provider.url, {
+      cache: "no-store",
+      headers:
+        provider.responseType === "json"
+          ? { Accept: "application/json" }
+          : undefined,
+      signal: controller.signal,
+    });
+
+    if (!resp.ok) return "";
+
+    const data = (await resp.json().catch(() => null)) as Record<
+      string,
+      unknown
+    > | null;
+    return normalizePublicIpCandidate(
+      provider.field ? data?.[provider.field] : "",
+    );
+  } catch {
+    return "";
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+};
+
+const resolvePublicIpAddress = async () => {
+  const cachedIp = readCachedPublicIp();
+  if (cachedIp) return cachedIp;
+
+  for (const provider of PUBLIC_IP_PROVIDERS) {
+    const ip = await fetchPublicIpFromProvider(provider);
+    if (ip) {
+      cachePublicIp(ip);
+      return ip;
+    }
+  }
+
+  return "";
+};
+
+const collectBrowserDeviceContext = (): BrowserDeviceContext | null => {
+  if (typeof navigator === "undefined") return null;
+  const userAgent = navigator.userAgent || "";
+  if (!userAgent) return null;
+  const userAgentData = (
+    navigator as Navigator & {
+      userAgentData?: { mobile?: boolean };
+    }
+  ).userAgentData;
+
+  const browserMatch =
+    userAgent.match(/Edg\/(\d+)/) ||
+    userAgent.match(/Chrome\/(\d+)/) ||
+    userAgent.match(/Firefox\/(\d+)/) ||
+    userAgent.match(/Version\/(\d+).+Safari\//);
+  const browser = /Edg\//.test(userAgent)
+    ? "Edge"
+    : /Chrome\//.test(userAgent)
+      ? "Chrome"
+      : /Firefox\//.test(userAgent)
+        ? "Firefox"
+        : /Safari\//.test(userAgent)
+          ? "Safari"
+          : undefined;
+
+  const platform = /Windows/i.test(userAgent)
+    ? "Windows"
+    : /Mac OS X/i.test(userAgent)
+      ? "macOS"
+      : /iPhone|iPad|iOS/i.test(userAgent)
+        ? "iOS"
+        : /Android/i.test(userAgent)
+          ? "Android"
+          : /Linux/i.test(userAgent)
+            ? "Linux"
+            : undefined;
+  const isTablet =
+    /iPad/i.test(userAgent) ||
+    (/Android/i.test(userAgent) && !/Mobile/i.test(userAgent));
+  const isMobile =
+    userAgentData?.mobile === true || /Mobile|iPhone|Android/i.test(userAgent);
+  const summary = summarizeDeviceUserAgent(userAgent);
+
+  return {
+    browser,
+    browserVersion: browserMatch?.[1],
+    platform,
+    deviceType: isTablet ? "tablet" : isMobile ? "mobile" : "desktop",
+    mobile: isMobile,
+    deviceTitle: summary.title,
+    deviceDetail: summary.detail,
+  };
+};
+
+const buildClientAuditRequestContext = async () => {
+  const [publicIp, deviceContext] = await Promise.all([
+    resolvePublicIpAddress(),
+    Promise.resolve(collectBrowserDeviceContext()),
+  ]);
+  const headers: Record<string, string> = {};
+  const body: Record<string, unknown> = {};
+  if (publicIp) {
+    headers["x-demo-public-ip"] = publicIp;
+  }
+  if (deviceContext) {
+    body.deviceContext = deviceContext;
+  }
+
+  return {
+    headers,
+    body,
+  };
+};
+
 const normalizeSavedTransferRecipients = (value: unknown) =>
   Array.isArray(value)
     ? value
@@ -1539,6 +1785,7 @@ function DashboardView({
   const [transferFaceResetKey, setTransferFaceResetKey] = useState(0);
   const [transferFaceVerifyOpen, setTransferFaceVerifyOpen] = useState(false);
   const [transferFaceVerifyBusy, setTransferFaceVerifyBusy] = useState(false);
+  const [transferFaceCaptureError, setTransferFaceCaptureError] = useState("");
   const [transferFaceIdEnabled, setTransferFaceIdEnabled] = useState(false);
   const [transferPinEnabled, setTransferPinEnabled] = useState(false);
   const [transferServerFaceIdRequired, setTransferServerFaceIdRequired] =
@@ -1804,16 +2051,9 @@ function DashboardView({
     ]);
   const effectiveTransferAdvisory =
     transferAdvisory || localTransferPreflightAdvisory;
-  const isTransferHardBlocked =
-    effectiveTransferAdvisory?.severity === "blocked";
-  const isTransferPreOtpWarning =
-    effectiveTransferAdvisory?.severity === "blocked" ||
-    effectiveTransferAdvisory?.requiresAcknowledgement === true;
   const transferContinueLabel = transferOtpBusy
     ? "Preparing security check..."
-    : isTransferHardBlocked
-      ? "Blocked for safety review"
-      : "Continue to security";
+    : "Continue";
   const ownQrPayload =
     wallet?.qrPayload ||
     (wallet?.accountNumber
@@ -2288,8 +2528,8 @@ function DashboardView({
                         .anomalyScore as number)
                     : 0,
                 rawScore:
-                  typeof (data.mlAnalysis as Record<string, unknown>).rawScore ===
-                  "number"
+                  typeof (data.mlAnalysis as Record<string, unknown>)
+                    .rawScore === "number"
                     ? ((data.mlAnalysis as Record<string, unknown>)
                         .rawScore as number)
                     : 0,
@@ -2391,12 +2631,13 @@ function DashboardView({
                       : "low",
                   model:
                     (data.ml_analysis as Record<string, unknown>).model &&
-                    typeof (data.ml_analysis as Record<string, unknown>).model ===
-                      "object" &&
+                    typeof (data.ml_analysis as Record<string, unknown>)
+                      .model === "object" &&
                     !Array.isArray(
                       (data.ml_analysis as Record<string, unknown>).model,
                     )
-                      ? ((data.ml_analysis as Record<string, unknown>).model as {
+                      ? ((data.ml_analysis as Record<string, unknown>)
+                          .model as {
                           name?: string;
                           version?: string | null;
                           source?: string | null;
@@ -2482,8 +2723,8 @@ function DashboardView({
                         .source as string)
                     : null,
                 model:
-                  typeof (data.llmAnalysis as Record<string, unknown>)
-                    .model === "string"
+                  typeof (data.llmAnalysis as Record<string, unknown>).model ===
+                  "string"
                     ? ((data.llmAnalysis as Record<string, unknown>)
                         .model as string)
                     : null,
@@ -2523,8 +2764,8 @@ function DashboardView({
                           .source as string)
                       : null,
                   model:
-                    typeof (data.llm_analysis as Record<string, unknown>).model ===
-                    "string"
+                    typeof (data.llm_analysis as Record<string, unknown>)
+                      .model === "string"
                       ? ((data.llm_analysis as Record<string, unknown>)
                           .model as string)
                       : null,
@@ -2969,7 +3210,9 @@ function DashboardView({
     if (!ml) return null;
     const signals = (ml.topSignals || []).slice(0, compact ? 2 : 3);
     const modelMeta = [ml.model?.name, ml.model?.version]
-      .filter((item): item is string => typeof item === "string" && Boolean(item))
+      .filter(
+        (item): item is string => typeof item === "string" && Boolean(item),
+      )
       .join(" / ");
 
     return (
@@ -3051,9 +3294,7 @@ function DashboardView({
           {llm.source ? <span>{humanizeRiskKey(llm.source)}</span> : null}
           {llm.model ? <span>{llm.model}</span> : null}
         </div>
-        {summary ? (
-          <p className="transfer-ai-detail-copy">{summary}</p>
-        ) : null}
+        {summary ? <p className="transfer-ai-detail-copy">{summary}</p> : null}
         {signals.length > 0 ? (
           <ul className="transfer-ai-detail-list">
             {signals.map((signal) => (
@@ -3074,7 +3315,9 @@ function DashboardView({
     );
   }
 
-  function renderTransferDecisionSummary(monitoring: AiMonitoringSummary | null) {
+  function renderTransferDecisionSummary(
+    monitoring: AiMonitoringSummary | null,
+  ) {
     const decision = monitoring?.finalDecision;
     if (!decision) return null;
     return (
@@ -3292,8 +3535,10 @@ function DashboardView({
       primaryLabel:
         tone === "blocked" || isTransferHoldActive
           ? "Understood"
-          : translateTransferRiskCopy(advisory?.confirmationLabel) ||
-            "I reviewed the warning, continue to OTP",
+          : transferStep === 2
+            ? "I reviewed the warning, continue"
+            : translateTransferRiskCopy(advisory?.confirmationLabel) ||
+              "I reviewed the warning, continue to OTP",
       signals,
       protectSteps,
       stopList,
@@ -3309,6 +3554,7 @@ function DashboardView({
     transferAmount,
     transferReceiverName,
     transferServerFaceIdReason,
+    transferStep,
     visibleTransferMonitoring,
   ]);
 
@@ -3337,16 +3583,19 @@ function DashboardView({
     const timer = window.setTimeout(async () => {
       setTransferPreviewBusy(true);
       try {
+        const clientAuditContext = await buildClientAuditRequestContext();
         const resp = await fetch(`${API_BASE}/transfer/preview`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${token}`,
+            ...clientAuditContext.headers,
           },
           body: JSON.stringify({
             toAccount: transferAccount,
             amount: transferAmountNumber,
             note: transferContent || defaultTransferContent,
+            ...clientAuditContext.body,
           }),
           signal: controller.signal,
         });
@@ -5229,11 +5478,13 @@ function DashboardView({
     setTransferOtpBusy(true);
     try {
       const amount = Number(transferAmount.replace(/,/g, "")) || 0;
+      const clientAuditContext = await buildClientAuditRequestContext();
       const resp = await fetch(`${API_BASE}/transfer/otp/send`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
+          ...clientAuditContext.headers,
         },
         body: JSON.stringify({
           toAccount: transferAccount,
@@ -5247,6 +5498,7 @@ function DashboardView({
             transferAdvisory?.requestKey ||
             transferMonitoring?.requestKey ||
             null,
+          ...clientAuditContext.body,
         }),
       });
       const data = (await resp.json().catch(() => null)) as {
@@ -5371,11 +5623,13 @@ function DashboardView({
     }
 
     try {
+      const clientAuditContext = await buildClientAuditRequestContext();
       await fetch(`${API_BASE}/transfer/advisory/dismiss`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
+          ...clientAuditContext.headers,
         },
         body: JSON.stringify({
           requestKey:
@@ -5386,6 +5640,7 @@ function DashboardView({
           toAccount: transferAccount,
           amount:
             Number(transferAmount.replace(/,/g, "")) || transferAdvisory.amount,
+          ...clientAuditContext.body,
         }),
       });
     } catch {
@@ -5410,11 +5665,13 @@ function DashboardView({
       if (!token) return;
 
       try {
+        const clientAuditContext = await buildClientAuditRequestContext();
         await fetch(`${API_BASE}/transfer/flow-event`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${token}`,
+            ...clientAuditContext.headers,
           },
           body: JSON.stringify({
             eventType,
@@ -5431,6 +5688,7 @@ function DashboardView({
               null,
             step: transferStep,
             reason: options?.reason || null,
+            ...clientAuditContext.body,
           }),
         });
       } catch {
@@ -5479,14 +5737,6 @@ function DashboardView({
     if (!canContinueTransferAmount) {
       return;
     }
-    if (localTransferPreflightAdvisory?.severity === "blocked") {
-      toast(
-        localTransferPreflightAdvisory.title ||
-          "This transfer is blocked for safety review.",
-        "error",
-      );
-      return;
-    }
     if (amount > TRANSFER_FACE_ID_THRESHOLD && !transferFaceIdEnabled) {
       toast(
         `Transfers above $${TRANSFER_FACE_ID_THRESHOLD.toLocaleString(
@@ -5498,6 +5748,10 @@ function DashboardView({
     }
     if (!transferContent.trim()) {
       setTransferContent(defaultTransferContent);
+    }
+    if (transferAiIntervention?.shouldPrompt) {
+      setTransferAiInterventionOpen(true);
+      return;
     }
     if (!transferPinEnabled) {
       setTransferPinSetupError("");
@@ -5520,9 +5774,35 @@ function DashboardView({
     setTransferOpen(true);
     goToTransferStep(3);
     setTransferFaceProof(null);
+    setTransferFaceCaptureError("");
     setTransferFaceResetKey((value) => value + 1);
     setTransferFaceVerifyBusy(false);
-  }, []);
+  }, [goToTransferStep]);
+
+  const handleTransferFaceCaptureChange = useCallback(
+    (value: FaceIdProof | null) => {
+      setTransferFaceProof(value);
+      if (value) {
+        setTransferFaceCaptureError("");
+        setTransferOtpError("");
+      }
+    },
+    [],
+  );
+
+  const handleTransferFaceFeedbackChange = useCallback(
+    (feedback: {
+      status: "idle" | "loading" | "ready" | "scanning" | "verified" | "error";
+      message: string;
+    }) => {
+      if (feedback.status === "error") {
+        setTransferFaceCaptureError(feedback.message);
+        return;
+      }
+      setTransferFaceCaptureError("");
+    },
+    [],
+  );
 
   const submitTransferPinSetup = useCallback(async () => {
     if (!token) {
@@ -5592,15 +5872,18 @@ function DashboardView({
     try {
       let resp: Response;
       try {
+        const clientAuditContext = await buildClientAuditRequestContext();
         resp = await fetch(`${API_BASE}/transfer/otp/verify`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${token}`,
+            ...clientAuditContext.headers,
           },
           body: JSON.stringify({
             challengeId: transferOtpChallengeId,
             otp: transferOtpInput,
+            ...clientAuditContext.body,
           }),
         });
       } catch {
@@ -5641,11 +5924,13 @@ function DashboardView({
       }
       let transferResp: Response;
       try {
+        const clientAuditContext = await buildClientAuditRequestContext();
         transferResp = await fetch(`${API_BASE}/transfer/confirm`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${token}`,
+            ...clientAuditContext.headers,
           },
           body: JSON.stringify({
             challengeId: transferOtpChallengeId,
@@ -5653,17 +5938,22 @@ function DashboardView({
             faceIdEnrollment: transferServerFaceIdRequired
               ? faceProof
               : undefined,
+            ...clientAuditContext.body,
           }),
         });
       } catch {
-        setTransferOtpError("Cannot connect to API server.");
+        setTransferOtpError(
+          formatFaceIdActionError("Cannot connect to API server.", "transfer"),
+        );
         return false;
       }
       if (!transferResp.ok) {
         const err = (await transferResp.json().catch(() => null)) as {
           error?: string;
         } | null;
-        setTransferOtpError(err?.error || "OTP verification failed");
+        setTransferOtpError(
+          formatFaceIdActionError(err?.error || null, "transfer"),
+        );
         return false;
       }
 
@@ -5724,6 +6014,7 @@ function DashboardView({
         return;
       }
       setTransferFaceProof(null);
+      setTransferFaceCaptureError("");
       setTransferFaceResetKey((value) => value + 1);
       setTransferOpen(false);
       setTransferFaceVerifyOpen(true);
@@ -5751,8 +6042,37 @@ function DashboardView({
       return;
     }
     setTransferAdvisoryAcknowledged(true);
+    if (transferStep === 2) {
+      if (!transferContent.trim()) {
+        setTransferContent(defaultTransferContent);
+      }
+      if (!transferPinEnabled) {
+        setTransferPinSetupError("");
+        setTransferPinSetupForm({ pin: "", confirm: "" });
+        setTransferPinSetupOpen(true);
+        return;
+      }
+      setTransferPinError("");
+      setTransferOtpError("");
+      setTransferOtpRequired(false);
+      setTransferOtpChallengeId("");
+      setTransferOtpDestination("");
+      setTransferOtpExpiresAt("");
+      setTransferOtpInput("");
+      goToTransferStep(3);
+      return;
+    }
     await generateTransferOtp({ advisoryAcknowledged: true });
-  }, [generateTransferOtp, isTransferHoldActive, transferAiIntervention]);
+  }, [
+    defaultTransferContent,
+    generateTransferOtp,
+    goToTransferStep,
+    isTransferHoldActive,
+    transferAiIntervention,
+    transferContent,
+    transferPinEnabled,
+    transferStep,
+  ]);
 
   const handleTransferFaceConfirm = useCallback(async () => {
     if (!transferFaceProof) {
@@ -6992,11 +7312,7 @@ function DashboardView({
                         type="button"
                         className="btn-primary"
                         onClick={continueTransferAmount}
-                        disabled={
-                          !canContinueTransferAmount ||
-                          transferOtpBusy ||
-                          isTransferHardBlocked
-                        }
+                        disabled={!canContinueTransferAmount || transferOtpBusy}
                       >
                         {transferContinueLabel}
                       </button>
@@ -7355,6 +7671,12 @@ function DashboardView({
                   </div>
                 </div>
 
+                {transferFaceCaptureError && !transferOtpError ? (
+                  <div className="card-otp-error transfer-faceid-error">
+                    {transferFaceCaptureError}
+                  </div>
+                ) : null}
+
                 {transferOtpError ? (
                   <div className="card-otp-error transfer-faceid-error">
                     {transferOtpError}
@@ -7366,7 +7688,8 @@ function DashboardView({
                   resetKey={transferFaceResetKey}
                   disabled={transferFaceVerifyBusy}
                   mode="verify"
-                  onChange={setTransferFaceProof}
+                  onChange={handleTransferFaceCaptureChange}
+                  onFeedbackChange={handleTransferFaceFeedbackChange}
                 />
 
                 <div className="faceid-modal-actions transfer-faceid-actions">
@@ -7446,7 +7769,9 @@ function DashboardView({
                   <div className="transfer-ai-warning-grid">
                     <div className="transfer-ai-warning-section">
                       <span className="transfer-ai-warning-section-label">
-                        Why this popped up
+                        {transferAiIntervention.tone === "blocked"
+                          ? "Why this transfer was blocked"
+                          : "Why this popped up"}
                       </span>
                       <p>{transferAiIntervention.summary}</p>
                       {transferAiIntervention.signals.length > 0 ? (
@@ -11000,6 +11325,7 @@ function App() {
   const [faceEnrollmentProof, setFaceEnrollmentProof] =
     useState<FaceIdProof | null>(null);
   const [faceEnrollmentResetKey, setFaceEnrollmentResetKey] = useState(0);
+  const [faceEnrollmentError, setFaceEnrollmentError] = useState("");
 
   const isInvoicesActive =
     activeTab === "Invoice List" || activeTab === "Create Invoices";
@@ -11134,6 +11460,7 @@ function App() {
 
   const resetFaceEnrollmentModal = useCallback(() => {
     setFaceEnrollmentProof(null);
+    setFaceEnrollmentError("");
     setFaceEnrollmentResetKey((value) => value + 1);
   }, []);
 
@@ -11147,26 +11474,58 @@ function App() {
     setFaceEnrollmentOpen(true);
   }, [resetFaceEnrollmentModal]);
 
+  const handleFaceEnrollmentCaptureChange = useCallback(
+    (value: FaceIdProof | null) => {
+      setFaceEnrollmentProof(value);
+      if (value) {
+        setFaceEnrollmentError("");
+      }
+    },
+    [],
+  );
+
+  const handleFaceEnrollmentFeedbackChange = useCallback(
+    (feedback: {
+      status: "idle" | "loading" | "ready" | "scanning" | "verified" | "error";
+      message: string;
+    }) => {
+      if (feedback.status === "error") {
+        setFaceEnrollmentError(feedback.message);
+        return;
+      }
+      setFaceEnrollmentError("");
+    },
+    [],
+  );
+
   const handleEnrollFaceId = useCallback(async () => {
     if (!token) {
-      toast("Session expired. Please login again.", "error");
+      const message = "Session expired. Please login again.";
+      setFaceEnrollmentError(message);
+      toast(message, "error");
       return;
     }
     if (!faceEnrollmentProof) {
-      toast("Complete the 5-second FaceID video first.", "error");
+      const message = "Complete the 5-second FaceID video first.";
+      setFaceEnrollmentError(message);
+      toast(message, "error");
       return;
     }
 
     setFaceEnrollmentBusy(true);
+    setFaceEnrollmentError("");
     try {
+      const clientAuditContext = await buildClientAuditRequestContext();
       const resp = await fetch(`${API_BASE}/auth/face/enroll`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
+          ...clientAuditContext.headers,
         },
         body: JSON.stringify({
           faceIdEnrollment: faceEnrollmentProof,
+          ...clientAuditContext.body,
         }),
       });
       const data = (await resp.json().catch(() => null)) as {
@@ -11175,11 +11534,16 @@ function App() {
         metadata?: Record<string, unknown>;
       } | null;
       if (!resp.ok) {
+        const errorMessage = formatFaceIdActionError(
+          data?.error || "Failed to enroll FaceID",
+          "enroll",
+        );
         console.error(
           `FaceID enroll failed: ${resp.status} ${data?.error || "Unknown error"}`,
           data,
         );
-        toast(data?.error || "Failed to enroll FaceID", "error");
+        setFaceEnrollmentError(errorMessage);
+        toast(errorMessage, "error");
         return;
       }
 
@@ -11188,7 +11552,12 @@ function App() {
       toast(data?.message || "FaceID enrolled successfully.");
     } catch {
       console.error("FaceID enroll request crashed before completion");
-      toast("Cannot connect to API server.", "error");
+      const errorMessage = formatFaceIdActionError(
+        "Cannot connect to API server.",
+        "enroll",
+      );
+      setFaceEnrollmentError(errorMessage);
+      toast(errorMessage, "error");
     } finally {
       setFaceEnrollmentBusy(false);
     }
@@ -11903,8 +12272,14 @@ function App() {
                     apiBase={API_BASE}
                     resetKey={faceEnrollmentResetKey}
                     disabled={faceEnrollmentBusy}
-                    onChange={setFaceEnrollmentProof}
+                    onChange={handleFaceEnrollmentCaptureChange}
+                    onFeedbackChange={handleFaceEnrollmentFeedbackChange}
                   />
+                  {faceEnrollmentError ? (
+                    <div className="card-otp-error transfer-faceid-error">
+                      {faceEnrollmentError}
+                    </div>
+                  ) : null}
                   <div className="faceid-modal-actions">
                     <button
                       type="button"

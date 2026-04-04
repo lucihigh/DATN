@@ -151,6 +151,7 @@ export const faceIdEnrollmentSchema = z.object({
   descriptor: z.string().min(64).max(4096),
   livenessScore: z.number().min(0).max(1),
   motionScore: z.number().min(0).max(1),
+  eyeMotionScore: z.number().min(0).max(1),
   faceCoverage: z.number().min(0).max(1),
   sampleCount: z.number().int().min(2).max(240),
   completedSteps: z.array(faceIdStepSchema).min(1).max(4),
