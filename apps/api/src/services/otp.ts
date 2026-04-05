@@ -278,8 +278,17 @@ export const verifyAndConsumeEmailOtpChallenge = async (input: {
     };
   });
 
-export const consumeOtpChallenge = async (challengeId: string) =>
-  prisma.otpChallenge.update({
-    where: { id: challengeId },
-    data: { consumedAt: new Date() },
+export const consumeOtpChallenge = async (challengeId: string) => {
+  const consumedAt = new Date();
+  const result = await prisma.otpChallenge.updateMany({
+    where: {
+      id: challengeId,
+      consumedAt: null,
+    },
+    data: { consumedAt },
   });
+  if (result.count !== 1) {
+    throw new Error("OTP_CHALLENGE_ALREADY_USED");
+  }
+  return consumedAt;
+};

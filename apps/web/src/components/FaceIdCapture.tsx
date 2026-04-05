@@ -28,11 +28,15 @@ export type FaceIdProof = {
   descriptor: string;
   livenessScore: number;
   motionScore: number;
+  eyeMotionScore: number;
   faceCoverage: number;
   sampleCount: number;
   completedSteps: FaceIdStepId[];
   stepCaptures: FaceIdStepCapture[];
   previewImage?: string;
+  videoEvidence?: string;
+  videoDurationMs?: number;
+  videoMimeType?: string;
 };
 
 type FaceIdChallenge = {
@@ -47,6 +51,10 @@ type FaceIdCaptureProps = {
   disabled?: boolean;
   mode?: "enroll" | "verify";
   onChange: (value: FaceIdProof | null) => void;
+  onFeedbackChange?: (input: {
+    status: "idle" | "loading" | "ready" | "scanning" | "verified" | "error";
+    message: string;
+  }) => void;
 };
 
 type CameraOption = {
@@ -76,6 +84,7 @@ type AlignmentSnapshot = {
   sizeRatio: number;
   glow: number;
   aligned: boolean;
+  scanReady: boolean;
 };
 
 type BrowserFaceDetector = {
@@ -99,6 +108,18 @@ type BrowserImageCaptureCtor = new (
   track: MediaStreamTrack,
 ) => BrowserImageCapture;
 
+type RecordedVideoEvidence = {
+  dataUrl: string;
+  durationMs: number;
+  mimeType: string;
+};
+
+type EyeMetrics = {
+  leftEar: number;
+  rightEar: number;
+  averageEar: number;
+};
+
 const STEP_COLORS: Record<FaceIdStepId, string> = {
   center: "#38bdf8",
   move_left: "#a78bfa",
@@ -107,7 +128,9 @@ const STEP_COLORS: Record<FaceIdStepId, string> = {
 };
 
 const PROCESS_INTERVAL_MS = 220;
-const MIN_SCAN_DURATION_MS = 3000;
+const MIN_VIDEO_DURATION_MS = 5000;
+const MIN_SCAN_DURATION_MS = MIN_VIDEO_DURATION_MS;
+const TIMED_CAPTURE_GRACE_MS = 1200;
 const REQUIRED_STEP_STREAK = 3;
 const COMPAT_REQUIRED_STEP_STREAK = 4;
 const MEDIAPIPE_WASM_PATH =
@@ -132,6 +155,35 @@ const base64FromBytes = (bytes: Uint8Array) => {
   return btoa(result);
 };
 
+const blobToDataUrl = (blob: Blob) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+        return;
+      }
+      reject(new Error("Cannot encode FaceID verification video."));
+    };
+    reader.onerror = () => {
+      reject(new Error("Cannot encode FaceID verification video."));
+    };
+    reader.readAsDataURL(blob);
+  });
+
+const pickVideoMimeType = () => {
+  if (typeof MediaRecorder === "undefined") return "";
+  const candidates = [
+    "video/webm;codecs=vp9",
+    "video/webm;codecs=vp8",
+    "video/webm",
+    "video/mp4",
+  ];
+  return (
+    candidates.find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) || ""
+  );
+};
+
 const averagePoint = (
   points: Array<{ x: number; y: number }>,
   indices: number[],
@@ -147,6 +199,43 @@ const averagePoint = (
     count += 1;
   }
   return count ? { x: sumX / count, y: sumY / count } : null;
+};
+
+const getEyeAspectRatio = (
+  landmarks: Array<{ x: number; y: number }>,
+  indices: number[],
+) => {
+  if (indices.length < 4) return null;
+  const outer = landmarks[indices[0]];
+  const inner = landmarks[indices[1]];
+  const upper = landmarks[indices[2]];
+  const lower = landmarks[indices[3]];
+  if (!outer || !inner || !upper || !lower) return null;
+
+  const width = Math.hypot(inner.x - outer.x, inner.y - outer.y);
+  const height = Math.hypot(lower.x - upper.x, lower.y - upper.y);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1) {
+    return null;
+  }
+
+  return height / width;
+};
+
+const getEyeMetrics = (landmarks?: Array<{ x: number; y: number }>) => {
+  if (!landmarks?.length) return null;
+  const leftEar = getEyeAspectRatio(landmarks, LEFT_EYE_INDICES);
+  const rightEar = getEyeAspectRatio(landmarks, RIGHT_EYE_INDICES);
+  if (
+    !Number.isFinite(leftEar ?? Number.NaN) ||
+    !Number.isFinite(rightEar ?? Number.NaN)
+  ) {
+    return null;
+  }
+  return {
+    leftEar: leftEar as number,
+    rightEar: rightEar as number,
+    averageEar: ((leftEar as number) + (rightEar as number)) / 2,
+  } satisfies EyeMetrics;
 };
 
 const waitForVideoReady = (video: HTMLVideoElement) =>
@@ -496,6 +585,7 @@ export function FaceIdCapture({
   disabled = false,
   mode = "enroll",
   onChange,
+  onFeedbackChange,
 }: FaceIdCaptureProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -512,15 +602,33 @@ export function FaceIdCapture({
     y: number;
     coverage: number;
   } | null>(null);
+  const prevEyeMetricsRef = useRef<EyeMetrics | null>(null);
   const motionAccumulatorRef = useRef(0);
+  const eyeMotionAccumulatorRef = useRef(0);
+  const eyeMotionPeakRef = useRef(0);
   const cueAccumulatorRef = useRef(0);
   const sampleCountRef = useRef(0);
   const scanStartedAtRef = useRef(0);
+  const accumulatedScanMsRef = useRef(0);
+  const scanTickStartedAtRef = useRef(0);
+  const lostTrackStartedAtRef = useRef(0);
   const lastBoxRef = useRef<DetectedFace["boundingBox"] | null>(null);
   const lastDetectedFaceRef = useRef<DetectedFace | null>(null);
   const stepCaptureRef = useRef<
     Partial<Record<FaceIdStepId, FaceIdStepCapture>>
   >({});
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+  const recordingStartedAtRef = useRef(0);
+  const recordingAccumulatedMsRef = useRef(0);
+  const recordingTickStartedAtRef = useRef(0);
+  const recordingStopPromiseRef =
+    useRef<Promise<RecordedVideoEvidence | null> | null>(null);
+  const capturePhaseRef = useRef<
+    "idle" | "scanning" | "finalizing" | "verified"
+  >("idle");
+  const finalizeRequestedRef = useRef(false);
+  const readyFrameStreakRef = useRef(0);
   const centerSnapshotRef = useRef<{
     centerX: number;
     centerY: number;
@@ -538,11 +646,10 @@ export function FaceIdCapture({
     "idle" | "loading" | "ready" | "scanning" | "verified" | "error"
   >("idle");
   const [message, setMessage] = useState(
-    "Register your face scan for this account.",
+    "Record a 5-second face video for this account.",
   );
   const [stepIndex, setStepIndex] = useState(0);
   const [completedSteps, setCompletedSteps] = useState<FaceIdStepId[]>([]);
-  const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [diagnostic, setDiagnostic] = useState("");
   const [availableCameras, setAvailableCameras] = useState<CameraOption[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
@@ -550,6 +657,10 @@ export function FaceIdCapture({
   const [faceAligned, setFaceAligned] = useState(false);
   const [alignmentGlow, setAlignmentGlow] = useState(0);
   const isVerifyMode = mode === "verify";
+
+  useEffect(() => {
+    onFeedbackChange?.({ status, message });
+  }, [message, onFeedbackChange, status]);
 
   const activeStep = challenge?.steps[stepIndex] ?? null;
   const activeCueColor = activeStep ? STEP_COLORS[activeStep.id] : "#38bdf8";
@@ -563,11 +674,21 @@ export function FaceIdCapture({
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
     }
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      try {
+        recorder.stop();
+      } catch {
+        // ignore recorder shutdown failures during teardown
+      }
+    }
     imageCaptureRef.current = null;
     if (imageBitmapRef.current) {
       imageBitmapRef.current.close();
       imageBitmapRef.current = null;
     }
+    recordingAccumulatedMsRef.current = 0;
+    recordingTickStartedAtRef.current = 0;
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
@@ -580,22 +701,36 @@ export function FaceIdCapture({
     setStatus("idle");
     setMessage(
       isVerifyMode
-        ? "Verify your face scan before the transfer is approved."
-        : "Register your face scan for this account.",
+        ? "Record a 5-second face video before the transfer is approved."
+        : "Record a 5-second face video for this account.",
     );
     setStepIndex(0);
     setCompletedSteps([]);
-    setPreviewImage(null);
     setDiagnostic("");
     stepStreakRef.current = 0;
     prevFaceCenterRef.current = null;
+    prevEyeMetricsRef.current = null;
     motionAccumulatorRef.current = 0;
+    eyeMotionAccumulatorRef.current = 0;
+    eyeMotionPeakRef.current = 0;
     cueAccumulatorRef.current = 0;
     sampleCountRef.current = 0;
     scanStartedAtRef.current = 0;
+    accumulatedScanMsRef.current = 0;
+    scanTickStartedAtRef.current = 0;
+    lostTrackStartedAtRef.current = 0;
     lastBoxRef.current = null;
     lastDetectedFaceRef.current = null;
     stepCaptureRef.current = {};
+    recordedChunksRef.current = [];
+    mediaRecorderRef.current = null;
+    recordingStartedAtRef.current = 0;
+    recordingAccumulatedMsRef.current = 0;
+    recordingTickStartedAtRef.current = 0;
+    recordingStopPromiseRef.current = null;
+    capturePhaseRef.current = "idle";
+    finalizeRequestedRef.current = false;
+    readyFrameStreakRef.current = 0;
     centerSnapshotRef.current = null;
     previousFrameRef.current = null;
     compatScanProgressRef.current = 0;
@@ -868,17 +1003,257 @@ export function FaceIdCapture({
 
   const getRemainingScanMs = useCallback(() => {
     if (!scanStartedAtRef.current) return MIN_SCAN_DURATION_MS;
-    return Math.max(
-      0,
-      MIN_SCAN_DURATION_MS - (performance.now() - scanStartedAtRef.current),
-    );
+    const elapsedMs =
+      accumulatedScanMsRef.current +
+      (scanTickStartedAtRef.current
+        ? Math.max(0, performance.now() - scanTickStartedAtRef.current)
+        : 0);
+    return Math.max(0, MIN_SCAN_DURATION_MS - elapsedMs);
+  }, []);
+
+  const getTimedScanProgress = useCallback((now: number) => {
+    if (!scanStartedAtRef.current) return 0;
+    const elapsedMs =
+      accumulatedScanMsRef.current +
+      (scanTickStartedAtRef.current
+        ? Math.max(0, now - scanTickStartedAtRef.current)
+        : 0);
+    return clamp(elapsedMs / MIN_SCAN_DURATION_MS, 0, 1);
+  }, []);
+
+  const pauseVideoRecording = useCallback((now: number) => {
+    if (recordingTickStartedAtRef.current) {
+      recordingAccumulatedMsRef.current += Math.max(
+        0,
+        now - recordingTickStartedAtRef.current,
+      );
+      recordingTickStartedAtRef.current = 0;
+    }
+
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state !== "recording") {
+      return;
+    }
+
+    if (typeof recorder.pause === "function") {
+      try {
+        recorder.pause();
+      } catch {
+        // Keep the live preview running even if recorder pause fails.
+      }
+    }
+  }, []);
+
+  const startVideoRecording = useCallback(
+    (stream: MediaStream, now: number) => {
+      if (typeof MediaRecorder === "undefined") {
+        throw new Error(
+          "5-second FaceID video capture is unavailable on this browser. Use the latest Chrome or Edge.",
+        );
+      }
+      const mimeType = pickVideoMimeType();
+      const recorderOptions = {
+        ...(mimeType ? { mimeType } : {}),
+        videoBitsPerSecond: 900_000,
+      };
+      const recorder = new MediaRecorder(stream, recorderOptions);
+      recordedChunksRef.current = [];
+      recordingStartedAtRef.current = now;
+      recordingAccumulatedMsRef.current = 0;
+      recordingTickStartedAtRef.current = now;
+      const stopPromise = new Promise<RecordedVideoEvidence | null>(
+        (resolve) => {
+          recorder.ondataavailable = (event) => {
+            if (event.data && event.data.size > 0) {
+              recordedChunksRef.current.push(event.data);
+            }
+          };
+          recorder.onerror = () => {
+            resolve(null);
+          };
+          recorder.onstop = () => {
+            const elapsedMs =
+              recordingAccumulatedMsRef.current +
+              (recordingTickStartedAtRef.current
+                ? Math.max(
+                    0,
+                    performance.now() - recordingTickStartedAtRef.current,
+                  )
+                : 0);
+            const chunks = recordedChunksRef.current.slice();
+            recordedChunksRef.current = [];
+            mediaRecorderRef.current = null;
+            recordingAccumulatedMsRef.current = 0;
+            recordingTickStartedAtRef.current = 0;
+            if (!chunks.length) {
+              resolve(null);
+              return;
+            }
+            const blob = new Blob(chunks, {
+              type: recorder.mimeType || mimeType || "video/webm",
+            });
+            void blobToDataUrl(blob)
+              .then((dataUrl) =>
+                resolve({
+                  dataUrl,
+                  durationMs: elapsedMs,
+                  mimeType:
+                    blob.type || recorder.mimeType || mimeType || "video/webm",
+                }),
+              )
+              .catch(() => resolve(null));
+          };
+        },
+      );
+
+      mediaRecorderRef.current = recorder;
+      recordingStopPromiseRef.current = stopPromise;
+      recorder.start(250);
+    },
+    [],
+  );
+
+  const resumeVideoRecording = useCallback(
+    (now: number) => {
+      const stream = streamRef.current;
+      if (!stream) {
+        return;
+      }
+
+      const recorder = mediaRecorderRef.current;
+      if (!recorder) {
+        startVideoRecording(stream, now);
+        return;
+      }
+
+      if (recorder.state === "paused") {
+        try {
+          recorder.resume();
+        } catch {
+          return;
+        }
+      }
+
+      if (
+        recorder.state === "recording" &&
+        !recordingTickStartedAtRef.current
+      ) {
+        recordingTickStartedAtRef.current = now;
+      }
+    },
+    [startVideoRecording],
+  );
+
+  const discardVideoRecording = useCallback(() => {
+    recordingAccumulatedMsRef.current = 0;
+    recordingTickStartedAtRef.current = 0;
+    recordingStartedAtRef.current = 0;
+    recordedChunksRef.current = [];
+    recordingStopPromiseRef.current = null;
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === "inactive") {
+      mediaRecorderRef.current = null;
+      return;
+    }
+
+    recorder.ondataavailable = null;
+    recorder.onerror = null;
+    recorder.onstop = null;
+    mediaRecorderRef.current = null;
+    try {
+      recorder.stop();
+    } catch {
+      // Ignore recorder teardown failures while restarting a scan.
+    }
+  }, []);
+
+  const pauseTimedCapture = useCallback(
+    (now: number) => {
+      if (scanTickStartedAtRef.current) {
+        accumulatedScanMsRef.current += Math.max(
+          0,
+          now - scanTickStartedAtRef.current,
+        );
+        scanTickStartedAtRef.current = 0;
+      }
+      pauseVideoRecording(now);
+      if (!lostTrackStartedAtRef.current) {
+        lostTrackStartedAtRef.current = now;
+      }
+    },
+    [pauseVideoRecording],
+  );
+
+  const resumeTimedCapture = useCallback(
+    (now: number) => {
+      if (!scanStartedAtRef.current) {
+        scanStartedAtRef.current = now;
+        accumulatedScanMsRef.current = 0;
+      }
+      if (!scanTickStartedAtRef.current) {
+        scanTickStartedAtRef.current = now;
+      }
+      lostTrackStartedAtRef.current = 0;
+      resumeVideoRecording(now);
+    },
+    [resumeVideoRecording],
+  );
+
+  const resetTimedCaptureProgress = useCallback(() => {
+    scanStartedAtRef.current = 0;
+    accumulatedScanMsRef.current = 0;
+    scanTickStartedAtRef.current = 0;
+    lostTrackStartedAtRef.current = 0;
+    readyFrameStreakRef.current = 0;
+    centerSnapshotRef.current = null;
+    setScanProgress(0);
+    setFaceAligned(false);
+    setAlignmentGlow(0);
+    discardVideoRecording();
+  }, [discardVideoRecording]);
+
+  const finalizeVideoRecording = useCallback(async () => {
+    const recorder = mediaRecorderRef.current;
+    const stopPromise = recordingStopPromiseRef.current;
+    if (!recorder || !stopPromise) {
+      throw new Error("FaceID 5-second video is missing. Please scan again.");
+    }
+    if (recordingTickStartedAtRef.current) {
+      recordingAccumulatedMsRef.current += Math.max(
+        0,
+        performance.now() - recordingTickStartedAtRef.current,
+      );
+      recordingTickStartedAtRef.current = 0;
+    }
+    if (recorder.state !== "inactive") {
+      recorder.stop();
+    }
+    const videoEvidence = await stopPromise;
+    recordingStopPromiseRef.current = null;
+    if (!videoEvidence || !videoEvidence.dataUrl.startsWith("data:video/")) {
+      throw new Error(
+        "FaceID video evidence could not be recorded. Please try again.",
+      );
+    }
+    if (videoEvidence.durationMs < MIN_VIDEO_DURATION_MS - 250) {
+      throw new Error(
+        "Keep recording for the full 5 seconds before finishing FaceID.",
+      );
+    }
+    return videoEvidence;
   }, []);
 
   const finalizeProof = useCallback(
-    (resolvedSteps: FaceIdStepId[]) => {
+    async (resolvedSteps: FaceIdStepId[]) => {
+      if (capturePhaseRef.current !== "scanning") {
+        return;
+      }
+      capturePhaseRef.current = "finalizing";
+      finalizeRequestedRef.current = true;
       const canvas = canvasRef.current;
       const box = lastBoxRef.current;
       if (!canvas || !box || !challenge) {
+        capturePhaseRef.current = "idle";
         setStatus("error");
         setMessage("Face sample was incomplete. Please scan again.");
         onChange(null);
@@ -914,6 +1289,14 @@ export function FaceIdCapture({
             ? resolvedSteps.length / challenge.steps.length
             : 0;
         const motionScore = clamp(motionAccumulatorRef.current / 0.45, 0, 1);
+        const eyeMotionScore = clamp(
+          Math.max(
+            eyeMotionAccumulatorRef.current / 0.1,
+            eyeMotionPeakRef.current / 0.02,
+          ),
+          0,
+          1,
+        );
         const cueScore = clamp(
           sampleCountRef.current > 0
             ? cueAccumulatorRef.current / sampleCountRef.current
@@ -927,36 +1310,47 @@ export function FaceIdCapture({
           1,
         );
         const livenessScore = clamp(
-          completedRatio * 0.4 + motionScore * 0.4 + cueScore * 0.2,
+          completedRatio * 0.35 +
+            motionScore * 0.25 +
+            eyeMotionScore * 0.25 +
+            cueScore * 0.15,
           0,
           1,
         );
-        const preview = canvas.toDataURL("image/jpeg", 0.78);
+        const preview =
+          orderedStepCaptures[0]?.image || canvas.toDataURL("image/jpeg", 0.78);
+        const videoEvidence = await finalizeVideoRecording();
 
         const proof: FaceIdProof = {
           challengeToken: challenge.challengeToken,
           descriptor,
           livenessScore,
           motionScore,
+          eyeMotionScore,
           faceCoverage,
           sampleCount: sampleCountRef.current,
           completedSteps: resolvedSteps,
           stepCaptures: orderedStepCaptures,
           previewImage: preview,
+          videoEvidence: videoEvidence.dataUrl,
+          videoDurationMs: Math.round(videoEvidence.durationMs),
+          videoMimeType: videoEvidence.mimeType,
         };
 
-        setPreviewImage(preview);
         setScanProgress(1);
+        capturePhaseRef.current = "verified";
         setStatus("verified");
         setMessage(
           isVerifyMode
-            ? "FaceID verification is ready for this transfer."
-            : "FaceID registered. This biometric sample is now linked to the account.",
+            ? "5-second FaceID video verification is ready for this transfer."
+            : "5-second FaceID video captured. This biometric sample is now linked to the account.",
         );
         setDiagnostic("");
         onChange(proof);
         stopCamera();
       } catch (error) {
+        capturePhaseRef.current = "idle";
+        finalizeRequestedRef.current = false;
         setStatus("error");
         setMessage(
           error instanceof Error ? error.message : "FaceID capture failed.",
@@ -964,7 +1358,14 @@ export function FaceIdCapture({
         onChange(null);
       }
     },
-    [challenge, getRemainingScanMs, isVerifyMode, onChange, stopCamera],
+    [
+      challenge,
+      finalizeVideoRecording,
+      getRemainingScanMs,
+      isVerifyMode,
+      onChange,
+      stopCamera,
+    ],
   );
 
   const renderCurrentFrameToCanvas = useCallback(async () => {
@@ -974,7 +1375,7 @@ export function FaceIdCapture({
       throw new Error("Camera canvas is not ready.");
     }
 
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) {
       throw new Error("Camera preview context is unavailable.");
     }
@@ -1021,16 +1422,30 @@ export function FaceIdCapture({
       const horizontalScore = clamp(1 - Math.abs(deltaX) / 0.18, 0, 1);
       const verticalScore = clamp(1 - Math.abs(deltaY) / 0.19, 0, 1);
       const sizeScore = clamp(1 - Math.abs(1 - sizeRatio) / 0.82, 0, 1);
+      const framePaddingX = targetBox.width * 0.12;
+      const framePaddingY = targetBox.height * 0.12;
+      const withinScanWindow =
+        box.x >= targetBox.x - framePaddingX &&
+        box.y >= targetBox.y - framePaddingY &&
+        box.x + box.width <= targetBox.x + targetBox.width + framePaddingX &&
+        box.y + box.height <= targetBox.y + targetBox.height + framePaddingY;
       const glow = clamp(
         horizontalScore * 0.35 + verticalScore * 0.35 + sizeScore * 0.3,
         0,
         1,
       );
       const aligned =
-        sizeRatio >= 0.42 &&
-        sizeRatio <= 1.56 &&
-        Math.abs(deltaX) <= 0.17 &&
-        Math.abs(deltaY) <= 0.18;
+        withinScanWindow &&
+        sizeRatio >= 0.46 &&
+        sizeRatio <= 1.38 &&
+        Math.abs(deltaX) <= 0.16 &&
+        Math.abs(deltaY) <= 0.17;
+      const scanReady =
+        withinScanWindow &&
+        sizeRatio >= 0.54 &&
+        sizeRatio <= 1.2 &&
+        Math.abs(deltaX) <= 0.125 &&
+        Math.abs(deltaY) <= 0.13;
 
       return {
         centerX,
@@ -1041,9 +1456,24 @@ export function FaceIdCapture({
         sizeRatio,
         glow,
         aligned,
+        scanReady,
       };
     },
     [getCompatibilityBox],
+  );
+
+  const isReadyToStartTimedCapture = useCallback(
+    (alignment: AlignmentSnapshot, motionMetric: number) =>
+      alignment.scanReady &&
+      alignment.coverage >= 0.085 &&
+      motionMetric <= 0.16,
+    [],
+  );
+
+  const canContinueTimedCapture = useCallback(
+    (alignment: AlignmentSnapshot, motionMetric: number) =>
+      alignment.aligned && alignment.coverage >= 0.072 && motionMetric <= 0.24,
+    [],
   );
 
   const evaluateStep = useCallback(
@@ -1060,9 +1490,9 @@ export function FaceIdCapture({
 
       if (activeStep.id === "center") {
         matched =
-          alignment.aligned &&
+          alignment.scanReady &&
           alignment.coverage >= 0.085 &&
-          motionMetric <= 0.12;
+          motionMetric <= 0.16;
         hint = matched
           ? "Hold still to lock the center step."
           : "Center your face inside the oval and hold still.";
@@ -1108,15 +1538,6 @@ export function FaceIdCapture({
         stepStreakRef.current + 1,
       );
 
-      setScanProgress(
-        clamp(
-          (completedSteps.length +
-            stepStreakRef.current / REQUIRED_STEP_STREAK) /
-            Math.max(totalSteps, 1),
-          0,
-          0.99,
-        ),
-      );
       setMessage(
         `Good. ${activeStep.label} ${stepStreakRef.current}/${REQUIRED_STEP_STREAK}`,
       );
@@ -1150,7 +1571,7 @@ export function FaceIdCapture({
             : "Finalizing FaceID verification...",
         );
         window.setTimeout(
-          () => finalizeProof(nextCompletedSteps),
+          () => void finalizeProof(nextCompletedSteps),
           Math.max(420, remainingScanMs),
         );
         return true;
@@ -1207,7 +1628,7 @@ export function FaceIdCapture({
             : "Finalizing FaceID verification...",
         );
         window.setTimeout(
-          () => finalizeProof(nextCompletedSteps),
+          () => void finalizeProof(nextCompletedSteps),
           Math.max(520, remainingScanMs),
         );
         return;
@@ -1231,7 +1652,7 @@ export function FaceIdCapture({
   const processFrame = useCallback(async () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    if (!canvas || !active) return;
+    if (!canvas || !active || capturePhaseRef.current !== "scanning") return;
     const useImageCapture =
       !video && captureMode === "compat" && imageCaptureRef.current;
     if (!useImageCapture && !video) return;
@@ -1251,7 +1672,7 @@ export function FaceIdCapture({
     }
     lastProcessAtRef.current = now;
 
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) return;
     if (useImageCapture) {
       const bitmap = await imageCaptureRef.current!.grabFrame();
@@ -1275,18 +1696,36 @@ export function FaceIdCapture({
         if (!faces.length) {
           noDetectionFramesRef.current += 1;
           lastDetectedFaceRef.current = null;
-          setFaceAligned(false);
-          setAlignmentGlow(0);
-          setScanProgress(
-            challenge?.steps.length
-              ? completedSteps.length / challenge.steps.length
-              : 0,
-          );
-          setMessage(
-            noDetectionFramesRef.current > 8
-              ? "Face not recognized yet. Keep your full face inside the oval."
-              : "Scanning camera feed...",
-          );
+          prevEyeMetricsRef.current = null;
+          if (scanStartedAtRef.current > 0) {
+            pauseTimedCapture(now);
+            const pausedProgress = getTimedScanProgress(now);
+            const pausedTooLong =
+              lostTrackStartedAtRef.current > 0 &&
+              now - lostTrackStartedAtRef.current >= TIMED_CAPTURE_GRACE_MS;
+            if (pausedTooLong) {
+              resetTimedCaptureProgress();
+              setMessage(
+                "Your face stayed outside the oval too long. Bring it back into the frame to restart the 5-second recording.",
+              );
+            } else {
+              setFaceAligned(false);
+              setAlignmentGlow(0);
+              setScanProgress(pausedProgress);
+              setMessage(
+                "Keep your face inside the oval to continue recording.",
+              );
+            }
+          } else {
+            setFaceAligned(false);
+            setAlignmentGlow(0);
+            setScanProgress(0);
+            setMessage(
+              noDetectionFramesRef.current > 8
+                ? "Face not recognized yet. Keep your full face inside the oval."
+                : "Scanning camera feed...",
+            );
+          }
           rafRef.current = window.requestAnimationFrame(
             () => void processFrame(),
           );
@@ -1302,17 +1741,17 @@ export function FaceIdCapture({
         const totalSteps = challenge?.steps.length ?? 0;
         let alignmentMessage = "Face aligned. Scanning now.";
 
-        if (alignment.sizeRatio < 0.4) {
+        if (alignment.sizeRatio < 0.58) {
           alignmentMessage = "Move closer until your face fits the oval.";
-        } else if (alignment.sizeRatio > 1.58) {
+        } else if (alignment.sizeRatio > 1.12) {
           alignmentMessage = "Move a little back so your full face fits.";
-        } else if (alignment.deltaX < -0.15) {
+        } else if (alignment.deltaX < -0.09) {
           alignmentMessage = "Move slightly to the right.";
-        } else if (alignment.deltaX > 0.15) {
+        } else if (alignment.deltaX > 0.09) {
           alignmentMessage = "Move slightly to the left.";
-        } else if (alignment.deltaY < -0.17) {
+        } else if (alignment.deltaY < -0.1) {
           alignmentMessage = "Lower your face into the oval.";
-        } else if (alignment.deltaY > 0.17) {
+        } else if (alignment.deltaY > 0.1) {
           alignmentMessage = "Raise your face into the oval.";
         } else if (activeStep?.id === "move_left") {
           alignmentMessage = "Turn or move slightly to the left.";
@@ -1346,6 +1785,24 @@ export function FaceIdCapture({
           coverage: alignment.coverage,
         };
 
+        const eyeMetrics = getEyeMetrics(detectedFace.landmarks);
+        if (eyeMetrics && prevEyeMetricsRef.current) {
+          const eyeDelta =
+            Math.abs(
+              eyeMetrics.averageEar - prevEyeMetricsRef.current.averageEar,
+            ) +
+            Math.abs(eyeMetrics.leftEar - prevEyeMetricsRef.current.leftEar) *
+              0.7 +
+            Math.abs(eyeMetrics.rightEar - prevEyeMetricsRef.current.rightEar) *
+              0.7;
+          eyeMotionAccumulatorRef.current += Math.min(0.05, eyeDelta * 1.8);
+          eyeMotionPeakRef.current = Math.max(
+            eyeMotionPeakRef.current,
+            eyeDelta,
+          );
+        }
+        prevEyeMetricsRef.current = eyeMetrics;
+
         const sampleX = clamp(Math.round(box.x), 0, canvas.width - 1);
         const sampleY = clamp(Math.round(box.y), 0, canvas.height - 1);
         const sampleW = clamp(Math.round(box.width), 1, canvas.width - sampleX);
@@ -1367,35 +1824,104 @@ export function FaceIdCapture({
           challenge && totalSteps > 0
             ? evaluateStep(alignment, motionMetric, totalSteps)
             : false;
-        const partialProgress =
-          totalSteps > 0
-            ? clamp(
-                (completedSteps.length +
-                  (stepMatched
-                    ? stepStreakRef.current / REQUIRED_STEP_STREAK
-                    : 0)) /
-                  totalSteps,
-                0,
-                0.99,
-              )
-            : 0;
-        setScanProgress(partialProgress);
+        const readyToStartTimedCapture = isReadyToStartTimedCapture(
+          alignment,
+          motionMetric,
+        );
+        const canContinueCapture = canContinueTimedCapture(
+          alignment,
+          motionMetric,
+        );
+        readyFrameStreakRef.current = readyToStartTimedCapture
+          ? Math.min(readyFrameStreakRef.current + 1, 12)
+          : 0;
+        if (
+          !scanStartedAtRef.current &&
+          readyToStartTimedCapture &&
+          readyFrameStreakRef.current >= 2
+        ) {
+          resumeTimedCapture(now);
+        }
+        const timedProgress = scanStartedAtRef.current
+          ? getTimedScanProgress(now)
+          : 0;
+        if (
+          scanStartedAtRef.current > 0 &&
+          !canContinueCapture &&
+          !finalizeRequestedRef.current
+        ) {
+          pauseTimedCapture(now);
+          const pausedProgress = getTimedScanProgress(now);
+          const pausedTooLong =
+            lostTrackStartedAtRef.current > 0 &&
+            now - lostTrackStartedAtRef.current >= TIMED_CAPTURE_GRACE_MS;
+          if (pausedTooLong) {
+            resetTimedCaptureProgress();
+            setMessage(
+              "Your face moved out of the oval for too long. Hold it inside the frame to restart recording.",
+            );
+          } else {
+            setFaceAligned(false);
+            setAlignmentGlow(Math.max(alignment.glow * 0.35, 0.12));
+            setScanProgress(pausedProgress);
+            setMessage("Hold your face inside the oval to continue recording.");
+          }
+          rafRef.current = window.requestAnimationFrame(
+            () => void processFrame(),
+          );
+          return;
+        }
+        if (canContinueCapture && scanStartedAtRef.current > 0) {
+          resumeTimedCapture(now);
+        }
+        setScanProgress(timedProgress);
         setFaceAligned(
-          stepMatched ||
-            (activeStep?.id === "center" && alignment.aligned) ||
-            alignment.glow >= 0.66,
+          canContinueCapture ||
+            stepMatched ||
+            (activeStep?.id === "center" && alignment.scanReady),
         );
         setAlignmentGlow(
-          stepMatched
-            ? Math.max(alignment.glow, 0.88)
-            : activeStep?.id === "center" && alignment.aligned
-              ? Math.max(alignment.glow, 0.64)
-              : alignment.glow * 0.72,
+          canContinueCapture
+            ? Math.max(alignment.glow, 0.92)
+            : stepMatched
+              ? Math.max(alignment.glow, 0.84)
+              : activeStep?.id === "center" && alignment.aligned
+                ? Math.max(alignment.glow, 0.6)
+                : alignment.glow * 0.62,
         );
-        if (!stepMatched) {
+        if (!scanStartedAtRef.current && !readyToStartTimedCapture) {
+          setMessage(
+            `${alignmentMessage} Hold still for a moment to start recording.`,
+          );
+        } else if (!stepMatched) {
           setMessage(alignmentMessage);
         }
+        const currentChallenge = challenge;
+        const isCenterOnlyChallenge =
+          currentChallenge?.steps.length === 1 &&
+          currentChallenge.steps[0]?.id === "center";
+        if (
+          isCenterOnlyChallenge &&
+          scanStartedAtRef.current &&
+          timedProgress >= 1 &&
+          canContinueCapture &&
+          !finalizeRequestedRef.current
+        ) {
+          finalizeRequestedRef.current = true;
+          centerSnapshotRef.current = {
+            centerX: alignment.centerX,
+            centerY: alignment.centerY,
+            coverage: alignment.coverage,
+          };
+          captureStepEvidence("center", alignment, motionMetric);
+          const resolvedSteps: FaceIdStepId[] = ["center"];
+          setCompletedSteps(resolvedSteps);
+          setMessage("Finalizing FaceID verification...");
+          window.setTimeout(() => void finalizeProof(resolvedSteps), 120);
+          return;
+        }
       } else {
+        prevEyeMetricsRef.current = null;
         const box = getCompatibilityBox(canvas);
         const sampleX = clamp(Math.round(box.x), 0, canvas.width - 1);
         const sampleY = clamp(Math.round(box.y), 0, canvas.height - 1);
@@ -1437,6 +1963,7 @@ export function FaceIdCapture({
           motionMetric >= 0.002 ||
           sampleCountRef.current > 3;
         if (frameHasSignal) {
+          resumeTimedCapture(now);
           setFaceAligned(true);
           setAlignmentGlow(
             clamp(
@@ -1459,12 +1986,15 @@ export function FaceIdCapture({
         compatScanProgressRef.current =
           compatAlignedSamplesRef.current / requiredCompatSamples;
         if (!frameHasSignal) {
+          pauseTimedCapture(now);
           setFaceAligned(false);
           setAlignmentGlow(0.12);
         }
 
         const progressRatio = clamp(compatScanProgressRef.current, 0, 1);
-        setScanProgress(progressRatio);
+        setScanProgress(
+          scanStartedAtRef.current ? getTimedScanProgress(now) : 0,
+        );
 
         if (!frameHasSignal) {
           setMessage("Align your face inside the oval to start auto scan.");
@@ -1504,7 +2034,7 @@ export function FaceIdCapture({
                 : "Finalizing FaceID verification...",
             );
             window.setTimeout(
-              () => finalizeProof(resolvedSteps),
+              () => void finalizeProof(resolvedSteps),
               Math.max(520, remainingScanMs),
             );
             return;
@@ -1514,6 +2044,10 @@ export function FaceIdCapture({
         }
       }
     } catch (error) {
+      if (capturePhaseRef.current !== "scanning") {
+        return;
+      }
+      capturePhaseRef.current = "idle";
       setStatus("error");
       setMessage(
         error instanceof Error ? error.message : "FaceID scan failed.",
@@ -1523,7 +2057,9 @@ export function FaceIdCapture({
       return;
     }
 
-    rafRef.current = window.requestAnimationFrame(() => void processFrame());
+    if (capturePhaseRef.current === "scanning") {
+      rafRef.current = window.requestAnimationFrame(() => void processFrame());
+    }
   }, [
     active,
     activeCueColor,
@@ -1536,14 +2072,22 @@ export function FaceIdCapture({
     evaluateCompatibilityStep,
     getAlignmentSnapshot,
     getCompatibilityBox,
+    getTimedScanProgress,
+    canContinueTimedCapture,
+    isReadyToStartTimedCapture,
     onChange,
+    pauseTimedCapture,
+    resetTimedCaptureProgress,
+    resumeTimedCapture,
     stopCamera,
   ]);
 
   const startCapture = useCallback(async () => {
     if (disabled) return;
     setStatus("loading");
-    setMessage("Starting camera and preparing your face scan...");
+    setMessage(
+      "Starting camera and preparing your 5-second face verification...",
+    );
     onChange(null);
 
     try {
@@ -1673,30 +2217,38 @@ export function FaceIdCapture({
 
       stepStreakRef.current = 0;
       prevFaceCenterRef.current = null;
+      prevEyeMetricsRef.current = null;
       motionAccumulatorRef.current = 0;
+      eyeMotionAccumulatorRef.current = 0;
+      eyeMotionPeakRef.current = 0;
       cueAccumulatorRef.current = 0;
       sampleCountRef.current = 0;
-      scanStartedAtRef.current = performance.now();
+      scanStartedAtRef.current = 0;
+      accumulatedScanMsRef.current = 0;
+      scanTickStartedAtRef.current = 0;
+      lostTrackStartedAtRef.current = 0;
       lastBoxRef.current = null;
       lastDetectedFaceRef.current = null;
       centerSnapshotRef.current = null;
       previousFrameRef.current = null;
       noDetectionFramesRef.current = 0;
+      finalizeRequestedRef.current = false;
+      readyFrameStreakRef.current = 0;
 
       setChallenge(nextChallenge);
       setCompletedSteps([]);
       setStepIndex(0);
-      setPreviewImage(null);
       setActive(true);
       setCaptureMode("native");
+      capturePhaseRef.current = "scanning";
       compatScanProgressRef.current = 0;
       compatAlignedSamplesRef.current = 0;
       setScanProgress(0);
       setStatus("scanning");
       setMessage(
         detector
-          ? "Look into the oval frame. The ring will brighten when your face is ready."
-          : "Look into the oval frame. Auto scan starts when the ring turns bright.",
+          ? "Look into the oval frame and keep recording for 5 seconds. The ring will brighten when your face is ready."
+          : "Look into the oval frame and keep recording for 5 seconds. Auto scan starts when the ring turns bright.",
       );
     } catch (error) {
       stopCamera();
@@ -1736,16 +2288,34 @@ export function FaceIdCapture({
     };
   }, [active, processFrame, status]);
 
-  const badgeLabel = useMemo(() => {
-    if (status === "verified") return "Ready";
-    if (status === "scanning") return "Scanning";
-    if (status === "error") return "Retry";
-    return "Required";
-  }, [status]);
+  const statusCopy = useMemo(() => {
+    if (status === "verified") {
+      return isVerifyMode
+        ? "5-second FaceID video verified. Review the preview, then continue."
+        : "5-second FaceID enrollment video captured and ready to bind.";
+    }
+    if (status === "error") {
+      return "The scan was interrupted. Keep the frame steady and try the 5-second capture again.";
+    }
+    if (status === "scanning") {
+      return isVerifyMode
+        ? "Keep your face inside the frame while the 5-second verification video records."
+        : "Keep your face inside the frame while the 5-second enrollment video records.";
+    }
+    if (status === "loading") {
+      return "Camera is starting. Hold steady and get ready for the 5-second capture.";
+    }
+    return isVerifyMode
+      ? "Record a 5-second face video before the transfer is approved."
+      : "Record a 5-second face video for this account.";
+  }, [isVerifyMode, status]);
 
   const shouldShowCameraPicker = availableCameras.length > 1;
   const visibleProgress = active ? scanProgress : status === "verified" ? 1 : 0;
-
+  const visibleProgressSeconds = (
+    (Math.min(visibleProgress, 1) * MIN_SCAN_DURATION_MS) /
+    1000
+  ).toFixed(1);
   const cueStyle = {
     "--faceid-cue": activeCueColor,
     "--faceid-lock-strength": alignmentGlow.toFixed(3),
@@ -1753,20 +2323,9 @@ export function FaceIdCapture({
 
   return (
     <div className={`faceid-card faceid-card-${status}`} style={cueStyle}>
-      <div className="faceid-head">
-        <div>
-          <strong>
-            {isVerifyMode ? "FaceID Verification" : "FaceID Enrollment"}
-          </strong>
-          <p>{message}</p>
-          {status === "error" && diagnostic ? (
-            <small className="faceid-diagnostic">{diagnostic}</small>
-          ) : null}
-        </div>
-        <span className="faceid-badge">
-          {status === "scanning" ? "Auto scan" : badgeLabel}
-        </span>
-      </div>
+      {status === "error" && diagnostic ? (
+        <small className="faceid-diagnostic">{diagnostic}</small>
+      ) : null}
 
       {shouldShowCameraPicker ? (
         <div className="faceid-device-row">
@@ -1818,17 +2377,17 @@ export function FaceIdCapture({
                 className={`faceid-oval ${faceAligned ? "is-aligned" : ""}`}
               />
             </div>
-          ) : previewImage ? (
-            <img
-              src={previewImage}
-              alt="Registered face sample"
-              className="faceid-preview"
-            />
           ) : (
             <div className="faceid-placeholder">
-              <span>Face scan required</span>
+              <span>
+                {status === "verified"
+                  ? "5-second video captured"
+                  : "5-second face video required"}
+              </span>
               <small>
-                Center your face inside the oval and let the scan complete.
+                {status === "verified"
+                  ? "FaceID is ready to submit. You can update the wallet now or record again."
+                  : "Center your face inside the oval and let the 5-second recording complete."}
               </small>
             </div>
           )}
@@ -1842,26 +2401,50 @@ export function FaceIdCapture({
           {active
             ? activeStep
               ? `Current step: ${activeStep.label}. Keep your face inside the oval and follow the hint above.`
-              : "Keep your face inside the oval. The scan will continue automatically."
+              : "Keep your face inside the oval until the 5-second recording finishes automatically."
             : isVerifyMode
-              ? "Camera preview will appear here after you start transfer verification."
-              : "Camera preview will appear here after you start scanning."}
+              ? status === "verified"
+                ? "FaceID verification is complete and ready to submit."
+                : "The scan area will switch to verification-ready state after recording."
+              : status === "verified"
+                ? "FaceID enrollment is complete and ready to update."
+                : "The scan area will switch to ready state after recording."}
         </small>
       </div>
 
-      <div className="faceid-scan-progress" aria-hidden="true">
-        <div className="faceid-scan-progress-bar">
-          <span style={{ width: `${Math.round(visibleProgress * 100)}%` }} />
+      <div className="faceid-feedback-panel">
+        <div className="faceid-live-hint" aria-live="polite">
+          {message}
         </div>
-        <small>
-          {status === "verified"
-            ? "Scan complete"
-            : active
-              ? activeStep
-                ? `${activeStep.label} • ${Math.round(visibleProgress * 100)}%`
-                : `Auto scanning ${Math.round(visibleProgress * 100)}%`
-              : "Ready to scan"}
-        </small>
+
+        <div className="faceid-scan-progress" aria-hidden="true">
+          <div className="faceid-progress-top">
+            <span>
+              {status === "verified"
+                ? "Capture complete"
+                : active
+                  ? "Recording in progress"
+                  : "Awaiting capture"}
+            </span>
+            <strong>
+              {status === "verified"
+                ? "5.0s"
+                : active
+                  ? `${visibleProgressSeconds}s`
+                  : "0.0s"}
+            </strong>
+          </div>
+          <div className="faceid-scan-progress-bar">
+            <span style={{ width: `${Math.round(visibleProgress * 100)}%` }} />
+          </div>
+          <small>
+            {status === "verified"
+              ? "5-second video complete"
+              : active
+                ? `Recording ${visibleProgressSeconds}s / ${(MIN_SCAN_DURATION_MS / 1000).toFixed(1)}s`
+                : "Ready to record"}
+          </small>
+        </div>
       </div>
 
       <div className="faceid-actions">
@@ -1881,7 +2464,7 @@ export function FaceIdCapture({
             onClick={startCapture}
             disabled={disabled}
           >
-            {status === "verified" ? "Scan again" : "Start scan"}
+            {status === "verified" ? "Capture again" : "Start capture"}
           </button>
         )}
         {challenge?.expiresAt ? (
