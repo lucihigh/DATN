@@ -90,6 +90,7 @@ import {
   type StoredCard,
 } from "./services/cards";
 import {
+  consumeOtpChallenge,
   createEmailOtpChallenge,
   maskEmail,
   verifyAndConsumeEmailOtpChallenge,
@@ -235,9 +236,10 @@ function invalidateUserResponseCache(
 
 const app = express();
 app.set("trust proxy", true);
+const JSON_BODY_LIMIT = process.env.JSON_BODY_LIMIT || "25mb";
 app.use(helmet());
 app.use(morgan("dev"));
-app.use(express.json());
+app.use(express.json({ limit: JSON_BODY_LIMIT }));
 app.use(applySecurityHeaders);
 app.use(lockoutGuard);
 
@@ -290,8 +292,9 @@ const BOOTSTRAP_DEFAULT_ADMIN = !["0", "false", "no"].includes(
     .trim()
     .toLowerCase(),
 );
-const TRANSFER_OTP_TTL_MINUTES = Number(
-  process.env.TRANSFER_OTP_TTL_MINUTES || "5",
+const TRANSFER_OTP_TTL_MINUTES = Math.max(
+  5,
+  Number(process.env.TRANSFER_OTP_TTL_MINUTES || "5"),
 );
 const TRANSFER_OTP_MAX_ATTEMPTS = Number(
   process.env.TRANSFER_OTP_MAX_ATTEMPTS || "5",
@@ -394,11 +397,20 @@ const FACE_ID_MIN_LIVENESS_SCORE = Number(
 const FACE_ID_MIN_MOTION_SCORE = Number(
   process.env.FACE_ID_MIN_MOTION_SCORE || "0.22",
 );
+const FACE_ID_MIN_EYE_MOTION_SCORE = Number(
+  process.env.FACE_ID_MIN_EYE_MOTION_SCORE || "0.12",
+);
 const FACE_ID_MIN_FACE_COVERAGE = Number(
   process.env.FACE_ID_MIN_FACE_COVERAGE || "0.085",
 );
 const FACE_ID_MIN_SAMPLE_COUNT = Number(
   process.env.FACE_ID_MIN_SAMPLE_COUNT || "12",
+);
+const FACE_ID_MIN_VIDEO_DURATION_MS = Number(
+  process.env.FACE_ID_MIN_VIDEO_DURATION_MS || "5000",
+);
+const FACE_ID_MAX_VIDEO_DATA_URL_LENGTH = Number(
+  process.env.FACE_ID_MAX_VIDEO_DATA_URL_LENGTH || "18000000",
 );
 const FACE_ID_LEGACY_MATCH_THRESHOLD = Number(
   process.env.FACE_ID_LEGACY_MATCH_THRESHOLD || "0.84",
@@ -412,6 +424,15 @@ const FACE_ID_V2_ALIGNED_MATCH_THRESHOLD = Number(
 const FACE_ID_V2_GEOMETRY_MATCH_THRESHOLD = Number(
   process.env.FACE_ID_V2_GEOMETRY_MATCH_THRESHOLD || "0.64",
 );
+const FACE_ID_V2_RESCUE_GEOMETRY_THRESHOLD = Number(
+  process.env.FACE_ID_V2_RESCUE_GEOMETRY_THRESHOLD || "0.985",
+);
+const FACE_ID_V2_RESCUE_LEGACY_THRESHOLD = Number(
+  process.env.FACE_ID_V2_RESCUE_LEGACY_THRESHOLD || "0.6",
+);
+const FACE_ID_V2_RESCUE_ALIGNED_FLOOR = Number(
+  process.env.FACE_ID_V2_RESCUE_ALIGNED_FLOOR || "0.45",
+);
 const FACE_ID_DESCRIPTOR_V2_PREFIX = "faceid_v2:";
 const TRANSFER_FACE_ID_THRESHOLD = Number(
   process.env.TRANSFER_FACE_ID_THRESHOLD || "10000",
@@ -419,9 +440,20 @@ const TRANSFER_FACE_ID_THRESHOLD = Number(
 const CUMULATIVE_TRANSFER_FACE_ID_WINDOW_MINUTES = Number(
   process.env.CUMULATIVE_TRANSFER_FACE_ID_WINDOW_MINUTES || "10",
 );
-const CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES = Number(
-  process.env.CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES || "5",
+const CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_SECONDS = Math.max(
+  1,
+  Math.round(
+    Number(
+      process.env.CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_SECONDS ||
+        (process.env.CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES
+          ? Number(process.env.CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES) *
+            60
+          : 150),
+    ),
+  ),
 );
+const CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES =
+  CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_SECONDS / 60;
 const CONTINUOUS_LARGE_TRANSFER_BLOCK_COUNT = Number(
   process.env.CONTINUOUS_LARGE_TRANSFER_BLOCK_COUNT || "1",
 );
@@ -605,6 +637,55 @@ type AnomalyResponse = {
     mustDo?: string[];
     promptTemplateId?: string;
   } | null;
+  inputContract?: {
+    version: string;
+    accountProfile?: Record<string, unknown> | null;
+    transferContext?: Record<string, unknown> | null;
+    behaviorSnapshot?: Record<string, unknown> | null;
+  } | null;
+  mlAnalysis?: {
+    anomalyScore: number;
+    rawScore: number;
+    baseRiskLevel: "low" | "medium" | "high";
+    adjustedRiskLevel: "low" | "medium" | "high";
+    model?: {
+      name?: string;
+      version?: string | null;
+      source?: string | null;
+    } | null;
+    topSignals?: Array<{
+      feature: string;
+      value: number;
+      zScore?: number | null;
+      baselineMean?: number | null;
+      baselineStd?: number | null;
+      direction?: "high" | "low" | "neutral";
+    }>;
+  } | null;
+  llmAnalysis?: {
+    riskLevel: "low" | "medium" | "high";
+    signalCount: number;
+    signals: string[];
+    ruleTags: string[];
+    summary?: string | null;
+    source?: string | null;
+    model?: string | null;
+  } | null;
+  finalDecision?: {
+    riskLevel: "low" | "medium" | "high";
+    finalAction?:
+      | "ALLOW"
+      | "ALLOW_WITH_WARNING"
+      | "REQUIRE_OTP"
+      | "REQUIRE_OTP_FACE_ID"
+      | "HOLD_REVIEW";
+    finalScore?: number;
+    headline?: string | null;
+    summary?: string | null;
+    nextStep?: string | null;
+    recommendedActions?: string[];
+    stepUpLevel?: string | null;
+  } | null;
 };
 
 type TransferSafetyAdvisory = {
@@ -673,8 +754,25 @@ type TransferNoteLlmAnalysis = {
   signals: string[];
   ruleTags: string[];
   summary: string | null;
+  purposeTags: string[];
+  purposeConfidence: number;
   source: "disabled" | "heuristic" | "openai" | "fallback";
   model?: string | null;
+};
+
+type TransferRiskLlmContextInput = {
+  note: string;
+  amount: number;
+  currency: string;
+  accountCategory: "personal" | "business";
+  accountSegment: "personal" | "sme" | "enterprise";
+  recipientKnown: boolean;
+  balanceImpactRatio: number;
+  sessionRiskLevel: "low" | "medium" | "high";
+  velocity1h: number;
+  recentReviewCount30d: number;
+  recentBlockedCount30d: number;
+  spendSurgeRatio: number | null;
 };
 
 type TransferStepUpPolicy = {
@@ -762,6 +860,27 @@ type AdminAlertResponse = {
   recentAdminTopUpAmount24h: number | null;
   recentSelfDepositAmount24h: number | null;
   rapidCashOutRiskScore: number | null;
+  transferAdvisorySeverity: TransferSafetyAdvisory["severity"] | null;
+  transferAdvisoryTitle: string | null;
+  transferAdvisoryMessage: string | null;
+  transferBlockedUntil: string | null;
+  finalAction: AnomalyResponse["finalAction"] | null;
+  stepUpLevel: string | null;
+  nextStep: string | null;
+  archetype: string | null;
+  timeline: string[];
+  recommendedActions: string[];
+  ruleHits: Array<{
+    ruleId?: string;
+    title?: string;
+    reason?: string;
+    userWarning?: string;
+    riskLevel?: string;
+  }>;
+  warningTitle: string | null;
+  warningMessage: string | null;
+  warningMustDo: string[];
+  warningDoNot: string[];
   analysisSignals: Record<string, unknown> | null;
 };
 
@@ -807,6 +926,7 @@ type FaceIdChallengePayload = {
   steps: FaceIdStep[];
   minLivenessScore: number;
   minMotionScore: number;
+  minEyeMotionScore: number;
   minFaceCoverage: number;
   minSampleCount: number;
 };
@@ -816,6 +936,7 @@ type FaceIdEnrollmentSubmission = {
   descriptor: string;
   livenessScore: number;
   motionScore: number;
+  eyeMotionScore: number;
   faceCoverage: number;
   sampleCount: number;
   completedSteps: FaceIdStep[];
@@ -829,6 +950,9 @@ type FaceIdEnrollmentSubmission = {
     aligned?: boolean;
   }>;
   previewImage?: string;
+  videoEvidence?: string;
+  videoDurationMs?: number;
+  videoMimeType?: string;
 };
 
 type FaceIdAntiSpoofResult = {
@@ -1026,6 +1150,152 @@ const normalizeRuleHits = (value: unknown): AnomalyResponse["ruleHits"] => {
   });
 };
 
+const normalizeNumberRecord = (value: unknown) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const entries = Object.entries(value as Record<string, unknown>).filter(
+    ([, entry]) => typeof entry === "number" && Number.isFinite(entry),
+  );
+  return entries.length
+    ? Object.fromEntries(entries.map(([key, entry]) => [key, entry as number]))
+    : undefined;
+};
+
+const normalizeMlSignals = (value: unknown): AnomalyResponse["mlAnalysis"] => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const data = value as Record<string, unknown>;
+  const topSignals = Array.isArray(data.topSignals)
+    ? data.topSignals.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+          return [];
+        }
+        const item = entry as Record<string, unknown>;
+        if (
+          typeof item.feature !== "string" ||
+          typeof item.value !== "number" ||
+          !Number.isFinite(item.value)
+        ) {
+          return [];
+        }
+        const direction: "high" | "low" | "neutral" =
+          item.direction === "high" ||
+          item.direction === "low" ||
+          item.direction === "neutral"
+            ? item.direction
+            : "neutral";
+        return [
+          {
+            feature: item.feature,
+            value: item.value,
+            zScore:
+              typeof item.zScore === "number" && Number.isFinite(item.zScore)
+                ? item.zScore
+                : null,
+            baselineMean:
+              typeof item.baselineMean === "number" &&
+              Number.isFinite(item.baselineMean)
+                ? item.baselineMean
+                : null,
+            baselineStd:
+              typeof item.baselineStd === "number" &&
+              Number.isFinite(item.baselineStd)
+                ? item.baselineStd
+                : null,
+            direction,
+          },
+        ];
+      })
+    : [];
+
+  return {
+    anomalyScore:
+      typeof data.anomalyScore === "number" &&
+      Number.isFinite(data.anomalyScore)
+        ? data.anomalyScore
+        : 0,
+    rawScore:
+      typeof data.rawScore === "number" && Number.isFinite(data.rawScore)
+        ? data.rawScore
+        : 0,
+    baseRiskLevel: normalizeRiskLevel(data.baseRiskLevel),
+    adjustedRiskLevel: normalizeRiskLevel(data.adjustedRiskLevel),
+    model:
+      data.model && typeof data.model === "object" && !Array.isArray(data.model)
+        ? {
+            name:
+              typeof (data.model as Record<string, unknown>).name === "string"
+                ? ((data.model as Record<string, unknown>).name as string)
+                : undefined,
+            version:
+              typeof (data.model as Record<string, unknown>).version ===
+              "string"
+                ? ((data.model as Record<string, unknown>).version as string)
+                : null,
+            source:
+              typeof (data.model as Record<string, unknown>).source === "string"
+                ? ((data.model as Record<string, unknown>).source as string)
+                : null,
+          }
+        : null,
+    topSignals,
+  };
+};
+
+const normalizeLlmAnalysis = (
+  value: unknown,
+): AnomalyResponse["llmAnalysis"] => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const data = value as Record<string, unknown>;
+  return {
+    riskLevel: normalizeRiskLevel(data.riskLevel),
+    signalCount:
+      typeof data.signalCount === "number" && Number.isFinite(data.signalCount)
+        ? data.signalCount
+        : 0,
+    signals: toStringList(data.signals).slice(0, 6),
+    ruleTags: toStringList(data.ruleTags).slice(0, 6),
+    summary: typeof data.summary === "string" ? data.summary : null,
+    source: typeof data.source === "string" ? data.source : null,
+    model: typeof data.model === "string" ? data.model : null,
+  };
+};
+
+const normalizeFinalDecision = (
+  value: unknown,
+): AnomalyResponse["finalDecision"] => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const data = value as Record<string, unknown>;
+  const finalAction =
+    typeof data.finalAction === "string"
+      ? (data.finalAction as
+          | "ALLOW"
+          | "ALLOW_WITH_WARNING"
+          | "REQUIRE_OTP"
+          | "REQUIRE_OTP_FACE_ID"
+          | "HOLD_REVIEW")
+      : undefined;
+  return {
+    riskLevel: normalizeRiskLevel(data.riskLevel),
+    finalAction,
+    finalScore:
+      typeof data.finalScore === "number" && Number.isFinite(data.finalScore)
+        ? data.finalScore
+        : undefined,
+    headline: typeof data.headline === "string" ? data.headline : null,
+    summary: typeof data.summary === "string" ? data.summary : null,
+    nextStep: typeof data.nextStep === "string" ? data.nextStep : null,
+    recommendedActions: toStringList(data.recommendedActions).slice(0, 4),
+    stepUpLevel: typeof data.stepUpLevel === "string" ? data.stepUpLevel : null,
+  };
+};
+
 const normalizeAiResponse = (value: unknown): AnomalyResponse => {
   if (!value || typeof value !== "object") return DEFAULT_AI_RESPONSE;
   const data = value as Record<string, unknown>;
@@ -1062,6 +1332,23 @@ const normalizeAiResponse = (value: unknown): AnomalyResponse => {
     otpReason,
     warning,
   });
+  const normalizedInputContract =
+    data.input_contract &&
+    typeof data.input_contract === "object" &&
+    !Array.isArray(data.input_contract)
+      ? (data.input_contract as Record<string, unknown>)
+      : data.inputContract &&
+          typeof data.inputContract === "object" &&
+          !Array.isArray(data.inputContract)
+        ? (data.inputContract as Record<string, unknown>)
+        : null;
+  const mlAnalysis = normalizeMlSignals(data.ml_analysis ?? data.mlAnalysis);
+  const llmAnalysis = normalizeLlmAnalysis(
+    data.llm_analysis ?? data.llmAnalysis,
+  );
+  const finalDecision = normalizeFinalDecision(
+    data.final_decision ?? data.finalDecision,
+  );
 
   return {
     score: toAnomalyScore(data.anomaly_score ?? data.score),
@@ -1233,23 +1520,9 @@ const normalizeAiResponse = (value: unknown): AnomalyResponse => {
           ? data.stepUpLevel
           : null,
     decisionComponents:
-      data.decision_components &&
-      typeof data.decision_components === "object" &&
-      !Array.isArray(data.decision_components)
-        ? Object.fromEntries(
-            Object.entries(data.decision_components as Record<string, unknown>)
-              .filter(([, entry]) => typeof entry === "number")
-              .map(([key, entry]) => [key, entry as number]),
-          )
-        : data.decisionComponents &&
-            typeof data.decisionComponents === "object" &&
-            !Array.isArray(data.decisionComponents)
-          ? Object.fromEntries(
-              Object.entries(data.decisionComponents as Record<string, unknown>)
-                .filter(([, entry]) => typeof entry === "number")
-                .map(([key, entry]) => [key, entry as number]),
-            )
-          : undefined,
+      normalizeNumberRecord(
+        data.decision_components ?? data.decisionComponents,
+      ) ?? undefined,
     adminSummary:
       typeof data.admin_summary === "string"
         ? data.admin_summary
@@ -1264,6 +1537,32 @@ const normalizeAiResponse = (value: unknown): AnomalyResponse => {
           : undefined,
     ruleHits: normalizeRuleHits(data.rule_hits ?? data.ruleHits),
     warning,
+    inputContract: normalizedInputContract
+      ? {
+          version:
+            typeof normalizedInputContract.version === "string"
+              ? normalizedInputContract.version
+              : "tx_risk_input_v1",
+          accountProfile:
+            normalizeRecord(normalizedInputContract.accountProfile)
+              .constructor === Object
+              ? normalizeRecord(normalizedInputContract.accountProfile)
+              : null,
+          transferContext:
+            normalizeRecord(normalizedInputContract.transferContext)
+              .constructor === Object
+              ? normalizeRecord(normalizedInputContract.transferContext)
+              : null,
+          behaviorSnapshot:
+            normalizeRecord(normalizedInputContract.behaviorSnapshot)
+              .constructor === Object
+              ? normalizeRecord(normalizedInputContract.behaviorSnapshot)
+              : null,
+        }
+      : null,
+    mlAnalysis,
+    llmAnalysis,
+    finalDecision,
   };
 };
 
@@ -1271,6 +1570,8 @@ const AI_ALERT_ACTIONS = [
   "AI_LOGIN_ALERT",
   "AI_TRANSACTION_ALERT",
   "AI_ALERT",
+  "TRANSFER_ADVISORY_PRESENTED",
+  "TRANSFER_SAFETY_BLOCKED",
 ] as const;
 
 const normalizeRecord = (value: unknown): Record<string, unknown> => {
@@ -1278,6 +1579,80 @@ const normalizeRecord = (value: unknown): Record<string, unknown> => {
     return value as Record<string, unknown>;
   }
   return {};
+};
+
+const extractAdminAlertRequestKey = (
+  details: unknown,
+  metadata: unknown,
+): string | null => {
+  const detailsRecord = normalizeRecord(details);
+  const metadataRecord = normalizeRecord(metadata);
+  const aiMonitoring = normalizeRecord(metadataRecord.aiMonitoring);
+  const transferAdvisory = normalizeTransferSafetyAdvisory(
+    metadataRecord.transferAdvisory ?? detailsRecord.transferAdvisory,
+  );
+
+  return (
+    asStringOrNull(detailsRecord.requestKey) ||
+    asStringOrNull(metadataRecord.requestKey) ||
+    asStringOrNull(aiMonitoring.requestKey) ||
+    transferAdvisory?.requestKey ||
+    null
+  );
+};
+
+const buildAdminAlertDedupKey = (input: {
+  userId: string | null;
+  action: string;
+  createdAt: Date;
+  details: unknown;
+  metadata: unknown;
+}) => {
+  const requestKey = extractAdminAlertRequestKey(input.details, input.metadata);
+  if (requestKey) {
+    return `req:${input.userId || "anon"}:${input.action}:${requestKey}`;
+  }
+
+  const detailsRecord = normalizeRecord(input.details);
+  const metadataRecord = normalizeRecord(input.metadata);
+  const aiMonitoring = normalizeRecord(metadataRecord.aiMonitoring);
+  const transferAdvisory = normalizeTransferSafetyAdvisory(
+    metadataRecord.transferAdvisory ?? detailsRecord.transferAdvisory,
+  );
+  const riskLevel = normalizeRiskLevel(
+    detailsRecord.riskLevel ??
+      aiMonitoring.riskLevel ??
+      metadataRecord.riskLevel,
+  );
+  const amount =
+    asNumberOrNull(detailsRecord.amount) ??
+    asNumberOrNull(aiMonitoring.amount) ??
+    transferAdvisory?.amount ??
+    0;
+  const toAccount =
+    asStringOrNull(detailsRecord.toAccount) ||
+    asStringOrNull(metadataRecord.toAccount) ||
+    "-";
+  const summary =
+    asStringOrNull(detailsRecord.message) ||
+    asStringOrNull(aiMonitoring.headline) ||
+    transferAdvisory?.title ||
+    toStringList(detailsRecord.reasons)[0] ||
+    toStringList(aiMonitoring.reasons)[0] ||
+    transferAdvisory?.reasons[0] ||
+    "-";
+  const timeBucket = Math.floor(input.createdAt.getTime() / 30_000);
+
+  return [
+    "fp",
+    input.userId || "anon",
+    input.action,
+    riskLevel,
+    Math.round(amount * 100),
+    toAccount,
+    summary.trim().toLowerCase(),
+    timeBucket,
+  ].join(":");
 };
 
 const inferAdminAuditCategory = (action: string) => {
@@ -1454,6 +1829,37 @@ const buildAdminAlertSignals = (
     });
   }
 
+  const finalAction = asStringOrNull(detail.finalAction);
+  if (finalAction) {
+    signals.push({
+      label: "AI action",
+      value: toTitleCase(finalAction),
+      tone:
+        finalAction === "HOLD_REVIEW" || finalAction === "REQUIRE_OTP_FACE_ID"
+          ? "warn"
+          : finalAction === "REQUIRE_OTP" ||
+              finalAction === "ALLOW_WITH_WARNING"
+            ? "info"
+            : "neutral",
+    });
+  }
+
+  const transferAdvisorySeverity = asStringOrNull(
+    detail.transferAdvisorySeverity,
+  );
+  if (transferAdvisorySeverity) {
+    signals.push({
+      label: "Transfer advisory",
+      value: toTitleCase(transferAdvisorySeverity),
+      tone:
+        transferAdvisorySeverity === "blocked"
+          ? "warn"
+          : transferAdvisorySeverity === "warning"
+            ? "info"
+            : "neutral",
+    });
+  }
+
   const accountSegment = asStringOrNull(detail.accountSegment);
   if (accountSegment) {
     signals.push({
@@ -1562,14 +1968,101 @@ const buildAdminAlertResponse = (log: {
   const detail = normalizeRecord(log.details);
   const metadata = normalizeRecord(log.metadata);
   const aiMonitoring = normalizeRecord(metadata.aiMonitoring);
+  const transferAdvisory = normalizeTransferSafetyAdvisory(
+    metadata.transferAdvisory ?? detail.transferAdvisory,
+  );
   const analysisSignals = normalizeRecord(aiMonitoring.analysisSignals);
-  const mergedDetail = {
+  const warning = normalizeRecord(aiMonitoring.warning);
+  const ruleHits = Array.isArray(aiMonitoring.ruleHits)
+    ? aiMonitoring.ruleHits
+        .filter(
+          (item): item is Record<string, unknown> =>
+            Boolean(item) && typeof item === "object" && !Array.isArray(item),
+        )
+        .map((item) => ({
+          ruleId: asStringOrNull(item.ruleId) || undefined,
+          title: asStringOrNull(item.title) || undefined,
+          reason: asStringOrNull(item.reason) || undefined,
+          userWarning: asStringOrNull(item.userWarning) || undefined,
+          riskLevel: asStringOrNull(item.riskLevel) || undefined,
+        }))
+        .filter(
+          (item) =>
+            item.ruleId ||
+            item.title ||
+            item.reason ||
+            item.userWarning ||
+            item.riskLevel,
+        )
+    : [];
+  const mergedDetail: Record<string, unknown> = {
     ...aiMonitoring,
+    ...(transferAdvisory
+      ? {
+          transferAdvisorySeverity: transferAdvisory.severity,
+          transferAdvisoryTitle: transferAdvisory.title,
+          transferAdvisoryMessage: transferAdvisory.message,
+          transferBlockedUntil: transferAdvisory.blockedUntil ?? null,
+          amount:
+            asNumberOrNull(detail.amount) ??
+            asNumberOrNull(aiMonitoring.amount) ??
+            transferAdvisory.amount,
+          currency:
+            asStringOrNull(detail.currency) ??
+            asStringOrNull(aiMonitoring.currency) ??
+            transferAdvisory.currency,
+          archetype: transferAdvisory.archetype ?? aiMonitoring.archetype,
+          timeline:
+            Array.isArray(aiMonitoring.timeline) &&
+            aiMonitoring.timeline.length > 0
+              ? aiMonitoring.timeline
+              : transferAdvisory.timeline,
+          recommendedActions:
+            Array.isArray(aiMonitoring.recommendedActions) &&
+            aiMonitoring.recommendedActions.length > 0
+              ? aiMonitoring.recommendedActions
+              : transferAdvisory.recommendedActions,
+          reasons:
+            Array.isArray(aiMonitoring.reasons) &&
+            aiMonitoring.reasons.length > 0
+              ? aiMonitoring.reasons
+              : transferAdvisory.reasons,
+          headline:
+            typeof aiMonitoring.headline === "string" &&
+            aiMonitoring.headline.trim()
+              ? aiMonitoring.headline
+              : transferAdvisory.title,
+          summary:
+            typeof aiMonitoring.summary === "string" &&
+            aiMonitoring.summary.trim()
+              ? aiMonitoring.summary
+              : transferAdvisory.message,
+        }
+      : {}),
     ...detail,
     ...analysisSignals,
   };
-  const type = log.action === "AI_TRANSACTION_ALERT" ? "transaction" : "login";
-  const reasons = toStringList(mergedDetail.reasons);
+  const type =
+    log.action === "AI_LOGIN_ALERT" &&
+    !transferAdvisory &&
+    asNumberOrNull(mergedDetail.amount) === null
+      ? "login"
+      : "transaction";
+  const reasons = Array.from(
+    new Set(
+      [
+        ...toStringList(transferAdvisory?.reasons),
+        ...toStringList(mergedDetail.reasons),
+        ...ruleHits.flatMap((item) =>
+          [item.userWarning, item.reason, item.title].filter(
+            (value): value is string => Boolean(value),
+          ),
+        ),
+      ]
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  );
   const riskLevel = normalizeRiskLevel(
     mergedDetail.riskLevel ?? metadata.riskLevel ?? "low",
   );
@@ -1588,6 +2081,34 @@ const buildAdminAlertResponse = (log: {
   const city = asStringOrNull(mergedDetail.city);
   const location =
     [city, region, country].filter(Boolean).join(", ") || country;
+  const timeline = Array.from(
+    new Set(
+      [
+        ...toStringList(transferAdvisory?.timeline),
+        ...toStringList(mergedDetail.timeline),
+      ]
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  );
+  const recommendedActions = Array.from(
+    new Set(
+      [
+        ...toStringList(transferAdvisory?.recommendedActions),
+        ...toStringList(mergedDetail.recommendedActions),
+      ]
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  );
+  const warningMustDo = toStringList(warning.mustDo).map((item) => item.trim());
+  const warningDoNot = toStringList(warning.doNot).map((item) => item.trim());
+  const finalAction = asStringOrNull(mergedDetail.finalAction);
+  const transferAdvisorySeverity =
+    transferAdvisory?.severity ??
+    (asStringOrNull(mergedDetail.transferAdvisorySeverity) as
+      | TransferSafetyAdvisory["severity"]
+      | null);
 
   return {
     id: log.id,
@@ -1602,8 +2123,14 @@ const buildAdminAlertResponse = (log: {
       mergedDetail.anomalyScore ?? mergedDetail.score,
     ),
     reasons,
-    summary: asStringOrNull(mergedDetail.headline) ?? explanation.summary,
-    explanation: explanation.explanation,
+    summary:
+      transferAdvisory?.title ??
+      asStringOrNull(mergedDetail.headline) ??
+      explanation.summary,
+    explanation:
+      transferAdvisory?.message ??
+      asStringOrNull(mergedDetail.summary) ??
+      explanation.explanation,
     keySignals: buildAdminAlertSignals(type, mergedDetail, riskLevel),
     adminStatus: normalizeAdminAlertStatus(
       mergedDetail.adminStatus ?? metadata.adminStatus,
@@ -1650,7 +2177,11 @@ const buildAdminAlertResponse = (log: {
         ? Object.fromEntries(
             Object.entries(
               mergedDetail.decisionComponents as Record<string, unknown>,
-            ).filter(([, value]) => typeof value === "number"),
+            ).flatMap(([key, value]) =>
+              typeof value === "number" && Number.isFinite(value)
+                ? ([[key, value]] as const)
+                : [],
+            ),
           )
         : null,
     segmentHistoryCount30d: asNumberOrNull(
@@ -1687,6 +2218,28 @@ const buildAdminAlertResponse = (log: {
     rapidCashOutRiskScore: asNumberOrNull(
       analysisSignals.rapid_cash_out_risk_score,
     ),
+    transferAdvisorySeverity,
+    transferAdvisoryTitle: transferAdvisory?.title ?? null,
+    transferAdvisoryMessage: transferAdvisory?.message ?? null,
+    transferBlockedUntil: transferAdvisory?.blockedUntil ?? null,
+    finalAction:
+      finalAction === "ALLOW" ||
+      finalAction === "ALLOW_WITH_WARNING" ||
+      finalAction === "REQUIRE_OTP" ||
+      finalAction === "REQUIRE_OTP_FACE_ID" ||
+      finalAction === "HOLD_REVIEW"
+        ? finalAction
+        : null,
+    stepUpLevel: asStringOrNull(mergedDetail.stepUpLevel),
+    nextStep: asStringOrNull(mergedDetail.nextStep),
+    archetype: asStringOrNull(mergedDetail.archetype),
+    timeline,
+    recommendedActions,
+    ruleHits,
+    warningTitle: asStringOrNull(warning.title),
+    warningMessage: asStringOrNull(warning.message),
+    warningMustDo,
+    warningDoNot,
     analysisSignals:
       Object.keys(analysisSignals).length > 0 ? analysisSignals : null,
   };
@@ -1889,6 +2442,24 @@ const buildUserAgentDeviceSummary = (
     title: "Unknown device",
     detail:
       browserLabel || (agent.length > 64 ? `${agent.slice(0, 64)}...` : agent),
+  };
+};
+
+const buildAuditClientMetadata = (req: Request, payload?: unknown) => {
+  const userAgent = readRequestHeaderString(req.headers["user-agent"]);
+  const deviceContext = readClientDeviceContext(payload);
+  const location = getRequestLocation(req);
+  const hasDeviceSignal = Boolean(userAgent || deviceContext);
+  const deviceSummary = hasDeviceSignal
+    ? buildUserAgentDeviceSummary(userAgent, deviceContext)
+    : null;
+
+  return {
+    ...(location ? { location } : {}),
+    ...(userAgent ? { userAgent } : {}),
+    ...(deviceContext ? { deviceContext } : {}),
+    ...(deviceSummary?.title ? { deviceTitle: deviceSummary.title } : {}),
+    ...(deviceSummary?.detail ? { deviceDetail: deviceSummary.detail } : {}),
   };
 };
 
@@ -2343,6 +2914,10 @@ const buildStoredAiMonitoring = (input: AnomalyResponse) => ({
   decisionComponents: input.decisionComponents ?? null,
   adminSummary: input.adminSummary ?? null,
   analysisSignals: input.analysisSignals ?? null,
+  inputContract: input.inputContract ?? null,
+  mlAnalysis: input.mlAnalysis ?? null,
+  llmAnalysis: input.llmAnalysis ?? null,
+  finalDecision: input.finalDecision ?? null,
   scoredAt: new Date().toISOString(),
 });
 
@@ -2951,6 +3526,12 @@ const suspiciousTransferNotePatterns: Array<{
   },
   {
     pattern:
+      /\b(chuyen tien dieu tra|phuc vu dieu tra|co quan dieu tra|cong an dieu tra|vien kiem sat|toa an|ho so vu an|vu an|phong toa tai khoan|tai khoan bi phong toa|tai khoan lien quan dieu tra|tai khoan lien quan vu an|kiem tra dong tien|ra soat dong tien|xac minh nguon tien|chuyen tien xac minh|chuyen tien chung minh trong sach)\b/i,
+    reason:
+      "Transfer note references investigation, account-freeze, or law-enforcement wording often used in impersonation scams.",
+  },
+  {
+    pattern:
       /\b(dau tu|loi nhuan|bao lai|tin hieu|san forex|phi vay|hoa hong)\b/i,
     reason:
       "Transfer note references investment or fee-collection language often used in fraud.",
@@ -2962,6 +3543,8 @@ const transferNoteLlmAnalysisSchema = z.object({
   signals: z.array(z.string().min(1).max(180)).max(6).default([]),
   ruleTags: z.array(z.string().min(1).max(48)).max(6).default([]),
   summary: z.string().max(240).nullable().optional(),
+  purposeTags: z.array(z.string().min(1).max(48)).max(4).default([]),
+  purposeConfidence: z.number().min(0).max(1).default(0),
 });
 
 const transferNoteLlmCache = new Map<
@@ -2969,11 +3552,66 @@ const transferNoteLlmCache = new Map<
   { expiresAt: number; value: TransferNoteLlmAnalysis }
 >();
 
+const normalizeTransferNoteForPatternMatch = (value: string) =>
+  value
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[đĐ]/g, "d")
+    .toLowerCase();
+
+const legitimateHighValueTransferPurposePatterns = [
+  {
+    pattern:
+      /\b(mua nha|mua can ho|mua chung cu|mua dat|mua bat dong san|mua bds|chuyen tien mua nha|chuyen tien mua dat)\b/i,
+    tag: "home_purchase",
+  },
+  {
+    pattern:
+      /\b(home purchase|house purchase|property purchase|real estate purchase|buying a house|buying a home|buy home|buy house|buy property|buy apartment|buy condo)\b/i,
+    tag: "home_purchase",
+  },
+  {
+    pattern:
+      /\b(coc nha|dat coc nha|tien coc nha|coc can ho|dat coc can ho|tien coc can ho|coc dat|dat coc dat|tien coc dat|giu cho can ho|giu cho nha)\b/i,
+    tag: "property_deposit",
+  },
+  {
+    pattern:
+      /\b(down payment|house deposit|home deposit|property deposit|apartment deposit|condo deposit|earnest money|reservation fee|booking fee)\b/i,
+    tag: "property_deposit",
+  },
+  {
+    pattern:
+      /\b(escrow|closing payment|mortgage closing|settlement statement|title company)\b/i,
+    tag: "mortgage_closing",
+  },
+];
+
+const normalizeTransferNotePurposeTag = (value: string) =>
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_\s-]/g, "")
+    .replace(/[\s-]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+const getLegitimateTransferPurposeTags = (note: string) => {
+  const normalizedNote = normalizeTransferNoteForPatternMatch(note);
+  if (!normalizedNote) return [] as string[];
+  return dedupeStringList(
+    legitimateHighValueTransferPurposePatterns
+      .filter((entry) => entry.pattern.test(normalizedNote))
+      .map((entry) => entry.tag),
+  );
+};
+
 const buildTransferNoteHeuristicAnalysis = (input: {
   note: string;
   suspiciousReasons: string[];
 }): TransferNoteLlmAnalysis => {
   const signals = dedupeStringList(input.suspiciousReasons).slice(0, 6);
+  const purposeTags = getLegitimateTransferPurposeTags(input.note).slice(0, 4);
   const riskLevel =
     signals.length >= 2 ? "high" : signals.length >= 1 ? "medium" : "low";
   return {
@@ -2981,13 +3619,16 @@ const buildTransferNoteHeuristicAnalysis = (input: {
     signals,
     ruleTags: signals.length ? ["regex_suspicious_note"] : [],
     summary: signals[0] || null,
+    purposeTags,
+    purposeConfidence:
+      purposeTags.length > 0 && signals.length === 0 ? 0.82 : 0,
     source: "heuristic",
     model: null,
   };
 };
 
 const getSuspiciousTransferNoteReasons = (note: string) => {
-  const normalizedNote = note.trim();
+  const normalizedNote = normalizeTransferNoteForPatternMatch(note);
   if (!normalizedNote) return [];
   return suspiciousTransferNotePatterns
     .filter((entry) => entry.pattern.test(normalizedNote))
@@ -2998,6 +3639,15 @@ const buildTransferNoteLlmCacheKey = (input: {
   note: string;
   amount: number;
   currency: string;
+  accountCategory: "personal" | "business";
+  accountSegment: "personal" | "sme" | "enterprise";
+  recipientKnown: boolean;
+  balanceImpactRatio: number;
+  sessionRiskLevel: "low" | "medium" | "high";
+  velocity1h: number;
+  recentReviewCount30d: number;
+  recentBlockedCount30d: number;
+  spendSurgeRatio: number | null;
 }) =>
   crypto
     .createHash("sha256")
@@ -3006,6 +3656,26 @@ const buildTransferNoteLlmCacheKey = (input: {
         note: input.note.trim().toLowerCase(),
         amountBucket: roundMoney(Math.max(0, input.amount)),
         currency: input.currency.trim().toUpperCase(),
+        accountCategory: input.accountCategory,
+        accountSegment: input.accountSegment,
+        recipientKnown: input.recipientKnown,
+        balanceImpactBucket: roundMoney(
+          clamp(input.balanceImpactRatio, 0, 1.5),
+        ),
+        sessionRiskLevel: input.sessionRiskLevel,
+        velocity1h: Math.max(0, Math.round(input.velocity1h)),
+        recentReviewCount30d: Math.max(
+          0,
+          Math.round(input.recentReviewCount30d),
+        ),
+        recentBlockedCount30d: Math.max(
+          0,
+          Math.round(input.recentBlockedCount30d),
+        ),
+        spendSurgeBucket:
+          input.spendSurgeRatio === null
+            ? null
+            : roundMoney(Math.max(0, input.spendSurgeRatio)),
       }),
     )
     .digest("hex");
@@ -3029,11 +3699,9 @@ const normalizeTransferNoteRuleTag = (value: string) =>
     .replace(/[\s-]+/g, "_")
     .replace(/^_+|_+$/g, "");
 
-const analyzeTransferNoteWithLlm = async (input: {
-  note: string;
-  amount: number;
-  currency: string;
-}): Promise<TransferNoteLlmAnalysis> => {
+const analyzeTransferNoteWithLlm = async (
+  input: TransferRiskLlmContextInput,
+): Promise<TransferNoteLlmAnalysis> => {
   const note = input.note.trim();
   const suspiciousReasons = getSuspiciousTransferNoteReasons(note);
   const heuristic = buildTransferNoteHeuristicAnalysis({
@@ -3065,11 +3733,29 @@ const analyzeTransferNoteWithLlm = async (input: {
         effort: OPENAI_REASONING_EFFORT as "low" | "medium" | "high",
       },
       instructions:
-        "You are a banking transfer safety analyst. Analyze only the transfer note text and infer scam-related rule hints. Return JSON only with keys riskLevel, signals, ruleTags, summary. Do not decide allow or block. Be conservative and avoid false positives for generic personal notes.",
+        "You are a banking transfer safety analyst. Review only the sanitized transfer context and note text. Infer scam-related risk hints and explain why the note/context is suspicious or benign. Also identify clearly legitimate high-value purposes when the note strongly supports them, such as home_purchase, property_deposit, mortgage_closing, real_estate_settlement, tuition_payment, medical_bill, vehicle_purchase, salary_payroll, supplier_payment. Return JSON only with keys riskLevel, signals, ruleTags, summary, purposeTags, purposeConfidence. Do not decide allow or block. Be conservative and avoid false positives for ordinary personal or business payments.",
       input: JSON.stringify({
         note,
         amount: roundMoney(Math.max(0, input.amount)),
         currency: input.currency.trim().toUpperCase(),
+        accountCategory: input.accountCategory,
+        accountSegment: input.accountSegment,
+        recipientKnown: input.recipientKnown,
+        balanceImpactRatio: roundMoney(clamp(input.balanceImpactRatio, 0, 1.5)),
+        sessionRiskLevel: input.sessionRiskLevel,
+        velocity1h: Math.max(0, Math.round(input.velocity1h)),
+        recentReviewCount30d: Math.max(
+          0,
+          Math.round(input.recentReviewCount30d),
+        ),
+        recentBlockedCount30d: Math.max(
+          0,
+          Math.round(input.recentBlockedCount30d),
+        ),
+        spendSurgeRatio:
+          input.spendSurgeRatio === null
+            ? null
+            : roundMoney(Math.max(0, input.spendSurgeRatio)),
         heuristicSignals: suspiciousReasons,
       }),
     });
@@ -3105,6 +3791,22 @@ const analyzeTransferNoteWithLlm = async (input: {
         safeParsed.data.summary.trim()
           ? safeParsed.data.summary.trim()
           : heuristic.summary,
+      purposeTags: dedupeStringList([
+        ...heuristic.purposeTags,
+        ...safeParsed.data.purposeTags.map(normalizeTransferNotePurposeTag),
+      ])
+        .filter(Boolean)
+        .slice(0, 4),
+      purposeConfidence: clamp(
+        Math.max(
+          heuristic.purposeConfidence,
+          typeof safeParsed.data.purposeConfidence === "number"
+            ? safeParsed.data.purposeConfidence
+            : 0,
+        ),
+        0,
+        1,
+      ),
       source: "openai",
       model: OPENAI_MODEL,
     };
@@ -3132,8 +3834,158 @@ const analyzeTransferNoteWithLlm = async (input: {
   }
 };
 
+const buildTransferAiScoringPayload = (input: {
+  senderUserId: string;
+  req: Request;
+  amount: number;
+  currency: string;
+  note: string;
+  accountProfile: {
+    segment: string;
+    category: string;
+    tier: string;
+    status: string;
+    confidence: number;
+  };
+  failedTx24h: number;
+  velocity1h: number;
+  spendProfile: TransferSpendProfile;
+  senderBalance: number;
+  recipientProfile: TransferRecipientProfile;
+  behaviorProfile: TransferBehaviorProfile;
+  transferStepUpPolicy: TransferStepUpPolicy;
+  transferNoteLlm: TransferNoteLlmAnalysis;
+}) => {
+  const sessionRiskLevel = normalizeRiskLevel(
+    input.req.sessionSecurity?.riskLevel || "low",
+  );
+  const senderBalance = Math.max(0, Number(input.senderBalance) || 0);
+  const remainingBalance = Math.max(0, senderBalance - input.amount);
+
+  return {
+    userId: input.senderUserId,
+    transactionId: crypto.randomUUID(),
+    timestamp: new Date().toISOString(),
+    amount: input.amount,
+    currency: input.currency,
+    location: getRequestLocation(input.req),
+    paymentMethod: "wallet_balance",
+    merchantCategory: "p2p_transfer",
+    device:
+      typeof input.req.headers["user-agent"] === "string"
+        ? input.req.headers["user-agent"]
+        : "unknown",
+    accountProfile: {
+      segment: input.accountProfile.segment,
+      category: input.accountProfile.category,
+      tier: input.accountProfile.tier,
+      status: input.accountProfile.status,
+      confidence: input.accountProfile.confidence,
+    },
+    transferContext: {
+      channel: "web",
+      balanceBefore: senderBalance,
+      remainingBalance,
+      recipientKnown: input.recipientProfile.isKnownRecipient,
+      rollingOutflowAmount: input.transferStepUpPolicy.rollingOutflowAmount,
+      faceIdRequired: input.transferStepUpPolicy.faceIdRequired,
+      sessionRiskLevel,
+      sessionRestrictLargeTransfers: Boolean(
+        input.req.sessionSecurity?.restrictLargeTransfers,
+      ),
+    },
+    behaviorSnapshot: {
+      failedTx24h: input.failedTx24h,
+      velocity1h: input.velocity1h,
+      dailySpendAvg30d: input.spendProfile.dailySpendAvg30d,
+      todaySpendBefore: input.spendProfile.todaySpendBefore,
+      projectedDailySpend: input.spendProfile.projectedDailySpend,
+      recentReviewCount30d: input.behaviorProfile.recentReviewCount30d,
+      recentBlockedCount30d: input.behaviorProfile.recentBlockedCount30d,
+      recentPendingOtpCount7d: input.behaviorProfile.recentPendingOtpCount7d,
+      recentInboundAmount24h: input.behaviorProfile.recentInboundAmount24h,
+      recentAdminTopUpAmount24h:
+        input.behaviorProfile.recentAdminTopUpAmount24h,
+      recentSelfDepositAmount24h:
+        input.behaviorProfile.recentSelfDepositAmount24h,
+      smallProbeCount24h: input.behaviorProfile.smallProbeCount24h,
+      smallProbeTotal24h: input.behaviorProfile.smallProbeTotal24h,
+      distinctSmallProbeRecipients24h:
+        input.behaviorProfile.distinctSmallProbeRecipients24h,
+      sameRecipientSmallProbeCount24h:
+        input.behaviorProfile.sameRecipientSmallProbeCount24h,
+      newRecipientSmallProbeCount24h:
+        input.behaviorProfile.newRecipientSmallProbeCount24h,
+      probeThenLargeRiskScore: input.behaviorProfile.probeThenLargeRiskScore,
+      rapidCashOutRiskScore: input.behaviorProfile.rapidCashOutRiskScore,
+    },
+    llmContext: {
+      riskLevel: input.transferNoteLlm.riskLevel,
+      signalCount: input.transferNoteLlm.signals.length,
+      signals: input.transferNoteLlm.signals,
+      ruleTags: input.transferNoteLlm.ruleTags,
+      summary: input.transferNoteLlm.summary,
+      purposeTags: input.transferNoteLlm.purposeTags,
+      purposeConfidence: input.transferNoteLlm.purposeConfidence,
+      source: input.transferNoteLlm.source,
+      model: input.transferNoteLlm.model || null,
+    },
+    // Legacy flat fields remain for backward compatibility while ai-service
+    // migrates to the grouped contract above.
+    accountSegment: input.accountProfile.segment,
+    accountCategory: input.accountProfile.category,
+    accountTier: input.accountProfile.tier,
+    accountProfileStatus: input.accountProfile.status,
+    accountProfileConfidence: input.accountProfile.confidence,
+    channel: "web",
+    failedTx24h: input.failedTx24h,
+    velocity1h: input.velocity1h,
+    dailySpendAvg30d: input.spendProfile.dailySpendAvg30d,
+    todaySpendBefore: input.spendProfile.todaySpendBefore,
+    projectedDailySpend: input.spendProfile.projectedDailySpend,
+    balanceBefore: senderBalance,
+    remainingBalance,
+    recipientKnown: input.recipientProfile.isKnownRecipient,
+    suspiciousNoteCount: getSuspiciousTransferNoteReasons(input.note).length,
+    llmNoteRiskLevel: input.transferNoteLlm.riskLevel,
+    llmSignalCount: input.transferNoteLlm.signals.length,
+    llmRuleTags: input.transferNoteLlm.ruleTags,
+    llmPurposeTags: input.transferNoteLlm.purposeTags,
+    llmPurposeConfidence: input.transferNoteLlm.purposeConfidence,
+    sessionRiskLevel,
+    rollingOutflowAmount: input.transferStepUpPolicy.rollingOutflowAmount,
+    faceIdRequired: input.transferStepUpPolicy.faceIdRequired,
+    sessionRestrictLargeTransfers: Boolean(
+      input.req.sessionSecurity?.restrictLargeTransfers,
+    ),
+    recentReviewCount30d: input.behaviorProfile.recentReviewCount30d,
+    recentBlockedCount30d: input.behaviorProfile.recentBlockedCount30d,
+    recentPendingOtpCount7d: input.behaviorProfile.recentPendingOtpCount7d,
+    recentInboundAmount24h: input.behaviorProfile.recentInboundAmount24h,
+    recentAdminTopUpAmount24h: input.behaviorProfile.recentAdminTopUpAmount24h,
+    recentSelfDepositAmount24h:
+      input.behaviorProfile.recentSelfDepositAmount24h,
+    smallProbeCount24h: input.behaviorProfile.smallProbeCount24h,
+    smallProbeTotal24h: input.behaviorProfile.smallProbeTotal24h,
+    distinctSmallProbeRecipients24h:
+      input.behaviorProfile.distinctSmallProbeRecipients24h,
+    sameRecipientSmallProbeCount24h:
+      input.behaviorProfile.sameRecipientSmallProbeCount24h,
+    newRecipientSmallProbeCount24h:
+      input.behaviorProfile.newRecipientSmallProbeCount24h,
+    probeThenLargeRiskScore: input.behaviorProfile.probeThenLargeRiskScore,
+    rapidCashOutRiskScore: input.behaviorProfile.rapidCashOutRiskScore,
+    llmSignals: input.transferNoteLlm.signals,
+    llmSummary: input.transferNoteLlm.summary,
+    llmPurposeTags: input.transferNoteLlm.purposeTags,
+    llmPurposeConfidence: input.transferNoteLlm.purposeConfidence,
+    llmSource: input.transferNoteLlm.source,
+    llmModel: input.transferNoteLlm.model || null,
+  };
+};
+
 const isGenericTransferNote = (note: string) => {
-  const normalizedNote = note.trim().toLowerCase();
+  const normalizedNote = normalizeTransferNoteForPatternMatch(note);
   if (!normalizedNote) return true;
   if (normalizedNote.length < 10) return true;
   return /^(transfer|payment|banking|send money|test|gift|invoice|payment for services|wallet transfer)$/i.test(
@@ -3247,6 +4099,7 @@ const buildTransferSafetyAdvisory = (input: {
   senderBalance: number;
   currency: string;
   aiResult: AnomalyResponse;
+  transferNoteLlm: TransferNoteLlmAnalysis;
   spendProfile: TransferSpendProfile;
   recipientProfile: TransferRecipientProfile;
   behaviorProfile: TransferBehaviorProfile;
@@ -3271,6 +4124,19 @@ const buildTransferSafetyAdvisory = (input: {
     amount >= Math.max(300, TRANSFER_PROBE_SMALL_AMOUNT_MAX * 2);
   const noteRiskReasons = getSuspiciousTransferNoteReasons(input.note);
   const noteIsGeneric = isGenericTransferNote(input.note);
+  const hasHousingPurposeTag = input.transferNoteLlm.purposeTags.some((tag) =>
+    [
+      "home_purchase",
+      "property_deposit",
+      "mortgage_closing",
+      "real_estate_settlement",
+    ].includes(tag),
+  );
+  const hasLegitimateHighValuePurpose =
+    hasHousingPurposeTag &&
+    input.transferNoteLlm.purposeConfidence >= 0.72 &&
+    input.transferNoteLlm.riskLevel === "low" &&
+    noteRiskReasons.length === 0;
   const reasons: string[] = [];
   const addReason = (reason: string) => {
     if (
@@ -3585,6 +4451,15 @@ const buildTransferSafetyAdvisory = (input: {
       "The hybrid risk engine suggests continuing only after reviewing the warning details.",
     );
   }
+  if (hasLegitimateHighValuePurpose) {
+    severity = "warning";
+    addReason(
+      "AI recognized a plausible high-value life-event purpose in the note, so this transfer can continue only with enhanced verification instead of an automatic pause.",
+    );
+    addRecommendedAction(
+      "Verify that the destination account belongs to your escrow agent, seller, or title company before approving.",
+    );
+  }
 
   for (const aiReason of input.aiResult.reasons) {
     const cleaned = aiReason.replace(/\s+/g, " ").trim();
@@ -3611,7 +4486,8 @@ const buildTransferSafetyAdvisory = (input: {
     input.behaviorProfile.probeThenLargeRiskScore >= 0.75 &&
     amount >= TRANSFER_PROBE_LARGE_ESCALATION_MIN_AMOUNT;
   const shouldBlock =
-    input.aiResult.finalAction === "HOLD_REVIEW" ||
+    (!hasLegitimateHighValuePurpose &&
+      input.aiResult.finalAction === "HOLD_REVIEW") ||
     (hasBlockSizedAmount &&
       ((hasSuspiciousNoteSignal &&
         (!input.recipientProfile.isKnownRecipient ||
@@ -5622,6 +6498,11 @@ const buildPortfolioAnalysisWithLiveDataResponse = async (input: {
     return null;
   }
 
+  const formatLocalizedPercent = (value: number | null, digits = 2) =>
+    value === null || !Number.isFinite(value)
+      ? localizeCopilotText(input.language, "Không có dữ liệu", "Unavailable")
+      : `${value >= 0 ? "+" : ""}${value.toFixed(digits)}%`;
+
   const latest = normalizeCopilotText(input.latestMessage);
   const asksCompare =
     snapshots.length >= 2 ||
@@ -5633,33 +6514,27 @@ const buildPortfolioAnalysisWithLiveDataResponse = async (input: {
   if (asksCompare) {
     const comparisonTable = buildCopilotMarkdownTable(
       input.language === "vi"
-        ? ["Ma", "Gia gan nhat", "1D", asksOneYear ? "1Y" : "Xu huong 1Y"]
+        ? ["Mã", "Giá gần nhất", "1D", asksOneYear ? "1Y" : "Xu hướng 1 năm"]
         : ["Symbol", "Latest price", "1D", asksOneYear ? "1Y" : "1Y trend"],
       snapshots.map((snapshot) => [
         snapshot.symbol,
         `${snapshot.currency} ${formatMarketPrice(snapshot.price)}`,
-        formatCopilotPercent(snapshot.changePercent),
-        formatCopilotPercent(snapshot.oneYearChangePercent),
+        formatLocalizedPercent(snapshot.changePercent),
+        formatLocalizedPercent(snapshot.oneYearChangePercent),
       ]),
-    );
-
-    const facts = localizeCopilotText(
-      input.language,
-      `Duoi day la so sanh dua tren du lieu thi truong lay duoc tu ${snapshots[0]?.source || "market provider"} tai ${formatMarketTimestamp(snapshots[0].asOf)}. Neu hang nao hien "Unavailable" thi provider khong tra ve day du du lieu cho chi so do.`,
-      `Below is a comparison using market data returned by ${snapshots[0]?.source || "the market provider"} as of ${formatMarketTimestamp(snapshots[0].asOf)}. If any row shows "Unavailable", the provider did not return enough data for that metric.`,
     );
 
     return {
       reply:
         input.language === "vi"
-          ? `Facts:\n${facts}\n\n${comparisonTable}\n\nCalculations:\n- "1D" la bien dong so voi previous close.\n- "1Y" la thay doi tu muc dong cua diem dau tien co san trong chart 1 nam.\n\nSuggestions:\n- Dung bang nay de nhin tuong quan gia va dong luong, nhung van can xem them ROE, chat luong loi nhuan, va dinh gia truoc khi ket luan.`
-          : `Facts:\n${facts}\n\n${comparisonTable}\n\nCalculations:\n- "1D" is measured versus the previous close.\n- "1Y" is measured from the earliest available close in the one-year chart window.\n\nSuggestions:\n- Use this table for relative price context, then add ROE, earnings quality, and valuation before drawing a conclusion.`,
+          ? `${comparisonTable}\n\nCách đọc nhanh:\n- "1D" là biến động so với giá đóng cửa trước đó.\n- "1Y" là thay đổi so với mức giá đầu tiên có sẵn trong cửa sổ dữ liệu 1 năm.\n\nGợi ý:\n- Dùng bảng này để nhìn tương quan giá và động lượng.\n- Để kết luận chắc hơn, vẫn nên xem thêm ROE, chất lượng lợi nhuận và định giá.`
+          : `${comparisonTable}\n\nQuick read:\n- "1D" is measured versus the previous close.\n- "1Y" is measured from the earliest available close in the one-year chart window.\n\nSuggestions:\n- Use this table for relative price context.\n- Add ROE, earnings quality, and valuation before drawing a conclusion.`,
       topic: "portfolio-analysis-live-compare",
       suggestedActions:
         input.language === "vi"
           ? [
-              "Toi co the so sanh tiep theo ROE, dinh gia, va rui ro drawdown cua cac ma nay.",
-              "Neu ban muon, toi se tach rieng phan facts, calculations, va suggestions cho tung ma.",
+              "Tôi có thể so sánh tiếp theo ROE, định giá và rủi ro drawdown của các mã này.",
+              "Nếu muốn, tôi sẽ tách riêng từng mã theo: dữ liệu, kết luận nhanh và rủi ro.",
             ]
           : [
               "I can compare ROE, valuation, and drawdown risk for these symbols next.",
@@ -5670,7 +6545,7 @@ const buildPortfolioAnalysisWithLiveDataResponse = async (input: {
       confidence: 0.84,
       followUpQuestion: localizeCopilotText(
         input.language,
-        "Ban muon toi dao sau hon vao dinh gia hay vao do on dinh loi nhuan?",
+        "Bạn muốn tôi đào sâu hơn vào định giá hay độ ổn định lợi nhuận?",
         "Do you want me to go deeper on valuation or on earnings stability?",
       ),
     };
@@ -5679,21 +6554,21 @@ const buildPortfolioAnalysisWithLiveDataResponse = async (input: {
   const snapshot = snapshots[0];
   const facts = [
     `${snapshot.label}: ${snapshot.currency} ${formatMarketPrice(snapshot.price)}`,
-    `${input.language === "vi" ? "Bien dong 1D" : "1D move"}: ${formatCopilotPercent(snapshot.changePercent)}`,
-    `${input.language === "vi" ? "Bien dong 1Y" : "1Y move"}: ${formatCopilotPercent(snapshot.oneYearChangePercent)}`,
+    `${input.language === "vi" ? "Biến động 1D" : "1D move"}: ${formatLocalizedPercent(snapshot.changePercent)}`,
+    `${input.language === "vi" ? "Biến động 1Y" : "1Y move"}: ${formatLocalizedPercent(snapshot.oneYearChangePercent)}`,
   ].join("\n");
 
   return {
     reply:
       input.language === "vi"
-        ? `Facts:\n${facts}\n\nCalculations:\n- Gia gan nhat duoc lay tu ${snapshot.source} tai ${formatMarketTimestamp(snapshot.asOf)}.\n- Neu "1Y" la unavailable, dieu do co nghia provider khong tra du chart de tinh bien dong 1 nam.\n\nSuggestions:\n- Toi co the dung bo so lieu nay de danh gia do on dinh gia, nhung de ket luan co "on dinh" hay khong van nen xem them drawdown, chat luong loi nhuan, va dinh gia.`
+        ? `${facts}\n\nCách đọc nhanh:\n- Giá gần nhất được lấy từ ${snapshot.source} tại ${formatMarketTimestamp(snapshot.asOf)}.\n- Nếu "1Y" hiện "Không có dữ liệu", nghĩa là provider chưa trả đủ chart để tính biến động 1 năm.\n\nGợi ý:\n- Tôi có thể dùng bộ số liệu này để đánh giá độ ổn định giá.\n- Để kết luận chắc hơn, vẫn nên xem thêm drawdown, chất lượng lợi nhuận và định giá.`
         : `Facts:\n${facts}\n\nCalculations:\n- The latest price was pulled from ${snapshot.source} at ${formatMarketTimestamp(snapshot.asOf)}.\n- If "1Y" is unavailable, the provider did not return enough chart data to calculate a one-year move.\n\nSuggestions:\n- I can use this data to discuss price stability, but a true stability view should still include drawdown, earnings quality, and valuation.`,
     topic: "portfolio-analysis-live-single",
     suggestedActions:
       input.language === "vi"
         ? [
-            "Toi co the phan tich tiep theo do on dinh 1 nam cua ma nay dua tren 1D/1Y va framework drawdown.",
-            "Neu ban muon, toi co the so sanh ma nay voi mot ngan hang khac ngay bay gio.",
+            "Tôi có thể phân tích tiếp độ ổn định 1 năm của mã này dựa trên 1D/1Y và khung drawdown.",
+            "Nếu muốn, tôi có thể so sánh mã này với một ngân hàng khác ngay bây giờ.",
           ]
         : [
             "I can continue with a one-year stability read using 1D/1Y and a drawdown framework.",
@@ -5704,7 +6579,7 @@ const buildPortfolioAnalysisWithLiveDataResponse = async (input: {
     confidence: 0.82,
     followUpQuestion: localizeCopilotText(
       input.language,
-      "Ban muon toi so sanh tiep voi ma nao?",
+      "Bạn muốn tôi so sánh tiếp với mã nào?",
       "Which symbol do you want me to compare it with next?",
     ),
   };
@@ -6449,7 +7324,7 @@ const buildHeuristicScamProtectionResponse = (input: {
 }): CopilotResponsePayload | null => {
   const latest = normalizeCopilotText(input.latestMessage);
   const matchesScamSignals =
-    /\b(otp|ma otp|verification code|ma xac minh|faceid|sinh trac|safe account|tai khoan an toan|security team|support team|nhan vien ngan hang|bank staff|refund|hoan tien|customs|hai quan|tax|thue|penalty|phat|unlock|mo khoa|broker|forex|crypto signal|guaranteed return|bao loi nhuan|remote access|anydesk|teamviewer|screen share|chia se man hinh|chuyen ngay|urgent|gap)\b/.test(
+    /\b(otp|ma otp|verification code|ma xac minh|faceid|sinh trac|safe account|tai khoan an toan|security team|support team|nhan vien ngan hang|bank staff|refund|hoan tien|customs|hai quan|tax|thue|penalty|phat|unlock|mo khoa|broker|forex|crypto signal|guaranteed return|bao loi nhuan|remote access|anydesk|teamviewer|screen share|chia se man hinh|chuyen ngay|urgent|gap|chuyen tien dieu tra|phuc vu dieu tra|co quan dieu tra|cong an dieu tra|vien kiem sat|toa an|ho so vu an|vu an|phong toa tai khoan|tai khoan bi phong toa|tai khoan lien quan dieu tra|tai khoan lien quan vu an|kiem tra dong tien|ra soat dong tien|xac minh nguon tien)\b/.test(
       latest,
     );
 
@@ -8174,6 +9049,7 @@ const buildFaceIdChallenge = () => {
     steps,
     minLivenessScore: FACE_ID_MIN_LIVENESS_SCORE,
     minMotionScore: FACE_ID_MIN_MOTION_SCORE,
+    minEyeMotionScore: FACE_ID_MIN_EYE_MOTION_SCORE,
     minFaceCoverage: FACE_ID_MIN_FACE_COVERAGE,
     minSampleCount: Math.min(FACE_ID_MIN_SAMPLE_COUNT, 4),
   };
@@ -8334,37 +9210,47 @@ const compareFaceDescriptors = (left: string, right: string) => {
 
   const isV2Pair = a.version === "v2" && b.version === "v2";
 
-  if (isV2Pair && typeof alignedScore === "number") {
-    return {
-      similarity: alignedScore,
-      alignedScore,
-      geometryScore,
-      legacyScore,
-      threshold: FACE_ID_V2_MATCH_THRESHOLD,
-    };
-  }
-
   const scores: Array<{ score: number; weight: number }> = [];
+  if (isV2Pair && typeof geometryScore === "number") {
+    scores.push({
+      score: geometryScore,
+      weight: 0.4,
+    });
+  }
+  if (isV2Pair && typeof alignedScore === "number") {
+    scores.push({
+      score: alignedScore,
+      weight: 0.45,
+    });
+  }
+  if (isV2Pair && typeof legacyScore === "number") {
+    scores.push({
+      score: legacyScore,
+      weight: 0.15,
+    });
+  }
   if (typeof geometryScore === "number") {
     scores.push({
       score: geometryScore,
-      weight: 0.35,
+      weight: isV2Pair ? 0 : 0.35,
     });
   }
   if (typeof alignedScore === "number") {
     scores.push({
       score: alignedScore,
-      weight: 0.65,
+      weight: isV2Pair ? 0 : 0.65,
     });
   }
   if (typeof legacyScore === "number") {
     scores.push({
       score: legacyScore,
-      weight: scores.length ? 0.35 : 1,
+      weight: isV2Pair ? 0 : scores.length ? 0.35 : 1,
     });
   }
 
-  if (!scores.length) {
+  const weightedScores = scores.filter((entry) => entry.weight > 0);
+
+  if (!weightedScores.length) {
     return {
       similarity: 0,
       alignedScore,
@@ -8376,9 +9262,12 @@ const compareFaceDescriptors = (left: string, right: string) => {
     };
   }
 
-  const totalWeight = scores.reduce((sum, entry) => sum + entry.weight, 0);
+  const totalWeight = weightedScores.reduce(
+    (sum, entry) => sum + entry.weight,
+    0,
+  );
   const similarity =
-    scores.reduce((sum, entry) => sum + entry.score * entry.weight, 0) /
+    weightedScores.reduce((sum, entry) => sum + entry.score * entry.weight, 0) /
     Math.max(totalWeight, 1);
 
   return {
@@ -8403,6 +9292,7 @@ const assessFaceIdAntiSpoof = async (
       stepCaptures: submission.stepCaptures,
       livenessScore: submission.livenessScore,
       motionScore: submission.motionScore,
+      eyeMotionScore: submission.eyeMotionScore,
       faceCoverage: submission.faceCoverage,
       sampleCount: submission.sampleCount,
       completedSteps: submission.completedSteps,
@@ -8473,6 +9363,64 @@ const readFaceIdEnrollment = (
       : "";
   if (!challengeToken) return null;
 
+  const stepCaptures = Array.isArray(source.stepCaptures)
+    ? source.stepCaptures.flatMap((capture) => {
+        const record =
+          capture && typeof capture === "object"
+            ? (capture as Record<string, unknown>)
+            : null;
+        if (!record) return [];
+        const step = record.step;
+        const image = record.image;
+        const centerX =
+          typeof record.centerX === "number"
+            ? record.centerX
+            : Number(record.centerX);
+        const centerY =
+          typeof record.centerY === "number"
+            ? record.centerY
+            : Number(record.centerY);
+        const coverage =
+          typeof record.coverage === "number"
+            ? record.coverage
+            : Number(record.coverage);
+        const motion =
+          typeof record.motion === "number"
+            ? record.motion
+            : Number(record.motion);
+        const aligned =
+          typeof record.aligned === "boolean" ? record.aligned : undefined;
+
+        if (
+          (step !== "center" &&
+            step !== "move_left" &&
+            step !== "move_right" &&
+            step !== "move_closer") ||
+          typeof image !== "string"
+        ) {
+          return [];
+        }
+
+        return [
+          {
+            step,
+            image,
+            centerX,
+            centerY,
+            coverage,
+            motion,
+            aligned,
+          },
+        ];
+      })
+    : [];
+  const previewImage =
+    typeof source.previewImage === "string" &&
+    source.previewImage.startsWith("data:image/")
+      ? source.previewImage
+      : stepCaptures.find((capture) => capture.image.startsWith("data:image/"))
+          ?.image;
+
   return {
     challengeToken,
     descriptor:
@@ -8485,6 +9433,10 @@ const readFaceIdEnrollment = (
       typeof source.motionScore === "number"
         ? source.motionScore
         : Number(source.motionScore),
+    eyeMotionScore:
+      typeof source.eyeMotionScore === "number"
+        ? source.eyeMotionScore
+        : Number(source.eyeMotionScore),
     faceCoverage:
       typeof source.faceCoverage === "number"
         ? source.faceCoverage
@@ -8502,59 +9454,60 @@ const readFaceIdEnrollment = (
             step === "move_closer",
         )
       : [],
-    stepCaptures: Array.isArray(source.stepCaptures)
-      ? source.stepCaptures.flatMap((capture) => {
-          const record =
-            capture && typeof capture === "object"
-              ? (capture as Record<string, unknown>)
-              : null;
-          if (!record) return [];
-          const step = record.step;
-          const image = record.image;
-          const centerX =
-            typeof record.centerX === "number"
-              ? record.centerX
-              : Number(record.centerX);
-          const centerY =
-            typeof record.centerY === "number"
-              ? record.centerY
-              : Number(record.centerY);
-          const coverage =
-            typeof record.coverage === "number"
-              ? record.coverage
-              : Number(record.coverage);
-          const motion =
-            typeof record.motion === "number"
-              ? record.motion
-              : Number(record.motion);
-          const aligned =
-            typeof record.aligned === "boolean" ? record.aligned : undefined;
+    stepCaptures,
+    previewImage,
+    videoEvidence:
+      typeof source.videoEvidence === "string"
+        ? source.videoEvidence.trim()
+        : undefined,
+    videoDurationMs:
+      typeof source.videoDurationMs === "number"
+        ? source.videoDurationMs
+        : Number(source.videoDurationMs),
+    videoMimeType:
+      typeof source.videoMimeType === "string"
+        ? source.videoMimeType.trim()
+        : undefined,
+  };
+};
 
-          if (
-            (step !== "center" &&
-              step !== "move_left" &&
-              step !== "move_right" &&
-              step !== "move_closer") ||
-            typeof image !== "string"
-          ) {
-            return [];
-          }
+const estimateBase64Bytes = (value: string) => {
+  const trimmed = value.replace(/\s+/g, "");
+  const padding = trimmed.endsWith("==") ? 2 : trimmed.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((trimmed.length * 3) / 4) - padding);
+};
 
-          return [
-            {
-              step,
-              image,
-              centerX,
-              centerY,
-              coverage,
-              motion,
-              aligned,
-            },
-          ];
-        })
-      : [],
-    previewImage:
-      typeof source.previewImage === "string" ? source.previewImage : undefined,
+const verifyFaceIdVideoEvidence = (submission: FaceIdEnrollmentSubmission) => {
+  if (!submission.videoEvidence) {
+    throw new Error("FACE_ID_VIDEO_REQUIRED");
+  }
+  const prefixMatch =
+    /^data:(video\/[-+.\w]+(?:;[-+.\w]+=[-+.\w]+)*);base64,(.+)$/i.exec(
+      submission.videoEvidence,
+    );
+  if (!prefixMatch) {
+    throw new Error("FACE_ID_VIDEO_INVALID");
+  }
+  const videoDurationMs = Number(submission.videoDurationMs);
+  if (!Number.isFinite(videoDurationMs)) {
+    throw new Error("FACE_ID_VIDEO_INVALID");
+  }
+  if (videoDurationMs < FACE_ID_MIN_VIDEO_DURATION_MS - 250) {
+    throw new Error("FACE_ID_VIDEO_TOO_SHORT");
+  }
+  if (
+    submission.videoEvidence.length > FACE_ID_MAX_VIDEO_DATA_URL_LENGTH ||
+    estimateBase64Bytes(prefixMatch[2]) > FACE_ID_MAX_VIDEO_DATA_URL_LENGTH
+  ) {
+    throw new Error("FACE_ID_VIDEO_INVALID");
+  }
+
+  return {
+    mimeType:
+      submission.videoMimeType && submission.videoMimeType.length > 0
+        ? submission.videoMimeType
+        : prefixMatch[1],
+    durationMs: Math.round(videoDurationMs),
   };
 };
 
@@ -8563,11 +9516,23 @@ const verifyFaceIdSubmission = (
   storedDescriptor?: string,
 ) => {
   const challenge = decodeFaceIdChallengeToken(submission.challengeToken);
-  if (
-    !submission.previewImage ||
-    !submission.previewImage.startsWith("data:image/")
-  ) {
-    throw new Error("FACE_ID_PREVIEW_REQUIRED");
+  const minLivenessScore = Number.isFinite(challenge.minLivenessScore)
+    ? challenge.minLivenessScore
+    : FACE_ID_MIN_LIVENESS_SCORE;
+  const minMotionScore = Number.isFinite(challenge.minMotionScore)
+    ? challenge.minMotionScore
+    : FACE_ID_MIN_MOTION_SCORE;
+  const minEyeMotionScore = Number.isFinite(challenge.minEyeMotionScore)
+    ? challenge.minEyeMotionScore
+    : FACE_ID_MIN_EYE_MOTION_SCORE;
+  if (submission.livenessScore < minLivenessScore) {
+    throw new Error("FACE_ID_LIVENESS_TOO_LOW");
+  }
+  if (submission.motionScore < minMotionScore) {
+    throw new Error("FACE_ID_MOTION_TOO_LOW");
+  }
+  if (submission.eyeMotionScore < minEyeMotionScore) {
+    throw new Error("FACE_ID_EYE_MOTION_TOO_LOW");
   }
   if (submission.faceCoverage < challenge.minFaceCoverage) {
     throw new Error("FACE_ID_FACE_TOO_SMALL");
@@ -8575,6 +9540,7 @@ const verifyFaceIdSubmission = (
   if (submission.sampleCount < challenge.minSampleCount) {
     throw new Error("FACE_ID_TOO_FEW_SAMPLES");
   }
+  verifyFaceIdVideoEvidence(submission);
 
   parseFaceDescriptor(submission.descriptor);
 
@@ -8588,8 +9554,27 @@ const verifyFaceIdSubmission = (
         threshold: FACE_ID_V2_MATCH_THRESHOLD,
       };
 
+  const geometryRescueMatch =
+    Boolean(storedDescriptor) &&
+    typeof similarityResult.geometryScore === "number" &&
+    similarityResult.geometryScore >= FACE_ID_V2_RESCUE_GEOMETRY_THRESHOLD &&
+    ((typeof similarityResult.legacyScore === "number" &&
+      similarityResult.legacyScore >= FACE_ID_V2_RESCUE_LEGACY_THRESHOLD) ||
+      (typeof similarityResult.alignedScore === "number" &&
+        similarityResult.alignedScore >= FACE_ID_V2_RESCUE_ALIGNED_FLOOR));
+
+  if (geometryRescueMatch) {
+    console.warn("FaceID geometry rescue accepted", {
+      similarity: similarityResult.similarity,
+      alignedScore: similarityResult.alignedScore,
+      geometryScore: similarityResult.geometryScore,
+      legacyScore: similarityResult.legacyScore,
+    });
+  }
+
   if (
     storedDescriptor &&
+    !geometryRescueMatch &&
     typeof similarityResult.alignedScore === "number" &&
     similarityResult.alignedScore < FACE_ID_V2_ALIGNED_MATCH_THRESHOLD &&
     similarityResult.similarity < similarityResult.threshold - 0.02
@@ -8604,6 +9589,7 @@ const verifyFaceIdSubmission = (
   }
   if (
     storedDescriptor &&
+    !geometryRescueMatch &&
     typeof similarityResult.alignedScore !== "number" &&
     typeof similarityResult.geometryScore === "number" &&
     similarityResult.geometryScore < FACE_ID_V2_GEOMETRY_MATCH_THRESHOLD &&
@@ -8619,6 +9605,7 @@ const verifyFaceIdSubmission = (
   }
   if (
     storedDescriptor &&
+    !geometryRescueMatch &&
     similarityResult.similarity < similarityResult.threshold
   ) {
     console.warn("FaceID mismatch: combined score below threshold", {
@@ -9604,22 +10591,22 @@ const ACCOUNT_PROFILE_TRANSFER_THRESHOLDS: Record<
     extremeMultiplier: 7,
   },
   BUSINESS_SMALL_BUSINESS: {
-    mediumAmount: 10000,
-    highAmount: 35000,
-    newRecipientAmount: 7000,
-    extremeMultiplier: 6,
+    mediumAmount: 75000,
+    highAmount: 400000,
+    newRecipientAmount: 40000,
+    extremeMultiplier: 8,
   },
   BUSINESS_MEDIUM_BUSINESS: {
-    mediumAmount: 25000,
-    highAmount: 100000,
-    newRecipientAmount: 15000,
-    extremeMultiplier: 5,
+    mediumAmount: 250000,
+    highAmount: 1200000,
+    newRecipientAmount: 125000,
+    extremeMultiplier: 6,
   },
   BUSINESS_ENTERPRISE: {
-    mediumAmount: 50000,
-    highAmount: 250000,
-    newRecipientAmount: 30000,
-    extremeMultiplier: 4,
+    mediumAmount: 500000,
+    highAmount: 3000000,
+    newRecipientAmount: 250000,
+    extremeMultiplier: 6,
   },
 };
 
@@ -9666,6 +10653,7 @@ const hardenTransferAiResultForAccountProfile = (input: {
   sessionRestrictLargeTransfers: boolean;
   spendProfile: TransferSpendProfile;
   behaviorProfile: TransferBehaviorProfile;
+  transferNoteLlm: TransferNoteLlmAnalysis;
 }): AnomalyResponse => {
   const amount = Math.max(0, Number(input.amount) || 0);
   if (amount <= 0) return input.aiResult;
@@ -9683,6 +10671,7 @@ const hardenTransferAiResultForAccountProfile = (input: {
     input.aiResult.reasons.some((reason) =>
       /ai monitoring unavailable/i.test(reason),
     );
+  const isBusinessProfile = input.accountProfile.category === "BUSINESS";
   const exceedsMediumBand = amount >= thresholds.mediumAmount;
   const exceedsHighBand = amount >= thresholds.highAmount;
   const exceedsExtremeBand =
@@ -9712,15 +10701,47 @@ const hardenTransferAiResultForAccountProfile = (input: {
         input.behaviorProfile.recentInboundAmount24h * 0.75,
         thresholds.mediumAmount * 0.5,
       );
+  const hasHousingPurposeTag = input.transferNoteLlm.purposeTags.some((tag) =>
+    [
+      "home_purchase",
+      "property_deposit",
+      "mortgage_closing",
+      "real_estate_settlement",
+    ].includes(tag),
+  );
+  const qualifiesForAiPurposeException =
+    !isBusinessProfile &&
+    hasHousingPurposeTag &&
+    input.transferNoteLlm.purposeConfidence >= 0.72 &&
+    input.transferNoteLlm.riskLevel === "low" &&
+    !aiUnavailable &&
+    !rapidCashOutSignal &&
+    !recentTopUpCashOutSignal &&
+    input.behaviorProfile.probeThenLargeRiskScore < 0.7 &&
+    input.behaviorProfile.smallProbeCount24h === 0 &&
+    !input.aiResult.reasons.some((reason) =>
+      /known scam pattern|otp theft|remote access|refund scam|tax scam|investment scam/i.test(
+        reason,
+      ),
+    );
   const shouldForceHardReview =
-    exceedsExtremeBand ||
+    (exceedsExtremeBand &&
+      !qualifiesForAiPurposeException &&
+      (!isBusinessProfile ||
+        !input.recipientKnown ||
+        drainRatio >= 0.95 ||
+        aiUnavailable)) ||
     (isStrictPersonalTier &&
       exceedsHighBand &&
+      !qualifiesForAiPurposeException &&
       (!input.recipientKnown || drainRatio >= 0.75)) ||
     (aiUnavailable &&
       exceedsHighBand &&
-      (!input.recipientKnown || drainRatio >= 0.75)) ||
-    (exceedsHighBand && drainRatio >= 0.9) ||
+      (!input.recipientKnown ||
+        drainRatio >= (isBusinessProfile ? 0.9 : 0.75))) ||
+    (exceedsHighBand &&
+      drainRatio >= (isBusinessProfile ? 0.97 : 0.9) &&
+      !qualifiesForAiPurposeException) ||
     rapidCashOutSignal ||
     recentTopUpCashOutSignal;
 
@@ -9770,13 +10791,25 @@ const hardenTransferAiResultForAccountProfile = (input: {
     aiUnavailable
       ? "AI scoring was unavailable, so the platform applied strict account-tier protection instead of silently allowing the transfer."
       : null,
+    qualifiesForAiPurposeException
+      ? "AI recognized a plausible high-value life-event purpose in the transfer note, so the payment can move to enhanced verification instead of an automatic hold."
+      : null,
   ]).slice(0, 6);
 
-  if (shouldForceHardReview) {
+  if (shouldForceHardReview && !qualifiesForAiPurposeException) {
     riskLevel = "high";
     finalAction = "HOLD_REVIEW";
     finalScore = Math.max(finalScore, 92);
     baseScore = Math.max(baseScore, 92);
+  } else if (qualifiesForAiPurposeException && exceedsHighBand) {
+    riskLevel = promoteTransferRiskLevel(riskLevel, "high");
+    finalAction =
+      rankTransferFinalAction(finalAction) >=
+      rankTransferFinalAction("REQUIRE_OTP_FACE_ID")
+        ? finalAction
+        : "REQUIRE_OTP_FACE_ID";
+    finalScore = Math.max(finalScore, 82);
+    baseScore = Math.max(baseScore, 82);
   } else if (
     exceedsHighBand ||
     isLargeNewRecipientTransfer ||
@@ -9825,18 +10858,23 @@ const hardenTransferAiResultForAccountProfile = (input: {
       finalAction === "REQUIRE_OTP" || finalAction === "REQUIRE_OTP_FACE_ID"
         ? `the transfer exceeds the protection band for a ${input.accountProfile.label.toLowerCase()} account`
         : input.aiResult.otpReason,
-    headline: shouldForceHardReview
-      ? `Transfer exceeds the safe operating band for ${input.accountProfile.label}`
-      : exceedsHighBand
-        ? `${input.accountProfile.label} account requires step-up for this amount`
-        : input.aiResult.headline,
-    summary: shouldForceHardReview
-      ? "The transfer is too large for the current account tier to pass automatically and must be reviewed before completion."
-      : exceedsHighBand
-        ? "The transfer materially exceeds the current account tier baseline, so passive AI monitoring is not enough."
-        : input.aiResult.summary,
-    nextStep:
-      finalAction === "HOLD_REVIEW"
+    headline: qualifiesForAiPurposeException
+      ? "High-value personal transfer requires enhanced verification"
+      : shouldForceHardReview
+        ? `Transfer exceeds the safe operating band for ${input.accountProfile.label}`
+        : exceedsHighBand
+          ? `${input.accountProfile.label} account requires step-up for this amount`
+          : input.aiResult.headline,
+    summary: qualifiesForAiPurposeException
+      ? "AI found a plausible legitimate purpose such as a property or home-payment event, so the transfer can continue only with stronger verification and review."
+      : shouldForceHardReview
+        ? "The transfer is too large for the current account tier to pass automatically and must be reviewed before completion."
+        : exceedsHighBand
+          ? "The transfer materially exceeds the current account tier baseline, so passive AI monitoring is not enough."
+          : input.aiResult.summary,
+    nextStep: qualifiesForAiPurposeException
+      ? "Require OTP and FaceID, then ask the sender to re-check the recipient, property/payment purpose, and destination account before completion."
+      : finalAction === "HOLD_REVIEW"
         ? "Place the transfer on hold and require admin review before any funds leave the wallet."
         : finalAction === "REQUIRE_OTP_FACE_ID"
           ? "Require OTP and FaceID, then re-check the recipient and amount before completion."
@@ -9846,6 +10884,9 @@ const hardenTransferAiResultForAccountProfile = (input: {
     recommendedActions: dedupeStringList([
       ...(input.aiResult.recommendedActions || []),
       "Confirm the recipient and payment purpose independently before continuing.",
+      qualifiesForAiPurposeException
+        ? "Require a precise note such as property deposit, escrow, or mortgage closing before releasing the transfer."
+        : null,
       shouldForceHardReview
         ? "Do not release this transfer automatically while the account remains on the current tier."
         : "Escalate the transfer with stronger verification because it sits outside the normal tier baseline.",
@@ -9873,6 +10914,9 @@ const hardenTransferAiResultForAccountProfile = (input: {
       ),
       amountVsTierHigh: roundMoney(amount / Math.max(thresholds.highAmount, 1)),
       aiUnavailable,
+      aiPurposeExceptionApplied: qualifiesForAiPurposeException,
+      aiPurposeTags: input.transferNoteLlm.purposeTags,
+      aiPurposeConfidence: input.transferNoteLlm.purposeConfidence,
       balanceDrainRatio: Number(drainRatio.toFixed(3)),
       recentInboundAmount24h: input.behaviorProfile.recentInboundAmount24h,
       recentAdminTopUpAmount24h:
@@ -9980,7 +11024,7 @@ const buildFaceEnrollmentRequiredNotice = (
   }
 
   const reminder =
-    "Security update: add your live FaceID scan after sign-in to keep this account protected.";
+    "Security update: add your 5-second FaceID verification video after sign-in to keep this account protected.";
   return baseNotice ? `${baseNotice} ${reminder}` : reminder;
 };
 
@@ -10525,7 +11569,7 @@ const evaluateTransferStepUpPolicy = async (input: {
   let recentSmallTransferSameRecipientCount = 0;
   let latestSmallTransferAt: Date | null = null;
   const largeTransferSince = new Date(
-    now - CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES * 60 * 1000,
+    now - CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_SECONDS * 1000,
   ).getTime();
   const smallTransferBurstSince = new Date(
     now - SMALL_TRANSFER_BURST_WINDOW_MINUTES * 60 * 1000,
@@ -10620,7 +11664,7 @@ const evaluateTransferStepUpPolicy = async (input: {
     shouldBlockContinuousLargeTransfer && latestLargeCompletedAt
       ? new Date(
           latestLargeCompletedAt.getTime() +
-            CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES * 60 * 1000,
+            CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_SECONDS * 1000,
         )
       : shouldBlockSmallTransferBurst && latestSmallTransferAt
         ? new Date(
@@ -10635,9 +11679,10 @@ const evaluateTransferStepUpPolicy = async (input: {
     ? `Another transfer above ${formatMoneyAmount(
         input.currency,
         TRANSFER_FACE_ID_THRESHOLD,
-      )} was completed less than ${CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES} minutes ago. Please wait ${formatRetryWait(
-        retryAfterSeconds ??
-          CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES * 60,
+      )} was completed less than ${formatRetryWait(
+        CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_SECONDS,
+      )} ago. Please wait ${formatRetryWait(
+        retryAfterSeconds ?? CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_SECONDS,
       )} before sending another high-value transfer.`
     : shouldBlockSmallTransferBurst
       ? `Too many small transfers were attempted in the last ${SMALL_TRANSFER_BURST_WINDOW_MINUTES} minutes. Please wait ${formatRetryWait(
@@ -11160,6 +12205,129 @@ const verifyTransferPinForUser = async (
   return verifyPassword(normalizedPin, storedHash);
 };
 
+const qualifiesForStoredTransferPurposeException = (input: {
+  aiResult: AnomalyResponse;
+  note?: string | null;
+  accountProfile?: ResolvedAccountProfile | null;
+}) => {
+  const note = typeof input.note === "string" ? input.note.trim() : "";
+  const accountCategory =
+    input.accountProfile?.category ||
+    (input.aiResult.accountCategory === "business" ? "BUSINESS" : "PERSONAL");
+  if (accountCategory !== "PERSONAL") {
+    return false;
+  }
+  if (getSuspiciousTransferNoteReasons(note).length > 0) {
+    return false;
+  }
+  if (getLegitimateTransferPurposeTags(note).length === 0) {
+    return false;
+  }
+  if (
+    input.aiResult.reasons.some((reason) =>
+      /known scam pattern|otp theft|remote access|refund scam|tax scam|investment scam/i.test(
+        reason,
+      ),
+    )
+  ) {
+    return false;
+  }
+  const analysisSignals =
+    input.aiResult.analysisSignals &&
+    typeof input.aiResult.analysisSignals === "object" &&
+    !Array.isArray(input.aiResult.analysisSignals)
+      ? input.aiResult.analysisSignals
+      : null;
+  const probeThenLargeRiskScore = Number(
+    analysisSignals?.probeThenLargeRiskScore ??
+      analysisSignals?.probe_then_large_risk_score ??
+      0,
+  );
+  const rapidCashOutRiskScore = Number(
+    analysisSignals?.rapidCashOutRiskScore ??
+      analysisSignals?.rapid_cash_out_risk_score ??
+      0,
+  );
+  const smallProbeCount24h = Number(
+    analysisSignals?.smallProbeCount24h ??
+      analysisSignals?.small_probe_count_24h ??
+      0,
+  );
+  return (
+    Number.isFinite(probeThenLargeRiskScore) &&
+    probeThenLargeRiskScore < 0.7 &&
+    Number.isFinite(rapidCashOutRiskScore) &&
+    rapidCashOutRiskScore < 0.7 &&
+    Number.isFinite(smallProbeCount24h) &&
+    smallProbeCount24h === 0
+  );
+};
+
+const resolveEffectiveTransferFinalAction = (
+  aiResult: AnomalyResponse,
+  options?: {
+    note?: string | null;
+    accountProfile?: ResolvedAccountProfile | null;
+  },
+) => {
+  const analysisSignals =
+    aiResult.analysisSignals &&
+    typeof aiResult.analysisSignals === "object" &&
+    !Array.isArray(aiResult.analysisSignals)
+      ? aiResult.analysisSignals
+      : null;
+  if (
+    analysisSignals?.aiPurposeExceptionApplied === true &&
+    aiResult.finalAction === "HOLD_REVIEW"
+  ) {
+    return "REQUIRE_OTP_FACE_ID" as const;
+  }
+  if (
+    aiResult.finalAction === "HOLD_REVIEW" &&
+    qualifiesForStoredTransferPurposeException({
+      aiResult,
+      note: options?.note,
+      accountProfile: options?.accountProfile,
+    })
+  ) {
+    return "REQUIRE_OTP_FACE_ID" as const;
+  }
+  return aiResult.finalAction || "ALLOW";
+};
+
+const verifyRequiredTransferFaceId = async (input: {
+  senderUser: UserEntity;
+  transferFaceEnrollment?: FaceIdEnrollmentSubmission | null;
+}) => {
+  const storedFaceId = getInternalFaceIdMetadata(input.senderUser.metadata);
+  const storedDescriptor =
+    storedFaceId && typeof storedFaceId.descriptor === "string"
+      ? storedFaceId.descriptor
+      : "";
+  const storedDescriptorIsLegacy =
+    !!storedDescriptor &&
+    !storedDescriptor.startsWith(FACE_ID_DESCRIPTOR_V2_PREFIX);
+  if (storedFaceId?.enabled !== true || !storedDescriptor) {
+    throw new Error("TRANSFER_FACE_ID_ENROLLMENT_REQUIRED");
+  }
+  if (!input.transferFaceEnrollment) {
+    throw new Error("TRANSFER_FACE_ID_VERIFICATION_REQUIRED");
+  }
+  try {
+    await verifyFaceIdSubmissionStrict(
+      input.transferFaceEnrollment,
+      storedDescriptor,
+    );
+  } catch (err) {
+    if (err instanceof Error && err.message === "FACE_ID_MISMATCH") {
+      if (storedDescriptorIsLegacy) {
+        throw new Error("TRANSFER_FACE_ID_LEGACY_REENROLL_REQUIRED");
+      }
+    }
+    throw err;
+  }
+};
+
 const completeAuthorizedTransfer = async (input: {
   req: Request;
   senderUser: UserEntity;
@@ -11177,12 +12345,19 @@ const completeAuthorizedTransfer = async (input: {
   faceIdRequired: boolean;
   faceIdReason?: string | null;
   transferFaceEnrollment?: FaceIdEnrollmentSubmission | null;
+  faceIdPreverified?: boolean;
 }) => {
   if (!input.amount || (!input.toAccount && !input.toUserId)) {
     throw new Error("INVALID_TRANSFER_PAYLOAD");
   }
 
-  const effectiveFinalAction = input.transferAiResult.finalAction || "ALLOW";
+  const effectiveFinalAction = resolveEffectiveTransferFinalAction(
+    input.transferAiResult,
+    {
+      note: input.note,
+      accountProfile: buildResolvedAccountProfile(input.senderUser.metadata),
+    },
+  );
   if (effectiveFinalAction === "HOLD_REVIEW") {
     throw new Error("TRANSFER_MANUAL_REVIEW_REQUIRED");
   }
@@ -11196,34 +12371,11 @@ const completeAuthorizedTransfer = async (input: {
 
   const effectiveFaceIdRequired =
     input.faceIdRequired || effectiveFinalAction === "REQUIRE_OTP_FACE_ID";
-  if (effectiveFaceIdRequired) {
-    const storedFaceId = getInternalFaceIdMetadata(input.senderUser.metadata);
-    const storedDescriptor =
-      storedFaceId && typeof storedFaceId.descriptor === "string"
-        ? storedFaceId.descriptor
-        : "";
-    const storedDescriptorIsLegacy =
-      !!storedDescriptor &&
-      !storedDescriptor.startsWith(FACE_ID_DESCRIPTOR_V2_PREFIX);
-    if (storedFaceId?.enabled !== true || !storedDescriptor) {
-      throw new Error("TRANSFER_FACE_ID_ENROLLMENT_REQUIRED");
-    }
-    if (!input.transferFaceEnrollment) {
-      throw new Error("TRANSFER_FACE_ID_VERIFICATION_REQUIRED");
-    }
-    try {
-      await verifyFaceIdSubmissionStrict(
-        input.transferFaceEnrollment,
-        storedDescriptor,
-      );
-    } catch (err) {
-      if (err instanceof Error && err.message === "FACE_ID_MISMATCH") {
-        if (storedDescriptorIsLegacy) {
-          throw new Error("TRANSFER_FACE_ID_LEGACY_REENROLL_REQUIRED");
-        }
-      }
-      throw err;
-    }
+  if (effectiveFaceIdRequired && input.faceIdPreverified !== true) {
+    await verifyRequiredTransferFaceId({
+      senderUser: input.senderUser,
+      transferFaceEnrollment: input.transferFaceEnrollment,
+    });
   }
 
   const userRepository = createUserRepository();
@@ -11257,6 +12409,10 @@ const completeAuthorizedTransfer = async (input: {
     input.transferAiResult.requestKey ||
     input.transferAdvisory?.requestKey ||
     null;
+  const auditClientMetadata = buildAuditClientMetadata(
+    input.req,
+    input.req.body,
+  );
 
   await logAuditEvent({
     actor: input.req.user?.email,
@@ -11273,6 +12429,7 @@ const completeAuthorizedTransfer = async (input: {
       transferAdvisorySeverity: input.transferAdvisory?.severity || null,
     },
     metadata: {
+      ...auditClientMetadata,
       requestKey: effectiveRequestKey,
       spendProfile: input.transferSpendProfile,
       transferAdvisory: input.transferAdvisory || undefined,
@@ -12102,6 +13259,12 @@ app.post("/auth/register", async (req, res) => {
     }
 
     const verifiedFace = await verifyFaceIdSubmissionStrict(faceEnrollment);
+    const faceVideoHash = faceEnrollment.videoEvidence
+      ? crypto
+          .createHash("sha256")
+          .update(faceEnrollment.videoEvidence)
+          .digest("hex")
+      : null;
 
     const existingUser = await userRepository.findByEmail(email);
     if (existingUser && existingUser.status !== "PENDING") {
@@ -12131,9 +13294,16 @@ app.post("/auth/register", async (req, res) => {
               .digest("hex"),
             livenessScore: faceEnrollment.livenessScore,
             motionScore: faceEnrollment.motionScore,
+            eyeMotionScore: faceEnrollment.eyeMotionScore,
             faceCoverage: faceEnrollment.faceCoverage,
             sampleCount: faceEnrollment.sampleCount,
             previewImage: faceEnrollment.previewImage,
+            videoEvidenceHash: faceVideoHash,
+            videoDurationMs:
+              typeof faceEnrollment.videoDurationMs === "number"
+                ? Math.round(faceEnrollment.videoDurationMs)
+                : null,
+            videoMimeType: faceEnrollment.videoMimeType || null,
             antiSpoof: {
               spoofScore: verifiedFace.antiSpoof.spoofScore,
               confidence: verifiedFace.antiSpoof.confidence,
@@ -12244,6 +13414,41 @@ app.post("/auth/register", async (req, res) => {
       return res.status(400).json({
         error:
           "FaceID live challenge evidence was incomplete. Please scan again.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_VIDEO_REQUIRED") {
+      return res.status(400).json({
+        error: "A 5-second FaceID verification video is required.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_VIDEO_TOO_SHORT") {
+      return res.status(400).json({
+        error:
+          "FaceID video was too short. Record the full 5 seconds and try again.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_VIDEO_INVALID") {
+      return res.status(400).json({
+        error:
+          "FaceID video evidence is invalid. Please record a new 5-second clip.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_LIVENESS_TOO_LOW") {
+      return res.status(400).json({
+        error:
+          "FaceID liveness check was too weak. Please scan again with your real face centered in frame.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_MOTION_TOO_LOW") {
+      return res.status(400).json({
+        error:
+          "Face motion was too limited. Move naturally while recording and try again.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_EYE_MOTION_TOO_LOW") {
+      return res.status(400).json({
+        error:
+          "Eye landmark motion was too limited. Blink or keep your eyes moving naturally and scan again.",
       });
     }
     if (err instanceof Error && err.message === "FACE_ID_PREVIEW_REQUIRED") {
@@ -13406,6 +14611,7 @@ app.post("/auth/face/enroll", requireAuth, async (req, res) => {
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
   const faceEnrollment = readFaceIdEnrollment(req.body);
+  const auditClientMetadata = buildAuditClientMetadata(req, req.body);
   if (!faceEnrollment) {
     return res.status(400).json({ error: "FaceID enrollment is required" });
   }
@@ -13419,6 +14625,12 @@ app.post("/auth/face/enroll", requireAuth, async (req, res) => {
     }
 
     const verifiedFace = await verifyFaceIdSubmissionStrict(faceEnrollment);
+    const faceVideoHash = faceEnrollment.videoEvidence
+      ? crypto
+          .createHash("sha256")
+          .update(faceEnrollment.videoEvidence)
+          .digest("hex")
+      : null;
     const existingFaceId = getInternalFaceIdMetadata(userDoc.metadata);
     const nowIso = new Date().toISOString();
     const nextMetadata = {
@@ -13440,9 +14652,16 @@ app.post("/auth/face/enroll", requireAuth, async (req, res) => {
           .digest("hex"),
         livenessScore: faceEnrollment.livenessScore,
         motionScore: faceEnrollment.motionScore,
+        eyeMotionScore: faceEnrollment.eyeMotionScore,
         faceCoverage: faceEnrollment.faceCoverage,
         sampleCount: faceEnrollment.sampleCount,
         previewImage: faceEnrollment.previewImage,
+        videoEvidenceHash: faceVideoHash,
+        videoDurationMs:
+          typeof faceEnrollment.videoDurationMs === "number"
+            ? Math.round(faceEnrollment.videoDurationMs)
+            : null,
+        videoMimeType: faceEnrollment.videoMimeType || null,
         antiSpoof: {
           spoofScore: verifiedFace.antiSpoof.spoofScore,
           confidence: verifiedFace.antiSpoof.confidence,
@@ -13471,7 +14690,9 @@ app.post("/auth/face/enroll", requireAuth, async (req, res) => {
         sampleCount: faceEnrollment.sampleCount,
         motionScore: faceEnrollment.motionScore,
         livenessScore: faceEnrollment.livenessScore,
+        eyeMotionScore: faceEnrollment.eyeMotionScore,
       },
+      metadata: auditClientMetadata,
       ipAddress: getRequestIp(req),
     });
 
@@ -13486,6 +14707,18 @@ app.post("/auth/face/enroll", requireAuth, async (req, res) => {
       metadata: buildPublicUserMetadata(updatedUser.metadata),
     });
   } catch (err) {
+    console.warn("FaceID enroll rejected", {
+      userId,
+      code: err instanceof Error ? err.message : "UNKNOWN",
+      sampleCount: faceEnrollment.sampleCount,
+      faceCoverage: faceEnrollment.faceCoverage,
+      motionScore: faceEnrollment.motionScore,
+      livenessScore: faceEnrollment.livenessScore,
+      eyeMotionScore: faceEnrollment.eyeMotionScore,
+      hasPreviewImage: Boolean(faceEnrollment.previewImage),
+      hasVideoEvidence: Boolean(faceEnrollment.videoEvidence),
+      videoDurationMs: faceEnrollment.videoDurationMs,
+    });
     if (err instanceof Error && err.message === "FACE_ID_EXPIRED") {
       return res.status(400).json({
         error: "FaceID challenge expired. Start a new live scan.",
@@ -13511,6 +14744,41 @@ app.post("/auth/face/enroll", requireAuth, async (req, res) => {
       return res.status(400).json({
         error:
           "FaceID live challenge evidence was incomplete. Please scan again.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_VIDEO_REQUIRED") {
+      return res.status(400).json({
+        error: "A 5-second FaceID verification video is required.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_VIDEO_TOO_SHORT") {
+      return res.status(400).json({
+        error:
+          "FaceID video was too short. Record the full 5 seconds and try again.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_VIDEO_INVALID") {
+      return res.status(400).json({
+        error:
+          "FaceID video evidence is invalid. Please record a new 5-second clip.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_LIVENESS_TOO_LOW") {
+      return res.status(400).json({
+        error:
+          "FaceID liveness check was too weak. Please scan again with your real face centered in frame.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_MOTION_TOO_LOW") {
+      return res.status(400).json({
+        error:
+          "Face motion was too limited. Move naturally while recording and try again.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_EYE_MOTION_TOO_LOW") {
+      return res.status(400).json({
+        error:
+          "Eye landmark motion was too limited. Blink or keep your eyes moving naturally and scan again.",
       });
     }
     if (err instanceof Error && err.message === "FACE_ID_PREVIEW_REQUIRED") {
@@ -14681,7 +15949,6 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
     const user = await userRepository.findValidatedById(senderUserId);
     if (!user) return res.status(404).json({ error: "User not found" });
     const accountProfile = buildResolvedAccountProfile(user.metadata);
-    const accountSegment = accountProfile.segment;
 
     const storedFaceId = getInternalFaceIdMetadata(user.metadata);
     const hasTransferFaceId =
@@ -14753,12 +16020,6 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
         },
       });
     }
-    const transferNoteLlmPromise = analyzeTransferNoteWithLlm({
-      note: context.note,
-      amount: context.amount,
-      currency: context.senderWallet.currency,
-    });
-
     const [
       failedTx24h,
       velocity1h,
@@ -14783,7 +16044,33 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
     const suspiciousNoteReasons = getSuspiciousTransferNoteReasons(
       context.note,
     );
-    const transferNoteLlm = await transferNoteLlmPromise;
+    const transferNoteLlm = await analyzeTransferNoteWithLlm({
+      note: context.note,
+      amount: context.amount,
+      currency: context.senderWallet.currency,
+      accountCategory:
+        accountProfile.category.toUpperCase() === "BUSINESS"
+          ? "business"
+          : "personal",
+      accountSegment:
+        accountProfile.segment.toUpperCase() === "ENTERPRISE"
+          ? "enterprise"
+          : accountProfile.segment.toUpperCase() === "SME"
+            ? "sme"
+            : "personal",
+      recipientKnown: recipientProfile.isKnownRecipient,
+      balanceImpactRatio:
+        Number(context.senderWallet.balance) > 0
+          ? context.amount / Number(context.senderWallet.balance)
+          : 0,
+      sessionRiskLevel: normalizeRiskLevel(
+        req.sessionSecurity?.riskLevel || "low",
+      ),
+      velocity1h,
+      recentReviewCount30d: behaviorProfile.recentReviewCount30d,
+      recentBlockedCount30d: behaviorProfile.recentBlockedCount30d,
+      spendSurgeRatio: spendProfile.spendSurgeRatio,
+    });
 
     let aiResult = DEFAULT_AI_RESPONSE;
     try {
@@ -14791,62 +16078,23 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
         method: "POST",
         headers: buildAiServiceHeaders(),
         body: JSON.stringify({
-          userId: senderUserId,
-          transactionId: crypto.randomUUID(),
-          timestamp: new Date().toISOString(),
-          amount: context.amount,
-          currency: context.senderWallet.currency,
-          accountSegment,
-          accountCategory: accountProfile.category,
-          accountTier: accountProfile.tier,
-          accountProfileStatus: accountProfile.status,
-          accountProfileConfidence: accountProfile.confidence,
-          location: getRequestLocation(req),
-          paymentMethod: "wallet_balance",
-          merchantCategory: "p2p_transfer",
-          device:
-            typeof req.headers["user-agent"] === "string"
-              ? req.headers["user-agent"]
-              : "unknown",
-          channel: "web",
-          failedTx24h,
-          velocity1h,
-          dailySpendAvg30d: spendProfile.dailySpendAvg30d,
-          todaySpendBefore: spendProfile.todaySpendBefore,
-          projectedDailySpend: spendProfile.projectedDailySpend,
-          balanceBefore: Number(context.senderWallet.balance),
-          remainingBalance: Math.max(
-            0,
-            Number(context.senderWallet.balance) - context.amount,
-          ),
-          recipientKnown: recipientProfile.isKnownRecipient,
+          ...buildTransferAiScoringPayload({
+            senderUserId,
+            req,
+            amount: context.amount,
+            currency: context.senderWallet.currency,
+            note: context.note,
+            accountProfile,
+            failedTx24h,
+            velocity1h,
+            spendProfile,
+            senderBalance: Number(context.senderWallet.balance),
+            recipientProfile,
+            behaviorProfile,
+            transferStepUpPolicy,
+            transferNoteLlm,
+          }),
           suspiciousNoteCount: suspiciousNoteReasons.length,
-          llmNoteRiskLevel: transferNoteLlm.riskLevel,
-          llmSignalCount: transferNoteLlm.signals.length,
-          llmRuleTags: transferNoteLlm.ruleTags,
-          sessionRiskLevel: req.sessionSecurity?.riskLevel || "low",
-          rollingOutflowAmount: transferStepUpPolicy.rollingOutflowAmount,
-          faceIdRequired: transferStepUpPolicy.faceIdRequired,
-          sessionRestrictLargeTransfers: Boolean(
-            req.sessionSecurity?.restrictLargeTransfers,
-          ),
-          recentReviewCount30d: behaviorProfile.recentReviewCount30d,
-          recentBlockedCount30d: behaviorProfile.recentBlockedCount30d,
-          recentPendingOtpCount7d: behaviorProfile.recentPendingOtpCount7d,
-          recentInboundAmount24h: behaviorProfile.recentInboundAmount24h,
-          recentAdminTopUpAmount24h: behaviorProfile.recentAdminTopUpAmount24h,
-          recentSelfDepositAmount24h:
-            behaviorProfile.recentSelfDepositAmount24h,
-          smallProbeCount24h: behaviorProfile.smallProbeCount24h,
-          smallProbeTotal24h: behaviorProfile.smallProbeTotal24h,
-          distinctSmallProbeRecipients24h:
-            behaviorProfile.distinctSmallProbeRecipients24h,
-          sameRecipientSmallProbeCount24h:
-            behaviorProfile.sameRecipientSmallProbeCount24h,
-          newRecipientSmallProbeCount24h:
-            behaviorProfile.newRecipientSmallProbeCount24h,
-          probeThenLargeRiskScore: behaviorProfile.probeThenLargeRiskScore,
-          rapidCashOutRiskScore: behaviorProfile.rapidCashOutRiskScore,
         }),
       });
       const rawResult = (await aiResp.json().catch(() => null)) as unknown;
@@ -14885,6 +16133,7 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
       ),
       spendProfile,
       behaviorProfile,
+      transferNoteLlm,
     });
 
     const transferAdvisory = buildTransferSafetyAdvisory({
@@ -14892,6 +16141,7 @@ app.post("/transfer/preview", requireAuth, async (req, res) => {
       senderBalance: Number(context.senderWallet.balance),
       currency: context.senderWallet.currency,
       aiResult,
+      transferNoteLlm,
       spendProfile,
       recipientProfile,
       behaviorProfile,
@@ -14954,6 +16204,7 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
     advisoryAcknowledged?: boolean;
     advisoryRequestKey?: string;
   };
+  const auditClientMetadata = buildAuditClientMetadata(req, req.body);
   const transferPin =
     typeof body.transferPin === "string"
       ? body.transferPin.replace(/\D/g, "")
@@ -14998,7 +16249,6 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
     const user = await userRepository.findValidatedById(senderUserId);
     if (!user) return res.status(404).json({ error: "User not found" });
     const accountProfile = buildResolvedAccountProfile(user.metadata);
-    const accountSegment = accountProfile.segment;
     if (!hasStoredTransferPin(user.metadata)) {
       return res.status(403).json({
         error:
@@ -15082,7 +16332,9 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
             transferStepUpPolicy.blockReason ||
             "Repeated large outgoing transfers were detected.",
           totalOutflowWindow: transferStepUpPolicy.rollingOutflowAmount,
-          windowLabel: `${CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_MINUTES} minutes`,
+          windowLabel: formatRetryWait(
+            CONTINUOUS_LARGE_TRANSFER_BLOCK_WINDOW_SECONDS,
+          ),
           actionRequired: "blocked",
         }),
       );
@@ -15161,12 +16413,6 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       }
     }
 
-    const transferNoteLlmPromise = analyzeTransferNoteWithLlm({
-      note: context.note,
-      amount: context.amount,
-      currency: context.senderWallet.currency,
-    });
-
     const [
       failedTx24h,
       velocity1h,
@@ -15191,7 +16437,33 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
     const suspiciousNoteReasons = getSuspiciousTransferNoteReasons(
       context.note,
     );
-    const transferNoteLlm = await transferNoteLlmPromise;
+    const transferNoteLlm = await analyzeTransferNoteWithLlm({
+      note: context.note,
+      amount: context.amount,
+      currency: context.senderWallet.currency,
+      accountCategory:
+        accountProfile.category.toUpperCase() === "BUSINESS"
+          ? "business"
+          : "personal",
+      accountSegment:
+        accountProfile.segment.toUpperCase() === "ENTERPRISE"
+          ? "enterprise"
+          : accountProfile.segment.toUpperCase() === "SME"
+            ? "sme"
+            : "personal",
+      recipientKnown: recipientProfile.isKnownRecipient,
+      balanceImpactRatio:
+        Number(context.senderWallet.balance) > 0
+          ? context.amount / Number(context.senderWallet.balance)
+          : 0,
+      sessionRiskLevel: normalizeRiskLevel(
+        req.sessionSecurity?.riskLevel || "low",
+      ),
+      velocity1h,
+      recentReviewCount30d: behaviorProfile.recentReviewCount30d,
+      recentBlockedCount30d: behaviorProfile.recentBlockedCount30d,
+      spendSurgeRatio: spendProfile.spendSurgeRatio,
+    });
 
     let aiResult = DEFAULT_AI_RESPONSE;
     try {
@@ -15199,62 +16471,23 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
         method: "POST",
         headers: buildAiServiceHeaders(),
         body: JSON.stringify({
-          userId: senderUserId,
-          transactionId: crypto.randomUUID(),
-          timestamp: new Date().toISOString(),
-          amount: context.amount,
-          currency: context.senderWallet.currency,
-          accountSegment,
-          accountCategory: accountProfile.category,
-          accountTier: accountProfile.tier,
-          accountProfileStatus: accountProfile.status,
-          accountProfileConfidence: accountProfile.confidence,
-          location: getRequestLocation(req),
-          paymentMethod: "wallet_balance",
-          merchantCategory: "p2p_transfer",
-          device:
-            typeof req.headers["user-agent"] === "string"
-              ? req.headers["user-agent"]
-              : "unknown",
-          channel: "web",
-          failedTx24h,
-          velocity1h,
-          dailySpendAvg30d: spendProfile.dailySpendAvg30d,
-          todaySpendBefore: spendProfile.todaySpendBefore,
-          projectedDailySpend: spendProfile.projectedDailySpend,
-          balanceBefore: Number(context.senderWallet.balance),
-          remainingBalance: Math.max(
-            0,
-            Number(context.senderWallet.balance) - context.amount,
-          ),
-          recipientKnown: recipientProfile.isKnownRecipient,
+          ...buildTransferAiScoringPayload({
+            senderUserId,
+            req,
+            amount: context.amount,
+            currency: context.senderWallet.currency,
+            note: context.note,
+            accountProfile,
+            failedTx24h,
+            velocity1h,
+            spendProfile,
+            senderBalance: Number(context.senderWallet.balance),
+            recipientProfile,
+            behaviorProfile,
+            transferStepUpPolicy,
+            transferNoteLlm,
+          }),
           suspiciousNoteCount: suspiciousNoteReasons.length,
-          llmNoteRiskLevel: transferNoteLlm.riskLevel,
-          llmSignalCount: transferNoteLlm.signals.length,
-          llmRuleTags: transferNoteLlm.ruleTags,
-          sessionRiskLevel: req.sessionSecurity?.riskLevel || "low",
-          rollingOutflowAmount: transferStepUpPolicy.rollingOutflowAmount,
-          faceIdRequired: transferStepUpPolicy.faceIdRequired,
-          sessionRestrictLargeTransfers: Boolean(
-            req.sessionSecurity?.restrictLargeTransfers,
-          ),
-          recentReviewCount30d: behaviorProfile.recentReviewCount30d,
-          recentBlockedCount30d: behaviorProfile.recentBlockedCount30d,
-          recentPendingOtpCount7d: behaviorProfile.recentPendingOtpCount7d,
-          recentInboundAmount24h: behaviorProfile.recentInboundAmount24h,
-          recentAdminTopUpAmount24h: behaviorProfile.recentAdminTopUpAmount24h,
-          recentSelfDepositAmount24h:
-            behaviorProfile.recentSelfDepositAmount24h,
-          smallProbeCount24h: behaviorProfile.smallProbeCount24h,
-          smallProbeTotal24h: behaviorProfile.smallProbeTotal24h,
-          distinctSmallProbeRecipients24h:
-            behaviorProfile.distinctSmallProbeRecipients24h,
-          sameRecipientSmallProbeCount24h:
-            behaviorProfile.sameRecipientSmallProbeCount24h,
-          newRecipientSmallProbeCount24h:
-            behaviorProfile.newRecipientSmallProbeCount24h,
-          probeThenLargeRiskScore: behaviorProfile.probeThenLargeRiskScore,
-          rapidCashOutRiskScore: behaviorProfile.rapidCashOutRiskScore,
         }),
       });
       const rawResult = (await aiResp.json().catch(() => null)) as unknown;
@@ -15297,6 +16530,7 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       ),
       spendProfile,
       behaviorProfile,
+      transferNoteLlm,
     });
 
     const transferAdvisory = buildTransferSafetyAdvisory({
@@ -15304,6 +16538,7 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       senderBalance: Number(context.senderWallet.balance),
       currency: context.senderWallet.currency,
       aiResult,
+      transferNoteLlm,
       spendProfile,
       recipientProfile,
       behaviorProfile,
@@ -15311,6 +16546,14 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       note: context.note,
       requestKey: aiResult.requestKey,
     });
+    const transferRequestKey =
+      (typeof body.advisoryRequestKey === "string" &&
+      body.advisoryRequestKey.trim()
+        ? body.advisoryRequestKey.trim()
+        : null) ||
+      transferAdvisory?.requestKey ||
+      aiResult.requestKey ||
+      crypto.randomUUID();
     if (hasMatchingSafetyHold && transferAdvisory?.severity !== "blocked") {
       await userRepository.updateMetadata(
         user.id,
@@ -15334,6 +16577,8 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
               : "High-risk transaction detected by transaction monitoring.",
           riskLevel: aiResult.riskLevel,
           amount: context.amount,
+          toAccount: context.receiverAccountNumber,
+          requestKey: transferRequestKey,
           dailySpendAvg30d: spendProfile.dailySpendAvg30d,
           todaySpendBefore: spendProfile.todaySpendBefore,
           projectedDailySpend: spendProfile.projectedDailySpend,
@@ -15341,7 +16586,8 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
           reasons: aiResult.reasons,
         },
         metadata: {
-          requestKey: aiResult.requestKey || null,
+          ...auditClientMetadata,
+          requestKey: transferRequestKey,
           spendProfile,
           transferAdvisory: transferAdvisory || undefined,
           aiMonitoring: buildStoredAiMonitoring(aiResult),
@@ -15369,7 +16615,7 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
         toAccount: context.receiverAccountNumber,
         toUserId: context.resolvedReceiverUserId,
         amount: context.amount,
-        requestKey: transferAdvisory?.requestKey || aiResult.requestKey || null,
+        requestKey: transferRequestKey,
         reason:
           transferAdvisory?.reasons[0] ||
           "This transfer matched a high-risk scam pattern.",
@@ -15394,7 +16640,8 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
           reasons: transferAdvisory?.reasons || aiResult.reasons || [],
         },
         metadata: {
-          requestKey: aiResult.requestKey || null,
+          ...auditClientMetadata,
+          requestKey: transferRequestKey,
           spendProfile,
           recipientProfile,
           transferAdvisory: transferAdvisory || undefined,
@@ -15416,7 +16663,7 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
         toAccount: context.receiverAccountNumber,
         fromUserId: senderUserId,
         toUserId: context.resolvedReceiverUserId,
-        requestKey: transferAdvisory?.requestKey || aiResult.requestKey || null,
+        requestKey: transferRequestKey,
         note: context.note,
         recipientKnown: recipientProfile.isKnownRecipient,
         riskLevel: aiResult.riskLevel,
@@ -15456,7 +16703,8 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
           remainingBalance: transferAdvisory.remainingBalance,
         },
         metadata: {
-          requestKey: aiResult.requestKey || null,
+          ...auditClientMetadata,
+          requestKey: transferRequestKey,
           spendProfile,
           recipientProfile,
           transferAdvisory,
@@ -15520,6 +16768,7 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
           remainingBalance: transferAdvisory.remainingBalance,
         },
         metadata: {
+          ...auditClientMetadata,
           requestKey: transferAdvisory.requestKey,
           spendProfile,
           recipientProfile,
@@ -15535,10 +16784,6 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
       (context.amount >= TRANSFER_MEDIUM_RISK_OTP_MIN_AMOUNT ||
         transferAdvisory?.severity === "warning" ||
         transferAdvisory?.requiresAcknowledgement === true);
-    const transferRequestKey =
-      transferAdvisory?.requestKey ||
-      aiResult.requestKey ||
-      crypto.randomUUID();
     const requiresOtp =
       shouldRequireOtpForMediumRisk ||
       aiResult.finalAction === "REQUIRE_OTP" ||
@@ -15641,6 +16886,7 @@ app.post("/transfer/otp/send", requireAuth, async (req, res) => {
         transferAdvisorySeverity: transferAdvisory?.severity || null,
       },
       metadata: {
+        ...auditClientMetadata,
         requestKey: transferRequestKey,
         spendProfile,
         recipientProfile,
@@ -15752,6 +16998,7 @@ app.post("/transfer/advisory/dismiss", requireAuth, async (req, res) => {
   const requestKey =
     typeof body.requestKey === "string" ? body.requestKey.trim() : "";
   const transferAdvisory = normalizeTransferSafetyAdvisory(body.advisory);
+  const auditClientMetadata = buildAuditClientMetadata(req, req.body);
   const amount = toPositiveAmount(body.amount);
   const toAccount =
     typeof body.toAccount === "string"
@@ -15774,6 +17021,7 @@ app.post("/transfer/advisory/dismiss", requireAuth, async (req, res) => {
       remainingBalance: transferAdvisory?.remainingBalance || null,
     },
     metadata: {
+      ...auditClientMetadata,
       requestKey: requestKey || transferAdvisory?.requestKey || null,
       transferAdvisory: transferAdvisory || undefined,
     },
@@ -15796,11 +17044,16 @@ app.post("/transfer/flow-event", requireAuth, async (req, res) => {
     requestKey?: unknown;
     step?: unknown;
     reason?: unknown;
+    advisory?: unknown;
   };
 
   const eventType =
     typeof body.eventType === "string" ? body.eventType.trim() : "";
-  if (eventType !== "STARTED" && eventType !== "CANCELLED") {
+  if (
+    eventType !== "STARTED" &&
+    eventType !== "CANCELLED" &&
+    eventType !== "BLOCKED_POPUP_SHOWN"
+  ) {
     return res.status(400).json({ error: "Unsupported transfer flow event" });
   }
 
@@ -15829,6 +17082,8 @@ app.post("/transfer/flow-event", requireAuth, async (req, res) => {
       ? body.reason.trim()
       : null;
   const amount = toPositiveAmount(body.amount);
+  const transferAdvisory = normalizeTransferSafetyAdvisory(body.advisory);
+  const auditClientMetadata = buildAuditClientMetadata(req, req.body);
 
   await logAuditEvent({
     actor: req.user?.email,
@@ -15836,24 +17091,44 @@ app.post("/transfer/flow-event", requireAuth, async (req, res) => {
     action:
       eventType === "STARTED"
         ? "TRANSFER_FLOW_STARTED"
-        : "TRANSFER_FLOW_CANCELLED",
+        : eventType === "CANCELLED"
+          ? "TRANSFER_FLOW_CANCELLED"
+          : "TRANSFER_SAFETY_BLOCKED",
     details: {
-      amount: amount ?? null,
-      toAccount: toAccount || null,
-      step,
-      reason,
+      ...(eventType === "BLOCKED_POPUP_SHOWN"
+        ? {
+            message:
+              transferAdvisory?.message ||
+              reason ||
+              "Transfer was paused before OTP.",
+            amount: amount ?? transferAdvisory?.amount ?? null,
+            toAccount: toAccount || null,
+            blockedUntil: transferAdvisory?.blockedUntil ?? null,
+            riskLevel: transferAdvisory?.severity === "blocked" ? "high" : null,
+            reasons:
+              transferAdvisory?.reasons ||
+              (reason ? [reason] : ["Transfer was paused before OTP."]),
+          }
+        : {
+            amount: amount ?? null,
+            toAccount: toAccount || null,
+            step,
+            reason,
+          }),
     },
     metadata: {
-      requestKey,
+      ...auditClientMetadata,
+      requestKey: requestKey || transferAdvisory?.requestKey || null,
       toUserId,
       note,
       eventType,
       observedAt: new Date().toISOString(),
+      transferAdvisory: transferAdvisory || undefined,
     },
     ipAddress: getRequestIp(req),
   });
 
-  if (amount) {
+  if (amount && eventType !== "BLOCKED_POPUP_SHOWN") {
     await logFundsFlowEvent({
       actor: req.user?.email,
       userId: senderUserId,
@@ -15889,6 +17164,7 @@ app.post("/transfer/otp/verify", requireAuth, async (req, res) => {
   const challengeId =
     typeof body.challengeId === "string" ? body.challengeId.trim() : "";
   const otp = typeof body.otp === "string" ? body.otp.replace(/\D/g, "") : "";
+  const auditClientMetadata = buildAuditClientMetadata(req, req.body);
   if (!challengeId || !/^\d{6}$/.test(otp)) {
     return res.status(400).json({ error: "Invalid transfer OTP payload" });
   }
@@ -15916,6 +17192,16 @@ app.post("/transfer/otp/verify", requireAuth, async (req, res) => {
     const transferAdvisory = normalizeTransferSafetyAdvisory(
       metadata.transferAdvisory,
     );
+    const effectiveFinalAction = resolveEffectiveTransferFinalAction(
+      transferAiResult,
+      {
+        note:
+          typeof metadata.note === "string" && metadata.note.trim()
+            ? metadata.note.trim()
+            : null,
+        accountProfile: null,
+      },
+    );
 
     if (!amount || (!toAccount && !toUserId)) {
       return res
@@ -15924,7 +17210,7 @@ app.post("/transfer/otp/verify", requireAuth, async (req, res) => {
     }
     const faceIdRequired =
       metadata.faceIdRequired === true ||
-      transferAiResult.finalAction === "REQUIRE_OTP_FACE_ID" ||
+      effectiveFinalAction === "REQUIRE_OTP_FACE_ID" ||
       amount > TRANSFER_FACE_ID_THRESHOLD;
     const faceIdReason =
       typeof metadata.faceIdReason === "string" ? metadata.faceIdReason : null;
@@ -15950,6 +17236,7 @@ app.post("/transfer/otp/verify", requireAuth, async (req, res) => {
         transferAdvisorySeverity: transferAdvisory?.severity || null,
       },
       metadata: {
+        ...auditClientMetadata,
         requestKey: transferRequestKey,
         transferAdvisory: transferAdvisory || undefined,
         aiMonitoring: buildStoredAiMonitoring(transferAiResult),
@@ -16048,12 +17335,13 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
     const senderUser = await userRepository.findValidatedById(senderUserId);
     if (!senderUser) return res.status(404).json({ error: "User not found" });
 
-    const { challenge, metadata } = await verifyAndConsumeEmailOtpChallenge({
+    const preverifiedChallenge = await verifyEmailOtpChallenge({
       userId: senderUserId,
       purpose: "TRANSFER",
       challengeId,
       otp,
     });
+    const { challenge, metadata } = preverifiedChallenge;
 
     const amount = toPositiveAmount(metadata.amount);
     const toAccount =
@@ -16067,6 +17355,13 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
     const transferAdvisory = normalizeTransferSafetyAdvisory(
       metadata.transferAdvisory,
     );
+    const effectiveFinalAction = resolveEffectiveTransferFinalAction(
+      transferAiResult,
+      {
+        note,
+        accountProfile: buildResolvedAccountProfile(senderUser.metadata),
+      },
+    );
     const transferSpendProfile =
       metadata.txSpendProfile && typeof metadata.txSpendProfile === "object"
         ? (metadata.txSpendProfile as Record<string, unknown>)
@@ -16078,7 +17373,7 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
     }
     const faceIdRequired =
       metadata.faceIdRequired === true ||
-      transferAiResult.finalAction === "REQUIRE_OTP_FACE_ID" ||
+      effectiveFinalAction === "REQUIRE_OTP_FACE_ID" ||
       amount > TRANSFER_FACE_ID_THRESHOLD;
     const faceIdReason =
       typeof metadata.faceIdReason === "string" ? metadata.faceIdReason : null;
@@ -16086,6 +17381,13 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
       typeof metadata.requestKey === "string" && metadata.requestKey.trim()
         ? metadata.requestKey.trim()
         : transferAdvisory?.requestKey || transferAiResult.requestKey || null;
+    if (faceIdRequired) {
+      await verifyRequiredTransferFaceId({
+        senderUser,
+        transferFaceEnrollment,
+      });
+    }
+    await consumeOtpChallenge(challenge.id);
     const completedTransfer = await completeAuthorizedTransfer({
       req,
       senderUser,
@@ -16103,6 +17405,7 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
       faceIdRequired,
       faceIdReason,
       transferFaceEnrollment,
+      faceIdPreverified: faceIdRequired,
     });
 
     return res.json({
@@ -16224,6 +17527,41 @@ app.post("/transfer/confirm", requireAuth, async (req, res) => {
       return res.status(400).json({
         error:
           "FaceID live challenge evidence was incomplete. Please scan again.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_VIDEO_REQUIRED") {
+      return res.status(400).json({
+        error: "A 5-second FaceID verification video is required.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_VIDEO_TOO_SHORT") {
+      return res.status(400).json({
+        error:
+          "FaceID video was too short. Record the full 5 seconds and try again.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_VIDEO_INVALID") {
+      return res.status(400).json({
+        error:
+          "FaceID video evidence is invalid. Please record a new 5-second clip.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_LIVENESS_TOO_LOW") {
+      return res.status(400).json({
+        error:
+          "FaceID liveness check was too weak. Please scan again with your real face centered in frame.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_MOTION_TOO_LOW") {
+      return res.status(400).json({
+        error:
+          "Face motion was too limited. Move naturally while recording and try again.",
+      });
+    }
+    if (err instanceof Error && err.message === "FACE_ID_EYE_MOTION_TOO_LOW") {
+      return res.status(400).json({
+        error:
+          "Eye landmark motion was too limited. Blink or keep your eyes moving naturally and scan again.",
       });
     }
     if (err instanceof Error && err.message === "FACE_ID_PREVIEW_REQUIRED") {
@@ -16841,8 +18179,23 @@ app.get(
       take: limit,
     });
 
+    const seenAlertKeys = new Set<string>();
     const alerts = alertLogs
-      .map((log) =>
+      .filter((log: (typeof alertLogs)[number]) => {
+        const dedupKey = buildAdminAlertDedupKey({
+          userId: log.userId,
+          action: log.action,
+          createdAt: log.createdAt,
+          details: log.details,
+          metadata: log.metadata,
+        });
+        if (seenAlertKeys.has(dedupKey)) {
+          return false;
+        }
+        seenAlertKeys.add(dedupKey);
+        return true;
+      })
+      .map((log: (typeof alertLogs)[number]) =>
         buildAdminAlertResponse({
           id: log.id,
           userId: log.userId,
@@ -16854,7 +18207,7 @@ app.get(
           metadata: log.metadata,
         }),
       )
-      .filter((alert) => {
+      .filter((alert: AdminAlertResponse) => {
         const requestedStatus =
           typeof req.query.status === "string" ? req.query.status.trim() : "";
         return requestedStatus ? alert.adminStatus === statusFilter : true;
@@ -17433,6 +18786,18 @@ app.post(
 const errorHandler: ErrorRequestHandler = (err, _req, res, next) => {
   void next;
   console.error(err);
+  if (
+    err &&
+    typeof err === "object" &&
+    "type" in err &&
+    (err as { type?: string }).type === "entity.too.large"
+  ) {
+    res.status(413).json({
+      error:
+        "Request payload is too large. Please retry with a shorter or smaller capture.",
+    });
+    return;
+  }
   res.status(500).json({ error: "Internal error" });
 };
 

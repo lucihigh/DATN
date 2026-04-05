@@ -51,6 +51,9 @@ const PROFESSIONAL_PASSWORD_MIN_LENGTH = 12;
 const TRANSFER_FACE_ID_THRESHOLD = 1000;
 const FORCE_AUTH_HERO_MOTION_CLASS = "force-auth-hero-motion";
 const SIGNUP_TEST_BALANCE_AMOUNT = 99999;
+const PUBLIC_IP_CACHE_KEY = "fpipay_public_ip_cache";
+const PUBLIC_IP_CACHE_TTL_MS = 30 * 1000;
+const PUBLIC_IP_FETCH_TIMEOUT_MS = 5000;
 
 const getSignupTestBalanceBonus = (userId?: string | null) => {
   if (!userId || typeof window === "undefined") return 0;
@@ -71,10 +74,18 @@ function DeferredFaceIdCapture(props: {
   disabled?: boolean;
   mode?: "enroll" | "verify";
   onChange: (value: FaceIdProof | null) => void;
+  onFeedbackChange?: (input: {
+    status: "idle" | "loading" | "ready" | "scanning" | "verified" | "error";
+    message: string;
+  }) => void;
 }) {
   return (
     <Suspense
-      fallback={<div className="faceid-card">Loading FaceID scanner...</div>}
+      fallback={
+        <div className="faceid-card">
+          Loading 5-second FaceID video capture...
+        </div>
+      }
     >
       <LazyFaceIdCapture {...props} />
     </Suspense>
@@ -216,6 +227,35 @@ const parseUsdLikeNumber = (value?: string) => {
   const normalized = (value || "").replace(/[^0-9.-]/g, "");
   const amount = Number(normalized);
   return Number.isFinite(amount) ? amount : 0;
+};
+
+const formatFaceIdActionError = (
+  raw: string | null | undefined,
+  mode: "enroll" | "transfer",
+) => {
+  const message = String(raw || "").trim();
+  if (!message) {
+    return mode === "transfer"
+      ? "FaceID verification failed for this transfer. Please try again."
+      : "FaceID update failed. Please scan again and retry.";
+  }
+  if (/cannot connect to api server/i.test(message)) {
+    return mode === "transfer"
+      ? "Cannot connect to the server while verifying FaceID for this transfer."
+      : "Cannot connect to the server while updating FaceID.";
+  }
+  if (/otp verification failed/i.test(message)) {
+    return "FaceID verification failed. Please scan again and retry.";
+  }
+  if (/otp challenge already used/i.test(message)) {
+    return mode === "transfer"
+      ? "This OTP is no longer valid for the transfer. Please request a new OTP and try again."
+      : "This OTP is no longer valid. Please request a new code and try again.";
+  }
+  if (/failed to enroll faceid/i.test(message)) {
+    return "FaceID update failed. Please review the error and scan again.";
+  }
+  return message;
 };
 
 const loadImageFromBlob = (blob: Blob) =>
@@ -429,6 +469,22 @@ type SecurityTrustedDeviceItem = {
   current: boolean;
 };
 
+type BrowserDeviceContext = {
+  browser?: string;
+  browserVersion?: string;
+  platform?: string;
+  deviceType?: string;
+  mobile?: boolean;
+  deviceTitle?: string;
+  deviceDetail?: string;
+};
+
+type PublicIpProvider = {
+  url: string;
+  responseType: "json" | "text";
+  field?: string;
+};
+
 type SecurityOverviewAlert = {
   id?: string;
   title?: string;
@@ -519,10 +575,19 @@ const isCopilotWorkspaceShape = (
 
 const IPV4_ADDRESS_PATTERN = /\b(?:\d{1,3}\.){3}\d{1,3}\b/;
 const COPILOT_HISTORY_STORAGE_PREFIX = "fpipay_copilot_history";
+const normalizeTransferNoteForPatternMatch = (value: string) =>
+  value
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[đĐ]/g, "d")
+    .toLowerCase();
+
 const TRANSFER_HARD_BLOCK_NOTE_PATTERNS = [
   /\b(otp|ma otp|verification code|ma xac minh|faceid|sinh trac)\b/i,
   /\b(safe account|tai khoan an toan|security team|support team)\b/i,
   /\b(anydesk|teamviewer|remote access|screen share|chia se man hinh)\b/i,
+  /\b(chuyen tien dieu tra|phuc vu dieu tra|co quan dieu tra|cong an dieu tra|vien kiem sat|toa an|ho so vu an|vu an|phong toa tai khoan|tai khoan bi phong toa|tai khoan lien quan dieu tra|tai khoan lien quan vu an|kiem tra dong tien|ra soat dong tien|xac minh nguon tien|chuyen tien xac minh)\b/i,
 ];
 const TRANSFER_BLOCKED_NOTE_PATTERNS = [
   /\b(refund|hoan tien|unlock|mo khoa|verification fee|phi xac minh)\b/i,
@@ -670,6 +735,19 @@ const truncateNotificationCopy = (value: string, maxLength: number) =>
   value.length <= maxLength
     ? value
     : `${value.slice(0, maxLength - 3).trimEnd()}...`;
+
+const humanizeRiskKey = (value: string) =>
+  value
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^./, (char) => char.toUpperCase());
+
+const formatRiskNumber = (value: number | null | undefined, digits = 2) =>
+  typeof value === "number" && Number.isFinite(value)
+    ? value.toFixed(digits)
+    : "N/A";
 
 const getNotificationDayLabel = (createdAt: string) => {
   const date = new Date(createdAt);
@@ -996,6 +1074,196 @@ const summarizeDeviceUserAgent = (value?: string) => {
   };
 };
 
+const readCachedPublicIp = () => {
+  if (typeof window === "undefined") return "";
+  try {
+    const raw = sessionStorage.getItem(PUBLIC_IP_CACHE_KEY);
+    if (!raw) return "";
+    const parsed = JSON.parse(raw) as {
+      ip?: unknown;
+      fetchedAt?: unknown;
+    };
+    if (
+      typeof parsed.ip !== "string" ||
+      !parsed.ip.trim() ||
+      typeof parsed.fetchedAt !== "number" ||
+      !Number.isFinite(parsed.fetchedAt) ||
+      Date.now() - parsed.fetchedAt > PUBLIC_IP_CACHE_TTL_MS
+    ) {
+      return "";
+    }
+    return parsed.ip.trim();
+  } catch {
+    return "";
+  }
+};
+
+const cachePublicIp = (ip: string) => {
+  if (typeof window === "undefined" || !ip) return;
+  try {
+    sessionStorage.setItem(
+      PUBLIC_IP_CACHE_KEY,
+      JSON.stringify({
+        ip,
+        fetchedAt: Date.now(),
+      }),
+    );
+  } catch {
+    // ignore storage errors
+  }
+};
+
+const normalizePublicIpCandidate = (value: unknown) => {
+  if (typeof value !== "string") return "";
+  return value.trim().replace(/\s+/g, "");
+};
+
+const PUBLIC_IP_PROVIDERS: PublicIpProvider[] = [
+  {
+    url: "https://api64.ipify.org?format=json",
+    responseType: "json",
+    field: "ip",
+  },
+  {
+    url: "https://api.ipify.org?format=json",
+    responseType: "json",
+    field: "ip",
+  },
+  {
+    url: "https://ipwho.is/",
+    responseType: "json",
+    field: "ip",
+  },
+  {
+    url: "https://api.myip.com",
+    responseType: "json",
+    field: "ip",
+  },
+];
+
+const fetchPublicIpFromProvider = async (provider: PublicIpProvider) => {
+  if (typeof window === "undefined") return "";
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(
+    () => controller.abort(),
+    PUBLIC_IP_FETCH_TIMEOUT_MS,
+  );
+
+  try {
+    const resp = await fetch(provider.url, {
+      cache: "no-store",
+      headers:
+        provider.responseType === "json"
+          ? { Accept: "application/json" }
+          : undefined,
+      signal: controller.signal,
+    });
+
+    if (!resp.ok) return "";
+
+    const data = (await resp.json().catch(() => null)) as Record<
+      string,
+      unknown
+    > | null;
+    return normalizePublicIpCandidate(
+      provider.field ? data?.[provider.field] : "",
+    );
+  } catch {
+    return "";
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+};
+
+const resolvePublicIpAddress = async () => {
+  const cachedIp = readCachedPublicIp();
+  if (cachedIp) return cachedIp;
+
+  for (const provider of PUBLIC_IP_PROVIDERS) {
+    const ip = await fetchPublicIpFromProvider(provider);
+    if (ip) {
+      cachePublicIp(ip);
+      return ip;
+    }
+  }
+
+  return "";
+};
+
+const collectBrowserDeviceContext = (): BrowserDeviceContext | null => {
+  if (typeof navigator === "undefined") return null;
+  const userAgent = navigator.userAgent || "";
+  if (!userAgent) return null;
+  const userAgentData = (
+    navigator as Navigator & {
+      userAgentData?: { mobile?: boolean };
+    }
+  ).userAgentData;
+
+  const browserMatch =
+    userAgent.match(/Edg\/(\d+)/) ||
+    userAgent.match(/Chrome\/(\d+)/) ||
+    userAgent.match(/Firefox\/(\d+)/) ||
+    userAgent.match(/Version\/(\d+).+Safari\//);
+  const browser = /Edg\//.test(userAgent)
+    ? "Edge"
+    : /Chrome\//.test(userAgent)
+      ? "Chrome"
+      : /Firefox\//.test(userAgent)
+        ? "Firefox"
+        : /Safari\//.test(userAgent)
+          ? "Safari"
+          : undefined;
+
+  const platform = /Windows/i.test(userAgent)
+    ? "Windows"
+    : /Mac OS X/i.test(userAgent)
+      ? "macOS"
+      : /iPhone|iPad|iOS/i.test(userAgent)
+        ? "iOS"
+        : /Android/i.test(userAgent)
+          ? "Android"
+          : /Linux/i.test(userAgent)
+            ? "Linux"
+            : undefined;
+  const isTablet =
+    /iPad/i.test(userAgent) ||
+    (/Android/i.test(userAgent) && !/Mobile/i.test(userAgent));
+  const isMobile =
+    userAgentData?.mobile === true || /Mobile|iPhone|Android/i.test(userAgent);
+  const summary = summarizeDeviceUserAgent(userAgent);
+
+  return {
+    browser,
+    browserVersion: browserMatch?.[1],
+    platform,
+    deviceType: isTablet ? "tablet" : isMobile ? "mobile" : "desktop",
+    mobile: isMobile,
+    deviceTitle: summary.title,
+    deviceDetail: summary.detail,
+  };
+};
+
+const buildClientAuditRequestContext = async () => {
+  const [publicIp, deviceContext] = await Promise.all([
+    resolvePublicIpAddress(),
+    Promise.resolve(collectBrowserDeviceContext()),
+  ]);
+  const headers: Record<string, string> = {};
+  const body: Record<string, unknown> = {};
+  if (publicIp) {
+    headers["x-demo-public-ip"] = publicIp;
+  }
+  if (deviceContext) {
+    body.deviceContext = deviceContext;
+  }
+
+  return {
+    headers,
+    body,
+  };
+};
+
 const normalizeSavedTransferRecipients = (value: unknown) =>
   Array.isArray(value)
     ? value
@@ -1153,6 +1421,50 @@ type AiMonitoringSummary = {
     promptTemplateId?: string;
   } | null;
   analysisSignals?: Record<string, unknown> | null;
+  inputContract?: {
+    version?: string;
+    accountProfile?: Record<string, unknown> | null;
+    transferContext?: Record<string, unknown> | null;
+    behaviorSnapshot?: Record<string, unknown> | null;
+  } | null;
+  mlAnalysis?: {
+    anomalyScore: number;
+    rawScore: number;
+    baseRiskLevel: string;
+    adjustedRiskLevel: string;
+    model?: {
+      name?: string;
+      version?: string | null;
+      source?: string | null;
+    } | null;
+    topSignals?: Array<{
+      feature: string;
+      value: number;
+      zScore?: number | null;
+      baselineMean?: number | null;
+      baselineStd?: number | null;
+      direction?: "high" | "low" | "neutral";
+    }>;
+  } | null;
+  llmAnalysis?: {
+    riskLevel: string;
+    signalCount: number;
+    signals: string[];
+    ruleTags: string[];
+    summary?: string | null;
+    source?: string | null;
+    model?: string | null;
+  } | null;
+  finalDecision?: {
+    riskLevel: string;
+    finalAction?: string;
+    finalScore?: number;
+    headline?: string | null;
+    summary?: string | null;
+    nextStep?: string | null;
+    recommendedActions?: string[];
+    stepUpLevel?: string | null;
+  } | null;
 };
 
 function Ring({ value }: { value: number }) {
@@ -1390,6 +1702,7 @@ function DashboardView({
   const copilotThreadRef = useRef<HTMLDivElement>(null);
   const copilotPersistTimerRef = useRef<number | null>(null);
   const walletRefreshInFlightRef = useRef(false);
+  const lastTransferBlockedPopupAlertKeyRef = useRef<string | null>(null);
   const [wallet, setWallet] = useState<{
     id: string;
     balance: number;
@@ -1482,6 +1795,7 @@ function DashboardView({
   const [transferFaceResetKey, setTransferFaceResetKey] = useState(0);
   const [transferFaceVerifyOpen, setTransferFaceVerifyOpen] = useState(false);
   const [transferFaceVerifyBusy, setTransferFaceVerifyBusy] = useState(false);
+  const [transferFaceCaptureError, setTransferFaceCaptureError] = useState("");
   const [transferFaceIdEnabled, setTransferFaceIdEnabled] = useState(false);
   const [transferPinEnabled, setTransferPinEnabled] = useState(false);
   const [transferServerFaceIdRequired, setTransferServerFaceIdRequired] =
@@ -1659,7 +1973,7 @@ function DashboardView({
         return null;
       }
 
-      const note = transferContent.trim();
+      const note = normalizeTransferNoteForPatternMatch(transferContent);
       const balance = Math.max(Number(wallet.balance) || 0, 1);
       const ratio = transferAmountNumber / balance;
       const remainingBalance = Math.max(balance - transferAmountNumber, 0);
@@ -1747,16 +2061,9 @@ function DashboardView({
     ]);
   const effectiveTransferAdvisory =
     transferAdvisory || localTransferPreflightAdvisory;
-  const isTransferHardBlocked =
-    effectiveTransferAdvisory?.severity === "blocked";
-  const isTransferPreOtpWarning =
-    effectiveTransferAdvisory?.severity === "blocked" ||
-    effectiveTransferAdvisory?.requiresAcknowledgement === true;
   const transferContinueLabel = transferOtpBusy
     ? "Preparing security check..."
-    : isTransferHardBlocked
-      ? "Blocked for safety review"
-      : "Continue to security";
+    : "Continue";
   const ownQrPayload =
     wallet?.qrPayload ||
     (wallet?.accountNumber
@@ -2209,6 +2516,281 @@ function DashboardView({
                 !Array.isArray(data.analysis_signals)
               ? (data.analysis_signals as Record<string, unknown>)
               : null,
+        inputContract:
+          data.inputContract &&
+          typeof data.inputContract === "object" &&
+          !Array.isArray(data.inputContract)
+            ? (data.inputContract as AiMonitoringSummary["inputContract"])
+            : data.input_contract &&
+                typeof data.input_contract === "object" &&
+                !Array.isArray(data.input_contract)
+              ? (data.input_contract as AiMonitoringSummary["inputContract"])
+              : null,
+        mlAnalysis:
+          data.mlAnalysis &&
+          typeof data.mlAnalysis === "object" &&
+          !Array.isArray(data.mlAnalysis)
+            ? {
+                anomalyScore:
+                  typeof (data.mlAnalysis as Record<string, unknown>)
+                    .anomalyScore === "number"
+                    ? ((data.mlAnalysis as Record<string, unknown>)
+                        .anomalyScore as number)
+                    : 0,
+                rawScore:
+                  typeof (data.mlAnalysis as Record<string, unknown>)
+                    .rawScore === "number"
+                    ? ((data.mlAnalysis as Record<string, unknown>)
+                        .rawScore as number)
+                    : 0,
+                baseRiskLevel:
+                  typeof (data.mlAnalysis as Record<string, unknown>)
+                    .baseRiskLevel === "string"
+                    ? ((data.mlAnalysis as Record<string, unknown>)
+                        .baseRiskLevel as string)
+                    : "low",
+                adjustedRiskLevel:
+                  typeof (data.mlAnalysis as Record<string, unknown>)
+                    .adjustedRiskLevel === "string"
+                    ? ((data.mlAnalysis as Record<string, unknown>)
+                        .adjustedRiskLevel as string)
+                    : "low",
+                model:
+                  (data.mlAnalysis as Record<string, unknown>).model &&
+                  typeof (data.mlAnalysis as Record<string, unknown>).model ===
+                    "object" &&
+                  !Array.isArray(
+                    (data.mlAnalysis as Record<string, unknown>).model,
+                  )
+                    ? ((data.mlAnalysis as Record<string, unknown>).model as {
+                        name?: string;
+                        version?: string | null;
+                        source?: string | null;
+                      })
+                    : null,
+                topSignals: Array.isArray(
+                  (data.mlAnalysis as Record<string, unknown>).topSignals,
+                )
+                  ? (
+                      (data.mlAnalysis as Record<string, unknown>)
+                        .topSignals as unknown[]
+                    ).flatMap((entry) => {
+                      if (!entry || typeof entry !== "object") return [];
+                      const item = entry as Record<string, unknown>;
+                      if (
+                        typeof item.feature !== "string" ||
+                        typeof item.value !== "number"
+                      ) {
+                        return [];
+                      }
+                      const direction =
+                        item.direction === "high" ||
+                        item.direction === "low" ||
+                        item.direction === "neutral"
+                          ? item.direction
+                          : "neutral";
+                      return [
+                        {
+                          feature: item.feature,
+                          value: item.value,
+                          zScore:
+                            typeof item.zScore === "number"
+                              ? item.zScore
+                              : null,
+                          baselineMean:
+                            typeof item.baselineMean === "number"
+                              ? item.baselineMean
+                              : null,
+                          baselineStd:
+                            typeof item.baselineStd === "number"
+                              ? item.baselineStd
+                              : null,
+                          direction,
+                        },
+                      ];
+                    })
+                  : [],
+              }
+            : data.ml_analysis &&
+                typeof data.ml_analysis === "object" &&
+                !Array.isArray(data.ml_analysis)
+              ? {
+                  anomalyScore:
+                    typeof (data.ml_analysis as Record<string, unknown>)
+                      .anomalyScore === "number"
+                      ? ((data.ml_analysis as Record<string, unknown>)
+                          .anomalyScore as number)
+                      : 0,
+                  rawScore:
+                    typeof (data.ml_analysis as Record<string, unknown>)
+                      .rawScore === "number"
+                      ? ((data.ml_analysis as Record<string, unknown>)
+                          .rawScore as number)
+                      : 0,
+                  baseRiskLevel:
+                    typeof (data.ml_analysis as Record<string, unknown>)
+                      .baseRiskLevel === "string"
+                      ? ((data.ml_analysis as Record<string, unknown>)
+                          .baseRiskLevel as string)
+                      : "low",
+                  adjustedRiskLevel:
+                    typeof (data.ml_analysis as Record<string, unknown>)
+                      .adjustedRiskLevel === "string"
+                      ? ((data.ml_analysis as Record<string, unknown>)
+                          .adjustedRiskLevel as string)
+                      : "low",
+                  model:
+                    (data.ml_analysis as Record<string, unknown>).model &&
+                    typeof (data.ml_analysis as Record<string, unknown>)
+                      .model === "object" &&
+                    !Array.isArray(
+                      (data.ml_analysis as Record<string, unknown>).model,
+                    )
+                      ? ((data.ml_analysis as Record<string, unknown>)
+                          .model as {
+                          name?: string;
+                          version?: string | null;
+                          source?: string | null;
+                        })
+                      : null,
+                  topSignals: Array.isArray(
+                    (data.ml_analysis as Record<string, unknown>).topSignals,
+                  )
+                    ? (
+                        (data.ml_analysis as Record<string, unknown>)
+                          .topSignals as unknown[]
+                      ).flatMap((entry) => {
+                        if (!entry || typeof entry !== "object") return [];
+                        const item = entry as Record<string, unknown>;
+                        if (
+                          typeof item.feature !== "string" ||
+                          typeof item.value !== "number"
+                        ) {
+                          return [];
+                        }
+                        const direction =
+                          item.direction === "high" ||
+                          item.direction === "low" ||
+                          item.direction === "neutral"
+                            ? item.direction
+                            : "neutral";
+                        return [
+                          {
+                            feature: item.feature,
+                            value: item.value,
+                            zScore:
+                              typeof item.zScore === "number"
+                                ? item.zScore
+                                : null,
+                            baselineMean:
+                              typeof item.baselineMean === "number"
+                                ? item.baselineMean
+                                : null,
+                            baselineStd:
+                              typeof item.baselineStd === "number"
+                                ? item.baselineStd
+                                : null,
+                            direction,
+                          },
+                        ];
+                      })
+                    : [],
+                }
+              : null,
+        llmAnalysis:
+          data.llmAnalysis &&
+          typeof data.llmAnalysis === "object" &&
+          !Array.isArray(data.llmAnalysis)
+            ? {
+                riskLevel:
+                  typeof (data.llmAnalysis as Record<string, unknown>)
+                    .riskLevel === "string"
+                    ? ((data.llmAnalysis as Record<string, unknown>)
+                        .riskLevel as string)
+                    : "low",
+                signalCount:
+                  typeof (data.llmAnalysis as Record<string, unknown>)
+                    .signalCount === "number"
+                    ? ((data.llmAnalysis as Record<string, unknown>)
+                        .signalCount as number)
+                    : 0,
+                signals: asStringList(
+                  (data.llmAnalysis as Record<string, unknown>).signals,
+                ),
+                ruleTags: asStringList(
+                  (data.llmAnalysis as Record<string, unknown>).ruleTags,
+                ),
+                summary:
+                  typeof (data.llmAnalysis as Record<string, unknown>)
+                    .summary === "string"
+                    ? ((data.llmAnalysis as Record<string, unknown>)
+                        .summary as string)
+                    : null,
+                source:
+                  typeof (data.llmAnalysis as Record<string, unknown>)
+                    .source === "string"
+                    ? ((data.llmAnalysis as Record<string, unknown>)
+                        .source as string)
+                    : null,
+                model:
+                  typeof (data.llmAnalysis as Record<string, unknown>).model ===
+                  "string"
+                    ? ((data.llmAnalysis as Record<string, unknown>)
+                        .model as string)
+                    : null,
+              }
+            : data.llm_analysis &&
+                typeof data.llm_analysis === "object" &&
+                !Array.isArray(data.llm_analysis)
+              ? {
+                  riskLevel:
+                    typeof (data.llm_analysis as Record<string, unknown>)
+                      .riskLevel === "string"
+                      ? ((data.llm_analysis as Record<string, unknown>)
+                          .riskLevel as string)
+                      : "low",
+                  signalCount:
+                    typeof (data.llm_analysis as Record<string, unknown>)
+                      .signalCount === "number"
+                      ? ((data.llm_analysis as Record<string, unknown>)
+                          .signalCount as number)
+                      : 0,
+                  signals: asStringList(
+                    (data.llm_analysis as Record<string, unknown>).signals,
+                  ),
+                  ruleTags: asStringList(
+                    (data.llm_analysis as Record<string, unknown>).ruleTags,
+                  ),
+                  summary:
+                    typeof (data.llm_analysis as Record<string, unknown>)
+                      .summary === "string"
+                      ? ((data.llm_analysis as Record<string, unknown>)
+                          .summary as string)
+                      : null,
+                  source:
+                    typeof (data.llm_analysis as Record<string, unknown>)
+                      .source === "string"
+                      ? ((data.llm_analysis as Record<string, unknown>)
+                          .source as string)
+                      : null,
+                  model:
+                    typeof (data.llm_analysis as Record<string, unknown>)
+                      .model === "string"
+                      ? ((data.llm_analysis as Record<string, unknown>)
+                          .model as string)
+                      : null,
+                }
+              : null,
+        finalDecision:
+          data.finalDecision &&
+          typeof data.finalDecision === "object" &&
+          !Array.isArray(data.finalDecision)
+            ? (data.finalDecision as AiMonitoringSummary["finalDecision"])
+            : data.final_decision &&
+                typeof data.final_decision === "object" &&
+                !Array.isArray(data.final_decision)
+              ? (data.final_decision as AiMonitoringSummary["finalDecision"])
+              : null,
       };
     },
     [],
@@ -2583,6 +3165,11 @@ function DashboardView({
               <dd>{afterTransferLabel}</dd>
             </div>
           </dl>
+          <div className="transfer-ai-detail-grid">
+            {renderTransferDecisionSummary(monitoring)}
+            {renderTransferMlInsights(monitoring, { compact: true })}
+            {renderTransferLlmInsights(monitoring, { compact: true })}
+          </div>
           {reasons.length > 0 ? (
             <ul>
               {reasons.map((reason) => (
@@ -2618,8 +3205,155 @@ function DashboardView({
       transferServerFaceIdReason,
       transferStep,
       wallet?.balance,
+      renderTransferDecisionSummary,
+      renderTransferLlmInsights,
+      renderTransferMlInsights,
     ],
   );
+
+  function renderTransferMlInsights(
+    monitoring: AiMonitoringSummary | null,
+    options?: { compact?: boolean },
+  ) {
+    const compact = Boolean(options?.compact);
+    const ml = monitoring?.mlAnalysis;
+    if (!ml) return null;
+    const signals = (ml.topSignals || []).slice(0, compact ? 2 : 3);
+    const modelMeta = [ml.model?.name, ml.model?.version]
+      .filter(
+        (item): item is string => typeof item === "string" && Boolean(item),
+      )
+      .join(" / ");
+
+    return (
+      <div className="transfer-ai-detail-card">
+        <div className="transfer-ai-detail-head">
+          <span className="transfer-ai-detail-kicker">ML analysis</span>
+          <strong>{humanizeRiskKey(ml.adjustedRiskLevel)} risk</strong>
+        </div>
+        <div className="transfer-ai-detail-meta">
+          <span>Score {Math.round(ml.anomalyScore * 100)}%</span>
+          <span>Raw {formatRiskNumber(ml.rawScore)}</span>
+          <span>Base {humanizeRiskKey(ml.baseRiskLevel)}</span>
+        </div>
+        {signals.length > 0 ? (
+          <div className="transfer-ai-signal-list">
+            {signals.map((signal) => (
+              <div
+                key={`${signal.feature}-${signal.value}`}
+                className="transfer-ai-signal-chip"
+              >
+                <strong>{humanizeRiskKey(signal.feature)}</strong>
+                <span>
+                  {signal.direction === "high"
+                    ? "Higher than usual"
+                    : signal.direction === "low"
+                      ? "Lower than usual"
+                      : "Notable shift"}
+                  {signal.zScore !== null && signal.zScore !== undefined
+                    ? ` (z=${formatRiskNumber(signal.zScore)})`
+                    : ""}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="transfer-ai-detail-copy">
+            The anomaly model flagged this transfer from its feature pattern,
+            but no single feature dominated the decision.
+          </p>
+        )}
+        {modelMeta ? (
+          <small className="transfer-ai-detail-foot">Model: {modelMeta}</small>
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderTransferLlmInsights(
+    monitoring: AiMonitoringSummary | null,
+    options?: { compact?: boolean },
+  ) {
+    const compact = Boolean(options?.compact);
+    const llm = monitoring?.llmAnalysis;
+    if (!llm) return null;
+    const signals = llm.signals.slice(0, compact ? 2 : 3);
+    const tags = llm.ruleTags.slice(0, compact ? 2 : 3);
+    const summary = llm.summary?.trim() || "";
+    const isDisabledReview =
+      llm.riskLevel === "low" &&
+      llm.signalCount === 0 &&
+      signals.length === 0 &&
+      tags.length === 0 &&
+      (!summary || summary.toLowerCase().includes("disabled"));
+
+    if (isDisabledReview) {
+      return null;
+    }
+
+    return (
+      <div className="transfer-ai-detail-card">
+        <div className="transfer-ai-detail-head">
+          <span className="transfer-ai-detail-kicker">LLM review</span>
+          <strong>{humanizeRiskKey(llm.riskLevel)} concern</strong>
+        </div>
+        <div className="transfer-ai-detail-meta">
+          <span>
+            {llm.signalCount} signal{llm.signalCount === 1 ? "" : "s"}
+          </span>
+          {llm.source ? <span>{humanizeRiskKey(llm.source)}</span> : null}
+          {llm.model ? <span>{llm.model}</span> : null}
+        </div>
+        {summary ? <p className="transfer-ai-detail-copy">{summary}</p> : null}
+        {signals.length > 0 ? (
+          <ul className="transfer-ai-detail-list">
+            {signals.map((signal) => (
+              <li key={signal}>{translateTransferRiskCopy(signal)}</li>
+            ))}
+          </ul>
+        ) : null}
+        {tags.length > 0 ? (
+          <div className="transfer-ai-tag-row">
+            {tags.map((tag) => (
+              <span key={tag} className="transfer-ai-tag">
+                {humanizeRiskKey(tag)}
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderTransferDecisionSummary(
+    monitoring: AiMonitoringSummary | null,
+  ) {
+    const decision = monitoring?.finalDecision;
+    if (!decision) return null;
+    return (
+      <div className="transfer-ai-detail-card decision">
+        <div className="transfer-ai-detail-head">
+          <span className="transfer-ai-detail-kicker">Decision summary</span>
+          <strong>
+            {decision.finalAction
+              ? humanizeRiskKey(decision.finalAction)
+              : humanizeRiskKey(decision.riskLevel)}
+          </strong>
+        </div>
+        <div className="transfer-ai-detail-meta">
+          {typeof decision.finalScore === "number" ? (
+            <span>Final {decision.finalScore}%</span>
+          ) : null}
+          {decision.stepUpLevel ? (
+            <span>{humanizeRiskKey(decision.stepUpLevel)}</span>
+          ) : null}
+        </div>
+        {decision.summary ? (
+          <p className="transfer-ai-detail-copy">{decision.summary}</p>
+        ) : null}
+      </div>
+    );
+  }
 
   const visibleTransferMonitoring = useMemo(() => {
     if (!transferMonitoring) return null;
@@ -2718,16 +3452,16 @@ function DashboardView({
           : "Review, then release OTP";
     const title =
       tone === "blocked"
-        ? "Transfer paused before funds leave your wallet"
+        ? "Transfer paused before OTP"
         : tone === "warning"
-          ? "AI wants one more review before sending OTP"
-          : "Quick AI safety review before OTP";
+          ? "Review this transfer before OTP"
+          : "Quick safety check before OTP";
     const summary =
       tone === "blocked"
-        ? `This transfer to ${recipientLabel} matches patterns that often appear when attackers test small payments, pressure victims, or route money through unfamiliar recipients. Funds stay in your wallet until the risk clears.`
+        ? `FPIPay paused OTP for ${recipientLabel} because this payment matches a stronger risk pattern.`
         : tone === "warning"
-          ? `This transfer to ${recipientLabel} can still continue, but the behavior is unusual enough that FPIPay wants you to pause, confirm the recipient, and re-check the purpose before OTP is issued.`
-          : `AI noticed a mild deviation for this transfer to ${recipientLabel}. Nothing is confirmed as fraud, but a short review helps prevent accidental or manipulated payments.`;
+          ? `This transfer to ${recipientLabel} can continue, but FPIPay wants a quick manual check first.`
+          : `FPIPay noticed a mild deviation for this transfer to ${recipientLabel}.`;
     const signals = [
       rapidCashOutSignal,
       ...(advisory?.reasons || []),
@@ -2811,8 +3545,10 @@ function DashboardView({
       primaryLabel:
         tone === "blocked" || isTransferHoldActive
           ? "Understood"
-          : translateTransferRiskCopy(advisory?.confirmationLabel) ||
-            "I reviewed the warning, continue to OTP",
+          : transferStep === 2
+            ? "I reviewed the warning, continue"
+            : translateTransferRiskCopy(advisory?.confirmationLabel) ||
+              "I reviewed the warning, continue to OTP",
       signals,
       protectSteps,
       stopList,
@@ -2828,6 +3564,7 @@ function DashboardView({
     transferAmount,
     transferReceiverName,
     transferServerFaceIdReason,
+    transferStep,
     visibleTransferMonitoring,
   ]);
 
@@ -2856,16 +3593,19 @@ function DashboardView({
     const timer = window.setTimeout(async () => {
       setTransferPreviewBusy(true);
       try {
+        const clientAuditContext = await buildClientAuditRequestContext();
         const resp = await fetch(`${API_BASE}/transfer/preview`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${token}`,
+            ...clientAuditContext.headers,
           },
           body: JSON.stringify({
             toAccount: transferAccount,
             amount: transferAmountNumber,
             note: transferContent || defaultTransferContent,
+            ...clientAuditContext.body,
           }),
           signal: controller.signal,
         });
@@ -2923,10 +3663,10 @@ function DashboardView({
   ]);
 
   useEffect(() => {
-    if (!transferOpen || transferStep !== 3) {
+    if (!transferOpen || transferStep !== 3 || transferOtpRequired) {
       setTransferAiInterventionOpen(false);
     }
-  }, [transferOpen, transferStep]);
+  }, [transferOpen, transferOtpRequired, transferStep]);
 
   const renderAiMonitoringPanel = useCallback(
     (monitoring: AiMonitoringSummary | null, title: string) => {
@@ -4748,11 +5488,13 @@ function DashboardView({
     setTransferOtpBusy(true);
     try {
       const amount = Number(transferAmount.replace(/,/g, "")) || 0;
+      const clientAuditContext = await buildClientAuditRequestContext();
       const resp = await fetch(`${API_BASE}/transfer/otp/send`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
+          ...clientAuditContext.headers,
         },
         body: JSON.stringify({
           toAccount: transferAccount,
@@ -4766,6 +5508,7 @@ function DashboardView({
             transferAdvisory?.requestKey ||
             transferMonitoring?.requestKey ||
             null,
+          ...clientAuditContext.body,
         }),
       });
       const data = (await resp.json().catch(() => null)) as {
@@ -4890,11 +5633,13 @@ function DashboardView({
     }
 
     try {
+      const clientAuditContext = await buildClientAuditRequestContext();
       await fetch(`${API_BASE}/transfer/advisory/dismiss`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
+          ...clientAuditContext.headers,
         },
         body: JSON.stringify({
           requestKey:
@@ -4905,6 +5650,7 @@ function DashboardView({
           toAccount: transferAccount,
           amount:
             Number(transferAmount.replace(/,/g, "")) || transferAdvisory.amount,
+          ...clientAuditContext.body,
         }),
       });
     } catch {
@@ -4920,7 +5666,7 @@ function DashboardView({
   ]);
   const logTransferFlowEvent = useCallback(
     async (
-      eventType: "STARTED" | "CANCELLED",
+      eventType: "STARTED" | "CANCELLED" | "BLOCKED_POPUP_SHOWN",
       options?: {
         amount?: number | null;
         reason?: string;
@@ -4929,11 +5675,13 @@ function DashboardView({
       if (!token) return;
 
       try {
+        const clientAuditContext = await buildClientAuditRequestContext();
         await fetch(`${API_BASE}/transfer/flow-event`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${token}`,
+            ...clientAuditContext.headers,
           },
           body: JSON.stringify({
             eventType,
@@ -4950,6 +5698,11 @@ function DashboardView({
               null,
             step: transferStep,
             reason: options?.reason || null,
+            advisory:
+              eventType === "BLOCKED_POPUP_SHOWN"
+                ? effectiveTransferAdvisory
+                : null,
+            ...clientAuditContext.body,
           }),
         });
       } catch {
@@ -4964,6 +5717,7 @@ function DashboardView({
       transferContent,
       transferMonitoring?.requestKey,
       transferAdvisory?.requestKey,
+      effectiveTransferAdvisory,
       transferStep,
     ],
   );
@@ -4998,14 +5752,6 @@ function DashboardView({
     if (!canContinueTransferAmount) {
       return;
     }
-    if (localTransferPreflightAdvisory?.severity === "blocked") {
-      toast(
-        localTransferPreflightAdvisory.title ||
-          "This transfer is blocked for safety review.",
-        "error",
-      );
-      return;
-    }
     if (amount > TRANSFER_FACE_ID_THRESHOLD && !transferFaceIdEnabled) {
       toast(
         `Transfers above $${TRANSFER_FACE_ID_THRESHOLD.toLocaleString(
@@ -5017,6 +5763,35 @@ function DashboardView({
     }
     if (!transferContent.trim()) {
       setTransferContent(defaultTransferContent);
+    }
+    if (transferAiIntervention?.shouldPrompt) {
+      if (transferAiIntervention.tone === "blocked") {
+        const blockedPopupAlertKey =
+          effectiveTransferAdvisory?.requestKey ||
+          [
+            transferAccount,
+            transferAmount,
+            effectiveTransferAdvisory?.title || transferAiIntervention.title,
+            effectiveTransferAdvisory?.message ||
+              transferAiIntervention.summary,
+          ]
+            .filter(Boolean)
+            .join("|");
+        if (
+          blockedPopupAlertKey &&
+          lastTransferBlockedPopupAlertKeyRef.current !== blockedPopupAlertKey
+        ) {
+          lastTransferBlockedPopupAlertKeyRef.current = blockedPopupAlertKey;
+          void logTransferFlowEvent("BLOCKED_POPUP_SHOWN", {
+            amount,
+            reason:
+              effectiveTransferAdvisory?.message ||
+              transferAiIntervention.summary,
+          });
+        }
+      }
+      setTransferAiInterventionOpen(true);
+      return;
     }
     if (!transferPinEnabled) {
       setTransferPinSetupError("");
@@ -5039,9 +5814,35 @@ function DashboardView({
     setTransferOpen(true);
     goToTransferStep(3);
     setTransferFaceProof(null);
+    setTransferFaceCaptureError("");
     setTransferFaceResetKey((value) => value + 1);
     setTransferFaceVerifyBusy(false);
-  }, []);
+  }, [goToTransferStep]);
+
+  const handleTransferFaceCaptureChange = useCallback(
+    (value: FaceIdProof | null) => {
+      setTransferFaceProof(value);
+      if (value) {
+        setTransferFaceCaptureError("");
+        setTransferOtpError("");
+      }
+    },
+    [],
+  );
+
+  const handleTransferFaceFeedbackChange = useCallback(
+    (feedback: {
+      status: "idle" | "loading" | "ready" | "scanning" | "verified" | "error";
+      message: string;
+    }) => {
+      if (feedback.status === "error") {
+        setTransferFaceCaptureError(feedback.message);
+        return;
+      }
+      setTransferFaceCaptureError("");
+    },
+    [],
+  );
 
   const submitTransferPinSetup = useCallback(async () => {
     if (!token) {
@@ -5111,15 +5912,18 @@ function DashboardView({
     try {
       let resp: Response;
       try {
+        const clientAuditContext = await buildClientAuditRequestContext();
         resp = await fetch(`${API_BASE}/transfer/otp/verify`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${token}`,
+            ...clientAuditContext.headers,
           },
           body: JSON.stringify({
             challengeId: transferOtpChallengeId,
             otp: transferOtpInput,
+            ...clientAuditContext.body,
           }),
         });
       } catch {
@@ -5160,11 +5964,13 @@ function DashboardView({
       }
       let transferResp: Response;
       try {
+        const clientAuditContext = await buildClientAuditRequestContext();
         transferResp = await fetch(`${API_BASE}/transfer/confirm`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${token}`,
+            ...clientAuditContext.headers,
           },
           body: JSON.stringify({
             challengeId: transferOtpChallengeId,
@@ -5172,17 +5978,22 @@ function DashboardView({
             faceIdEnrollment: transferServerFaceIdRequired
               ? faceProof
               : undefined,
+            ...clientAuditContext.body,
           }),
         });
       } catch {
-        setTransferOtpError("Cannot connect to API server.");
+        setTransferOtpError(
+          formatFaceIdActionError("Cannot connect to API server.", "transfer"),
+        );
         return false;
       }
       if (!transferResp.ok) {
         const err = (await transferResp.json().catch(() => null)) as {
           error?: string;
         } | null;
-        setTransferOtpError(err?.error || "OTP verification failed");
+        setTransferOtpError(
+          formatFaceIdActionError(err?.error || null, "transfer"),
+        );
         return false;
       }
 
@@ -5243,6 +6054,7 @@ function DashboardView({
         return;
       }
       setTransferFaceProof(null);
+      setTransferFaceCaptureError("");
       setTransferFaceResetKey((value) => value + 1);
       setTransferOpen(false);
       setTransferFaceVerifyOpen(true);
@@ -5270,12 +6082,41 @@ function DashboardView({
       return;
     }
     setTransferAdvisoryAcknowledged(true);
+    if (transferStep === 2) {
+      if (!transferContent.trim()) {
+        setTransferContent(defaultTransferContent);
+      }
+      if (!transferPinEnabled) {
+        setTransferPinSetupError("");
+        setTransferPinSetupForm({ pin: "", confirm: "" });
+        setTransferPinSetupOpen(true);
+        return;
+      }
+      setTransferPinError("");
+      setTransferOtpError("");
+      setTransferOtpRequired(false);
+      setTransferOtpChallengeId("");
+      setTransferOtpDestination("");
+      setTransferOtpExpiresAt("");
+      setTransferOtpInput("");
+      goToTransferStep(3);
+      return;
+    }
     await generateTransferOtp({ advisoryAcknowledged: true });
-  }, [generateTransferOtp, isTransferHoldActive, transferAiIntervention]);
+  }, [
+    defaultTransferContent,
+    generateTransferOtp,
+    goToTransferStep,
+    isTransferHoldActive,
+    transferAiIntervention,
+    transferContent,
+    transferPinEnabled,
+    transferStep,
+  ]);
 
   const handleTransferFaceConfirm = useCallback(async () => {
     if (!transferFaceProof) {
-      setTransferOtpError("Complete the live FaceID scan first.");
+      setTransferOtpError("Complete the 5-second FaceID video first.");
       return;
     }
     setTransferOtpError("");
@@ -6511,11 +7352,7 @@ function DashboardView({
                         type="button"
                         className="btn-primary"
                         onClick={continueTransferAmount}
-                        disabled={
-                          !canContinueTransferAmount ||
-                          transferOtpBusy ||
-                          isTransferHardBlocked
-                        }
+                        disabled={!canContinueTransferAmount || transferOtpBusy}
                       >
                         {transferContinueLabel}
                       </button>
@@ -6819,7 +7656,7 @@ function DashboardView({
                     <h3>Transfer FaceID Verification</h3>
                     <p>
                       {transferServerFaceIdReason ||
-                        `OTP is ready. Complete FaceID now to approve this transfer above $${TRANSFER_FACE_ID_THRESHOLD.toLocaleString(
+                        `OTP is ready. Record a 5-second FaceID video now to approve this transfer above $${TRANSFER_FACE_ID_THRESHOLD.toLocaleString(
                           "en-US",
                         )}.`}
                     </p>
@@ -6837,7 +7674,7 @@ function DashboardView({
                   <small className="transfer-faceid-summary-copy">
                     {transferServerFaceIdReason
                       ? `OTP was verified. ${transferServerFaceIdReason}`
-                      : `OTP was entered successfully. FaceID is required to release this transfer above $${TRANSFER_FACE_ID_THRESHOLD.toLocaleString(
+                      : `OTP was entered successfully. A 5-second FaceID video is required to release this transfer above $${TRANSFER_FACE_ID_THRESHOLD.toLocaleString(
                           "en-US",
                         )}.`}
                   </small>
@@ -6874,6 +7711,12 @@ function DashboardView({
                   </div>
                 </div>
 
+                {transferFaceCaptureError && !transferOtpError ? (
+                  <div className="card-otp-error transfer-faceid-error">
+                    {transferFaceCaptureError}
+                  </div>
+                ) : null}
+
                 {transferOtpError ? (
                   <div className="card-otp-error transfer-faceid-error">
                     {transferOtpError}
@@ -6885,7 +7728,8 @@ function DashboardView({
                   resetKey={transferFaceResetKey}
                   disabled={transferFaceVerifyBusy}
                   mode="verify"
-                  onChange={setTransferFaceProof}
+                  onChange={handleTransferFaceCaptureChange}
+                  onFeedbackChange={handleTransferFaceFeedbackChange}
                 />
 
                 <div className="faceid-modal-actions transfer-faceid-actions">
@@ -6946,63 +7790,41 @@ function DashboardView({
                 <div className="transfer-ai-warning-body">
                   <div className="transfer-ai-warning-summary">
                     <div>
+                      <span>Recipient</span>
+                      <strong>{transferAiIntervention.recipientLabel}</strong>
+                    </div>
+                    <div>
+                      <span>Amount</span>
+                      <strong>{transferAiIntervention.amountLabel}</strong>
+                    </div>
+                    <div>
                       <span>Status</span>
                       <strong>{transferAiIntervention.statusLabel}</strong>
                     </div>
                     <div>
-                      <span>Confidence</span>
-                      <strong>{transferAiIntervention.confidence}%</strong>
-                    </div>
-                    <div>
-                      <span>Next action</span>
+                      <span>Next step</span>
                       <strong>{transferAiIntervention.nextAction}</strong>
                     </div>
                   </div>
                   <div className="transfer-ai-warning-grid">
                     <div className="transfer-ai-warning-section">
                       <span className="transfer-ai-warning-section-label">
-                        Transfer snapshot
+                        {transferAiIntervention.tone === "blocked"
+                          ? "Why this transfer was blocked"
+                          : "Why this popped up"}
                       </span>
-                      <strong>{transferAiIntervention.recipientLabel}</strong>
-                      <p>Amount: {transferAiIntervention.amountLabel}</p>
-                      {transferAiIntervention.archetype ? (
-                        <small>
-                          Pattern:{" "}
-                          {translateTransferRiskCopy(
-                            transferAiIntervention.archetype,
-                          )}
-                        </small>
-                      ) : null}
-                      {isTransferHoldActive ? (
-                        <small>
-                          Retry after {transferHoldRemainingLabel} or wait for
-                          manual review to clear the hold.
-                        </small>
-                      ) : null}
-                    </div>
-                    <div className="transfer-ai-warning-section">
-                      <span className="transfer-ai-warning-section-label">
-                        Why AI flagged this
-                      </span>
+                      <p>{transferAiIntervention.summary}</p>
                       {transferAiIntervention.signals.length > 0 ? (
                         <ul>
                           {transferAiIntervention.signals.map((item) => (
                             <li key={item}>{item}</li>
                           ))}
                         </ul>
-                      ) : (
-                        <p>
-                          AI detected enough deviation from your normal behavior
-                          to trigger a safety review before OTP is sent.
-                        </p>
-                      )}
-                      {transferAiIntervention.timeline.length > 0 ? (
-                        <small>{transferAiIntervention.timeline[0]}</small>
                       ) : null}
                     </div>
                     <div className="transfer-ai-warning-section">
                       <span className="transfer-ai-warning-section-label">
-                        Before continuing
+                        Before OTP
                       </span>
                       <ul>
                         {transferAiIntervention.protectSteps.map((item) => (
@@ -7012,6 +7834,21 @@ function DashboardView({
                           <li key={item}>{item}</li>
                         ))}
                       </ul>
+                      {transferAiIntervention.archetype ? (
+                        <small>
+                          Pattern:{" "}
+                          {translateTransferRiskCopy(
+                            transferAiIntervention.archetype,
+                          )}
+                        </small>
+                      ) : isTransferHoldActive ? (
+                        <small>
+                          Retry after {transferHoldRemainingLabel} or wait for
+                          manual review to clear the hold.
+                        </small>
+                      ) : transferAiIntervention.timeline.length > 0 ? (
+                        <small>{transferAiIntervention.timeline[0]}</small>
+                      ) : null}
                     </div>
                   </div>
                 </div>
@@ -10528,6 +11365,7 @@ function App() {
   const [faceEnrollmentProof, setFaceEnrollmentProof] =
     useState<FaceIdProof | null>(null);
   const [faceEnrollmentResetKey, setFaceEnrollmentResetKey] = useState(0);
+  const [faceEnrollmentError, setFaceEnrollmentError] = useState("");
 
   const isInvoicesActive =
     activeTab === "Invoice List" || activeTab === "Create Invoices";
@@ -10662,6 +11500,7 @@ function App() {
 
   const resetFaceEnrollmentModal = useCallback(() => {
     setFaceEnrollmentProof(null);
+    setFaceEnrollmentError("");
     setFaceEnrollmentResetKey((value) => value + 1);
   }, []);
 
@@ -10675,26 +11514,58 @@ function App() {
     setFaceEnrollmentOpen(true);
   }, [resetFaceEnrollmentModal]);
 
+  const handleFaceEnrollmentCaptureChange = useCallback(
+    (value: FaceIdProof | null) => {
+      setFaceEnrollmentProof(value);
+      if (value) {
+        setFaceEnrollmentError("");
+      }
+    },
+    [],
+  );
+
+  const handleFaceEnrollmentFeedbackChange = useCallback(
+    (feedback: {
+      status: "idle" | "loading" | "ready" | "scanning" | "verified" | "error";
+      message: string;
+    }) => {
+      if (feedback.status === "error") {
+        setFaceEnrollmentError(feedback.message);
+        return;
+      }
+      setFaceEnrollmentError("");
+    },
+    [],
+  );
+
   const handleEnrollFaceId = useCallback(async () => {
     if (!token) {
-      toast("Session expired. Please login again.", "error");
+      const message = "Session expired. Please login again.";
+      setFaceEnrollmentError(message);
+      toast(message, "error");
       return;
     }
     if (!faceEnrollmentProof) {
-      toast("Complete the live FaceID scan first.", "error");
+      const message = "Complete the 5-second FaceID video first.";
+      setFaceEnrollmentError(message);
+      toast(message, "error");
       return;
     }
 
     setFaceEnrollmentBusy(true);
+    setFaceEnrollmentError("");
     try {
+      const clientAuditContext = await buildClientAuditRequestContext();
       const resp = await fetch(`${API_BASE}/auth/face/enroll`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
+          ...clientAuditContext.headers,
         },
         body: JSON.stringify({
           faceIdEnrollment: faceEnrollmentProof,
+          ...clientAuditContext.body,
         }),
       });
       const data = (await resp.json().catch(() => null)) as {
@@ -10703,7 +11574,16 @@ function App() {
         metadata?: Record<string, unknown>;
       } | null;
       if (!resp.ok) {
-        toast(data?.error || "Failed to enroll FaceID", "error");
+        const errorMessage = formatFaceIdActionError(
+          data?.error || "Failed to enroll FaceID",
+          "enroll",
+        );
+        console.error(
+          `FaceID enroll failed: ${resp.status} ${data?.error || "Unknown error"}`,
+          data,
+        );
+        setFaceEnrollmentError(errorMessage);
+        toast(errorMessage, "error");
         return;
       }
 
@@ -10711,7 +11591,13 @@ function App() {
       closeFaceEnrollmentModal();
       toast(data?.message || "FaceID enrolled successfully.");
     } catch {
-      toast("Cannot connect to API server.", "error");
+      console.error("FaceID enroll request crashed before completion");
+      const errorMessage = formatFaceIdActionError(
+        "Cannot connect to API server.",
+        "enroll",
+      );
+      setFaceEnrollmentError(errorMessage);
+      toast(errorMessage, "error");
     } finally {
       setFaceEnrollmentBusy(false);
     }
@@ -11409,8 +12295,8 @@ function App() {
                       </h3>
                       <p>
                         {faceIdStatus.enabled
-                          ? "Complete a fresh live face scan to replace the current FaceID sample for this wallet."
-                          : "Complete one live face scan to bind this wallet account to your protected identity profile."}
+                          ? "Record a fresh 5-second face video to replace the current FaceID sample for this wallet."
+                          : "Record one 5-second face video to bind this wallet account to your protected identity profile."}
                       </p>
                     </div>
                     <button
@@ -11426,8 +12312,14 @@ function App() {
                     apiBase={API_BASE}
                     resetKey={faceEnrollmentResetKey}
                     disabled={faceEnrollmentBusy}
-                    onChange={setFaceEnrollmentProof}
+                    onChange={handleFaceEnrollmentCaptureChange}
+                    onFeedbackChange={handleFaceEnrollmentFeedbackChange}
                   />
+                  {faceEnrollmentError ? (
+                    <div className="card-otp-error transfer-faceid-error">
+                      {faceEnrollmentError}
+                    </div>
+                  ) : null}
                   <div className="faceid-modal-actions">
                     <button
                       type="button"
@@ -11440,7 +12332,7 @@ function App() {
                     <button
                       type="button"
                       className="btn-primary"
-                      disabled={faceEnrollmentBusy || !faceEnrollmentProof}
+                      disabled={faceEnrollmentBusy}
                       onClick={() => void handleEnrollFaceId()}
                     >
                       {faceEnrollmentBusy
@@ -11626,6 +12518,8 @@ function AuthShell({
   const [signupCaptchaResetKey, setSignupCaptchaResetKey] = useState(0);
   const [signupFaceResetKey, setSignupFaceResetKey] = useState(0);
   const [forgotCaptchaResetKey, setForgotCaptchaResetKey] = useState(0);
+  const [loginMonitoringPopupOpen, setLoginMonitoringPopupOpen] =
+    useState(false);
   const signupPasswordStrength = getPasswordStrength(signupForm.password);
   const forgotPasswordStrength = getPasswordStrength(forgotNewPassword);
 
@@ -11699,6 +12593,24 @@ function AuthShell({
     }
   }, [mode]);
 
+  const visibleLoginMonitoring =
+    lastLoginMonitoring &&
+    (((lastLoginMonitoring.riskLevel || "").toLowerCase() !== "low" &&
+      ["high", "medium"].includes(
+        (lastLoginMonitoring.riskLevel || "").toLowerCase(),
+      )) ||
+      lastLoginMonitoring.requireOtp)
+      ? lastLoginMonitoring
+      : null;
+
+  useEffect(() => {
+    if (visibleLoginMonitoring && (mode === "signin" || mode === "signinOtp")) {
+      setLoginMonitoringPopupOpen(true);
+      return;
+    }
+    setLoginMonitoringPopupOpen(false);
+  }, [mode, visibleLoginMonitoring]);
+
   const validateSignupBeforeFaceScan = () => {
     const {
       fullName,
@@ -11748,7 +12660,7 @@ function AuthShell({
 
   const submitSignupOtpRequest = async () => {
     if (!signupFaceEnrollment) {
-      toast("Please complete the FaceID scan to continue", "error");
+      toast("Please complete the 5-second FaceID video to continue", "error");
       return;
     }
     setAuthBusy(true);
@@ -11794,15 +12706,14 @@ function AuthShell({
     pendingSessionAlert?.userAgent,
   );
 
-  const renderLoginMonitoring = (monitoring: LoginMonitoring | null) => {
+  const renderLoginMonitoringPopup = (monitoring: LoginMonitoring | null) => {
     if (!monitoring) return null;
-    const riskLevel = monitoring.riskLevel.toLowerCase();
+    const riskLevel = (monitoring.riskLevel || "").toLowerCase();
     const normalizedRisk =
       riskLevel === "high" || riskLevel === "medium" ? riskLevel : "low";
-    const filteredReasons = monitoring.reasons
-      .filter((reason) => reason !== "AI monitoring unavailable")
-      .slice(0, 3);
     if (normalizedRisk === "low" && !monitoring.requireOtp) return null;
+
+    const tone = normalizedRisk === "high" ? "blocked" : "warning";
     const riskLabel =
       normalizedRisk === "high"
         ? "High risk"
@@ -11826,57 +12737,120 @@ function AuthShell({
       (monitoring.requireOtp
         ? "Complete the verification challenge before access is granted."
         : "Review the signals and continue only if the activity is yours.");
-    const recommendedActions = (monitoring.recommendedActions || []).slice(
-      0,
-      3,
-    );
+    const reasons = monitoring.reasons
+      .filter((reason) => reason !== "AI monitoring unavailable")
+      .slice(0, 4);
+    const actions = (monitoring.recommendedActions || []).slice(0, 4);
     const timeline = (monitoring.timeline || []).slice(0, 3);
+    const channelLabel = monitoring.otpChannel
+      ? monitoring.otpChannel
+      : mode === "signinOtp"
+        ? "Email verification"
+        : "Credential review";
+    const continueLabel =
+      mode === "signinOtp" ? "Continue to verification" : "Continue sign-in";
 
-    return (
-      <div className={`auth-ai-monitor auth-ai-monitor-${normalizedRisk}`}>
-        <div className="auth-ai-monitor-head">
-          <strong>AI Security Analyst</strong>
-          <span className={`auth-ai-badge auth-ai-badge-${normalizedRisk}`}>
-            {riskLabel}
-          </span>
+    return createPortal(
+      <div
+        className="transfer-ai-warning-overlay"
+        onClick={() => setLoginMonitoringPopupOpen(false)}
+      >
+        <div
+          className={`transfer-ai-warning-card ${tone}`}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="transfer-ai-warning-head">
+            <div>
+              <span className="transfer-ai-warning-kicker">
+                AI sign-in guard
+              </span>
+              <h4>{headline}</h4>
+              <p>{summary}</p>
+            </div>
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={() => setLoginMonitoringPopupOpen(false)}
+              aria-label="Close AI sign-in warning"
+            >
+              ×
+            </button>
+          </div>
+          <div className="transfer-ai-warning-body">
+            <div className="transfer-ai-warning-summary">
+              <div>
+                <span>Risk</span>
+                <strong>{riskLabel}</strong>
+              </div>
+              <div>
+                <span>Confidence</span>
+                <strong>{confidence}%</strong>
+              </div>
+              <div>
+                <span>Pattern</span>
+                <strong>{monitoring.archetype || "New device check"}</strong>
+              </div>
+              <div>
+                <span>Next step</span>
+                <strong>{channelLabel}</strong>
+              </div>
+            </div>
+            <div className="transfer-ai-warning-grid">
+              <div className="transfer-ai-warning-section">
+                <span className="transfer-ai-warning-section-label">
+                  Why this popped up
+                </span>
+                <p>{nextStep}</p>
+                {reasons.length > 0 ? (
+                  <ul>
+                    {reasons.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+              <div className="transfer-ai-warning-section">
+                <span className="transfer-ai-warning-section-label">
+                  Before continuing
+                </span>
+                <ul>
+                  {(actions.length > 0 ? actions : timeline).map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                  {monitoring.requireOtp ? (
+                    <li>
+                      Finish the {monitoring.otpChannel || "email"} verification
+                      in this session.
+                    </li>
+                  ) : null}
+                </ul>
+                {monitoring.otpReason ? (
+                  <small>{monitoring.otpReason}</small>
+                ) : monitoring.archetype ? (
+                  <small>Pattern: {monitoring.archetype}</small>
+                ) : null}
+              </div>
+            </div>
+          </div>
+          <div className="transfer-actions">
+            <button
+              type="button"
+              className="pill"
+              onClick={() => setLoginMonitoringPopupOpen(false)}
+            >
+              Review details
+            </button>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => setLoginMonitoringPopupOpen(false)}
+            >
+              {continueLabel}
+            </button>
+          </div>
         </div>
-        <p className="auth-ai-copy">{headline}</p>
-        {monitoring.archetype ? (
-          <p className="auth-ai-signal">Pattern: {monitoring.archetype}</p>
-        ) : null}
-        <p className="auth-ai-signal">
-          Confidence {confidence}%. {summary}
-        </p>
-        {monitoring.requireOtp && (
-          <p className="auth-ai-signal">
-            Additional verification is required
-            {monitoring.otpChannel ? ` via ${monitoring.otpChannel}` : ""}.
-            {monitoring.otpReason ? ` ${monitoring.otpReason}` : ""}
-          </p>
-        )}
-        <p className="auth-ai-signal">{nextStep}</p>
-        {filteredReasons.length > 0 && (
-          <ul className="auth-ai-reasons">
-            {filteredReasons.map((reason) => (
-              <li key={reason}>{reason}</li>
-            ))}
-          </ul>
-        )}
-        {recommendedActions.length > 0 && (
-          <ul className="auth-ai-reasons">
-            {recommendedActions.map((action) => (
-              <li key={action}>{action}</li>
-            ))}
-          </ul>
-        )}
-        {timeline.length > 0 && (
-          <ul className="auth-ai-reasons">
-            {timeline.map((step) => (
-              <li key={step}>{step}</li>
-            ))}
-          </ul>
-        )}
-      </div>
+      </div>,
+      document.body,
     );
   };
 
@@ -12593,299 +13567,54 @@ function AuthShell({
   );
 
   return (
-    <div className={mode ? "auth-shell" : "auth-shell auth-shell-hero"}>
-      <div
-        className={
-          mode ? "auth-card-panel" : "auth-card-panel auth-card-panel-hero"
-        }
-      >
-        {!mode && renderChoice()}
+    <>
+      {loginMonitoringPopupOpen &&
+      visibleLoginMonitoring &&
+      typeof document !== "undefined"
+        ? renderLoginMonitoringPopup(visibleLoginMonitoring)
+        : null}
+      <div className={mode ? "auth-shell" : "auth-shell auth-shell-hero"}>
+        <div
+          className={
+            mode ? "auth-card-panel" : "auth-card-panel auth-card-panel-hero"
+          }
+        >
+          {!mode && renderChoice()}
 
-        {mode === "signin" && (
-          <div className="auth-form-shell">
-            <form className="auth-form-modern" onSubmit={handleSignIn}>
-              <h2>Sign In</h2>
-              <p className="muted">
-                Welcome back! Enter your credentials to access FPIPay.
-              </p>
-              <label className="auth-label">
-                Email Address
-                <input
-                  type="email"
-                  value={signinForm.email}
-                  onChange={(e) => {
-                    clearLoginMonitoring();
-                    setSigninForm({ ...signinForm, email: e.target.value });
-                  }}
-                  placeholder="Enter your email"
-                  required
-                />
-              </label>
-              <label className="auth-label">
-                Password
-                <div className="password-wrap">
-                  <input
-                    type={showPassword ? "text" : "password"}
-                    value={signinForm.password}
-                    onChange={(e) => {
-                      clearLoginMonitoring();
-                      setSigninForm({
-                        ...signinForm,
-                        password: e.target.value,
-                      });
-                    }}
-                    placeholder="Enter your password"
-                    required
-                  />
-                  <button
-                    type="button"
-                    className="eye"
-                    onClick={() => setShowPassword((s) => !s)}
-                    aria-label="Toggle password"
-                  >
-                    {showPassword ? "Hide" : "Show"}
-                  </button>
-                </div>
-              </label>
-              <div className="auth-row">
-                <label className="auth-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={signinRemember}
-                    onChange={(e) => {
-                      const nextValue = e.target.checked;
-                      setSigninRemember(nextValue);
-                      writeStoredSaveLoginPreference(nextValue);
-                    }}
-                  />{" "}
-                  Remember me
-                </label>
-                <a
-                  href="#"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    setMode("forgot");
-                  }}
-                  className="muted"
-                >
-                  Forgot password
-                </a>
-              </div>
-              <DeferredSliderCaptcha
-                apiBase={API_BASE}
-                resetKey={signinCaptchaResetKey}
-                disabled={authBusy}
-                onChange={setSigninCaptcha}
-              />
-              {renderLoginMonitoring(lastLoginMonitoring)}
-              <button
-                type="submit"
-                className="btn-primary auth-submit"
-                disabled={authBusy}
-              >
-                {authBusy ? "Signing in..." : "Sign In"}
-              </button>
-              <p className="auth-switch">
-                Don&apos;t have an account?{" "}
-                <button
-                  type="button"
-                  className="link-btn"
-                  onClick={() => setMode("signup")}
-                >
-                  Sign Up
-                </button>
-                <span className="muted"> / </span>
-                <button
-                  type="button"
-                  className="link-btn"
-                  onClick={() => setMode(null)}
-                >
-                  Back
-                </button>
-              </p>
-            </form>
-          </div>
-        )}
-        {mode === "signinOtp" && (
-          <div className="auth-form-shell">
-            <form className="auth-form-modern" onSubmit={handleVerifyLoginOtp}>
-              <h2>Verify Sign In</h2>
-              <p className="muted">
-                Enter the 6-digit code sent to{" "}
-                <strong>{loginOtpDestination}</strong>.
-              </p>
-              <label className="auth-label">
-                Verification Code
-                <input
-                  inputMode="numeric"
-                  maxLength={6}
-                  value={loginOtpInput}
-                  onChange={(e) =>
-                    setLoginOtpInput(
-                      e.target.value.replace(/\D/g, "").slice(0, 6),
-                    )
-                  }
-                  placeholder="Enter 6-digit OTP"
-                  required
-                />
-                <span className="muted" style={{ fontSize: 12 }}>
-                  {loginOtpAvailableInSeconds > 0
-                    ? `This new-device sign-in can be verified in ${loginOtpAvailableInSeconds}s.`
-                    : null}
-                </span>
-                <span className="muted" style={{ fontSize: 12 }}>
-                  {loginOtpExpiresAt
-                    ? `Code expires at ${new Date(
-                        loginOtpExpiresAt,
-                      ).toLocaleTimeString("en-US", {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}`
-                    : "Check your messages for the latest code."}
-                </span>
-              </label>
-              {renderLoginMonitoring(lastLoginMonitoring)}
-              <DeferredSliderCaptcha
-                apiBase={API_BASE}
-                resetKey={signinCaptchaResetKey}
-                disabled={authBusy}
-                onChange={setSigninCaptcha}
-              />
-              <div className="auth-otp-actions">
-                <button
-                  type="button"
-                  className="pill"
-                  disabled={authBusy || loginOtpCooldownSeconds > 0}
-                  onClick={() => void resendLoginOtp()}
-                >
-                  {loginOtpCooldownSeconds > 0
-                    ? `Resend in ${loginOtpCooldownSeconds}s`
-                    : "Resend OTP"}
-                </button>
-                <button
-                  type="submit"
-                  className="btn-primary auth-submit"
-                  disabled={authBusy || loginOtpAvailableInSeconds > 0}
-                >
-                  {authBusy ? "Verifying..." : "Verify & Sign In"}
-                </button>
-              </div>
-              <p className="auth-switch">
-                <button
-                  type="button"
-                  className="link-btn"
-                  onClick={() => setMode("signin")}
-                >
-                  Back to credentials
-                </button>
-              </p>
-            </form>
-          </div>
-        )}
-        {mode === "signup" && (
-          <div className="auth-form-shell">
-            <form
-              className="auth-form-modern auth-form-signup"
-              onSubmit={handleSignUp}
-            >
-              <h2>Sign Up</h2>
-              <p className="muted">
-                Create your FPIPay account to start managing finances smartly.
-              </p>
-              <div className="grid-signup-top">
-                <label className="auth-label">
-                  Full Name
-                  <input
-                    value={signupForm.fullName}
-                    onChange={(e) =>
-                      setSignupForm({ ...signupForm, fullName: e.target.value })
-                    }
-                    placeholder="Enter your full name"
-                    required
-                  />
-                </label>
-                <label className="auth-label">
-                  Username
-                  <input
-                    value={signupForm.username}
-                    onChange={(e) =>
-                      setSignupForm({ ...signupForm, username: e.target.value })
-                    }
-                    placeholder="Enter your username"
-                    required
-                  />
-                </label>
-                <label className="auth-label">
-                  Phone Number
-                  <input
-                    value={signupForm.phone}
-                    onChange={(e) =>
-                      setSignupForm({ ...signupForm, phone: e.target.value })
-                    }
-                    placeholder="Enter your phone number"
-                    required
-                  />
-                </label>
-              </div>
-              <div className="grid-signup-top">
-                <label className="auth-label">
-                  Date of Birth
-                  <input
-                    type="date"
-                    value={signupForm.dob}
-                    onChange={(e) =>
-                      setSignupForm({ ...signupForm, dob: e.target.value })
-                    }
-                    placeholder="Enter your date of birth"
-                    required
-                  />
-                </label>
+          {mode === "signin" && (
+            <div className="auth-form-shell">
+              <form className="auth-form-modern" onSubmit={handleSignIn}>
+                <h2>Sign In</h2>
+                <p className="muted">
+                  Welcome back! Enter your credentials to access FPIPay.
+                </p>
                 <label className="auth-label">
                   Email Address
                   <input
                     type="email"
-                    value={signupForm.email}
-                    onChange={(e) =>
-                      setSignupForm({ ...signupForm, email: e.target.value })
-                    }
+                    value={signinForm.email}
+                    onChange={(e) => {
+                      clearLoginMonitoring();
+                      setSigninForm({ ...signinForm, email: e.target.value });
+                    }}
                     placeholder="Enter your email"
                     required
                   />
                 </label>
                 <label className="auth-label">
-                  Address
-                  <input
-                    value={signupForm.address}
-                    onChange={(e) =>
-                      setSignupForm({ ...signupForm, address: e.target.value })
-                    }
-                    placeholder="Enter your address"
-                    required
-                  />
-                </label>
-              </div>
-              <div className="grid-signup-password">
-                <label className="auth-label">
                   Password
                   <div className="password-wrap">
                     <input
                       type={showPassword ? "text" : "password"}
-                      className={
-                        signupForm.password &&
-                        !signupPasswordStrength.meetsPolicy
-                          ? "input-invalid"
-                          : undefined
-                      }
-                      value={signupForm.password}
-                      onChange={(e) =>
-                        setSignupForm({
-                          ...signupForm,
+                      value={signinForm.password}
+                      onChange={(e) => {
+                        clearLoginMonitoring();
+                        setSigninForm({
+                          ...signinForm,
                           password: e.target.value,
-                        })
-                      }
+                        });
+                      }}
                       placeholder="Enter your password"
-                      autoComplete="new-password"
-                      minLength={12}
                       required
                     />
                     <button
@@ -12898,392 +13627,661 @@ function AuthShell({
                     </button>
                   </div>
                 </label>
-                <label className="auth-label">
-                  Confirm Password
-                  <input
-                    type={showPassword ? "text" : "password"}
-                    value={signupForm.confirm}
-                    onChange={(e) =>
-                      setSignupForm({ ...signupForm, confirm: e.target.value })
-                    }
-                    placeholder="Confirm your password"
-                    autoComplete="new-password"
-                    required
-                  />
-                </label>
-                <div className="auth-strength-slot">
-                  {renderPasswordStrength(signupPasswordStrength)}
+                <div className="auth-row">
+                  <label className="auth-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={signinRemember}
+                      onChange={(e) => {
+                        const nextValue = e.target.checked;
+                        setSigninRemember(nextValue);
+                        writeStoredSaveLoginPreference(nextValue);
+                      }}
+                    />{" "}
+                    Remember me
+                  </label>
+                  <a
+                    href="#"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      setMode("forgot");
+                    }}
+                    className="muted"
+                  >
+                    Forgot password
+                  </a>
                 </div>
-              </div>
-              <div className="auth-terms-row auth-span-two">
-                <label className="auth-checkbox">
+                <DeferredSliderCaptcha
+                  apiBase={API_BASE}
+                  resetKey={signinCaptchaResetKey}
+                  disabled={authBusy}
+                  onChange={setSigninCaptcha}
+                />
+                <button
+                  type="submit"
+                  className="btn-primary auth-submit"
+                  disabled={authBusy}
+                >
+                  {authBusy ? "Signing in..." : "Sign In"}
+                </button>
+                <p className="auth-switch">
+                  Don&apos;t have an account?{" "}
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => setMode("signup")}
+                  >
+                    Sign Up
+                  </button>
+                  <span className="muted"> / </span>
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => setMode(null)}
+                  >
+                    Back
+                  </button>
+                </p>
+              </form>
+            </div>
+          )}
+          {mode === "signinOtp" && (
+            <div className="auth-form-shell">
+              <form
+                className="auth-form-modern"
+                onSubmit={handleVerifyLoginOtp}
+              >
+                <h2>Verify Sign In</h2>
+                <p className="muted">
+                  Enter the 6-digit code sent to{" "}
+                  <strong>{loginOtpDestination}</strong>.
+                </p>
+                <label className="auth-label">
+                  Verification Code
                   <input
-                    type="checkbox"
-                    checked={signupForm.agree}
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={loginOtpInput}
                     onChange={(e) =>
-                      setSignupForm({ ...signupForm, agree: e.target.checked })
+                      setLoginOtpInput(
+                        e.target.value.replace(/\D/g, "").slice(0, 6),
+                      )
                     }
+                    placeholder="Enter 6-digit OTP"
                     required
                   />
-                  <span>I agree to</span>
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    {loginOtpAvailableInSeconds > 0
+                      ? `This new-device sign-in can be verified in ${loginOtpAvailableInSeconds}s.`
+                      : null}
+                  </span>
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    {loginOtpExpiresAt
+                      ? `Code expires at ${new Date(
+                          loginOtpExpiresAt,
+                        ).toLocaleTimeString("en-US", {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}`
+                      : "Check your messages for the latest code."}
+                  </span>
                 </label>
+                <DeferredSliderCaptcha
+                  apiBase={API_BASE}
+                  resetKey={signinCaptchaResetKey}
+                  disabled={authBusy}
+                  onChange={setSigninCaptcha}
+                />
+                <div className="auth-otp-actions">
+                  <button
+                    type="button"
+                    className="pill"
+                    disabled={authBusy || loginOtpCooldownSeconds > 0}
+                    onClick={() => void resendLoginOtp()}
+                  >
+                    {loginOtpCooldownSeconds > 0
+                      ? `Resend in ${loginOtpCooldownSeconds}s`
+                      : "Resend OTP"}
+                  </button>
+                  <button
+                    type="submit"
+                    className="btn-primary auth-submit"
+                    disabled={authBusy || loginOtpAvailableInSeconds > 0}
+                  >
+                    {authBusy ? "Verifying..." : "Verify & Sign In"}
+                  </button>
+                </div>
+                <p className="auth-switch">
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => setMode("signin")}
+                  >
+                    Back to credentials
+                  </button>
+                </p>
+              </form>
+            </div>
+          )}
+          {mode === "signup" && (
+            <div className="auth-form-shell">
+              <form
+                className="auth-form-modern auth-form-signup"
+                onSubmit={handleSignUp}
+              >
+                <h2>Sign Up</h2>
+                <p className="muted">
+                  Create your FPIPay account to start managing finances smartly.
+                </p>
+                <div className="grid-signup-top">
+                  <label className="auth-label">
+                    Full Name
+                    <input
+                      value={signupForm.fullName}
+                      onChange={(e) =>
+                        setSignupForm({
+                          ...signupForm,
+                          fullName: e.target.value,
+                        })
+                      }
+                      placeholder="Enter your full name"
+                      required
+                    />
+                  </label>
+                  <label className="auth-label">
+                    Username
+                    <input
+                      value={signupForm.username}
+                      onChange={(e) =>
+                        setSignupForm({
+                          ...signupForm,
+                          username: e.target.value,
+                        })
+                      }
+                      placeholder="Enter your username"
+                      required
+                    />
+                  </label>
+                  <label className="auth-label">
+                    Phone Number
+                    <input
+                      value={signupForm.phone}
+                      onChange={(e) =>
+                        setSignupForm({ ...signupForm, phone: e.target.value })
+                      }
+                      placeholder="Enter your phone number"
+                      required
+                    />
+                  </label>
+                </div>
+                <div className="grid-signup-top">
+                  <label className="auth-label">
+                    Date of Birth
+                    <input
+                      type="date"
+                      value={signupForm.dob}
+                      onChange={(e) =>
+                        setSignupForm({ ...signupForm, dob: e.target.value })
+                      }
+                      placeholder="Enter your date of birth"
+                      required
+                    />
+                  </label>
+                  <label className="auth-label">
+                    Email Address
+                    <input
+                      type="email"
+                      value={signupForm.email}
+                      onChange={(e) =>
+                        setSignupForm({ ...signupForm, email: e.target.value })
+                      }
+                      placeholder="Enter your email"
+                      required
+                    />
+                  </label>
+                  <label className="auth-label">
+                    Address
+                    <input
+                      value={signupForm.address}
+                      onChange={(e) =>
+                        setSignupForm({
+                          ...signupForm,
+                          address: e.target.value,
+                        })
+                      }
+                      placeholder="Enter your address"
+                      required
+                    />
+                  </label>
+                </div>
+                <div className="grid-signup-password">
+                  <label className="auth-label">
+                    Password
+                    <div className="password-wrap">
+                      <input
+                        type={showPassword ? "text" : "password"}
+                        className={
+                          signupForm.password &&
+                          !signupPasswordStrength.meetsPolicy
+                            ? "input-invalid"
+                            : undefined
+                        }
+                        value={signupForm.password}
+                        onChange={(e) =>
+                          setSignupForm({
+                            ...signupForm,
+                            password: e.target.value,
+                          })
+                        }
+                        placeholder="Enter your password"
+                        autoComplete="new-password"
+                        minLength={12}
+                        required
+                      />
+                      <button
+                        type="button"
+                        className="eye"
+                        onClick={() => setShowPassword((s) => !s)}
+                        aria-label="Toggle password"
+                      >
+                        {showPassword ? "Hide" : "Show"}
+                      </button>
+                    </div>
+                  </label>
+                  <label className="auth-label">
+                    Confirm Password
+                    <input
+                      type={showPassword ? "text" : "password"}
+                      value={signupForm.confirm}
+                      onChange={(e) =>
+                        setSignupForm({
+                          ...signupForm,
+                          confirm: e.target.value,
+                        })
+                      }
+                      placeholder="Confirm your password"
+                      autoComplete="new-password"
+                      required
+                    />
+                  </label>
+                  <div className="auth-strength-slot">
+                    {renderPasswordStrength(signupPasswordStrength)}
+                  </div>
+                </div>
+                <div className="auth-terms-row auth-span-two">
+                  <label className="auth-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={signupForm.agree}
+                      onChange={(e) =>
+                        setSignupForm({
+                          ...signupForm,
+                          agree: e.target.checked,
+                        })
+                      }
+                      required
+                    />
+                    <span>I agree to</span>
+                  </label>
+                  <button
+                    type="button"
+                    className="auth-terms-trigger"
+                    onClick={() => setTermsOpen(true)}
+                  >
+                    terms & privacy
+                  </button>
+                </div>
+                <div className="auth-span-two">
+                  <DeferredSliderCaptcha
+                    apiBase={API_BASE}
+                    resetKey={signupCaptchaResetKey}
+                    disabled={authBusy}
+                    onChange={setSignupCaptcha}
+                  />
+                </div>
                 <button
-                  type="button"
-                  className="auth-terms-trigger"
-                  onClick={() => setTermsOpen(true)}
+                  type="submit"
+                  className="btn-primary auth-submit auth-span-two"
+                  disabled={authBusy}
                 >
-                  terms & privacy
+                  {authBusy ? "Creating..." : "Create Account"}
                 </button>
-              </div>
-              <div className="auth-span-two">
+                <p className="auth-switch auth-span-two">
+                  Already have an account?{" "}
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => setMode("signin")}
+                  >
+                    Sign In
+                  </button>
+                  <span className="muted"> / </span>
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => setMode(null)}
+                  >
+                    Back
+                  </button>
+                </p>
+              </form>
+            </div>
+          )}
+          {signupFaceModalOpen && typeof document !== "undefined"
+            ? createPortal(
+                <div
+                  className="faceid-modal-overlay"
+                  onClick={() => closeSignupFaceModal()}
+                >
+                  <div
+                    className="faceid-modal"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <div className="faceid-modal-head">
+                      <div>
+                        <h3>Create Account with FaceID</h3>
+                        <p>
+                          Complete one 5-second face video to finish your
+                          account protection setup before we send the signup
+                          code.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className="faceid-modal-close"
+                        onClick={() => closeSignupFaceModal()}
+                        aria-label="Close signup FaceID popup"
+                      >
+                        X
+                      </button>
+                    </div>
+                    <DeferredFaceIdCapture
+                      apiBase={API_BASE}
+                      resetKey={signupFaceResetKey}
+                      disabled={authBusy}
+                      onChange={setSignupFaceEnrollment}
+                    />
+                    <div className="faceid-modal-actions">
+                      <button
+                        type="button"
+                        className="pill"
+                        disabled={authBusy}
+                        onClick={() => resetSignupFaceEnrollment()}
+                      >
+                        Retry
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        disabled={authBusy || !signupFaceEnrollment}
+                        onClick={() => void submitSignupOtpRequest()}
+                      >
+                        {authBusy ? "Preparing account..." : "Continue Signup"}
+                      </button>
+                    </div>
+                  </div>
+                </div>,
+                document.body,
+              )
+            : null}
+          {mode === "signupOtp" && (
+            <div className="auth-form-shell">
+              <form
+                className="auth-form-modern"
+                onSubmit={handleVerifyRegisterOtp}
+              >
+                <h2>Verify Email</h2>
+                <p className="muted">
+                  Enter the 6-digit code sent to{" "}
+                  <strong>{signupOtpDestination}</strong> to activate your
+                  account.
+                </p>
+                <label className="auth-label">
+                  Verification Code
+                  <input
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={signupOtpInput}
+                    onChange={(e) =>
+                      setSignupOtpInput(
+                        e.target.value.replace(/\D/g, "").slice(0, 6),
+                      )
+                    }
+                    placeholder="Enter 6-digit OTP"
+                    required
+                  />
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    {signupOtpExpiresAt
+                      ? `Code expires at ${new Date(
+                          signupOtpExpiresAt,
+                        ).toLocaleTimeString("en-US", {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}`
+                      : "Check your inbox for the latest code."}
+                  </span>
+                </label>
                 <DeferredSliderCaptcha
                   apiBase={API_BASE}
                   resetKey={signupCaptchaResetKey}
                   disabled={authBusy}
                   onChange={setSignupCaptcha}
                 />
-              </div>
-              <button
-                type="submit"
-                className="btn-primary auth-submit auth-span-two"
-                disabled={authBusy}
-              >
-                {authBusy ? "Creating..." : "Create Account"}
-              </button>
-              <p className="auth-switch auth-span-two">
-                Already have an account?{" "}
-                <button
-                  type="button"
-                  className="link-btn"
-                  onClick={() => setMode("signin")}
-                >
-                  Sign In
-                </button>
-                <span className="muted"> / </span>
-                <button
-                  type="button"
-                  className="link-btn"
-                  onClick={() => setMode(null)}
-                >
-                  Back
-                </button>
-              </p>
-            </form>
-          </div>
-        )}
-        {signupFaceModalOpen && typeof document !== "undefined"
-          ? createPortal(
-              <div
-                className="faceid-modal-overlay"
-                onClick={() => closeSignupFaceModal()}
-              >
-                <div
-                  className="faceid-modal"
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  <div className="faceid-modal-head">
-                    <div>
-                      <h3>Create Account with FaceID</h3>
-                      <p>
-                        Complete one live face scan to finish your account
-                        protection setup before we send the signup code.
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      className="faceid-modal-close"
-                      onClick={() => closeSignupFaceModal()}
-                      aria-label="Close signup FaceID popup"
-                    >
-                      X
-                    </button>
-                  </div>
-                  <DeferredFaceIdCapture
-                    apiBase={API_BASE}
-                    resetKey={signupFaceResetKey}
+                <div className="auth-otp-actions">
+                  <button
+                    type="button"
+                    className="pill"
+                    disabled={authBusy || signupOtpCooldownSeconds > 0}
+                    onClick={() => void resendRegisterOtp()}
+                  >
+                    {signupOtpCooldownSeconds > 0
+                      ? `Resend in ${signupOtpCooldownSeconds}s`
+                      : "Resend OTP"}
+                  </button>
+                  <button
+                    type="submit"
+                    className="btn-primary auth-submit"
                     disabled={authBusy}
-                    onChange={setSignupFaceEnrollment}
-                  />
-                  <div className="faceid-modal-actions">
-                    <button
-                      type="button"
-                      className="pill"
-                      disabled={authBusy}
-                      onClick={() => resetSignupFaceEnrollment()}
-                    >
-                      Retry
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      disabled={authBusy || !signupFaceEnrollment}
-                      onClick={() => void submitSignupOtpRequest()}
-                    >
-                      {authBusy ? "Preparing account..." : "Continue Signup"}
-                    </button>
-                  </div>
+                  >
+                    {authBusy ? "Verifying..." : "Verify & Create Account"}
+                  </button>
                 </div>
-              </div>,
-              document.body,
-            )
-          : null}
-        {mode === "signupOtp" && (
-          <div className="auth-form-shell">
-            <form
-              className="auth-form-modern"
-              onSubmit={handleVerifyRegisterOtp}
-            >
-              <h2>Verify Email</h2>
-              <p className="muted">
-                Enter the 6-digit code sent to{" "}
-                <strong>{signupOtpDestination}</strong> to activate your
-                account.
-              </p>
-              <label className="auth-label">
-                Verification Code
-                <input
-                  inputMode="numeric"
-                  maxLength={6}
-                  value={signupOtpInput}
-                  onChange={(e) =>
-                    setSignupOtpInput(
-                      e.target.value.replace(/\D/g, "").slice(0, 6),
-                    )
-                  }
-                  placeholder="Enter 6-digit OTP"
-                  required
+                <p className="auth-switch">
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => setMode("signup")}
+                  >
+                    Back to sign up
+                  </button>
+                </p>
+              </form>
+            </div>
+          )}
+          {mode === "forgot" && (
+            <div className="auth-form-shell">
+              <form className="auth-form-modern" onSubmit={handleForgot}>
+                <h2>Forgot Password</h2>
+                <p className="muted">
+                  Enter the email linked to your account and we&apos;ll email
+                  you a reset code.
+                </p>
+                <label className="auth-label">
+                  Email Address
+                  <input
+                    type="email"
+                    value={forgotEmail}
+                    onChange={(e) => setForgotEmail(e.target.value)}
+                    placeholder="Enter your email"
+                    required
+                  />
+                </label>
+                <DeferredSliderCaptcha
+                  apiBase={API_BASE}
+                  resetKey={forgotCaptchaResetKey}
+                  disabled={authBusy}
+                  onChange={setForgotCaptcha}
                 />
-                <span className="muted" style={{ fontSize: 12 }}>
-                  {signupOtpExpiresAt
-                    ? `Code expires at ${new Date(
-                        signupOtpExpiresAt,
-                      ).toLocaleTimeString("en-US", {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}`
-                    : "Check your inbox for the latest code."}
-                </span>
-              </label>
-              <DeferredSliderCaptcha
-                apiBase={API_BASE}
-                resetKey={signupCaptchaResetKey}
-                disabled={authBusy}
-                onChange={setSignupCaptcha}
-              />
-              <div className="auth-otp-actions">
-                <button
-                  type="button"
-                  className="pill"
-                  disabled={authBusy || signupOtpCooldownSeconds > 0}
-                  onClick={() => void resendRegisterOtp()}
-                >
-                  {signupOtpCooldownSeconds > 0
-                    ? `Resend in ${signupOtpCooldownSeconds}s`
-                    : "Resend OTP"}
-                </button>
                 <button
                   type="submit"
                   className="btn-primary auth-submit"
                   disabled={authBusy}
                 >
-                  {authBusy ? "Verifying..." : "Verify & Create Account"}
+                  {authBusy ? "Sending..." : "Send Reset Code"}
                 </button>
-              </div>
-              <p className="auth-switch">
-                <button
-                  type="button"
-                  className="link-btn"
-                  onClick={() => setMode("signup")}
-                >
-                  Back to sign up
-                </button>
-              </p>
-            </form>
-          </div>
-        )}
-        {mode === "forgot" && (
-          <div className="auth-form-shell">
-            <form className="auth-form-modern" onSubmit={handleForgot}>
-              <h2>Forgot Password</h2>
-              <p className="muted">
-                Enter the email linked to your account and we&apos;ll email you
-                a reset code.
-              </p>
-              <label className="auth-label">
-                Email Address
-                <input
-                  type="email"
-                  value={forgotEmail}
-                  onChange={(e) => setForgotEmail(e.target.value)}
-                  placeholder="Enter your email"
-                  required
-                />
-              </label>
-              <DeferredSliderCaptcha
-                apiBase={API_BASE}
-                resetKey={forgotCaptchaResetKey}
-                disabled={authBusy}
-                onChange={setForgotCaptcha}
-              />
-              <button
-                type="submit"
-                className="btn-primary auth-submit"
-                disabled={authBusy}
-              >
-                {authBusy ? "Sending..." : "Send Reset Code"}
-              </button>
-              <p className="auth-switch">
-                Remembered it?{" "}
-                <button
-                  type="button"
-                  className="link-btn"
-                  onClick={() => setMode("signin")}
-                >
-                  Back to Sign In
-                </button>
-              </p>
-            </form>
-          </div>
-        )}
-        {mode === "forgotOtp" && (
-          <div className="auth-form-shell">
-            <form className="auth-form-modern" onSubmit={handleResetPassword}>
-              <h2>Reset Password</h2>
-              <p className="muted">
-                Enter the 6-digit code sent to{" "}
-                <strong>{forgotDestination}</strong> and set a new password.
-              </p>
-              <label className="auth-label">
-                Reset Code
-                <input
-                  inputMode="numeric"
-                  maxLength={6}
-                  value={forgotOtpInput}
-                  onChange={(e) =>
-                    setForgotOtpInput(
-                      e.target.value.replace(/\D/g, "").slice(0, 6),
-                    )
-                  }
-                  placeholder="Enter 6-digit OTP"
-                  required
-                />
-                <span className="muted" style={{ fontSize: 12 }}>
-                  {forgotExpiresAt
-                    ? `Code expires at ${new Date(
-                        forgotExpiresAt,
-                      ).toLocaleTimeString("en-US", {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}`
-                    : "Check your inbox for the latest code."}
-                </span>
-              </label>
-              <DeferredSliderCaptcha
-                apiBase={API_BASE}
-                resetKey={forgotCaptchaResetKey}
-                disabled={authBusy}
-                onChange={setForgotCaptcha}
-              />
-              <label className="auth-label">
-                New Password
-                <input
-                  type="password"
-                  value={forgotNewPassword}
-                  onChange={(e) => setForgotNewPassword(e.target.value)}
-                  placeholder="Enter new password"
-                  autoComplete="new-password"
-                  minLength={12}
-                  required
-                />
-                {renderPasswordStrength(forgotPasswordStrength)}
-              </label>
-              <label className="auth-label">
-                Confirm New Password
-                <input
-                  type="password"
-                  value={forgotConfirmPassword}
-                  onChange={(e) => setForgotConfirmPassword(e.target.value)}
-                  placeholder="Confirm new password"
-                  required
-                />
-              </label>
-              <div className="auth-otp-actions">
-                <button
-                  type="button"
-                  className="pill"
-                  disabled={authBusy || forgotOtpCooldownSeconds > 0}
-                  onClick={() => void resendForgotOtp()}
-                >
-                  {forgotOtpCooldownSeconds > 0
-                    ? `Resend in ${forgotOtpCooldownSeconds}s`
-                    : "Resend OTP"}
-                </button>
-                <button
-                  type="submit"
-                  className="btn-primary auth-submit"
+                <p className="auth-switch">
+                  Remembered it?{" "}
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => setMode("signin")}
+                  >
+                    Back to Sign In
+                  </button>
+                </p>
+              </form>
+            </div>
+          )}
+          {mode === "forgotOtp" && (
+            <div className="auth-form-shell">
+              <form className="auth-form-modern" onSubmit={handleResetPassword}>
+                <h2>Reset Password</h2>
+                <p className="muted">
+                  Enter the 6-digit code sent to{" "}
+                  <strong>{forgotDestination}</strong> and set a new password.
+                </p>
+                <label className="auth-label">
+                  Reset Code
+                  <input
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={forgotOtpInput}
+                    onChange={(e) =>
+                      setForgotOtpInput(
+                        e.target.value.replace(/\D/g, "").slice(0, 6),
+                      )
+                    }
+                    placeholder="Enter 6-digit OTP"
+                    required
+                  />
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    {forgotExpiresAt
+                      ? `Code expires at ${new Date(
+                          forgotExpiresAt,
+                        ).toLocaleTimeString("en-US", {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}`
+                      : "Check your inbox for the latest code."}
+                  </span>
+                </label>
+                <DeferredSliderCaptcha
+                  apiBase={API_BASE}
+                  resetKey={forgotCaptchaResetKey}
                   disabled={authBusy}
-                >
-                  {authBusy ? "Resetting..." : "Reset Password"}
-                </button>
-              </div>
-              <p className="auth-switch">
-                <button
-                  type="button"
-                  className="link-btn"
-                  onClick={() => setMode("signin")}
-                >
-                  Back to Sign In
-                </button>
-              </p>
-            </form>
-          </div>
-        )}
-      </div>
-      {pendingSessionAlert && (
-        <div className="session-alert-overlay">
-          <div className="session-alert-banner">
-            <div className="session-alert-copy">
-              <span className="session-alert-kicker">Security Review</span>
-              <h3>Your previous device was signed out</h3>
-              <p>
-                A newer sign-in was detected for this account. Review it before
-                continuing.
-              </p>
-              <div className="session-alert-meta">
-                <span>Time: {sessionAlertIssuedAt}</span>
-                <span>
-                  Device: {sessionAlertDevice.title}
-                  {sessionAlertDevice.detail
-                    ? ` · ${sessionAlertDevice.detail}`
-                    : ""}
-                </span>
-                <span>
-                  IP: {pendingSessionAlert.ipAddress || "Unavailable"}
-                </span>
-              </div>
+                  onChange={setForgotCaptcha}
+                />
+                <label className="auth-label">
+                  New Password
+                  <input
+                    type="password"
+                    value={forgotNewPassword}
+                    onChange={(e) => setForgotNewPassword(e.target.value)}
+                    placeholder="Enter new password"
+                    autoComplete="new-password"
+                    minLength={12}
+                    required
+                  />
+                  {renderPasswordStrength(forgotPasswordStrength)}
+                </label>
+                <label className="auth-label">
+                  Confirm New Password
+                  <input
+                    type="password"
+                    value={forgotConfirmPassword}
+                    onChange={(e) => setForgotConfirmPassword(e.target.value)}
+                    placeholder="Confirm new password"
+                    required
+                  />
+                </label>
+                <div className="auth-otp-actions">
+                  <button
+                    type="button"
+                    className="pill"
+                    disabled={authBusy || forgotOtpCooldownSeconds > 0}
+                    onClick={() => void resendForgotOtp()}
+                  >
+                    {forgotOtpCooldownSeconds > 0
+                      ? `Resend in ${forgotOtpCooldownSeconds}s`
+                      : "Resend OTP"}
+                  </button>
+                  <button
+                    type="submit"
+                    className="btn-primary auth-submit"
+                    disabled={authBusy}
+                  >
+                    {authBusy ? "Resetting..." : "Reset Password"}
+                  </button>
+                </div>
+                <p className="auth-switch">
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => setMode("signin")}
+                  >
+                    Back to Sign In
+                  </button>
+                </p>
+              </form>
             </div>
-            <div className="session-alert-actions">
-              <button
-                type="button"
-                className="pill"
-                disabled={sessionAlertBusy}
-                onClick={() => void handleConfirmSessionAlert()}
-              >
-                {sessionAlertBusy ? "Processing..." : "Yes, it was me"}
-              </button>
-              <button
-                type="button"
-                className="btn-primary auth-submit"
-                disabled={sessionAlertBusy}
-                onClick={() => void handleSecureCompromisedSession()}
-              >
-                {sessionAlertBusy ? "Securing..." : "No, secure account"}
-              </button>
-            </div>
-          </div>
+          )}
         </div>
-      )}
-      {renderSignupTermsModal()}
-    </div>
+        {pendingSessionAlert && (
+          <div className="session-alert-overlay">
+            <div className="session-alert-banner">
+              <div className="session-alert-copy">
+                <span className="session-alert-kicker">Security Review</span>
+                <h3>Your previous device was signed out</h3>
+                <p>
+                  A newer sign-in was detected for this account. Review it
+                  before continuing.
+                </p>
+                <div className="session-alert-meta">
+                  <span>Time: {sessionAlertIssuedAt}</span>
+                  <span>
+                    Device: {sessionAlertDevice.title}
+                    {sessionAlertDevice.detail
+                      ? ` · ${sessionAlertDevice.detail}`
+                      : ""}
+                  </span>
+                  <span>
+                    IP: {pendingSessionAlert.ipAddress || "Unavailable"}
+                  </span>
+                </div>
+              </div>
+              <div className="session-alert-actions">
+                <button
+                  type="button"
+                  className="pill"
+                  disabled={sessionAlertBusy}
+                  onClick={() => void handleConfirmSessionAlert()}
+                >
+                  {sessionAlertBusy ? "Processing..." : "Yes, it was me"}
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary auth-submit"
+                  disabled={sessionAlertBusy}
+                  onClick={() => void handleSecureCompromisedSession()}
+                >
+                  {sessionAlertBusy ? "Securing..." : "No, secure account"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {renderSignupTermsModal()}
+      </div>
+    </>
   );
 }

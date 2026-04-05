@@ -1979,6 +1979,110 @@ h3 {
   display: grid;
   gap: 6px;
 }
+.transfer-ai-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+.transfer-ai-detail-card {
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background:
+    linear-gradient(180deg, rgba(18, 29, 56, 0.9), rgba(11, 20, 39, 0.92)),
+    rgba(10, 18, 40, 0.92);
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+.transfer-ai-detail-card.decision {
+  border-color: rgba(56, 189, 248, 0.24);
+  background:
+    radial-gradient(
+      120% 120% at 100% 0%,
+      rgba(56, 189, 248, 0.12) 0%,
+      transparent 55%
+    ),
+    linear-gradient(180deg, rgba(18, 29, 56, 0.9), rgba(11, 20, 39, 0.92));
+}
+.transfer-ai-detail-head {
+  display: grid;
+  gap: 2px;
+}
+.transfer-ai-detail-kicker {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(191, 219, 254, 0.72);
+}
+.transfer-ai-detail-head strong {
+  font-size: 13px;
+  line-height: 1.35;
+  color: #f8fafc;
+}
+.transfer-ai-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.transfer-ai-detail-meta span,
+.transfer-ai-tag {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #bfdbfe;
+  background: rgba(30, 41, 59, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+}
+.transfer-ai-detail-copy,
+.transfer-ai-detail-foot {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #dbeafe;
+}
+.transfer-ai-detail-foot {
+  color: rgba(191, 219, 254, 0.72);
+}
+.transfer-ai-detail-list {
+  margin: 0;
+  padding-left: 16px;
+  display: grid;
+  gap: 5px;
+  color: #dbeafe;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.transfer-ai-signal-list {
+  display: grid;
+  gap: 6px;
+}
+.transfer-ai-signal-chip {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.1);
+}
+.transfer-ai-signal-chip strong {
+  font-size: 11px;
+  line-height: 1.3;
+  color: #f8fafc;
+}
+.transfer-ai-signal-chip span {
+  font-size: 10px;
+  line-height: 1.45;
+  color: rgba(191, 219, 254, 0.78);
+}
+.transfer-ai-tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
 .transfer-advisory-card {
   margin-top: 6px;
   border-radius: 16px;
@@ -4149,88 +4253,118 @@ h3 {
   display: grid;
   place-items: center;
   padding: 20px;
-  background: rgba(4, 10, 24, 0.66);
-  backdrop-filter: blur(10px);
+  background: rgba(4, 10, 24, 0.56);
+  backdrop-filter: blur(12px) saturate(1.04);
 }
 .transfer-ai-warning-card {
-  width: min(680px, calc(100vw - 48px));
+  position: relative;
+  overflow: hidden;
+  width: min(720px, calc(100vw - 40px));
   display: grid;
-  gap: 12px;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  padding: 16px;
+  gap: 14px;
+  padding: 18px;
   border-radius: 20px;
-  border: 1px solid rgba(126, 173, 255, 0.22);
+  border: 1px solid rgba(126, 173, 255, 0.18);
   background:
     radial-gradient(
-      130% 120% at 0% 0%,
-      rgba(120, 176, 255, 0.14) 0%,
-      transparent 54%
+      62% 54% at 0% 0%,
+      rgba(120, 176, 255, 0.1) 0%,
+      transparent 72%
     ),
-    linear-gradient(180deg, rgba(15, 29, 60, 0.99), rgba(9, 21, 42, 0.99));
+    linear-gradient(180deg, rgba(14, 27, 58, 0.98), rgba(8, 19, 40, 0.98));
   box-shadow:
-    0 28px 52px rgba(2, 8, 22, 0.46),
+    0 26px 56px rgba(2, 8, 22, 0.46),
     inset 0 1px 0 rgba(233, 242, 255, 0.08);
+}
+.transfer-ai-warning-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 18%),
+    radial-gradient(circle at top right, rgba(255, 255, 255, 0.06), transparent 24%);
+  pointer-events: none;
 }
 .transfer-ai-warning-body {
   display: grid;
   gap: 12px;
-  min-height: 0;
 }
 .transfer-ai-warning-card.warning {
-  border-color: rgba(245, 158, 11, 0.34);
+  border-color: rgba(245, 158, 11, 0.28);
 }
 .transfer-ai-warning-card.blocked {
-  border-color: rgba(244, 63, 94, 0.42);
+  border-color: rgba(244, 63, 94, 0.36);
   background:
     radial-gradient(
-      140% 130% at 0% 0%,
+      86% 58% at 0% 0%,
       rgba(244, 63, 94, 0.16) 0%,
-      transparent 48%
+      transparent 70%
     ),
-    linear-gradient(180deg, rgba(34, 12, 24, 0.99), rgba(19, 9, 18, 0.99));
+    linear-gradient(180deg, rgba(40, 12, 24, 0.98), rgba(18, 10, 20, 0.99));
 }
 .transfer-ai-warning-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
   gap: 12px;
 }
 .transfer-ai-warning-kicker {
   display: inline-flex;
   align-items: center;
-  padding: 4px 9px;
+  padding: 5px 9px;
   border-radius: 999px;
-  background: rgba(56, 189, 248, 0.12);
-  color: #9bd4ff;
+  background: rgba(255, 255, 255, 0.08);
+  color: #b7d7ff;
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 .transfer-ai-warning-head h4 {
-  margin: 8px 0 0;
-  font-size: 18px;
-  line-height: 1.28;
+  margin: 10px 0 0;
+  max-width: 26ch;
+  font-size: 19px;
+  line-height: 1.2;
+  letter-spacing: -0.025em;
 }
 .transfer-ai-warning-head p {
-  margin: 6px 0 0;
-  color: #b7c8ec;
+  margin: 8px 0 0;
+  max-width: 60ch;
+  color: #c7d4ee;
   font-size: 12px;
   line-height: 1.5;
 }
+.transfer-ai-warning-card .icon-btn {
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #f8fafc;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.transfer-ai-warning-card .icon-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
 .transfer-ai-warning-summary {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
 }
 .transfer-ai-warning-summary div,
 .transfer-ai-warning-section {
   display: grid;
   gap: 6px;
-  padding: 12px;
+  padding: 12px 13px;
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.03)),
+    rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 .transfer-ai-warning-summary span,
 .transfer-ai-warning-section-label {
@@ -4241,34 +4375,127 @@ h3 {
   text-transform: uppercase;
 }
 .transfer-ai-warning-summary strong {
-  font-size: 12px;
-  line-height: 1.35;
+  font-size: 14px;
+  line-height: 1.3;
+  color: #f8fafc;
 }
 .transfer-ai-warning-grid {
   display: grid;
-  grid-template-columns: 0.9fr 1.1fr 1fr;
+  grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.92fr);
   gap: 10px;
   align-items: stretch;
 }
+.transfer-ai-warning-grid > .transfer-ai-warning-section:nth-child(1) {
+  min-height: 100%;
+}
+.transfer-ai-warning-grid > .transfer-ai-warning-section:nth-child(2) {
+  align-content: start;
+}
 .transfer-ai-warning-section strong {
-  font-size: 13px;
-  line-height: 1.4;
+  font-size: 16px;
+  line-height: 1.25;
+  color: #f8fafc;
 }
 .transfer-ai-warning-section p,
 .transfer-ai-warning-section small {
   margin: 0;
   color: #dbeafe;
-  font-size: 11px;
-  line-height: 1.45;
+  font-size: 12px;
+  line-height: 1.5;
 }
 .transfer-ai-warning-section ul {
   margin: 0;
   padding-left: 16px;
   display: grid;
-  gap: 4px;
+  gap: 6px;
   color: #dbeafe;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.transfer-ai-warning-card .transfer-actions {
+  position: relative;
+  z-index: 1;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.transfer-ai-warning-card .transfer-actions .pill,
+.transfer-ai-warning-card .transfer-actions .btn-primary {
+  min-height: 42px;
+  border-radius: 12px;
+  padding: 0 16px;
+}
+.transfer-ai-warning-card .transfer-actions .pill {
+  border-color: rgba(170, 190, 226, 0.2);
+  background: rgba(255, 255, 255, 0.04);
+}
+.transfer-ai-warning-card .transfer-actions .pill:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.transfer-ai-warning-card .transfer-actions .btn-primary {
+  min-width: 146px;
+}
+.transfer-ai-detail-card {
+  border-radius: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background:
+    linear-gradient(180deg, rgba(15, 28, 56, 0.88), rgba(10, 19, 37, 0.92)),
+    rgba(10, 18, 40, 0.92);
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+.transfer-ai-detail-card.decision {
+  border-color: rgba(56, 189, 248, 0.22);
+  background:
+    radial-gradient(
+      120% 120% at 100% 0%,
+      rgba(56, 189, 248, 0.1) 0%,
+      transparent 55%
+    ),
+    linear-gradient(180deg, rgba(15, 28, 56, 0.88), rgba(10, 19, 37, 0.92));
+}
+.transfer-ai-detail-head {
+  display: grid;
+  gap: 4px;
+}
+.transfer-ai-detail-kicker {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(191, 219, 254, 0.66);
+}
+.transfer-ai-detail-head strong {
+  font-size: 15px;
+  line-height: 1.35;
+  color: #f8fafc;
+}
+.transfer-ai-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.transfer-ai-detail-meta span,
+.transfer-ai-tag {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #bfdbfe;
+  background: rgba(30, 41, 59, 0.66);
+  border: 1px solid rgba(148, 163, 184, 0.1);
+}
+.transfer-ai-detail-copy,
+.transfer-ai-detail-foot {
+  margin: 0;
   font-size: 11px;
-  line-height: 1.45;
+  line-height: 1.6;
+  color: #dbeafe;
+}
+.transfer-ai-detail-foot {
+  color: rgba(191, 219, 254, 0.72);
 }
 .transfer-amount-field {
   position: relative;
@@ -4918,10 +5145,15 @@ h3 {
   }
 
   .transfer-faceid-modal .faceid-card {
-    padding: 10px !important;
-    gap: 8px !important;
-    border-radius: 16px !important;
-    overflow: hidden;
+    padding: 0 !important;
+    gap: 10px !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    overflow: visible !important;
   }
 
   .transfer-faceid-modal .faceid-head {
@@ -4934,14 +5166,34 @@ h3 {
     margin: 0 auto;
   }
 
+  .transfer-faceid-modal .faceid-stage.is-live .faceid-video {
+    --faceid-live-zoom: 1.25 !important;
+  }
+
   .transfer-faceid-modal .faceid-placeholder {
     min-height: 300px !important;
     padding: 12px !important;
   }
 
+  .transfer-faceid-modal .faceid-feedback-panel {
+    min-height: 156px !important;
+    padding: 12px !important;
+  }
+
+  .transfer-faceid-modal .faceid-live-hint {
+    min-height: 78px !important;
+  }
+
+  .transfer-faceid-modal .faceid-scan-progress {
+    min-height: 60px !important;
+    align-content: start;
+  }
+
   .transfer-faceid-modal .faceid-actions {
     justify-content: center !important;
+    align-items: start !important;
     gap: 8px !important;
+    min-height: 54px !important;
   }
 
   .transfer-faceid-modal .faceid-actions .pill,
@@ -4954,6 +5206,17 @@ h3 {
     grid-template-columns: 88px minmax(0, 1fr);
     gap: 8px !important;
     margin-top: 0 !important;
+    position: sticky !important;
+    bottom: 0 !important;
+    z-index: 3 !important;
+    padding-top: 8px !important;
+    padding-bottom: calc(4px + env(safe-area-inset-bottom, 0px)) !important;
+    background: linear-gradient(
+      180deg,
+      rgba(9, 21, 42, 0) 0%,
+      rgba(9, 21, 42, 0.88) 24%,
+      rgba(9, 21, 42, 0.98) 100%
+    ) !important;
   }
 
   .transfer-faceid-actions .pill,
@@ -8688,65 +8951,103 @@ body.theme-light .auth-form-shell {
 
 .faceid-card {
   display: grid;
-  gap: 10px;
-  padding: 12px;
-  border-radius: 18px;
-  border: 1px solid rgba(150, 194, 255, 0.18);
+  gap: 14px;
+  padding: 16px;
+  border-radius: 24px;
+  border: 1px solid rgba(150, 194, 255, 0.16);
   background:
     radial-gradient(
-      90% 120% at 10% 0%,
-      rgba(170, 216, 255, 0.1) 0%,
-      transparent 72%
+      120% 120% at 10% 0%,
+      rgba(88, 169, 255, 0.14) 0%,
+      transparent 52%
     ),
-    linear-gradient(160deg, rgba(11, 24, 54, 0.66), rgba(8, 21, 47, 0.8));
+    linear-gradient(180deg, rgba(13, 28, 63, 0.92), rgba(8, 18, 42, 0.98));
   backdrop-filter: blur(14px) saturate(1.08);
   -webkit-backdrop-filter: blur(14px) saturate(1.08);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    0 18px 32px rgba(2, 8, 23, 0.18);
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 18px 42px rgba(2, 8, 23, 0.26);
 }
 .faceid-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: 14px;
+}
+.faceid-head-copy {
+  display: grid;
+  gap: 6px;
+  min-height: 64px;
+  flex: 1;
 }
 .faceid-head strong {
   display: block;
-  font-size: 14px;
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
 }
-.faceid-head p {
-  margin: 4px 0 0;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.45;
+.faceid-head p,
+.faceid-status-copy {
+  margin: 0;
+  color: #b7c8e6;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.faceid-status-copy {
+  min-height: calc(1.45em * 2);
+}
+.faceid-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.faceid-meta-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(96, 165, 250, 0.2);
+  background: rgba(14, 32, 72, 0.58);
+  color: #d9e9ff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.faceid-meta-pill-muted {
+  border-color: rgba(148, 163, 184, 0.16);
+  background: rgba(9, 20, 45, 0.5);
+  color: #9fb8dd;
 }
 .faceid-diagnostic {
   display: block;
-  margin-top: 6px;
+  margin-top: 2px;
   color: #8fb7e8;
   font-size: 11px;
   line-height: 1.45;
 }
 .faceid-device-row {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
-  gap: 8px;
+  gap: 10px;
 }
 .faceid-camera-select {
   display: grid;
   gap: 6px;
-  flex: 1;
+  min-width: 0;
 }
 .faceid-camera-select span {
-  color: var(--muted);
+  color: #8fa9cf;
   font-size: 11px;
 }
 .faceid-camera-select select {
   width: 100%;
-  border-radius: 12px;
-  border: 1px solid rgba(150, 194, 255, 0.18);
+  min-height: 48px;
+  border-radius: 16px;
+  border: 1px solid rgba(150, 194, 255, 0.14);
   background:
     radial-gradient(
       90% 120% at 12% 0%,
@@ -8759,22 +9060,26 @@ body.theme-light .auth-form-shell {
       rgba(9, 24, 55, 0.66) 100%
     );
   color: #e2e8f0;
-  padding: 10px 12px;
+  padding: 0 14px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 .faceid-camera {
   display: grid;
-  gap: 8px;
+  gap: 12px;
   justify-items: center;
   align-content: start;
   width: 100%;
 }
 .faceid-badge {
-  padding: 6px 10px;
+  min-height: 36px;
+  padding: 0 14px;
   border-radius: 999px;
-  border: 1px solid rgba(56, 189, 248, 0.18);
-  background: rgba(59, 130, 246, 0.12);
-  color: #bfdbfe;
-  font-size: 11px;
+  border: 1px solid rgba(96, 165, 250, 0.22);
+  background:
+    radial-gradient(circle at top, rgba(59, 130, 246, 0.18), transparent 60%),
+    rgba(17, 37, 83, 0.78);
+  color: #d5e7ff;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -8782,20 +9087,25 @@ body.theme-light .auth-form-shell {
 }
 .faceid-stage {
   position: relative;
-  width: min(100%, var(--faceid-stage-width, 248px));
-  height: var(--faceid-stage-height, 308px);
-  min-height: var(--faceid-stage-height, 308px);
+  width: min(100%, var(--faceid-stage-width, 318px));
+  height: var(--faceid-stage-height, 368px);
+  min-height: var(--faceid-stage-height, 368px);
+  --faceid-live-zoom: 1;
   margin: 0 auto;
-  border-radius: 16px;
+  border-radius: 28px;
   overflow: hidden;
-  border: 1px solid rgba(148, 163, 184, 0.12);
+  isolation: isolate;
+  border: 1px solid rgba(148, 163, 184, 0.14);
   background:
     radial-gradient(
-      circle at top,
-      color-mix(in srgb, var(--faceid-cue, #38bdf8) 36%, transparent),
-      transparent 38%
+      88% 72% at 50% 0%,
+      color-mix(in srgb, var(--faceid-cue, #38bdf8) 24%, rgba(20, 66, 102, 0.68)),
+      transparent 80%
     ),
-    linear-gradient(180deg, #091326, #0c1730);
+    linear-gradient(180deg, #091326, #0b1732 52%, #0a1530);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 20px 36px rgba(2, 6, 23, 0.28);
 }
 .faceid-video,
 .faceid-preview {
@@ -8806,6 +9116,7 @@ body.theme-light .auth-form-shell {
   object-fit: cover;
   display: block;
   background: #040816;
+  transform-origin: center center;
 }
 .faceid-video {
   opacity: 0;
@@ -8817,11 +9128,25 @@ body.theme-light .auth-form-shell {
       rgba(0, 0, 0, 0.18)
     ),
     #000;
-  transform: scaleX(-1);
-  transition: opacity 180ms ease;
+  transform: scaleX(-1) scale(var(--faceid-live-zoom));
+  transition: opacity 180ms ease, transform 180ms ease, filter 180ms ease;
+}
+.faceid-preview {
+  clip-path: ellipse(22% 40% at 50% 50%);
+  object-position: center 34%;
+}
+.faceid-preview-image {
+  clip-path: none;
+  object-position: center 24%;
+}
+.faceid-preview-video {
+  clip-path: ellipse(22% 40% at 50% 50%);
+  object-position: center 34%;
 }
 .faceid-stage.is-live .faceid-video {
   opacity: 1;
+  --faceid-live-zoom: 1.25;
+  filter: saturate(1.06) contrast(1.05);
 }
 .faceid-canvas {
   display: none;
@@ -8835,11 +9160,9 @@ body.theme-light .auth-form-shell {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  background: linear-gradient(
-    180deg,
-    rgba(2, 6, 23, 0.03),
-    rgba(2, 6, 23, 0.16)
-  );
+  background:
+    radial-gradient(circle at 50% 50%, rgba(56, 189, 248, 0.05), transparent 38%),
+    linear-gradient(180deg, rgba(2, 6, 23, 0.18), rgba(2, 6, 23, 0.32));
 }
 .faceid-oval {
   position: absolute;
@@ -8856,7 +9179,7 @@ body.theme-light .auth-form-shell {
     transparent 72%
   );
   box-shadow:
-    0 0 0 999px rgba(2, 6, 23, 0.08),
+    0 0 0 999px rgba(2, 6, 23, 0.82),
     0 0 calc(18px + var(--faceid-lock-strength, 0) * 22px)
       color-mix(in srgb, var(--faceid-cue, #38bdf8) 42%, transparent);
   opacity: calc(0.78 + var(--faceid-lock-strength, 0) * 0.22);
@@ -8873,7 +9196,7 @@ body.theme-light .auth-form-shell {
 .faceid-oval.is-aligned {
   transform: translate(-50%, -50%) scale(1.025);
   box-shadow:
-    0 0 0 999px rgba(2, 6, 23, 0.04),
+    0 0 0 999px rgba(2, 6, 23, 0.74),
     0 0 34px color-mix(in srgb, var(--faceid-cue, #38bdf8) 62%, transparent),
     0 0 64px color-mix(in srgb, var(--faceid-cue, #38bdf8) 28%, transparent);
   animation: faceid-lock-pulse 1.15s ease-in-out infinite;
@@ -8883,56 +9206,110 @@ body.theme-light .auth-form-shell {
   display: grid;
   place-items: center;
   align-content: center;
-  gap: 8px;
-  padding: 18px;
+  gap: 10px;
+  padding: 28px 24px;
   text-align: center;
+  background:
+    radial-gradient(circle at top, rgba(56, 189, 248, 0.14), transparent 42%),
+    linear-gradient(180deg, rgba(8, 18, 40, 0.64), rgba(8, 18, 40, 0.2));
 }
 .faceid-placeholder span {
-  font-size: 14px;
-  font-weight: 700;
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
 }
 .faceid-placeholder small {
   max-width: 34ch;
-  color: var(--muted);
-  line-height: 1.5;
+  color: #a9bddb;
+  line-height: 1.6;
+}
+.faceid-feedback-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background:
+    radial-gradient(circle at top left, rgba(56, 189, 248, 0.12), transparent 48%),
+    rgba(8, 18, 40, 0.56);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 .faceid-scan-progress {
   display: grid;
-  gap: 8px;
+  gap: 10px;
+}
+.faceid-progress-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #d7e8ff;
+  font-size: 12px;
+}
+.faceid-progress-top strong {
+  color: #f8fafc;
+  font-size: 15px;
+  font-weight: 800;
 }
 .faceid-scan-progress small {
-  color: #a8c9ef;
+  color: #9db6d8;
   font-size: 12px;
-  text-align: center;
+  text-align: left;
 }
 .faceid-scan-progress-bar {
   width: 100%;
-  height: 8px;
+  height: 10px;
   border-radius: 999px;
   overflow: hidden;
   background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 3px rgba(2, 6, 23, 0.28);
 }
 .faceid-scan-progress-bar span {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, #38bdf8, #22c55e);
-  box-shadow: 0 0 18px rgba(56, 189, 248, 0.32);
+  background: linear-gradient(90deg, #38bdf8, #14b8a6 48%, #84cc16 100%);
+  box-shadow: 0 0 22px rgba(56, 189, 248, 0.3);
   transition: width 180ms ease;
 }
 .faceid-actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
 }
+.faceid-actions .pill,
+.faceid-actions .btn-primary {
+  min-height: 48px;
+  border-radius: 16px;
+  padding: 0 18px;
+}
+.faceid-actions .pill {
+  justify-self: stretch;
+}
 .faceid-expiry {
-  color: var(--muted);
+  color: #8fa9cf;
   font-size: 11px;
+  text-align: right;
 }
 .faceid-camera-help {
   text-align: center;
-  max-width: 32ch;
+  max-width: 36ch;
+  min-height: calc(1.5em * 2);
+  color: #94adcf;
+}
+.faceid-live-hint {
+  min-height: 52px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(96, 165, 250, 0.14);
+  background: rgba(7, 18, 43, 0.62);
+  color: #d9e9ff;
+  font-size: 12px;
+  line-height: 1.55;
+  text-align: left;
+  display: grid;
+  align-content: center;
 }
 @keyframes faceid-lock-pulse {
   0%,
@@ -8947,10 +9324,12 @@ body.theme-light .auth-form-shell {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
   padding: 12px 14px;
   border-radius: 14px;
   border: 1px solid rgba(56, 189, 248, 0.22);
   background: rgba(8, 18, 48, 0.86);
+  overflow-wrap: anywhere;
 }
 .faceid-banner {
   display: flex;
@@ -9077,9 +9456,213 @@ body.transfer-faceid-screen-open #root {
   flex-shrink: 0;
 }
 .faceid-modal-actions {
+  position: relative;
+  z-index: 2;
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+  pointer-events: auto;
+}
+
+@media (min-width: 980px) {
+  .faceid-modal:not(.transfer-faceid-modal) {
+    width: min(500px, calc(100vw - 88px));
+    max-width: 500px;
+    max-height: calc(100vh - 88px);
+    overflow: auto;
+    padding: 12px;
+    gap: 10px;
+    border-radius: 20px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-head {
+    align-items: flex-start;
+    gap: 6px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-head h3 {
+    font-size: 16px;
+    line-height: 1.08;
+    letter-spacing: -0.02em;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-head p {
+    max-width: 36ch;
+    font-size: 11px;
+    line-height: 1.35;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-close {
+    width: 34px;
+    height: 34px;
+    font-size: 15px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-card {
+    display: grid;
+    gap: 8px;
+    padding: 0;
+    border-radius: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-head-copy {
+    min-height: 0;
+    gap: 4px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-head strong {
+    font-size: 15px;
+    line-height: 1.08;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-status-copy {
+    max-width: none;
+    min-height: 0;
+    font-size: 11px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-diagnostic {
+    font-size: 9px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-meta {
+    gap: 6px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-meta-pill {
+    min-height: 26px;
+    padding: 0 8px;
+    font-size: 8px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-device-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    gap: 8px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-camera-select {
+    gap: 4px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-camera-select span {
+    font-size: 10px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-camera-select select {
+    min-height: 40px;
+    padding: 0 12px;
+    border-radius: 14px;
+    font-size: 12px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-device-row .pill {
+    width: auto;
+    min-height: 36px;
+    min-width: 132px;
+    padding: 0 14px;
+    border-radius: 14px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-camera {
+    gap: 6px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-stage {
+    --faceid-stage-width: min(100%, 286px);
+    --faceid-stage-height: 344px;
+    border-radius: 20px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-placeholder {
+    min-height: 344px;
+    padding: 14px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-placeholder span {
+    font-size: 14px;
+    letter-spacing: -0.02em;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-placeholder small {
+    max-width: 30ch;
+    font-size: 11px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-camera-help {
+    max-width: 34ch;
+    margin: 0 auto;
+    text-align: center;
+    font-size: 10px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-feedback-panel {
+    gap: 6px;
+    padding: 8px;
+    border-radius: 12px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-live-hint {
+    min-height: 40px;
+    padding: 8px 10px;
+    font-size: 11px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-scan-progress {
+    gap: 6px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-progress-top {
+    font-size: 10px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-progress-top strong {
+    font-size: 15px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-scan-progress-bar {
+    height: 8px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-scan-progress small {
+    font-size: 10px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-actions .pill,
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-actions .btn-primary {
+    width: 100%;
+    min-height: 38px;
+    border-radius: 12px;
+    font-size: 12px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-actions {
+    justify-content: flex-end;
+    gap: 6px;
+    position: relative;
+    z-index: 3;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-actions .pill,
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-actions .btn-primary {
+    min-height: 36px;
+    border-radius: 12px;
+    padding: 0 12px;
+    pointer-events: auto;
+  }
 }
 
 @media (max-width: 900px) {
@@ -9108,135 +9691,239 @@ body.transfer-faceid-screen-open #root {
 
 @media (max-width: 760px) {
   .faceid-modal-overlay {
-    padding: 12px !important;
+    padding: 8px !important;
     align-items: center;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) {
-    width: min(100%, calc(100vw - 24px)) !important;
+    width: min(100%, calc(100vw - 16px)) !important;
     max-width: 360px !important;
-    max-height: calc(100dvh - 56px) !important;
-    padding: 12px !important;
-    gap: 10px !important;
-    border-radius: 18px !important;
-    overflow: hidden !important;
+    max-height: calc(100dvh - 16px) !important;
+    padding: 10px !important;
+    gap: 8px !important;
+    border-radius: 16px !important;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-head {
     position: relative;
-    align-items: center;
-    gap: 10px;
-    padding-right: 34px;
+    align-items: flex-start;
+    gap: 6px;
+    padding-right: 30px;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-head h3 {
-    font-size: 16px;
+    font-size: 15px;
     line-height: 1.2;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-head p {
-    margin-top: 4px;
-    font-size: 12px;
-    line-height: 1.35;
+    margin-top: 2px;
+    font-size: 11px;
+    line-height: 1.3;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-close {
     position: absolute;
     top: 0;
     right: 0;
-    width: 34px;
-    height: 34px;
+    width: 32px;
+    height: 32px;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-card {
     gap: 8px;
     padding: 10px;
     border-radius: 16px;
+    min-height: 0;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-head {
+    align-items: center;
+    gap: 8px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-head-copy {
+    min-height: 0;
+    gap: 2px;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-head strong {
-    font-size: 13px;
+    font-size: 14px;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-head p,
   .faceid-modal:not(.transfer-faceid-modal) .faceid-diagnostic {
-    font-size: 11px;
-    line-height: 1.35;
+    font-size: 10px;
+    line-height: 1.3;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-status-copy,
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-meta,
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-camera-help,
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-live-hint {
+    display: none;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-device-row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 8px;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
     align-items: end;
   }
 
-  .faceid-modal:not(.transfer-faceid-modal) .faceid-camera-select {
-    min-width: 0;
-  }
-
   .faceid-modal:not(.transfer-faceid-modal) .faceid-camera-select span {
-    font-size: 10px;
+    font-size: 9px;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-camera-select select {
-    min-height: 40px;
-    padding: 9px 10px;
-    font-size: 12px;
+    min-height: 38px;
+    padding: 0 10px;
+    font-size: 11px;
+    border-radius: 14px;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-device-row .pill {
-    min-height: 40px;
-    padding: 0 12px;
-    font-size: 12px;
-    white-space: nowrap;
+    display: none;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-camera {
-    gap: 8px;
-  }
-
-  .faceid-modal:not(.transfer-faceid-modal) .faceid-stage {
-    --faceid-stage-width: min(100%, 248px);
-    --faceid-stage-height: 292px;
-  }
-
-  .faceid-modal:not(.transfer-faceid-modal) .faceid-placeholder {
-    min-height: 292px;
-    padding: 14px;
     gap: 6px;
   }
 
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-stage {
+    --faceid-stage-width: min(100%, 100%);
+    --faceid-stage-height: 248px;
+    border-radius: 22px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-placeholder {
+    min-height: 248px;
+    padding: 16px;
+    gap: 4px;
+  }
+
   .faceid-modal:not(.transfer-faceid-modal) .faceid-placeholder span {
-    font-size: 13px;
+    font-size: 12px;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-placeholder small,
-  .faceid-modal:not(.transfer-faceid-modal) .faceid-camera-help,
   .faceid-modal:not(.transfer-faceid-modal) .faceid-expiry {
+    font-size: 10px;
+    line-height: 1.3;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-feedback-panel {
+    gap: 8px;
+    padding: 10px;
+    border-radius: 14px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-progress-top {
     font-size: 11px;
-    line-height: 1.35;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-progress-top strong {
+    font-size: 13px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-scan-progress {
+    gap: 6px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-scan-progress small {
+    font-size: 10px;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-actions,
   .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-actions {
     display: grid;
-    grid-template-columns: 72px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
     gap: 8px;
     align-items: stretch;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-actions {
+    position: sticky;
+    bottom: 0;
+    padding-top: 8px;
+    padding-bottom: max(2px, env(safe-area-inset-bottom));
+    background:
+      linear-gradient(180deg, rgba(8, 18, 48, 0), rgba(8, 18, 48, 0.96) 28%),
+      linear-gradient(180deg, rgba(8, 18, 48, 0.96), rgba(9, 20, 44, 0.98));
+    margin-top: -2px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-actions .pill {
+    width: 100%;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-actions .pill,
   .faceid-modal:not(.transfer-faceid-modal) .faceid-actions .btn-primary,
   .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-actions .pill,
   .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-actions .btn-primary {
-    min-height: 40px;
+    min-height: 42px;
     margin: 0;
+    border-radius: 14px;
+    font-size: 13px;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-actions .btn-primary,
   .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-actions .btn-primary {
     width: 100%;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-badge {
+    min-height: 30px;
+    padding: 0 10px;
+    font-size: 10px;
+  }
+}
+
+@media (max-width: 760px) and (max-height: 760px) {
+  .faceid-modal:not(.transfer-faceid-modal) {
+    max-height: calc(100dvh - 10px) !important;
+    padding: 8px !important;
+    gap: 6px !important;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-card {
+    gap: 6px;
+    padding: 8px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-stage {
+    --faceid-stage-height: 220px;
+    border-radius: 18px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-placeholder {
+    min-height: 220px;
+    padding: 12px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-feedback-panel {
+    gap: 6px;
+    padding: 8px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-scan-progress {
+    gap: 4px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-actions {
+    gap: 6px;
+    padding-top: 6px;
   }
 }
 .auth-ai-monitor-low {
@@ -9265,14 +9952,16 @@ body.transfer-faceid-screen-open #root {
 }
 .auth-ai-monitor-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
 }
 .auth-ai-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   padding: 4px 10px;
   border-radius: 999px;
   font-size: 12px;
@@ -9296,6 +9985,7 @@ body.transfer-faceid-screen-open #root {
   margin: 0;
   font-size: 13px;
   line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 .auth-ai-signal {
   color: #fef3c7;
@@ -9307,6 +9997,16 @@ body.transfer-faceid-screen-open #root {
   gap: 6px;
   color: var(--muted);
   font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.auth-ai-monitor-compact {
+  gap: 8px;
+}
+.auth-ai-monitor-compact .auth-ai-copy {
+  font-size: 14px;
+}
+.auth-ai-reasons-compact {
+  gap: 7px;
 }
 .auth-terms {
   margin: 0;
@@ -9346,6 +10046,11 @@ body.transfer-faceid-screen-open #root {
   display: flex;
   gap: 12px;
   align-items: center;
+  flex-wrap: wrap;
+}
+.auth-otp-actions > * {
+  flex: 1 1 220px;
+  min-width: 0;
 }
 .auth-otp-actions .pill {
   min-width: 140px;
@@ -9977,10 +10682,11 @@ body.theme-light .mf-menu button.active .mf-ico {
 
 @media (min-width: 1024px) {
   .auth-shell {
-    height: 100vh;
+    height: auto;
     min-height: 100vh;
-    max-height: 100vh;
-    overflow: hidden;
+    max-height: none;
+    overflow-x: hidden;
+    overflow-y: auto;
   }
 }
 
@@ -10764,6 +11470,11 @@ body::before {
   }
   .auth-otp-actions {
     flex-direction: column;
+    align-items: stretch;
+  }
+  .auth-otp-actions > * {
+    flex: 0 0 auto;
+    width: 100%;
   }
   .ai-agent-grid,
   .ai-agent-plan-head {
@@ -18133,6 +18844,25 @@ body:has(.ai-copilot-page) .ai-copilot-avatar-user img {
 
   .transfer-ai-warning-section small {
     display: none !important;
+  }
+
+  .transfer-ai-detail-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .transfer-ai-detail-card {
+    padding: 10px !important;
+  }
+
+  .transfer-ai-detail-head strong {
+    font-size: 12px !important;
+  }
+
+  .transfer-ai-detail-copy,
+  .transfer-ai-detail-foot,
+  .transfer-ai-detail-list,
+  .transfer-ai-signal-chip span {
+    font-size: 10px !important;
   }
 
   .transfer-ai-warning-card .transfer-actions {

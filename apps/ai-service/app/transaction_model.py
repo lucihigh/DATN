@@ -175,6 +175,170 @@ ACCOUNT_PROFILE_THRESHOLDS["PERSONAL_PRIVATE"] = ACCOUNT_PROFILE_THRESHOLDS["PER
 ACCOUNT_PROFILE_THRESHOLDS["BUSINESS_SME"] = ACCOUNT_PROFILE_THRESHOLDS["BUSINESS_SMALL_BUSINESS"]
 
 
+class TransactionAccountProfile(BaseModel):
+    segment: str | None = None
+    category: str | None = None
+    tier: str | None = None
+    status: str | None = None
+    confidence: float | None = None
+
+
+class TransactionTransferContext(BaseModel):
+    channel: str | None = None
+    balance_before: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices("balance_before", "balanceBefore"),
+    )
+    remaining_balance: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices("remaining_balance", "remainingBalance"),
+    )
+    recipient_known: bool | None = Field(
+        default=None,
+        validation_alias=AliasChoices("recipient_known", "recipientKnown"),
+    )
+    rolling_outflow_amount: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices("rolling_outflow_amount", "rollingOutflowAmount"),
+    )
+    face_id_required: bool | None = Field(
+        default=None,
+        validation_alias=AliasChoices("face_id_required", "faceIdRequired"),
+    )
+    session_risk_level: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("session_risk_level", "sessionRiskLevel"),
+    )
+    session_restrict_large_transfers: bool | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "session_restrict_large_transfers",
+            "sessionRestrictLargeTransfers",
+        ),
+    )
+
+
+class TransactionBehaviorSnapshot(BaseModel):
+    failed_tx_24h: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("failed_tx_24h", "failedTx24h"),
+    )
+    velocity_1h: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("velocity_1h", "velocity1h"),
+    )
+    daily_spend_avg_30d: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices("daily_spend_avg_30d", "dailySpendAvg30d"),
+    )
+    today_spend_before: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices("today_spend_before", "todaySpendBefore"),
+    )
+    projected_daily_spend: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices("projected_daily_spend", "projectedDailySpend"),
+    )
+    recent_review_count_30d: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("recent_review_count_30d", "recentReviewCount30d"),
+    )
+    recent_blocked_count_30d: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("recent_blocked_count_30d", "recentBlockedCount30d"),
+    )
+    recent_pending_otp_count_7d: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "recent_pending_otp_count_7d",
+            "recentPendingOtpCount7d",
+        ),
+    )
+    recent_inbound_amount_24h: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "recent_inbound_amount_24h",
+            "recentInboundAmount24h",
+        ),
+    )
+    recent_admin_topup_amount_24h: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "recent_admin_topup_amount_24h",
+            "recentAdminTopUpAmount24h",
+        ),
+    )
+    recent_self_deposit_amount_24h: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "recent_self_deposit_amount_24h",
+            "recentSelfDepositAmount24h",
+        ),
+    )
+    small_probe_count_24h: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("small_probe_count_24h", "smallProbeCount24h"),
+    )
+    small_probe_total_24h: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices("small_probe_total_24h", "smallProbeTotal24h"),
+    )
+    distinct_small_probe_recipients_24h: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "distinct_small_probe_recipients_24h",
+            "distinctSmallProbeRecipients24h",
+        ),
+    )
+    same_recipient_small_probe_count_24h: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "same_recipient_small_probe_count_24h",
+            "sameRecipientSmallProbeCount24h",
+        ),
+    )
+    new_recipient_small_probe_count_24h: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "new_recipient_small_probe_count_24h",
+            "newRecipientSmallProbeCount24h",
+        ),
+    )
+    probe_then_large_risk_score: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "probe_then_large_risk_score",
+            "probeThenLargeRiskScore",
+        ),
+    )
+    rapid_cash_out_risk_score: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "rapid_cash_out_risk_score",
+            "rapidCashOutRiskScore",
+        ),
+    )
+
+
+class TransactionLlmContext(BaseModel):
+    risk_level: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("risk_level", "riskLevel"),
+    )
+    signal_count: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("signal_count", "signalCount"),
+    )
+    signals: list[str] = Field(default_factory=list)
+    rule_tags: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("rule_tags", "ruleTags"),
+    )
+    summary: str | None = None
+    source: str | None = None
+    model: str | None = None
+
+
 class TransactionEvent(BaseModel):
     transaction_event_id: str | None = Field(
         default=None,
@@ -378,9 +542,41 @@ class TransactionEvent(BaseModel):
         default_factory=list,
         validation_alias=AliasChoices("llm_rule_tags", "llmRuleTags"),
     )
+    llm_signals: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("llm_signals", "llmSignals"),
+    )
+    llm_summary: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("llm_summary", "llmSummary"),
+    )
+    llm_source: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("llm_source", "llmSource"),
+    )
+    llm_model: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("llm_model", "llmModel"),
+    )
     session_risk_level: str = Field(
         default="LOW",
         validation_alias=AliasChoices("session_risk_level", "sessionRiskLevel"),
+    )
+    account_profile: TransactionAccountProfile | None = Field(
+        default=None,
+        validation_alias=AliasChoices("account_profile", "accountProfile"),
+    )
+    transfer_context: TransactionTransferContext | None = Field(
+        default=None,
+        validation_alias=AliasChoices("transfer_context", "transferContext"),
+    )
+    behavior_snapshot: TransactionBehaviorSnapshot | None = Field(
+        default=None,
+        validation_alias=AliasChoices("behavior_snapshot", "behaviorSnapshot"),
+    )
+    llm_context: TransactionLlmContext | None = Field(
+        default=None,
+        validation_alias=AliasChoices("llm_context", "llmContext"),
     )
 
 
@@ -509,6 +705,79 @@ def get_account_profile_thresholds(
 
 
 def normalize_transaction_event(event: TransactionEvent) -> TransactionEvent:
+    if event.account_profile is not None:
+        if event.account_profile.segment:
+            event.account_segment = event.account_profile.segment
+        if event.account_profile.category:
+            event.account_category = event.account_profile.category
+        if event.account_profile.tier:
+            event.account_tier = event.account_profile.tier
+        if event.account_profile.status:
+            event.account_profile_status = event.account_profile.status
+        if event.account_profile.confidence is not None:
+            event.account_profile_confidence = float(event.account_profile.confidence)
+
+    if event.transfer_context is not None:
+        if event.transfer_context.channel:
+            event.channel = event.transfer_context.channel
+        if event.transfer_context.balance_before is not None:
+            event.balance_before = float(event.transfer_context.balance_before)
+        if event.transfer_context.remaining_balance is not None:
+            event.remaining_balance = float(event.transfer_context.remaining_balance)
+        if event.transfer_context.recipient_known is not None:
+            event.recipient_known = bool(event.transfer_context.recipient_known)
+        if event.transfer_context.rolling_outflow_amount is not None:
+            event.rolling_outflow_amount = float(event.transfer_context.rolling_outflow_amount)
+        if event.transfer_context.face_id_required is not None:
+            event.face_id_required = bool(event.transfer_context.face_id_required)
+        if event.transfer_context.session_risk_level:
+            event.session_risk_level = event.transfer_context.session_risk_level
+        if event.transfer_context.session_restrict_large_transfers is not None:
+            event.session_restrict_large_transfers = bool(
+                event.transfer_context.session_restrict_large_transfers
+            )
+
+    if event.behavior_snapshot is not None:
+        for attr in [
+            "failed_tx_24h",
+            "velocity_1h",
+            "daily_spend_avg_30d",
+            "today_spend_before",
+            "projected_daily_spend",
+            "recent_review_count_30d",
+            "recent_blocked_count_30d",
+            "recent_pending_otp_count_7d",
+            "recent_inbound_amount_24h",
+            "recent_admin_topup_amount_24h",
+            "recent_self_deposit_amount_24h",
+            "small_probe_count_24h",
+            "small_probe_total_24h",
+            "distinct_small_probe_recipients_24h",
+            "same_recipient_small_probe_count_24h",
+            "new_recipient_small_probe_count_24h",
+            "probe_then_large_risk_score",
+            "rapid_cash_out_risk_score",
+        ]:
+            value = getattr(event.behavior_snapshot, attr)
+            if value is not None:
+                setattr(event, attr, value)
+
+    if event.llm_context is not None:
+        if event.llm_context.risk_level:
+            event.llm_note_risk_level = event.llm_context.risk_level
+        if event.llm_context.signal_count is not None:
+            event.llm_signal_count = int(event.llm_context.signal_count)
+        if event.llm_context.signals:
+            event.llm_signals = list(event.llm_context.signals)
+        if event.llm_context.rule_tags:
+            event.llm_rule_tags = list(event.llm_context.rule_tags)
+        if event.llm_context.summary:
+            event.llm_summary = event.llm_context.summary
+        if event.llm_context.source:
+            event.llm_source = event.llm_context.source
+        if event.llm_context.model:
+            event.llm_model = event.llm_context.model
+
     event.timestamp = _as_utc(event.timestamp) or event.timestamp
     event.currency = (event.currency or "").strip().upper()[:8] or "UNK"
     event.country = _normalize_country(event.country)
@@ -570,6 +839,14 @@ def normalize_transaction_event(event: TransactionEvent) -> TransactionEvent:
         for tag in event.llm_rule_tags
         if str(tag).strip()
     ][:6]
+    event.llm_signals = [
+        str(signal).strip()
+        for signal in event.llm_signals
+        if str(signal).strip()
+    ][:6]
+    event.llm_summary = str(event.llm_summary).strip()[:240] if event.llm_summary else None
+    event.llm_source = str(event.llm_source).strip().lower()[:32] if event.llm_source else None
+    event.llm_model = str(event.llm_model).strip()[:120] if event.llm_model else None
     event.session_risk_level = _normalize_risk_level(event.session_risk_level)
     return event
 
