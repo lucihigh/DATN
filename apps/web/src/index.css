@@ -9324,10 +9324,12 @@ body.theme-light .auth-form-shell {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
   padding: 12px 14px;
   border-radius: 14px;
   border: 1px solid rgba(56, 189, 248, 0.22);
   background: rgba(8, 18, 48, 0.86);
+  overflow-wrap: anywhere;
 }
 .faceid-banner {
   display: flex;
@@ -9899,14 +9901,16 @@ body.transfer-faceid-screen-open #root {
 }
 .auth-ai-monitor-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
 }
 .auth-ai-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   padding: 4px 10px;
   border-radius: 999px;
   font-size: 12px;
@@ -9930,6 +9934,7 @@ body.transfer-faceid-screen-open #root {
   margin: 0;
   font-size: 13px;
   line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 .auth-ai-signal {
   color: #fef3c7;
@@ -9941,6 +9946,16 @@ body.transfer-faceid-screen-open #root {
   gap: 6px;
   color: var(--muted);
   font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.auth-ai-monitor-compact {
+  gap: 8px;
+}
+.auth-ai-monitor-compact .auth-ai-copy {
+  font-size: 14px;
+}
+.auth-ai-reasons-compact {
+  gap: 7px;
 }
 .auth-terms {
   margin: 0;
@@ -9980,6 +9995,10 @@ body.transfer-faceid-screen-open #root {
   display: flex;
   gap: 12px;
   align-items: center;
+  flex-wrap: wrap;
+}
+.auth-otp-actions > * {
+  flex: 1 1 220px;
 }
 .auth-otp-actions .pill {
   min-width: 140px;
@@ -10611,10 +10630,11 @@ body.theme-light .mf-menu button.active .mf-ico {
 
 @media (min-width: 1024px) {
   .auth-shell {
-    height: 100vh;
+    height: auto;
     min-height: 100vh;
-    max-height: 100vh;
-    overflow: hidden;
+    max-height: none;
+    overflow-x: hidden;
+    overflow-y: auto;
   }
 }
 

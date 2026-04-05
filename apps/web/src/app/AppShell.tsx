@@ -12686,8 +12686,12 @@ function AuthShell({
     pendingSessionAlert?.userAgent,
   );
 
-  const renderLoginMonitoring = (monitoring: LoginMonitoring | null) => {
+  const renderLoginMonitoring = (
+    monitoring: LoginMonitoring | null,
+    options?: { compact?: boolean },
+  ) => {
     if (!monitoring) return null;
+    const compact = options?.compact === true;
     const riskLevel = monitoring.riskLevel.toLowerCase();
     const normalizedRisk =
       riskLevel === "high" || riskLevel === "medium" ? riskLevel : "low";
@@ -12723,9 +12727,30 @@ function AuthShell({
       3,
     );
     const timeline = (monitoring.timeline || []).slice(0, 3);
+    const compactHighlights = Array.from(
+      new Set(
+        [
+          monitoring.archetype ? `Pattern: ${monitoring.archetype}` : null,
+          `Confidence ${confidence}%. ${summary}`,
+          monitoring.requireOtp
+            ? `Additional verification is required${
+                monitoring.otpChannel ? ` via ${monitoring.otpChannel}` : ""
+              }.${monitoring.otpReason ? ` ${monitoring.otpReason}` : ""}`
+            : null,
+          nextStep,
+          ...filteredReasons,
+          ...recommendedActions,
+          ...timeline,
+        ].filter((entry): entry is string => Boolean(entry)),
+      ),
+    ).slice(0, 4);
 
     return (
-      <div className={`auth-ai-monitor auth-ai-monitor-${normalizedRisk}`}>
+      <div
+        className={`auth-ai-monitor auth-ai-monitor-${normalizedRisk}${
+          compact ? " auth-ai-monitor-compact" : ""
+        }`}
+      >
         <div className="auth-ai-monitor-head">
           <strong>AI Security Analyst</strong>
           <span className={`auth-ai-badge auth-ai-badge-${normalizedRisk}`}>
@@ -12733,40 +12758,50 @@ function AuthShell({
           </span>
         </div>
         <p className="auth-ai-copy">{headline}</p>
-        {monitoring.archetype ? (
-          <p className="auth-ai-signal">Pattern: {monitoring.archetype}</p>
-        ) : null}
-        <p className="auth-ai-signal">
-          Confidence {confidence}%. {summary}
-        </p>
-        {monitoring.requireOtp && (
-          <p className="auth-ai-signal">
-            Additional verification is required
-            {monitoring.otpChannel ? ` via ${monitoring.otpChannel}` : ""}.
-            {monitoring.otpReason ? ` ${monitoring.otpReason}` : ""}
-          </p>
-        )}
-        <p className="auth-ai-signal">{nextStep}</p>
-        {filteredReasons.length > 0 && (
-          <ul className="auth-ai-reasons">
-            {filteredReasons.map((reason) => (
-              <li key={reason}>{reason}</li>
+        {compact ? (
+          <ul className="auth-ai-reasons auth-ai-reasons-compact">
+            {compactHighlights.map((item: string) => (
+              <li key={item}>{item}</li>
             ))}
           </ul>
-        )}
-        {recommendedActions.length > 0 && (
-          <ul className="auth-ai-reasons">
-            {recommendedActions.map((action) => (
-              <li key={action}>{action}</li>
-            ))}
-          </ul>
-        )}
-        {timeline.length > 0 && (
-          <ul className="auth-ai-reasons">
-            {timeline.map((step) => (
-              <li key={step}>{step}</li>
-            ))}
-          </ul>
+        ) : (
+          <>
+            {monitoring.archetype ? (
+              <p className="auth-ai-signal">Pattern: {monitoring.archetype}</p>
+            ) : null}
+            <p className="auth-ai-signal">
+              Confidence {confidence}%. {summary}
+            </p>
+            {monitoring.requireOtp && (
+              <p className="auth-ai-signal">
+                Additional verification is required
+                {monitoring.otpChannel ? ` via ${monitoring.otpChannel}` : ""}.
+                {monitoring.otpReason ? ` ${monitoring.otpReason}` : ""}
+              </p>
+            )}
+            <p className="auth-ai-signal">{nextStep}</p>
+            {filteredReasons.length > 0 && (
+              <ul className="auth-ai-reasons">
+                {filteredReasons.map((reason) => (
+                  <li key={reason}>{reason}</li>
+                ))}
+              </ul>
+            )}
+            {recommendedActions.length > 0 && (
+              <ul className="auth-ai-reasons">
+                {recommendedActions.map((action) => (
+                  <li key={action}>{action}</li>
+                ))}
+              </ul>
+            )}
+            {timeline.length > 0 && (
+              <ul className="auth-ai-reasons">
+                {timeline.map((step) => (
+                  <li key={step}>{step}</li>
+                ))}
+              </ul>
+            )}
+          </>
         )}
       </div>
     );
@@ -13636,7 +13671,7 @@ function AuthShell({
                     : "Check your messages for the latest code."}
                 </span>
               </label>
-              {renderLoginMonitoring(lastLoginMonitoring)}
+              {renderLoginMonitoring(lastLoginMonitoring, { compact: true })}
               <DeferredSliderCaptcha
                 apiBase={API_BASE}
                 resetKey={signinCaptchaResetKey}
