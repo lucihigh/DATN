@@ -9702,7 +9702,9 @@ body.transfer-faceid-screen-open #root {
     padding: 10px !important;
     gap: 8px !important;
     border-radius: 16px !important;
-    overflow: hidden !important;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-head {
@@ -9739,6 +9741,7 @@ body.transfer-faceid-screen-open #root {
     gap: 8px;
     padding: 10px;
     border-radius: 16px;
+    min-height: 0;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-head {
@@ -9846,6 +9849,17 @@ body.transfer-faceid-screen-open #root {
     align-items: stretch;
   }
 
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-actions {
+    position: sticky;
+    bottom: 0;
+    padding-top: 8px;
+    padding-bottom: max(2px, env(safe-area-inset-bottom));
+    background:
+      linear-gradient(180deg, rgba(8, 18, 48, 0), rgba(8, 18, 48, 0.96) 28%),
+      linear-gradient(180deg, rgba(8, 18, 48, 0.96), rgba(9, 20, 44, 0.98));
+    margin-top: -2px;
+  }
+
   .faceid-modal:not(.transfer-faceid-modal) .faceid-actions {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -9873,6 +9887,43 @@ body.transfer-faceid-screen-open #root {
     min-height: 30px;
     padding: 0 10px;
     font-size: 10px;
+  }
+}
+
+@media (max-width: 760px) and (max-height: 760px) {
+  .faceid-modal:not(.transfer-faceid-modal) {
+    max-height: calc(100dvh - 10px) !important;
+    padding: 8px !important;
+    gap: 6px !important;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-card {
+    gap: 6px;
+    padding: 8px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-stage {
+    --faceid-stage-height: 220px;
+    border-radius: 18px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-placeholder {
+    min-height: 220px;
+    padding: 12px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-feedback-panel {
+    gap: 6px;
+    padding: 8px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-scan-progress {
+    gap: 4px;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-actions {
+    gap: 6px;
+    padding-top: 6px;
   }
 }
 .auth-ai-monitor-low {
@@ -9999,6 +10050,7 @@ body.transfer-faceid-screen-open #root {
 }
 .auth-otp-actions > * {
   flex: 1 1 220px;
+  min-width: 0;
 }
 .auth-otp-actions .pill {
   min-width: 140px;
@@ -11418,6 +11470,11 @@ body::before {
   }
   .auth-otp-actions {
     flex-direction: column;
+    align-items: stretch;
+  }
+  .auth-otp-actions > * {
+    flex: 0 0 auto;
+    width: 100%;
   }
   .ai-agent-grid,
   .ai-agent-plan-head {

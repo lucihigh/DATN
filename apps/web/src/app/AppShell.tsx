@@ -12518,6 +12518,8 @@ function AuthShell({
   const [signupCaptchaResetKey, setSignupCaptchaResetKey] = useState(0);
   const [signupFaceResetKey, setSignupFaceResetKey] = useState(0);
   const [forgotCaptchaResetKey, setForgotCaptchaResetKey] = useState(0);
+  const [loginMonitoringPopupOpen, setLoginMonitoringPopupOpen] =
+    useState(false);
   const signupPasswordStrength = getPasswordStrength(signupForm.password);
   const forgotPasswordStrength = getPasswordStrength(forgotNewPassword);
 
@@ -12590,6 +12592,24 @@ function AuthShell({
       resetSignupFaceEnrollment();
     }
   }, [mode]);
+
+  const visibleLoginMonitoring =
+    lastLoginMonitoring &&
+    (((lastLoginMonitoring.riskLevel || "").toLowerCase() !== "low" &&
+      ["high", "medium"].includes(
+        (lastLoginMonitoring.riskLevel || "").toLowerCase(),
+      )) ||
+      lastLoginMonitoring.requireOtp)
+      ? lastLoginMonitoring
+      : null;
+
+  useEffect(() => {
+    if (visibleLoginMonitoring && (mode === "signin" || mode === "signinOtp")) {
+      setLoginMonitoringPopupOpen(true);
+      return;
+    }
+    setLoginMonitoringPopupOpen(false);
+  }, [mode, visibleLoginMonitoring]);
 
   const validateSignupBeforeFaceScan = () => {
     const {
@@ -12686,19 +12706,14 @@ function AuthShell({
     pendingSessionAlert?.userAgent,
   );
 
-  const renderLoginMonitoring = (
-    monitoring: LoginMonitoring | null,
-    options?: { compact?: boolean },
-  ) => {
+  const renderLoginMonitoringPopup = (monitoring: LoginMonitoring | null) => {
     if (!monitoring) return null;
-    const compact = options?.compact === true;
-    const riskLevel = monitoring.riskLevel.toLowerCase();
+    const riskLevel = (monitoring.riskLevel || "").toLowerCase();
     const normalizedRisk =
       riskLevel === "high" || riskLevel === "medium" ? riskLevel : "low";
-    const filteredReasons = monitoring.reasons
-      .filter((reason) => reason !== "AI monitoring unavailable")
-      .slice(0, 3);
     if (normalizedRisk === "low" && !monitoring.requireOtp) return null;
+
+    const tone = normalizedRisk === "high" ? "blocked" : "warning";
     const riskLabel =
       normalizedRisk === "high"
         ? "High risk"
@@ -12722,88 +12737,120 @@ function AuthShell({
       (monitoring.requireOtp
         ? "Complete the verification challenge before access is granted."
         : "Review the signals and continue only if the activity is yours.");
-    const recommendedActions = (monitoring.recommendedActions || []).slice(
-      0,
-      3,
-    );
+    const reasons = monitoring.reasons
+      .filter((reason) => reason !== "AI monitoring unavailable")
+      .slice(0, 4);
+    const actions = (monitoring.recommendedActions || []).slice(0, 4);
     const timeline = (monitoring.timeline || []).slice(0, 3);
-    const compactHighlights = Array.from(
-      new Set(
-        [
-          monitoring.archetype ? `Pattern: ${monitoring.archetype}` : null,
-          `Confidence ${confidence}%. ${summary}`,
-          monitoring.requireOtp
-            ? `Additional verification is required${
-                monitoring.otpChannel ? ` via ${monitoring.otpChannel}` : ""
-              }.${monitoring.otpReason ? ` ${monitoring.otpReason}` : ""}`
-            : null,
-          nextStep,
-          ...filteredReasons,
-          ...recommendedActions,
-          ...timeline,
-        ].filter((entry): entry is string => Boolean(entry)),
-      ),
-    ).slice(0, 4);
+    const channelLabel = monitoring.otpChannel
+      ? monitoring.otpChannel
+      : mode === "signinOtp"
+        ? "Email verification"
+        : "Credential review";
+    const continueLabel =
+      mode === "signinOtp" ? "Continue to verification" : "Continue sign-in";
 
-    return (
+    return createPortal(
       <div
-        className={`auth-ai-monitor auth-ai-monitor-${normalizedRisk}${
-          compact ? " auth-ai-monitor-compact" : ""
-        }`}
+        className="transfer-ai-warning-overlay"
+        onClick={() => setLoginMonitoringPopupOpen(false)}
       >
-        <div className="auth-ai-monitor-head">
-          <strong>AI Security Analyst</strong>
-          <span className={`auth-ai-badge auth-ai-badge-${normalizedRisk}`}>
-            {riskLabel}
-          </span>
+        <div
+          className={`transfer-ai-warning-card ${tone}`}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="transfer-ai-warning-head">
+            <div>
+              <span className="transfer-ai-warning-kicker">
+                AI sign-in guard
+              </span>
+              <h4>{headline}</h4>
+              <p>{summary}</p>
+            </div>
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={() => setLoginMonitoringPopupOpen(false)}
+              aria-label="Close AI sign-in warning"
+            >
+              ×
+            </button>
+          </div>
+          <div className="transfer-ai-warning-body">
+            <div className="transfer-ai-warning-summary">
+              <div>
+                <span>Risk</span>
+                <strong>{riskLabel}</strong>
+              </div>
+              <div>
+                <span>Confidence</span>
+                <strong>{confidence}%</strong>
+              </div>
+              <div>
+                <span>Pattern</span>
+                <strong>{monitoring.archetype || "New device check"}</strong>
+              </div>
+              <div>
+                <span>Next step</span>
+                <strong>{channelLabel}</strong>
+              </div>
+            </div>
+            <div className="transfer-ai-warning-grid">
+              <div className="transfer-ai-warning-section">
+                <span className="transfer-ai-warning-section-label">
+                  Why this popped up
+                </span>
+                <p>{nextStep}</p>
+                {reasons.length > 0 ? (
+                  <ul>
+                    {reasons.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+              <div className="transfer-ai-warning-section">
+                <span className="transfer-ai-warning-section-label">
+                  Before continuing
+                </span>
+                <ul>
+                  {(actions.length > 0 ? actions : timeline).map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                  {monitoring.requireOtp ? (
+                    <li>
+                      Finish the {monitoring.otpChannel || "email"} verification
+                      in this session.
+                    </li>
+                  ) : null}
+                </ul>
+                {monitoring.otpReason ? (
+                  <small>{monitoring.otpReason}</small>
+                ) : monitoring.archetype ? (
+                  <small>Pattern: {monitoring.archetype}</small>
+                ) : null}
+              </div>
+            </div>
+          </div>
+          <div className="transfer-actions">
+            <button
+              type="button"
+              className="pill"
+              onClick={() => setLoginMonitoringPopupOpen(false)}
+            >
+              Review details
+            </button>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => setLoginMonitoringPopupOpen(false)}
+            >
+              {continueLabel}
+            </button>
+          </div>
         </div>
-        <p className="auth-ai-copy">{headline}</p>
-        {compact ? (
-          <ul className="auth-ai-reasons auth-ai-reasons-compact">
-            {compactHighlights.map((item: string) => (
-              <li key={item}>{item}</li>
-            ))}
-          </ul>
-        ) : (
-          <>
-            {monitoring.archetype ? (
-              <p className="auth-ai-signal">Pattern: {monitoring.archetype}</p>
-            ) : null}
-            <p className="auth-ai-signal">
-              Confidence {confidence}%. {summary}
-            </p>
-            {monitoring.requireOtp && (
-              <p className="auth-ai-signal">
-                Additional verification is required
-                {monitoring.otpChannel ? ` via ${monitoring.otpChannel}` : ""}.
-                {monitoring.otpReason ? ` ${monitoring.otpReason}` : ""}
-              </p>
-            )}
-            <p className="auth-ai-signal">{nextStep}</p>
-            {filteredReasons.length > 0 && (
-              <ul className="auth-ai-reasons">
-                {filteredReasons.map((reason) => (
-                  <li key={reason}>{reason}</li>
-                ))}
-              </ul>
-            )}
-            {recommendedActions.length > 0 && (
-              <ul className="auth-ai-reasons">
-                {recommendedActions.map((action) => (
-                  <li key={action}>{action}</li>
-                ))}
-              </ul>
-            )}
-            {timeline.length > 0 && (
-              <ul className="auth-ai-reasons">
-                {timeline.map((step) => (
-                  <li key={step}>{step}</li>
-                ))}
-              </ul>
-            )}
-          </>
-        )}
-      </div>
+      </div>,
+      document.body,
     );
   };
 
@@ -13520,299 +13567,54 @@ function AuthShell({
   );
 
   return (
-    <div className={mode ? "auth-shell" : "auth-shell auth-shell-hero"}>
-      <div
-        className={
-          mode ? "auth-card-panel" : "auth-card-panel auth-card-panel-hero"
-        }
-      >
-        {!mode && renderChoice()}
+    <>
+      {loginMonitoringPopupOpen &&
+      visibleLoginMonitoring &&
+      typeof document !== "undefined"
+        ? renderLoginMonitoringPopup(visibleLoginMonitoring)
+        : null}
+      <div className={mode ? "auth-shell" : "auth-shell auth-shell-hero"}>
+        <div
+          className={
+            mode ? "auth-card-panel" : "auth-card-panel auth-card-panel-hero"
+          }
+        >
+          {!mode && renderChoice()}
 
-        {mode === "signin" && (
-          <div className="auth-form-shell">
-            <form className="auth-form-modern" onSubmit={handleSignIn}>
-              <h2>Sign In</h2>
-              <p className="muted">
-                Welcome back! Enter your credentials to access FPIPay.
-              </p>
-              <label className="auth-label">
-                Email Address
-                <input
-                  type="email"
-                  value={signinForm.email}
-                  onChange={(e) => {
-                    clearLoginMonitoring();
-                    setSigninForm({ ...signinForm, email: e.target.value });
-                  }}
-                  placeholder="Enter your email"
-                  required
-                />
-              </label>
-              <label className="auth-label">
-                Password
-                <div className="password-wrap">
-                  <input
-                    type={showPassword ? "text" : "password"}
-                    value={signinForm.password}
-                    onChange={(e) => {
-                      clearLoginMonitoring();
-                      setSigninForm({
-                        ...signinForm,
-                        password: e.target.value,
-                      });
-                    }}
-                    placeholder="Enter your password"
-                    required
-                  />
-                  <button
-                    type="button"
-                    className="eye"
-                    onClick={() => setShowPassword((s) => !s)}
-                    aria-label="Toggle password"
-                  >
-                    {showPassword ? "Hide" : "Show"}
-                  </button>
-                </div>
-              </label>
-              <div className="auth-row">
-                <label className="auth-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={signinRemember}
-                    onChange={(e) => {
-                      const nextValue = e.target.checked;
-                      setSigninRemember(nextValue);
-                      writeStoredSaveLoginPreference(nextValue);
-                    }}
-                  />{" "}
-                  Remember me
-                </label>
-                <a
-                  href="#"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    setMode("forgot");
-                  }}
-                  className="muted"
-                >
-                  Forgot password
-                </a>
-              </div>
-              <DeferredSliderCaptcha
-                apiBase={API_BASE}
-                resetKey={signinCaptchaResetKey}
-                disabled={authBusy}
-                onChange={setSigninCaptcha}
-              />
-              {renderLoginMonitoring(lastLoginMonitoring)}
-              <button
-                type="submit"
-                className="btn-primary auth-submit"
-                disabled={authBusy}
-              >
-                {authBusy ? "Signing in..." : "Sign In"}
-              </button>
-              <p className="auth-switch">
-                Don&apos;t have an account?{" "}
-                <button
-                  type="button"
-                  className="link-btn"
-                  onClick={() => setMode("signup")}
-                >
-                  Sign Up
-                </button>
-                <span className="muted"> / </span>
-                <button
-                  type="button"
-                  className="link-btn"
-                  onClick={() => setMode(null)}
-                >
-                  Back
-                </button>
-              </p>
-            </form>
-          </div>
-        )}
-        {mode === "signinOtp" && (
-          <div className="auth-form-shell">
-            <form className="auth-form-modern" onSubmit={handleVerifyLoginOtp}>
-              <h2>Verify Sign In</h2>
-              <p className="muted">
-                Enter the 6-digit code sent to{" "}
-                <strong>{loginOtpDestination}</strong>.
-              </p>
-              <label className="auth-label">
-                Verification Code
-                <input
-                  inputMode="numeric"
-                  maxLength={6}
-                  value={loginOtpInput}
-                  onChange={(e) =>
-                    setLoginOtpInput(
-                      e.target.value.replace(/\D/g, "").slice(0, 6),
-                    )
-                  }
-                  placeholder="Enter 6-digit OTP"
-                  required
-                />
-                <span className="muted" style={{ fontSize: 12 }}>
-                  {loginOtpAvailableInSeconds > 0
-                    ? `This new-device sign-in can be verified in ${loginOtpAvailableInSeconds}s.`
-                    : null}
-                </span>
-                <span className="muted" style={{ fontSize: 12 }}>
-                  {loginOtpExpiresAt
-                    ? `Code expires at ${new Date(
-                        loginOtpExpiresAt,
-                      ).toLocaleTimeString("en-US", {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}`
-                    : "Check your messages for the latest code."}
-                </span>
-              </label>
-              {renderLoginMonitoring(lastLoginMonitoring, { compact: true })}
-              <DeferredSliderCaptcha
-                apiBase={API_BASE}
-                resetKey={signinCaptchaResetKey}
-                disabled={authBusy}
-                onChange={setSigninCaptcha}
-              />
-              <div className="auth-otp-actions">
-                <button
-                  type="button"
-                  className="pill"
-                  disabled={authBusy || loginOtpCooldownSeconds > 0}
-                  onClick={() => void resendLoginOtp()}
-                >
-                  {loginOtpCooldownSeconds > 0
-                    ? `Resend in ${loginOtpCooldownSeconds}s`
-                    : "Resend OTP"}
-                </button>
-                <button
-                  type="submit"
-                  className="btn-primary auth-submit"
-                  disabled={authBusy || loginOtpAvailableInSeconds > 0}
-                >
-                  {authBusy ? "Verifying..." : "Verify & Sign In"}
-                </button>
-              </div>
-              <p className="auth-switch">
-                <button
-                  type="button"
-                  className="link-btn"
-                  onClick={() => setMode("signin")}
-                >
-                  Back to credentials
-                </button>
-              </p>
-            </form>
-          </div>
-        )}
-        {mode === "signup" && (
-          <div className="auth-form-shell">
-            <form
-              className="auth-form-modern auth-form-signup"
-              onSubmit={handleSignUp}
-            >
-              <h2>Sign Up</h2>
-              <p className="muted">
-                Create your FPIPay account to start managing finances smartly.
-              </p>
-              <div className="grid-signup-top">
-                <label className="auth-label">
-                  Full Name
-                  <input
-                    value={signupForm.fullName}
-                    onChange={(e) =>
-                      setSignupForm({ ...signupForm, fullName: e.target.value })
-                    }
-                    placeholder="Enter your full name"
-                    required
-                  />
-                </label>
-                <label className="auth-label">
-                  Username
-                  <input
-                    value={signupForm.username}
-                    onChange={(e) =>
-                      setSignupForm({ ...signupForm, username: e.target.value })
-                    }
-                    placeholder="Enter your username"
-                    required
-                  />
-                </label>
-                <label className="auth-label">
-                  Phone Number
-                  <input
-                    value={signupForm.phone}
-                    onChange={(e) =>
-                      setSignupForm({ ...signupForm, phone: e.target.value })
-                    }
-                    placeholder="Enter your phone number"
-                    required
-                  />
-                </label>
-              </div>
-              <div className="grid-signup-top">
-                <label className="auth-label">
-                  Date of Birth
-                  <input
-                    type="date"
-                    value={signupForm.dob}
-                    onChange={(e) =>
-                      setSignupForm({ ...signupForm, dob: e.target.value })
-                    }
-                    placeholder="Enter your date of birth"
-                    required
-                  />
-                </label>
+          {mode === "signin" && (
+            <div className="auth-form-shell">
+              <form className="auth-form-modern" onSubmit={handleSignIn}>
+                <h2>Sign In</h2>
+                <p className="muted">
+                  Welcome back! Enter your credentials to access FPIPay.
+                </p>
                 <label className="auth-label">
                   Email Address
                   <input
                     type="email"
-                    value={signupForm.email}
-                    onChange={(e) =>
-                      setSignupForm({ ...signupForm, email: e.target.value })
-                    }
+                    value={signinForm.email}
+                    onChange={(e) => {
+                      clearLoginMonitoring();
+                      setSigninForm({ ...signinForm, email: e.target.value });
+                    }}
                     placeholder="Enter your email"
                     required
                   />
                 </label>
                 <label className="auth-label">
-                  Address
-                  <input
-                    value={signupForm.address}
-                    onChange={(e) =>
-                      setSignupForm({ ...signupForm, address: e.target.value })
-                    }
-                    placeholder="Enter your address"
-                    required
-                  />
-                </label>
-              </div>
-              <div className="grid-signup-password">
-                <label className="auth-label">
                   Password
                   <div className="password-wrap">
                     <input
                       type={showPassword ? "text" : "password"}
-                      className={
-                        signupForm.password &&
-                        !signupPasswordStrength.meetsPolicy
-                          ? "input-invalid"
-                          : undefined
-                      }
-                      value={signupForm.password}
-                      onChange={(e) =>
-                        setSignupForm({
-                          ...signupForm,
+                      value={signinForm.password}
+                      onChange={(e) => {
+                        clearLoginMonitoring();
+                        setSigninForm({
+                          ...signinForm,
                           password: e.target.value,
-                        })
-                      }
+                        });
+                      }}
                       placeholder="Enter your password"
-                      autoComplete="new-password"
-                      minLength={12}
                       required
                     />
                     <button
@@ -13825,392 +13627,661 @@ function AuthShell({
                     </button>
                   </div>
                 </label>
-                <label className="auth-label">
-                  Confirm Password
-                  <input
-                    type={showPassword ? "text" : "password"}
-                    value={signupForm.confirm}
-                    onChange={(e) =>
-                      setSignupForm({ ...signupForm, confirm: e.target.value })
-                    }
-                    placeholder="Confirm your password"
-                    autoComplete="new-password"
-                    required
-                  />
-                </label>
-                <div className="auth-strength-slot">
-                  {renderPasswordStrength(signupPasswordStrength)}
+                <div className="auth-row">
+                  <label className="auth-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={signinRemember}
+                      onChange={(e) => {
+                        const nextValue = e.target.checked;
+                        setSigninRemember(nextValue);
+                        writeStoredSaveLoginPreference(nextValue);
+                      }}
+                    />{" "}
+                    Remember me
+                  </label>
+                  <a
+                    href="#"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      setMode("forgot");
+                    }}
+                    className="muted"
+                  >
+                    Forgot password
+                  </a>
                 </div>
-              </div>
-              <div className="auth-terms-row auth-span-two">
-                <label className="auth-checkbox">
+                <DeferredSliderCaptcha
+                  apiBase={API_BASE}
+                  resetKey={signinCaptchaResetKey}
+                  disabled={authBusy}
+                  onChange={setSigninCaptcha}
+                />
+                <button
+                  type="submit"
+                  className="btn-primary auth-submit"
+                  disabled={authBusy}
+                >
+                  {authBusy ? "Signing in..." : "Sign In"}
+                </button>
+                <p className="auth-switch">
+                  Don&apos;t have an account?{" "}
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => setMode("signup")}
+                  >
+                    Sign Up
+                  </button>
+                  <span className="muted"> / </span>
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => setMode(null)}
+                  >
+                    Back
+                  </button>
+                </p>
+              </form>
+            </div>
+          )}
+          {mode === "signinOtp" && (
+            <div className="auth-form-shell">
+              <form
+                className="auth-form-modern"
+                onSubmit={handleVerifyLoginOtp}
+              >
+                <h2>Verify Sign In</h2>
+                <p className="muted">
+                  Enter the 6-digit code sent to{" "}
+                  <strong>{loginOtpDestination}</strong>.
+                </p>
+                <label className="auth-label">
+                  Verification Code
                   <input
-                    type="checkbox"
-                    checked={signupForm.agree}
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={loginOtpInput}
                     onChange={(e) =>
-                      setSignupForm({ ...signupForm, agree: e.target.checked })
+                      setLoginOtpInput(
+                        e.target.value.replace(/\D/g, "").slice(0, 6),
+                      )
                     }
+                    placeholder="Enter 6-digit OTP"
                     required
                   />
-                  <span>I agree to</span>
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    {loginOtpAvailableInSeconds > 0
+                      ? `This new-device sign-in can be verified in ${loginOtpAvailableInSeconds}s.`
+                      : null}
+                  </span>
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    {loginOtpExpiresAt
+                      ? `Code expires at ${new Date(
+                          loginOtpExpiresAt,
+                        ).toLocaleTimeString("en-US", {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}`
+                      : "Check your messages for the latest code."}
+                  </span>
                 </label>
+                <DeferredSliderCaptcha
+                  apiBase={API_BASE}
+                  resetKey={signinCaptchaResetKey}
+                  disabled={authBusy}
+                  onChange={setSigninCaptcha}
+                />
+                <div className="auth-otp-actions">
+                  <button
+                    type="button"
+                    className="pill"
+                    disabled={authBusy || loginOtpCooldownSeconds > 0}
+                    onClick={() => void resendLoginOtp()}
+                  >
+                    {loginOtpCooldownSeconds > 0
+                      ? `Resend in ${loginOtpCooldownSeconds}s`
+                      : "Resend OTP"}
+                  </button>
+                  <button
+                    type="submit"
+                    className="btn-primary auth-submit"
+                    disabled={authBusy || loginOtpAvailableInSeconds > 0}
+                  >
+                    {authBusy ? "Verifying..." : "Verify & Sign In"}
+                  </button>
+                </div>
+                <p className="auth-switch">
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => setMode("signin")}
+                  >
+                    Back to credentials
+                  </button>
+                </p>
+              </form>
+            </div>
+          )}
+          {mode === "signup" && (
+            <div className="auth-form-shell">
+              <form
+                className="auth-form-modern auth-form-signup"
+                onSubmit={handleSignUp}
+              >
+                <h2>Sign Up</h2>
+                <p className="muted">
+                  Create your FPIPay account to start managing finances smartly.
+                </p>
+                <div className="grid-signup-top">
+                  <label className="auth-label">
+                    Full Name
+                    <input
+                      value={signupForm.fullName}
+                      onChange={(e) =>
+                        setSignupForm({
+                          ...signupForm,
+                          fullName: e.target.value,
+                        })
+                      }
+                      placeholder="Enter your full name"
+                      required
+                    />
+                  </label>
+                  <label className="auth-label">
+                    Username
+                    <input
+                      value={signupForm.username}
+                      onChange={(e) =>
+                        setSignupForm({
+                          ...signupForm,
+                          username: e.target.value,
+                        })
+                      }
+                      placeholder="Enter your username"
+                      required
+                    />
+                  </label>
+                  <label className="auth-label">
+                    Phone Number
+                    <input
+                      value={signupForm.phone}
+                      onChange={(e) =>
+                        setSignupForm({ ...signupForm, phone: e.target.value })
+                      }
+                      placeholder="Enter your phone number"
+                      required
+                    />
+                  </label>
+                </div>
+                <div className="grid-signup-top">
+                  <label className="auth-label">
+                    Date of Birth
+                    <input
+                      type="date"
+                      value={signupForm.dob}
+                      onChange={(e) =>
+                        setSignupForm({ ...signupForm, dob: e.target.value })
+                      }
+                      placeholder="Enter your date of birth"
+                      required
+                    />
+                  </label>
+                  <label className="auth-label">
+                    Email Address
+                    <input
+                      type="email"
+                      value={signupForm.email}
+                      onChange={(e) =>
+                        setSignupForm({ ...signupForm, email: e.target.value })
+                      }
+                      placeholder="Enter your email"
+                      required
+                    />
+                  </label>
+                  <label className="auth-label">
+                    Address
+                    <input
+                      value={signupForm.address}
+                      onChange={(e) =>
+                        setSignupForm({
+                          ...signupForm,
+                          address: e.target.value,
+                        })
+                      }
+                      placeholder="Enter your address"
+                      required
+                    />
+                  </label>
+                </div>
+                <div className="grid-signup-password">
+                  <label className="auth-label">
+                    Password
+                    <div className="password-wrap">
+                      <input
+                        type={showPassword ? "text" : "password"}
+                        className={
+                          signupForm.password &&
+                          !signupPasswordStrength.meetsPolicy
+                            ? "input-invalid"
+                            : undefined
+                        }
+                        value={signupForm.password}
+                        onChange={(e) =>
+                          setSignupForm({
+                            ...signupForm,
+                            password: e.target.value,
+                          })
+                        }
+                        placeholder="Enter your password"
+                        autoComplete="new-password"
+                        minLength={12}
+                        required
+                      />
+                      <button
+                        type="button"
+                        className="eye"
+                        onClick={() => setShowPassword((s) => !s)}
+                        aria-label="Toggle password"
+                      >
+                        {showPassword ? "Hide" : "Show"}
+                      </button>
+                    </div>
+                  </label>
+                  <label className="auth-label">
+                    Confirm Password
+                    <input
+                      type={showPassword ? "text" : "password"}
+                      value={signupForm.confirm}
+                      onChange={(e) =>
+                        setSignupForm({
+                          ...signupForm,
+                          confirm: e.target.value,
+                        })
+                      }
+                      placeholder="Confirm your password"
+                      autoComplete="new-password"
+                      required
+                    />
+                  </label>
+                  <div className="auth-strength-slot">
+                    {renderPasswordStrength(signupPasswordStrength)}
+                  </div>
+                </div>
+                <div className="auth-terms-row auth-span-two">
+                  <label className="auth-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={signupForm.agree}
+                      onChange={(e) =>
+                        setSignupForm({
+                          ...signupForm,
+                          agree: e.target.checked,
+                        })
+                      }
+                      required
+                    />
+                    <span>I agree to</span>
+                  </label>
+                  <button
+                    type="button"
+                    className="auth-terms-trigger"
+                    onClick={() => setTermsOpen(true)}
+                  >
+                    terms & privacy
+                  </button>
+                </div>
+                <div className="auth-span-two">
+                  <DeferredSliderCaptcha
+                    apiBase={API_BASE}
+                    resetKey={signupCaptchaResetKey}
+                    disabled={authBusy}
+                    onChange={setSignupCaptcha}
+                  />
+                </div>
                 <button
-                  type="button"
-                  className="auth-terms-trigger"
-                  onClick={() => setTermsOpen(true)}
+                  type="submit"
+                  className="btn-primary auth-submit auth-span-two"
+                  disabled={authBusy}
                 >
-                  terms & privacy
+                  {authBusy ? "Creating..." : "Create Account"}
                 </button>
-              </div>
-              <div className="auth-span-two">
+                <p className="auth-switch auth-span-two">
+                  Already have an account?{" "}
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => setMode("signin")}
+                  >
+                    Sign In
+                  </button>
+                  <span className="muted"> / </span>
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => setMode(null)}
+                  >
+                    Back
+                  </button>
+                </p>
+              </form>
+            </div>
+          )}
+          {signupFaceModalOpen && typeof document !== "undefined"
+            ? createPortal(
+                <div
+                  className="faceid-modal-overlay"
+                  onClick={() => closeSignupFaceModal()}
+                >
+                  <div
+                    className="faceid-modal"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <div className="faceid-modal-head">
+                      <div>
+                        <h3>Create Account with FaceID</h3>
+                        <p>
+                          Complete one 5-second face video to finish your
+                          account protection setup before we send the signup
+                          code.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className="faceid-modal-close"
+                        onClick={() => closeSignupFaceModal()}
+                        aria-label="Close signup FaceID popup"
+                      >
+                        X
+                      </button>
+                    </div>
+                    <DeferredFaceIdCapture
+                      apiBase={API_BASE}
+                      resetKey={signupFaceResetKey}
+                      disabled={authBusy}
+                      onChange={setSignupFaceEnrollment}
+                    />
+                    <div className="faceid-modal-actions">
+                      <button
+                        type="button"
+                        className="pill"
+                        disabled={authBusy}
+                        onClick={() => resetSignupFaceEnrollment()}
+                      >
+                        Retry
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        disabled={authBusy || !signupFaceEnrollment}
+                        onClick={() => void submitSignupOtpRequest()}
+                      >
+                        {authBusy ? "Preparing account..." : "Continue Signup"}
+                      </button>
+                    </div>
+                  </div>
+                </div>,
+                document.body,
+              )
+            : null}
+          {mode === "signupOtp" && (
+            <div className="auth-form-shell">
+              <form
+                className="auth-form-modern"
+                onSubmit={handleVerifyRegisterOtp}
+              >
+                <h2>Verify Email</h2>
+                <p className="muted">
+                  Enter the 6-digit code sent to{" "}
+                  <strong>{signupOtpDestination}</strong> to activate your
+                  account.
+                </p>
+                <label className="auth-label">
+                  Verification Code
+                  <input
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={signupOtpInput}
+                    onChange={(e) =>
+                      setSignupOtpInput(
+                        e.target.value.replace(/\D/g, "").slice(0, 6),
+                      )
+                    }
+                    placeholder="Enter 6-digit OTP"
+                    required
+                  />
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    {signupOtpExpiresAt
+                      ? `Code expires at ${new Date(
+                          signupOtpExpiresAt,
+                        ).toLocaleTimeString("en-US", {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}`
+                      : "Check your inbox for the latest code."}
+                  </span>
+                </label>
                 <DeferredSliderCaptcha
                   apiBase={API_BASE}
                   resetKey={signupCaptchaResetKey}
                   disabled={authBusy}
                   onChange={setSignupCaptcha}
                 />
-              </div>
-              <button
-                type="submit"
-                className="btn-primary auth-submit auth-span-two"
-                disabled={authBusy}
-              >
-                {authBusy ? "Creating..." : "Create Account"}
-              </button>
-              <p className="auth-switch auth-span-two">
-                Already have an account?{" "}
-                <button
-                  type="button"
-                  className="link-btn"
-                  onClick={() => setMode("signin")}
-                >
-                  Sign In
-                </button>
-                <span className="muted"> / </span>
-                <button
-                  type="button"
-                  className="link-btn"
-                  onClick={() => setMode(null)}
-                >
-                  Back
-                </button>
-              </p>
-            </form>
-          </div>
-        )}
-        {signupFaceModalOpen && typeof document !== "undefined"
-          ? createPortal(
-              <div
-                className="faceid-modal-overlay"
-                onClick={() => closeSignupFaceModal()}
-              >
-                <div
-                  className="faceid-modal"
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  <div className="faceid-modal-head">
-                    <div>
-                      <h3>Create Account with FaceID</h3>
-                      <p>
-                        Complete one 5-second face video to finish your account
-                        protection setup before we send the signup code.
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      className="faceid-modal-close"
-                      onClick={() => closeSignupFaceModal()}
-                      aria-label="Close signup FaceID popup"
-                    >
-                      X
-                    </button>
-                  </div>
-                  <DeferredFaceIdCapture
-                    apiBase={API_BASE}
-                    resetKey={signupFaceResetKey}
+                <div className="auth-otp-actions">
+                  <button
+                    type="button"
+                    className="pill"
+                    disabled={authBusy || signupOtpCooldownSeconds > 0}
+                    onClick={() => void resendRegisterOtp()}
+                  >
+                    {signupOtpCooldownSeconds > 0
+                      ? `Resend in ${signupOtpCooldownSeconds}s`
+                      : "Resend OTP"}
+                  </button>
+                  <button
+                    type="submit"
+                    className="btn-primary auth-submit"
                     disabled={authBusy}
-                    onChange={setSignupFaceEnrollment}
-                  />
-                  <div className="faceid-modal-actions">
-                    <button
-                      type="button"
-                      className="pill"
-                      disabled={authBusy}
-                      onClick={() => resetSignupFaceEnrollment()}
-                    >
-                      Retry
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      disabled={authBusy || !signupFaceEnrollment}
-                      onClick={() => void submitSignupOtpRequest()}
-                    >
-                      {authBusy ? "Preparing account..." : "Continue Signup"}
-                    </button>
-                  </div>
+                  >
+                    {authBusy ? "Verifying..." : "Verify & Create Account"}
+                  </button>
                 </div>
-              </div>,
-              document.body,
-            )
-          : null}
-        {mode === "signupOtp" && (
-          <div className="auth-form-shell">
-            <form
-              className="auth-form-modern"
-              onSubmit={handleVerifyRegisterOtp}
-            >
-              <h2>Verify Email</h2>
-              <p className="muted">
-                Enter the 6-digit code sent to{" "}
-                <strong>{signupOtpDestination}</strong> to activate your
-                account.
-              </p>
-              <label className="auth-label">
-                Verification Code
-                <input
-                  inputMode="numeric"
-                  maxLength={6}
-                  value={signupOtpInput}
-                  onChange={(e) =>
-                    setSignupOtpInput(
-                      e.target.value.replace(/\D/g, "").slice(0, 6),
-                    )
-                  }
-                  placeholder="Enter 6-digit OTP"
-                  required
+                <p className="auth-switch">
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => setMode("signup")}
+                  >
+                    Back to sign up
+                  </button>
+                </p>
+              </form>
+            </div>
+          )}
+          {mode === "forgot" && (
+            <div className="auth-form-shell">
+              <form className="auth-form-modern" onSubmit={handleForgot}>
+                <h2>Forgot Password</h2>
+                <p className="muted">
+                  Enter the email linked to your account and we&apos;ll email
+                  you a reset code.
+                </p>
+                <label className="auth-label">
+                  Email Address
+                  <input
+                    type="email"
+                    value={forgotEmail}
+                    onChange={(e) => setForgotEmail(e.target.value)}
+                    placeholder="Enter your email"
+                    required
+                  />
+                </label>
+                <DeferredSliderCaptcha
+                  apiBase={API_BASE}
+                  resetKey={forgotCaptchaResetKey}
+                  disabled={authBusy}
+                  onChange={setForgotCaptcha}
                 />
-                <span className="muted" style={{ fontSize: 12 }}>
-                  {signupOtpExpiresAt
-                    ? `Code expires at ${new Date(
-                        signupOtpExpiresAt,
-                      ).toLocaleTimeString("en-US", {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}`
-                    : "Check your inbox for the latest code."}
-                </span>
-              </label>
-              <DeferredSliderCaptcha
-                apiBase={API_BASE}
-                resetKey={signupCaptchaResetKey}
-                disabled={authBusy}
-                onChange={setSignupCaptcha}
-              />
-              <div className="auth-otp-actions">
-                <button
-                  type="button"
-                  className="pill"
-                  disabled={authBusy || signupOtpCooldownSeconds > 0}
-                  onClick={() => void resendRegisterOtp()}
-                >
-                  {signupOtpCooldownSeconds > 0
-                    ? `Resend in ${signupOtpCooldownSeconds}s`
-                    : "Resend OTP"}
-                </button>
                 <button
                   type="submit"
                   className="btn-primary auth-submit"
                   disabled={authBusy}
                 >
-                  {authBusy ? "Verifying..." : "Verify & Create Account"}
+                  {authBusy ? "Sending..." : "Send Reset Code"}
                 </button>
-              </div>
-              <p className="auth-switch">
-                <button
-                  type="button"
-                  className="link-btn"
-                  onClick={() => setMode("signup")}
-                >
-                  Back to sign up
-                </button>
-              </p>
-            </form>
-          </div>
-        )}
-        {mode === "forgot" && (
-          <div className="auth-form-shell">
-            <form className="auth-form-modern" onSubmit={handleForgot}>
-              <h2>Forgot Password</h2>
-              <p className="muted">
-                Enter the email linked to your account and we&apos;ll email you
-                a reset code.
-              </p>
-              <label className="auth-label">
-                Email Address
-                <input
-                  type="email"
-                  value={forgotEmail}
-                  onChange={(e) => setForgotEmail(e.target.value)}
-                  placeholder="Enter your email"
-                  required
-                />
-              </label>
-              <DeferredSliderCaptcha
-                apiBase={API_BASE}
-                resetKey={forgotCaptchaResetKey}
-                disabled={authBusy}
-                onChange={setForgotCaptcha}
-              />
-              <button
-                type="submit"
-                className="btn-primary auth-submit"
-                disabled={authBusy}
-              >
-                {authBusy ? "Sending..." : "Send Reset Code"}
-              </button>
-              <p className="auth-switch">
-                Remembered it?{" "}
-                <button
-                  type="button"
-                  className="link-btn"
-                  onClick={() => setMode("signin")}
-                >
-                  Back to Sign In
-                </button>
-              </p>
-            </form>
-          </div>
-        )}
-        {mode === "forgotOtp" && (
-          <div className="auth-form-shell">
-            <form className="auth-form-modern" onSubmit={handleResetPassword}>
-              <h2>Reset Password</h2>
-              <p className="muted">
-                Enter the 6-digit code sent to{" "}
-                <strong>{forgotDestination}</strong> and set a new password.
-              </p>
-              <label className="auth-label">
-                Reset Code
-                <input
-                  inputMode="numeric"
-                  maxLength={6}
-                  value={forgotOtpInput}
-                  onChange={(e) =>
-                    setForgotOtpInput(
-                      e.target.value.replace(/\D/g, "").slice(0, 6),
-                    )
-                  }
-                  placeholder="Enter 6-digit OTP"
-                  required
-                />
-                <span className="muted" style={{ fontSize: 12 }}>
-                  {forgotExpiresAt
-                    ? `Code expires at ${new Date(
-                        forgotExpiresAt,
-                      ).toLocaleTimeString("en-US", {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}`
-                    : "Check your inbox for the latest code."}
-                </span>
-              </label>
-              <DeferredSliderCaptcha
-                apiBase={API_BASE}
-                resetKey={forgotCaptchaResetKey}
-                disabled={authBusy}
-                onChange={setForgotCaptcha}
-              />
-              <label className="auth-label">
-                New Password
-                <input
-                  type="password"
-                  value={forgotNewPassword}
-                  onChange={(e) => setForgotNewPassword(e.target.value)}
-                  placeholder="Enter new password"
-                  autoComplete="new-password"
-                  minLength={12}
-                  required
-                />
-                {renderPasswordStrength(forgotPasswordStrength)}
-              </label>
-              <label className="auth-label">
-                Confirm New Password
-                <input
-                  type="password"
-                  value={forgotConfirmPassword}
-                  onChange={(e) => setForgotConfirmPassword(e.target.value)}
-                  placeholder="Confirm new password"
-                  required
-                />
-              </label>
-              <div className="auth-otp-actions">
-                <button
-                  type="button"
-                  className="pill"
-                  disabled={authBusy || forgotOtpCooldownSeconds > 0}
-                  onClick={() => void resendForgotOtp()}
-                >
-                  {forgotOtpCooldownSeconds > 0
-                    ? `Resend in ${forgotOtpCooldownSeconds}s`
-                    : "Resend OTP"}
-                </button>
-                <button
-                  type="submit"
-                  className="btn-primary auth-submit"
+                <p className="auth-switch">
+                  Remembered it?{" "}
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => setMode("signin")}
+                  >
+                    Back to Sign In
+                  </button>
+                </p>
+              </form>
+            </div>
+          )}
+          {mode === "forgotOtp" && (
+            <div className="auth-form-shell">
+              <form className="auth-form-modern" onSubmit={handleResetPassword}>
+                <h2>Reset Password</h2>
+                <p className="muted">
+                  Enter the 6-digit code sent to{" "}
+                  <strong>{forgotDestination}</strong> and set a new password.
+                </p>
+                <label className="auth-label">
+                  Reset Code
+                  <input
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={forgotOtpInput}
+                    onChange={(e) =>
+                      setForgotOtpInput(
+                        e.target.value.replace(/\D/g, "").slice(0, 6),
+                      )
+                    }
+                    placeholder="Enter 6-digit OTP"
+                    required
+                  />
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    {forgotExpiresAt
+                      ? `Code expires at ${new Date(
+                          forgotExpiresAt,
+                        ).toLocaleTimeString("en-US", {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}`
+                      : "Check your inbox for the latest code."}
+                  </span>
+                </label>
+                <DeferredSliderCaptcha
+                  apiBase={API_BASE}
+                  resetKey={forgotCaptchaResetKey}
                   disabled={authBusy}
-                >
-                  {authBusy ? "Resetting..." : "Reset Password"}
-                </button>
-              </div>
-              <p className="auth-switch">
-                <button
-                  type="button"
-                  className="link-btn"
-                  onClick={() => setMode("signin")}
-                >
-                  Back to Sign In
-                </button>
-              </p>
-            </form>
-          </div>
-        )}
-      </div>
-      {pendingSessionAlert && (
-        <div className="session-alert-overlay">
-          <div className="session-alert-banner">
-            <div className="session-alert-copy">
-              <span className="session-alert-kicker">Security Review</span>
-              <h3>Your previous device was signed out</h3>
-              <p>
-                A newer sign-in was detected for this account. Review it before
-                continuing.
-              </p>
-              <div className="session-alert-meta">
-                <span>Time: {sessionAlertIssuedAt}</span>
-                <span>
-                  Device: {sessionAlertDevice.title}
-                  {sessionAlertDevice.detail
-                    ? ` · ${sessionAlertDevice.detail}`
-                    : ""}
-                </span>
-                <span>
-                  IP: {pendingSessionAlert.ipAddress || "Unavailable"}
-                </span>
-              </div>
+                  onChange={setForgotCaptcha}
+                />
+                <label className="auth-label">
+                  New Password
+                  <input
+                    type="password"
+                    value={forgotNewPassword}
+                    onChange={(e) => setForgotNewPassword(e.target.value)}
+                    placeholder="Enter new password"
+                    autoComplete="new-password"
+                    minLength={12}
+                    required
+                  />
+                  {renderPasswordStrength(forgotPasswordStrength)}
+                </label>
+                <label className="auth-label">
+                  Confirm New Password
+                  <input
+                    type="password"
+                    value={forgotConfirmPassword}
+                    onChange={(e) => setForgotConfirmPassword(e.target.value)}
+                    placeholder="Confirm new password"
+                    required
+                  />
+                </label>
+                <div className="auth-otp-actions">
+                  <button
+                    type="button"
+                    className="pill"
+                    disabled={authBusy || forgotOtpCooldownSeconds > 0}
+                    onClick={() => void resendForgotOtp()}
+                  >
+                    {forgotOtpCooldownSeconds > 0
+                      ? `Resend in ${forgotOtpCooldownSeconds}s`
+                      : "Resend OTP"}
+                  </button>
+                  <button
+                    type="submit"
+                    className="btn-primary auth-submit"
+                    disabled={authBusy}
+                  >
+                    {authBusy ? "Resetting..." : "Reset Password"}
+                  </button>
+                </div>
+                <p className="auth-switch">
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => setMode("signin")}
+                  >
+                    Back to Sign In
+                  </button>
+                </p>
+              </form>
             </div>
-            <div className="session-alert-actions">
-              <button
-                type="button"
-                className="pill"
-                disabled={sessionAlertBusy}
-                onClick={() => void handleConfirmSessionAlert()}
-              >
-                {sessionAlertBusy ? "Processing..." : "Yes, it was me"}
-              </button>
-              <button
-                type="button"
-                className="btn-primary auth-submit"
-                disabled={sessionAlertBusy}
-                onClick={() => void handleSecureCompromisedSession()}
-              >
-                {sessionAlertBusy ? "Securing..." : "No, secure account"}
-              </button>
-            </div>
-          </div>
+          )}
         </div>
-      )}
-      {renderSignupTermsModal()}
-    </div>
+        {pendingSessionAlert && (
+          <div className="session-alert-overlay">
+            <div className="session-alert-banner">
+              <div className="session-alert-copy">
+                <span className="session-alert-kicker">Security Review</span>
+                <h3>Your previous device was signed out</h3>
+                <p>
+                  A newer sign-in was detected for this account. Review it
+                  before continuing.
+                </p>
+                <div className="session-alert-meta">
+                  <span>Time: {sessionAlertIssuedAt}</span>
+                  <span>
+                    Device: {sessionAlertDevice.title}
+                    {sessionAlertDevice.detail
+                      ? ` · ${sessionAlertDevice.detail}`
+                      : ""}
+                  </span>
+                  <span>
+                    IP: {pendingSessionAlert.ipAddress || "Unavailable"}
+                  </span>
+                </div>
+              </div>
+              <div className="session-alert-actions">
+                <button
+                  type="button"
+                  className="pill"
+                  disabled={sessionAlertBusy}
+                  onClick={() => void handleConfirmSessionAlert()}
+                >
+                  {sessionAlertBusy ? "Processing..." : "Yes, it was me"}
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary auth-submit"
+                  disabled={sessionAlertBusy}
+                  onClick={() => void handleSecureCompromisedSession()}
+                >
+                  {sessionAlertBusy ? "Securing..." : "No, secure account"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {renderSignupTermsModal()}
+      </div>
+    </>
   );
 }
