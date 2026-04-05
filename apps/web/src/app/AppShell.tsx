@@ -575,10 +575,19 @@ const isCopilotWorkspaceShape = (
 
 const IPV4_ADDRESS_PATTERN = /\b(?:\d{1,3}\.){3}\d{1,3}\b/;
 const COPILOT_HISTORY_STORAGE_PREFIX = "fpipay_copilot_history";
+const normalizeTransferNoteForPatternMatch = (value: string) =>
+  value
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[đĐ]/g, "d")
+    .toLowerCase();
+
 const TRANSFER_HARD_BLOCK_NOTE_PATTERNS = [
   /\b(otp|ma otp|verification code|ma xac minh|faceid|sinh trac)\b/i,
   /\b(safe account|tai khoan an toan|security team|support team)\b/i,
   /\b(anydesk|teamviewer|remote access|screen share|chia se man hinh)\b/i,
+  /\b(chuyen tien dieu tra|phuc vu dieu tra|co quan dieu tra|cong an dieu tra|vien kiem sat|toa an|ho so vu an|vu an|phong toa tai khoan|tai khoan bi phong toa|tai khoan lien quan dieu tra|tai khoan lien quan vu an|kiem tra dong tien|ra soat dong tien|xac minh nguon tien|chuyen tien xac minh)\b/i,
 ];
 const TRANSFER_BLOCKED_NOTE_PATTERNS = [
   /\b(refund|hoan tien|unlock|mo khoa|verification fee|phi xac minh)\b/i,
@@ -1693,6 +1702,7 @@ function DashboardView({
   const copilotThreadRef = useRef<HTMLDivElement>(null);
   const copilotPersistTimerRef = useRef<number | null>(null);
   const walletRefreshInFlightRef = useRef(false);
+  const lastTransferBlockedPopupAlertKeyRef = useRef<string | null>(null);
   const [wallet, setWallet] = useState<{
     id: string;
     balance: number;
@@ -1963,7 +1973,7 @@ function DashboardView({
         return null;
       }
 
-      const note = transferContent.trim();
+      const note = normalizeTransferNoteForPatternMatch(transferContent);
       const balance = Math.max(Number(wallet.balance) || 0, 1);
       const ratio = transferAmountNumber / balance;
       const remainingBalance = Math.max(balance - transferAmountNumber, 0);
@@ -5656,7 +5666,7 @@ function DashboardView({
   ]);
   const logTransferFlowEvent = useCallback(
     async (
-      eventType: "STARTED" | "CANCELLED",
+      eventType: "STARTED" | "CANCELLED" | "BLOCKED_POPUP_SHOWN",
       options?: {
         amount?: number | null;
         reason?: string;
@@ -5688,6 +5698,10 @@ function DashboardView({
               null,
             step: transferStep,
             reason: options?.reason || null,
+            advisory:
+              eventType === "BLOCKED_POPUP_SHOWN"
+                ? effectiveTransferAdvisory
+                : null,
             ...clientAuditContext.body,
           }),
         });
@@ -5703,6 +5717,7 @@ function DashboardView({
       transferContent,
       transferMonitoring?.requestKey,
       transferAdvisory?.requestKey,
+      effectiveTransferAdvisory,
       transferStep,
     ],
   );
@@ -5750,6 +5765,31 @@ function DashboardView({
       setTransferContent(defaultTransferContent);
     }
     if (transferAiIntervention?.shouldPrompt) {
+      if (transferAiIntervention.tone === "blocked") {
+        const blockedPopupAlertKey =
+          effectiveTransferAdvisory?.requestKey ||
+          [
+            transferAccount,
+            transferAmount,
+            effectiveTransferAdvisory?.title || transferAiIntervention.title,
+            effectiveTransferAdvisory?.message ||
+              transferAiIntervention.summary,
+          ]
+            .filter(Boolean)
+            .join("|");
+        if (
+          blockedPopupAlertKey &&
+          lastTransferBlockedPopupAlertKeyRef.current !== blockedPopupAlertKey
+        ) {
+          lastTransferBlockedPopupAlertKeyRef.current = blockedPopupAlertKey;
+          void logTransferFlowEvent("BLOCKED_POPUP_SHOWN", {
+            amount,
+            reason:
+              effectiveTransferAdvisory?.message ||
+              transferAiIntervention.summary,
+          });
+        }
+      }
       setTransferAiInterventionOpen(true);
       return;
     }

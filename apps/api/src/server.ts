@@ -3526,6 +3526,12 @@ const suspiciousTransferNotePatterns: Array<{
   },
   {
     pattern:
+      /\b(chuyen tien dieu tra|phuc vu dieu tra|co quan dieu tra|cong an dieu tra|vien kiem sat|toa an|ho so vu an|vu an|phong toa tai khoan|tai khoan bi phong toa|tai khoan lien quan dieu tra|tai khoan lien quan vu an|kiem tra dong tien|ra soat dong tien|xac minh nguon tien|chuyen tien xac minh|chuyen tien chung minh trong sach)\b/i,
+    reason:
+      "Transfer note references investigation, account-freeze, or law-enforcement wording often used in impersonation scams.",
+  },
+  {
+    pattern:
       /\b(dau tu|loi nhuan|bao lai|tin hieu|san forex|phi vay|hoa hong)\b/i,
     reason:
       "Transfer note references investment or fee-collection language often used in fraud.",
@@ -3546,20 +3552,33 @@ const transferNoteLlmCache = new Map<
   { expiresAt: number; value: TransferNoteLlmAnalysis }
 >();
 
+const normalizeTransferNoteForPatternMatch = (value: string) =>
+  value
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[đĐ]/g, "d")
+    .toLowerCase();
+
 const legitimateHighValueTransferPurposePatterns = [
   {
     pattern:
-      /\b(mua nha|mua can ho|mua dat|dat coc nha|dat coc can ho|bat dong san|chuyen tien mua nha)\b/i,
+      /\b(mua nha|mua can ho|mua chung cu|mua dat|mua bat dong san|mua bds|chuyen tien mua nha|chuyen tien mua dat)\b/i,
     tag: "home_purchase",
   },
   {
     pattern:
-      /\b(home purchase|house purchase|property purchase|real estate purchase|buying a house|buying a home)\b/i,
+      /\b(home purchase|house purchase|property purchase|real estate purchase|buying a house|buying a home|buy home|buy house|buy property|buy apartment|buy condo)\b/i,
     tag: "home_purchase",
   },
   {
     pattern:
-      /\b(down payment|house deposit|property deposit|earnest money|reservation fee)\b/i,
+      /\b(coc nha|dat coc nha|tien coc nha|coc can ho|dat coc can ho|tien coc can ho|coc dat|dat coc dat|tien coc dat|giu cho can ho|giu cho nha)\b/i,
+    tag: "property_deposit",
+  },
+  {
+    pattern:
+      /\b(down payment|house deposit|home deposit|property deposit|apartment deposit|condo deposit|earnest money|reservation fee|booking fee)\b/i,
     tag: "property_deposit",
   },
   {
@@ -3578,7 +3597,7 @@ const normalizeTransferNotePurposeTag = (value: string) =>
     .replace(/^_+|_+$/g, "");
 
 const getLegitimateTransferPurposeTags = (note: string) => {
-  const normalizedNote = note.trim();
+  const normalizedNote = normalizeTransferNoteForPatternMatch(note);
   if (!normalizedNote) return [] as string[];
   return dedupeStringList(
     legitimateHighValueTransferPurposePatterns
@@ -3609,7 +3628,7 @@ const buildTransferNoteHeuristicAnalysis = (input: {
 };
 
 const getSuspiciousTransferNoteReasons = (note: string) => {
-  const normalizedNote = note.trim();
+  const normalizedNote = normalizeTransferNoteForPatternMatch(note);
   if (!normalizedNote) return [];
   return suspiciousTransferNotePatterns
     .filter((entry) => entry.pattern.test(normalizedNote))
@@ -3966,7 +3985,7 @@ const buildTransferAiScoringPayload = (input: {
 };
 
 const isGenericTransferNote = (note: string) => {
-  const normalizedNote = note.trim().toLowerCase();
+  const normalizedNote = normalizeTransferNoteForPatternMatch(note);
   if (!normalizedNote) return true;
   if (normalizedNote.length < 10) return true;
   return /^(transfer|payment|banking|send money|test|gift|invoice|payment for services|wallet transfer)$/i.test(
@@ -7305,7 +7324,7 @@ const buildHeuristicScamProtectionResponse = (input: {
 }): CopilotResponsePayload | null => {
   const latest = normalizeCopilotText(input.latestMessage);
   const matchesScamSignals =
-    /\b(otp|ma otp|verification code|ma xac minh|faceid|sinh trac|safe account|tai khoan an toan|security team|support team|nhan vien ngan hang|bank staff|refund|hoan tien|customs|hai quan|tax|thue|penalty|phat|unlock|mo khoa|broker|forex|crypto signal|guaranteed return|bao loi nhuan|remote access|anydesk|teamviewer|screen share|chia se man hinh|chuyen ngay|urgent|gap)\b/.test(
+    /\b(otp|ma otp|verification code|ma xac minh|faceid|sinh trac|safe account|tai khoan an toan|security team|support team|nhan vien ngan hang|bank staff|refund|hoan tien|customs|hai quan|tax|thue|penalty|phat|unlock|mo khoa|broker|forex|crypto signal|guaranteed return|bao loi nhuan|remote access|anydesk|teamviewer|screen share|chia se man hinh|chuyen ngay|urgent|gap|chuyen tien dieu tra|phuc vu dieu tra|co quan dieu tra|cong an dieu tra|vien kiem sat|toa an|ho so vu an|vu an|phong toa tai khoan|tai khoan bi phong toa|tai khoan lien quan dieu tra|tai khoan lien quan vu an|kiem tra dong tien|ra soat dong tien|xac minh nguon tien)\b/.test(
       latest,
     );
 
@@ -17025,11 +17044,16 @@ app.post("/transfer/flow-event", requireAuth, async (req, res) => {
     requestKey?: unknown;
     step?: unknown;
     reason?: unknown;
+    advisory?: unknown;
   };
 
   const eventType =
     typeof body.eventType === "string" ? body.eventType.trim() : "";
-  if (eventType !== "STARTED" && eventType !== "CANCELLED") {
+  if (
+    eventType !== "STARTED" &&
+    eventType !== "CANCELLED" &&
+    eventType !== "BLOCKED_POPUP_SHOWN"
+  ) {
     return res.status(400).json({ error: "Unsupported transfer flow event" });
   }
 
@@ -17058,6 +17082,7 @@ app.post("/transfer/flow-event", requireAuth, async (req, res) => {
       ? body.reason.trim()
       : null;
   const amount = toPositiveAmount(body.amount);
+  const transferAdvisory = normalizeTransferSafetyAdvisory(body.advisory);
   const auditClientMetadata = buildAuditClientMetadata(req, req.body);
 
   await logAuditEvent({
@@ -17066,25 +17091,44 @@ app.post("/transfer/flow-event", requireAuth, async (req, res) => {
     action:
       eventType === "STARTED"
         ? "TRANSFER_FLOW_STARTED"
-        : "TRANSFER_FLOW_CANCELLED",
+        : eventType === "CANCELLED"
+          ? "TRANSFER_FLOW_CANCELLED"
+          : "TRANSFER_SAFETY_BLOCKED",
     details: {
-      amount: amount ?? null,
-      toAccount: toAccount || null,
-      step,
-      reason,
+      ...(eventType === "BLOCKED_POPUP_SHOWN"
+        ? {
+            message:
+              transferAdvisory?.message ||
+              reason ||
+              "Transfer was paused before OTP.",
+            amount: amount ?? transferAdvisory?.amount ?? null,
+            toAccount: toAccount || null,
+            blockedUntil: transferAdvisory?.blockedUntil ?? null,
+            riskLevel: transferAdvisory?.severity === "blocked" ? "high" : null,
+            reasons:
+              transferAdvisory?.reasons ||
+              (reason ? [reason] : ["Transfer was paused before OTP."]),
+          }
+        : {
+            amount: amount ?? null,
+            toAccount: toAccount || null,
+            step,
+            reason,
+          }),
     },
     metadata: {
       ...auditClientMetadata,
-      requestKey,
+      requestKey: requestKey || transferAdvisory?.requestKey || null,
       toUserId,
       note,
       eventType,
       observedAt: new Date().toISOString(),
+      transferAdvisory: transferAdvisory || undefined,
     },
     ipAddress: getRequestIp(req),
   });
 
-  if (amount) {
+  if (amount && eventType !== "BLOCKED_POPUP_SHOWN") {
     await logFundsFlowEvent({
       actor: req.user?.email,
       userId: senderUserId,
