@@ -1258,6 +1258,7 @@ const styles = `
     min-height:calc(100vh - 56px);
   }
   .user-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:18px; }
+  .user-head.compact { justify-content:flex-end; }
   .user-actions { display:flex; gap:10px; align-items:center; }
   .user-search { padding:10px 12px; border:1px solid #e5e7eb; border-radius:10px; min-width:220px; }
   .user-table-wrap { overflow:auto; flex:1; min-height:0; }
@@ -1552,6 +1553,7 @@ const styles = `
     border-radius:2px;
   }
   .audit-head { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:16px; }
+  .audit-head.compact { justify-content:flex-end; align-items:center; }
   .audit-filters { display:flex; gap:10px; flex-wrap:wrap; }
   .audit-select {
     appearance:none;
@@ -1679,6 +1681,7 @@ const styles = `
     flex-wrap:wrap;
     margin-bottom:18px;
   }
+  .alerts-head.compact { justify-content:flex-end; align-items:center; }
   .alerts-head h2 { margin:0 0 4px; font-size:28px; color:#eef4ff; }
   .alerts-head p { margin:0; color:#89a3c8; }
   .alerts-summary-bar {
@@ -3782,14 +3785,7 @@ function AdminApp() {
 
         {active === "alerts" && (
           <div className="alerts-card">
-            <div className="alerts-head">
-              <div>
-                <h2>Security Alerts</h2>
-                <p>
-                  Review AI-flagged cases, investigate quickly, and keep every
-                  security decision visible to the team.
-                </p>
-              </div>
+            <div className="alerts-head compact">
               <div className="alerts-filters">
                 <select
                   className="alerts-filter"
@@ -4797,13 +4793,6 @@ function AdminApp() {
 
         {active === "setting" && (
           <div className="set-card">
-            <h2 style={{ marginTop: 0, marginBottom: 10 }}>
-              Security Controls
-            </h2>
-            <p className="section-subtitle" style={{ marginBottom: 14 }}>
-              Configure the admin-side controls that shape notifications,
-              operator sign-in hardening, and review discipline.
-            </p>
             <div className="set-row">
               <div>
                 <h4>Theme</h4>
@@ -4858,16 +4847,7 @@ function AdminApp() {
         {active === "users" && (
           <>
             <div className="user-card">
-              <div className="user-head">
-                <div>
-                  <h2 style={{ margin: 0, fontSize: 28, color: "var(--text)" }}>
-                    User Risk Review
-                  </h2>
-                  <p className="section-subtitle">
-                    Lock risky accounts, inspect profile drift, and review trust
-                    changes before broadening access.
-                  </p>
-                </div>
+              <div className="user-head compact">
                 <div className="user-actions" style={{ gap: 12 }}>
                   <input
                     className="user-search"
@@ -5441,20 +5421,7 @@ function AdminApp() {
 
         {active === "audit" && (
           <div className="audit-card">
-            <div className="audit-tabs">
-              <button className="audit-tab active" type="button">
-                Audit Trail
-              </button>
-            </div>
-
-            <div className="audit-head">
-              <div>
-                <h2 style={{ margin: 0 }}>Investigation Log</h2>
-                <p className="section-subtitle">
-                  Trace admin, AI, and transaction actions with enough context
-                  to explain every security decision.
-                </p>
-              </div>
+            <div className="audit-head compact">
               <div className="audit-filters">
                 <select
                   className="audit-select"
