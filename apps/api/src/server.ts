@@ -392,19 +392,19 @@ const FACE_ID_CHALLENGE_TTL_MS =
   Number(process.env.FACE_ID_CHALLENGE_TTL_SECONDS || "300") * 1000;
 const FACE_ID_SECRET_KEY = process.env.FACE_ID_SECRET_KEY || CAPTCHA_SECRET_KEY;
 const FACE_ID_MIN_LIVENESS_SCORE = Number(
-  process.env.FACE_ID_MIN_LIVENESS_SCORE || "0.66",
+  process.env.FACE_ID_MIN_LIVENESS_SCORE || "0.54",
 );
 const FACE_ID_MIN_MOTION_SCORE = Number(
-  process.env.FACE_ID_MIN_MOTION_SCORE || "0.22",
+  process.env.FACE_ID_MIN_MOTION_SCORE || "0.12",
 );
 const FACE_ID_MIN_EYE_MOTION_SCORE = Number(
-  process.env.FACE_ID_MIN_EYE_MOTION_SCORE || "0.12",
+  process.env.FACE_ID_MIN_EYE_MOTION_SCORE || "0.04",
 );
 const FACE_ID_MIN_FACE_COVERAGE = Number(
-  process.env.FACE_ID_MIN_FACE_COVERAGE || "0.085",
+  process.env.FACE_ID_MIN_FACE_COVERAGE || "0.06",
 );
 const FACE_ID_MIN_SAMPLE_COUNT = Number(
-  process.env.FACE_ID_MIN_SAMPLE_COUNT || "12",
+  process.env.FACE_ID_MIN_SAMPLE_COUNT || "10",
 );
 const FACE_ID_MIN_VIDEO_DURATION_MS = Number(
   process.env.FACE_ID_MIN_VIDEO_DURATION_MS || "5000",

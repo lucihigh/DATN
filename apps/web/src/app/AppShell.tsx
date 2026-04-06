@@ -1796,6 +1796,9 @@ function DashboardView({
   const [transferFaceVerifyOpen, setTransferFaceVerifyOpen] = useState(false);
   const [transferFaceVerifyBusy, setTransferFaceVerifyBusy] = useState(false);
   const [transferFaceCaptureError, setTransferFaceCaptureError] = useState("");
+  const [transferFaceScanStatus, setTransferFaceScanStatus] = useState<
+    "idle" | "loading" | "ready" | "scanning" | "verified" | "error"
+  >("idle");
   const [transferFaceIdEnabled, setTransferFaceIdEnabled] = useState(false);
   const [transferPinEnabled, setTransferPinEnabled] = useState(false);
   const [transferServerFaceIdRequired, setTransferServerFaceIdRequired] =
@@ -5815,6 +5818,7 @@ function DashboardView({
     goToTransferStep(3);
     setTransferFaceProof(null);
     setTransferFaceCaptureError("");
+    setTransferFaceScanStatus("idle");
     setTransferFaceResetKey((value) => value + 1);
     setTransferFaceVerifyBusy(false);
   }, [goToTransferStep]);
@@ -5835,6 +5839,7 @@ function DashboardView({
       status: "idle" | "loading" | "ready" | "scanning" | "verified" | "error";
       message: string;
     }) => {
+      setTransferFaceScanStatus(feedback.status);
       if (feedback.status === "error") {
         setTransferFaceCaptureError(feedback.message);
         return;
@@ -6055,6 +6060,7 @@ function DashboardView({
       }
       setTransferFaceProof(null);
       setTransferFaceCaptureError("");
+      setTransferFaceScanStatus("idle");
       setTransferFaceResetKey((value) => value + 1);
       setTransferOpen(false);
       setTransferFaceVerifyOpen(true);
@@ -7648,7 +7654,12 @@ function DashboardView({
               onClick={closeTransferFaceVerification}
             >
               <div
-                className="faceid-modal transfer-faceid-modal"
+                className={`faceid-modal transfer-faceid-modal ${
+                  transferFaceScanStatus === "loading" ||
+                  transferFaceScanStatus === "scanning"
+                    ? "is-scanning"
+                    : ""
+                }`}
                 onClick={(event) => event.stopPropagation()}
               >
                 <div className="faceid-modal-head">
@@ -11366,6 +11377,9 @@ function App() {
     useState<FaceIdProof | null>(null);
   const [faceEnrollmentResetKey, setFaceEnrollmentResetKey] = useState(0);
   const [faceEnrollmentError, setFaceEnrollmentError] = useState("");
+  const [faceEnrollmentScanStatus, setFaceEnrollmentScanStatus] = useState<
+    "idle" | "loading" | "ready" | "scanning" | "verified" | "error"
+  >("idle");
 
   const isInvoicesActive =
     activeTab === "Invoice List" || activeTab === "Create Invoices";
@@ -11501,6 +11515,7 @@ function App() {
   const resetFaceEnrollmentModal = useCallback(() => {
     setFaceEnrollmentProof(null);
     setFaceEnrollmentError("");
+    setFaceEnrollmentScanStatus("idle");
     setFaceEnrollmentResetKey((value) => value + 1);
   }, []);
 
@@ -11529,6 +11544,7 @@ function App() {
       status: "idle" | "loading" | "ready" | "scanning" | "verified" | "error";
       message: string;
     }) => {
+      setFaceEnrollmentScanStatus(feedback.status);
       if (feedback.status === "error") {
         setFaceEnrollmentError(feedback.message);
         return;
@@ -12285,7 +12301,12 @@ function App() {
                 onClick={() => closeFaceEnrollmentModal()}
               >
                 <div
-                  className="faceid-modal"
+                  className={`faceid-modal ${
+                    faceEnrollmentScanStatus === "loading" ||
+                    faceEnrollmentScanStatus === "scanning"
+                      ? "is-scanning"
+                      : ""
+                  }`}
                   onClick={(event) => event.stopPropagation()}
                 >
                   <div className="faceid-modal-head">
@@ -12315,11 +12336,20 @@ function App() {
                     onChange={handleFaceEnrollmentCaptureChange}
                     onFeedbackChange={handleFaceEnrollmentFeedbackChange}
                   />
-                  {faceEnrollmentError ? (
-                    <div className="card-otp-error transfer-faceid-error">
-                      {faceEnrollmentError}
-                    </div>
-                  ) : null}
+                  <div
+                    className={`faceid-modal-error-slot ${
+                      faceEnrollmentError ? "is-visible" : ""
+                    }`}
+                    aria-live="polite"
+                  >
+                    {faceEnrollmentError ? (
+                      <div className="card-otp-error transfer-faceid-error">
+                        {faceEnrollmentError}
+                      </div>
+                    ) : (
+                      <span aria-hidden="true"> </span>
+                    )}
+                  </div>
                   <div className="faceid-modal-actions">
                     <button
                       type="button"
