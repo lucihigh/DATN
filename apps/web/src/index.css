@@ -594,6 +594,10 @@ body.theme-light .user-menu-dropdown {
   background: #fee2e2;
   color: #991b1b;
 }
+.notif-assistant {
+  background: #dcfce7;
+  color: #166534;
+}
 
 @media (max-width: 720px) {
   .notif-dropdown {
@@ -1742,6 +1746,178 @@ h3 {
   color: #45b8ff;
   cursor: pointer;
   text-align: right;
+}
+.budget-plan-block {
+  overflow: hidden;
+}
+.budget-plan-block.safe {
+  border-color: rgba(45, 212, 191, 0.28);
+}
+.budget-plan-block.warn {
+  border-color: rgba(251, 191, 36, 0.34);
+}
+.budget-plan-block.danger {
+  border-color: rgba(248, 113, 113, 0.38);
+}
+.budget-plan-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 14px;
+}
+.budget-plan-hero {
+  display: grid;
+  gap: 8px;
+  padding: 16px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(26, 64, 114, 0.5), rgba(10, 26, 56, 0.82));
+  border: 1px solid rgba(120, 170, 255, 0.16);
+}
+.budget-plan-pill {
+  width: fit-content;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.budget-plan-pill.safe {
+  background: rgba(16, 185, 129, 0.18);
+  color: #6ee7b7;
+}
+.budget-plan-pill.warn {
+  background: rgba(245, 158, 11, 0.18);
+  color: #fbbf24;
+}
+.budget-plan-pill.danger {
+  background: rgba(239, 68, 68, 0.18);
+  color: #fda4af;
+}
+.budget-plan-hero strong {
+  font-size: 30px;
+  line-height: 1;
+}
+.budget-plan-hero p {
+  margin: 0;
+  color: #a7b9dd;
+  line-height: 1.5;
+}
+.budget-plan-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.budget-plan-metrics div,
+.budget-plan-category {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  border-radius: 12px;
+  background: rgba(13, 27, 56, 0.9);
+  border: 1px solid rgba(41, 63, 106, 0.8);
+}
+.budget-plan-metrics span,
+.budget-plan-category span {
+  font-size: 11px;
+  color: #8ea5cf;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.budget-plan-metrics strong,
+.budget-plan-category strong {
+  font-size: 18px;
+  color: #f5f8ff;
+}
+.budget-plan-category small {
+  color: #8ea5cf;
+  font-size: 12px;
+}
+.budget-plan-categories {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.budget-plan-modal {
+  width: min(1120px, 94vw);
+  max-width: 1120px;
+  max-height: 88vh;
+  overflow: auto;
+}
+.budget-plan-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.budget-plan-modal-head h3 {
+  margin: 0;
+}
+.budget-plan-modal-head p {
+  margin: 6px 0 0;
+  color: #9fb2da;
+  line-height: 1.5;
+}
+.budget-plan-modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.budget-plan-empty {
+  display: grid;
+  gap: 10px;
+  padding: 18px;
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(19, 39, 76, 0.88), rgba(8, 20, 44, 0.94));
+  border: 1px solid rgba(69, 114, 193, 0.26);
+}
+.budget-plan-empty strong {
+  font-size: 18px;
+  color: #f5f8ff;
+}
+.budget-plan-empty p {
+  margin: 0;
+  color: #9fb2da;
+  line-height: 1.6;
+}
+@media (max-width: 960px) {
+  .budget-plan-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .budget-plan-categories {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .budget-plan-modal-head {
+    flex-direction: column;
+  }
+
+  .budget-plan-modal-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+@media (max-width: 640px) {
+  .budget-plan-metrics,
+  .budget-plan-categories {
+    grid-template-columns: 1fr;
+  }
+
+  .budget-plan-hero strong {
+    font-size: 24px;
+  }
+
+  .budget-plan-modal {
+    width: min(94vw, 94vw);
+    padding: 18px;
+  }
+
+  .budget-plan-modal-actions {
+    flex-wrap: wrap;
+  }
 }
 .dashboard-alert-list {
   display: grid;
@@ -14814,6 +14990,12 @@ body.theme-dark .notif-icon-security {
   color: #ffd997;
   border-color: rgba(247, 201, 117, 0.46);
   background: rgba(158, 113, 26, 0.22);
+}
+
+body.theme-dark .notif-icon-assistant {
+  color: #b8f5d0;
+  border-color: rgba(94, 234, 161, 0.42);
+  background: rgba(22, 101, 52, 0.24);
 }
 
 @keyframes notifDropdownReveal {

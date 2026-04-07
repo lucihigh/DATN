@@ -50,6 +50,10 @@ import {
 import { logAuditEvent } from "./services/audit";
 import {
   sendBalanceChangeEmail,
+  sendBudgetCategoryAlertEmail,
+  sendBudgetDigestEmail,
+  sendBudgetPacingReminderEmail,
+  sendBudgetThresholdAlertEmail,
   sendCardDetailsOtpEmail,
   sendLoginOtpEmail,
   sendLoginRiskAlertEmail,
@@ -2550,6 +2554,103 @@ type CopilotResponsePayload = {
   riskLevel: string;
   confidence: number;
   followUpQuestion?: string | null;
+  budgetPlan?: PublicBudgetPlanSummary | null;
+};
+
+type StoredBudgetPlanCategory = {
+  key: string;
+  label: string;
+  share: number;
+  amount: number;
+  trackingKeys?: SpendingCategoryKey[];
+  thresholdAlertsSent?: string[];
+};
+
+type StoredBudgetPlan = {
+  planId: string;
+  status: "ACTIVE" | "EXPIRED";
+  period: "MONTHLY";
+  currency: string;
+  planningMode: "spend_cap" | "savings_goal";
+  targetAmount: number;
+  savingsGoalAmount: number | null;
+  incomeBaselineAmount: number | null;
+  spentAmount: number;
+  remainingAmount: number;
+  utilizationRatio: number;
+  warningThreshold: number;
+  criticalThreshold: number;
+  thresholdAlertsSent: string[];
+  startAt: string;
+  endAt: string;
+  createdAt: string;
+  updatedAt: string;
+  lastEvaluatedAt: string;
+  sourcePrompt: string;
+  dailyCapRemaining: number | null;
+  weeklyCapRemaining: number | null;
+  categories: StoredBudgetPlanCategory[];
+  emailAlertsEnabled: boolean;
+};
+
+type PublicBudgetPlanSummary = {
+  planId: string;
+  status: "ACTIVE" | "EXPIRED";
+  period: "MONTHLY";
+  currency: string;
+  planningMode: "spend_cap" | "savings_goal";
+  targetAmount: number;
+  savingsGoalAmount: number | null;
+  incomeBaselineAmount: number | null;
+  spentAmount: number;
+  remainingAmount: number;
+  utilizationRatio: number;
+  warningThreshold: number;
+  criticalThreshold: number;
+  startAt: string;
+  endAt: string;
+  createdAt: string;
+  updatedAt: string;
+  lastEvaluatedAt: string;
+  dailyCapRemaining: number | null;
+  weeklyCapRemaining: number | null;
+  categories: StoredBudgetPlanCategory[];
+  emailAlertsEnabled: boolean;
+};
+
+type StoredBudgetAssistantPreferences = {
+  proactiveRemindersEnabled: boolean;
+  dailyDigestEnabled: boolean;
+  weeklyDigestEnabled: boolean;
+  monthlyDigestEnabled: boolean;
+  digestDeliveryChannel: "email";
+};
+
+type StoredBudgetAssistantAutomationState = {
+  lastDailyDigestKey: string | null;
+  lastWeeklyDigestKey: string | null;
+  lastMonthlyDigestKey: string | null;
+  lastPacingReminderKey: string | null;
+};
+
+type SpendingCategoryKey =
+  | "food"
+  | "transport"
+  | "bills"
+  | "shopping"
+  | "transfers"
+  | "education_health"
+  | "other";
+
+type SpendingCategorySummary = {
+  key: SpendingCategoryKey;
+  label: string;
+  amount: number;
+  count: number;
+  shareOfSpend: number;
+  capAmount: number | null;
+  utilizationRatio: number | null;
+  warningState: "ok" | "warning" | "over";
 };
 
 type CopilotIntent =
@@ -4726,6 +4827,1525 @@ const dedupeStringList = (items: Array<string | null | undefined>) => {
   return result;
 };
 
+const BUDGET_WARNING_THRESHOLD = 0.85;
+const BUDGET_CRITICAL_THRESHOLD = 1;
+const SPENDING_CATEGORY_SHARES: Record<SpendingCategoryKey, number> = {
+  food: 0.22,
+  transport: 0.1,
+  bills: 0.16,
+  shopping: 0.18,
+  transfers: 0.16,
+  education_health: 0.1,
+  other: 0.08,
+};
+const SPENDING_CATEGORY_ORDER: SpendingCategoryKey[] = [
+  "food",
+  "transport",
+  "bills",
+  "shopping",
+  "transfers",
+  "education_health",
+  "other",
+];
+const SPENDING_CATEGORY_ALIASES: Record<SpendingCategoryKey, string[]> = {
+  food: ["an uong", "food", "dining", "meal", "meals", "cafe", "coffee"],
+  transport: ["di lai", "transport", "travel", "xang", "taxi", "commute"],
+  bills: [
+    "hoa don",
+    "bill",
+    "bills",
+    "utilities",
+    "dien nuoc",
+    "internet",
+    "rent",
+  ],
+  shopping: [
+    "mua sam",
+    "shopping",
+    "lifestyle",
+    "giai tri",
+    "entertainment",
+  ],
+  transfers: ["chuyen tien", "transfer", "transfers", "rut tien", "cash out"],
+  education_health: [
+    "hoc tap",
+    "suc khoe",
+    "education",
+    "health",
+    "medical",
+    "y te",
+  ],
+  other: ["khac", "other", "misc", "miscellaneous"],
+};
+const DEFAULT_BUDGET_ASSISTANT_PREFERENCES: StoredBudgetAssistantPreferences = {
+  proactiveRemindersEnabled: true,
+  dailyDigestEnabled: false,
+  weeklyDigestEnabled: false,
+  monthlyDigestEnabled: false,
+  digestDeliveryChannel: "email",
+};
+const DEFAULT_BUDGET_ASSISTANT_AUTOMATION_STATE: StoredBudgetAssistantAutomationState =
+  {
+    lastDailyDigestKey: null,
+    lastWeeklyDigestKey: null,
+    lastMonthlyDigestKey: null,
+    lastPacingReminderKey: null,
+  };
+
+const normalizeBudgetAmountToken = (value: string) => {
+  const trimmed = value.replace(/\s+/g, "");
+  if (/^\d{1,3}(\.\d{3})+$/.test(trimmed)) {
+    return trimmed.replace(/\./g, "");
+  }
+  if (/^\d{1,3}(,\d{3})+$/.test(trimmed)) {
+    return trimmed.replace(/,/g, "");
+  }
+  return trimmed.replace(/,/g, "");
+};
+
+const parseBudgetAmountCandidate = (raw: string, unit?: string | null) => {
+  const numeric = Number.parseFloat(normalizeBudgetAmountToken(raw));
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  const normalizedUnit = String(unit || "")
+    .trim()
+    .toLowerCase();
+  const multiplier =
+    normalizedUnit === "k" ||
+    normalizedUnit === "nghin" ||
+    normalizedUnit === "ngan"
+      ? 1_000
+      : normalizedUnit === "m" || normalizedUnit === "trieu"
+        ? 1_000_000
+        : 1;
+  return roundMoney(numeric * multiplier);
+};
+
+const escapeRegex = (value: string) =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const extractBudgetTargetAmount = (message: string) => {
+  const normalized = normalizeCopilotText(message);
+  if (
+    !/\b(budget|ngan sach|chi tieu|tieu|spend|spending|expense|cash flow|dong tien|ke hoach|kinh phi|du tru|allowance)\b/.test(
+      normalized,
+    )
+  ) {
+    return null;
+  }
+
+  const explicitCurrencyPatterns = [
+    /(?:\$|usd|do|dollars?)\s*(\d[\d.,]*)(?:\s*(k|m))?\b/i,
+    /(\d[\d.,]*)(?:\s*(k|m|nghin|ngan|trieu))?\s*(usd|do|dollars?|\$|vnd|dong)\b/i,
+    /(\d[\d.,]*)(?:\s*(k|m|nghin|ngan|trieu))?\s*(do|dollars?)\b/i,
+  ];
+
+  for (const pattern of explicitCurrencyPatterns) {
+    const match = message.match(pattern);
+    if (!match) continue;
+    const parsed = parseBudgetAmountCandidate(match[1], match[2]);
+    if (parsed !== null) return parsed;
+  }
+
+  const contextualMatch = normalized.match(
+    /\b(?:budget|ngan sach|chi tieu|tieu|spending|spend|expense|muc tieu|kinh phi|du tru|allowance)\b[\s\S]{0,30}?(\d[\d.,]*)(?:\s*(k|m|nghin|ngan|trieu))?\b/,
+  );
+  if (contextualMatch) {
+    const parsed = parseBudgetAmountCandidate(
+      contextualMatch[1],
+      contextualMatch[2],
+    );
+    if (parsed !== null && parsed >= 10) return parsed;
+  }
+
+  const relaxedMatch = normalized.match(
+    /\b(?:la|khoang|tam|about|around)\s*(\d[\d.,]*)(?:\s*(k|m|nghin|ngan|trieu))?\b/,
+  );
+  if (relaxedMatch) {
+    const parsed = parseBudgetAmountCandidate(relaxedMatch[1], relaxedMatch[2]);
+    if (parsed !== null && parsed >= 10) return parsed;
+  }
+
+  return null;
+};
+
+const extractSavingsGoalAmount = (message: string) => {
+  const normalized = normalizeCopilotText(message);
+  if (
+    !/\b(save|saving|savings|tiet kiem|de danh|de duoc|bo ra|muc tieu tiet kiem|save up)\b/.test(
+      normalized,
+    )
+  ) {
+    return null;
+  }
+
+  const explicitCurrencyPatterns = [
+    /(?:\$|usd|do|dollars?)\s*(\d[\d.,]*)(?:\s*(k|m))?\b/i,
+    /(\d[\d.,]*)(?:\s*(k|m|nghin|ngan|trieu))?\s*(usd|do|dollars?|\$|vnd|dong)\b/i,
+    /(\d[\d.,]*)(?:\s*(k|m|nghin|ngan|trieu))?\s*(do|dollars?)\b/i,
+  ];
+
+  for (const pattern of explicitCurrencyPatterns) {
+    const match = message.match(pattern);
+    if (!match) continue;
+    const parsed = parseBudgetAmountCandidate(match[1], match[2]);
+    if (parsed !== null) return parsed;
+  }
+
+  const contextualMatch = normalized.match(
+    /\b(?:save|saving|savings|tiet kiem|de danh|de duoc|save up)\b[\s\S]{0,30}?(\d[\d.,]*)(?:\s*(k|m|nghin|ngan|trieu))?\b/,
+  );
+  if (contextualMatch) {
+    const parsed = parseBudgetAmountCandidate(
+      contextualMatch[1],
+      contextualMatch[2],
+    );
+    if (parsed !== null && parsed >= 10) return parsed;
+  }
+
+  return null;
+};
+
+const isBudgetPlanSetupIntent = (message: string) =>
+  /\b(lap|tao|dat|set|create|build|ke hoach|muc tieu|toi se|du dinh|gioi han|han muc|phan bo|toi da|toi muon|giu duoi|toi da|toi muon tieu|tieu toi da|tiet kiem|de danh|save|saving)\b/.test(
+    normalizeCopilotText(message),
+  );
+
+const isBudgetPlanStatusIntent = (message: string) =>
+  /\b(hien tai|current|con lai|remaining|con bao nhieu|used|da dung|vuot|over budget|tinh hinh|status|kiem tra)\b/.test(
+    normalizeCopilotText(message),
+  );
+
+const extractBudgetPlanningScope = (
+  message: string,
+): "weekly" | "monthly" | null => {
+  const normalized = normalizeCopilotText(message);
+  if (
+    /\b(tuan toi|tuan tiep theo|next week|weekly|1 tuan|mot tuan|7 ngay toi)\b/.test(
+      normalized,
+    )
+  ) {
+    return "weekly";
+  }
+  if (
+    /\b(thang nay|thang toi|monthly|month|30 ngay|1 thang|mot thang)\b/.test(
+      normalized,
+    )
+  ) {
+    return "monthly";
+  }
+  return null;
+};
+
+const getStoredBudgetCategoryLabel = (key: SpendingCategoryKey) =>
+  getSpendingCategoryLabel("en", key);
+
+const normalizeBudgetCategoryShares = (input?: {
+  customShares?: Partial<Record<SpendingCategoryKey, number>> | null;
+  baseShares?: Partial<Record<SpendingCategoryKey, number>> | null;
+}) => {
+  const baseShares = input?.baseShares || SPENDING_CATEGORY_SHARES;
+  const customShares = input?.customShares || {};
+  const normalizedCustomEntries = Object.entries(customShares).filter(
+    ([key, value]): value is number =>
+      SPENDING_CATEGORY_ORDER.includes(key as SpendingCategoryKey) &&
+      typeof value === "number" &&
+      Number.isFinite(value) &&
+      value >= 0,
+  ) as Array<[SpendingCategoryKey, number]>;
+
+  if (!normalizedCustomEntries.length) {
+    return {
+      shares: { ...SPENDING_CATEGORY_SHARES },
+      providedKeys: [] as SpendingCategoryKey[],
+      remainderDistributed: false,
+    };
+  }
+
+  const providedTotal = normalizedCustomEntries.reduce(
+    (sum, [, value]) => sum + value,
+    0,
+  );
+  if (providedTotal > 1.001) {
+    return null;
+  }
+
+  const providedKeys = normalizedCustomEntries.map(([key]) => key);
+  const missingKeys = SPENDING_CATEGORY_ORDER.filter(
+    (key) => !providedKeys.includes(key),
+  );
+  const remainingShare = Math.max(0, 1 - providedTotal);
+  const baseMissingTotal = missingKeys.reduce(
+    (sum, key) => sum + Math.max(0, baseShares[key] || 0),
+    0,
+  );
+  const shares = {} as Record<SpendingCategoryKey, number>;
+
+  for (const [key, value] of normalizedCustomEntries) {
+    shares[key] = value;
+  }
+
+  for (const key of missingKeys) {
+    const baseShare = Math.max(0, baseShares[key] || 0);
+    shares[key] =
+      remainingShare <= 0
+        ? 0
+        : baseMissingTotal > 0
+          ? remainingShare * (baseShare / baseMissingTotal)
+          : remainingShare / Math.max(missingKeys.length, 1);
+  }
+
+  return {
+    shares,
+    providedKeys,
+    remainderDistributed: missingKeys.length > 0 && remainingShare > 0,
+  };
+};
+
+const extractBudgetCategoryAllocationShares = (message: string) => {
+  const normalized = normalizeCopilotText(message);
+  if (!/\d{1,3}(?:[.,]\d+)?\s*%/.test(normalized)) return null;
+
+  const allocations: Partial<Record<SpendingCategoryKey, number>> = {};
+  for (const key of SPENDING_CATEGORY_ORDER) {
+    for (const alias of SPENDING_CATEGORY_ALIASES[key]) {
+      const escapedAlias = escapeRegex(alias);
+      const patterns = [
+        new RegExp(
+          `\\b${escapedAlias}\\b\\s*(?:la|=|:|khoang|about|tam)?\\s*(\\d{1,3}(?:[.,]\\d+)?)\\s*%`,
+          "i",
+        ),
+        new RegExp(
+          `(\\d{1,3}(?:[.,]\\d+)?)\\s*%\\s*(?:cho|for|danh cho)?\\s*\\b${escapedAlias}\\b`,
+          "i",
+        ),
+      ];
+
+      let matchedShare: number | null = null;
+      for (const pattern of patterns) {
+        const match = normalized.match(pattern);
+        if (!match) continue;
+        const value = Number.parseFloat(match[1].replace(",", "."));
+        if (Number.isFinite(value) && value >= 0 && value <= 100) {
+          matchedShare = value / 100;
+          break;
+        }
+      }
+
+      if (matchedShare !== null) {
+        allocations[key] = matchedShare;
+        break;
+      }
+    }
+  }
+
+  return Object.keys(allocations).length ? allocations : null;
+};
+
+const extractBudgetAssistantPreferenceUpdates = (
+  message: string,
+): Partial<StoredBudgetAssistantPreferences> | null => {
+  const normalized = normalizeCopilotText(message);
+  const updates: Partial<StoredBudgetAssistantPreferences> = {};
+  const enable =
+    /\b(bat|mo|enable|turn on|kich hoat|gui)\b/.test(normalized) &&
+    !/\b(tat|disable|turn off|stop|dung|ngung|huy)\b/.test(normalized);
+  const disable = /\b(tat|disable|turn off|stop|dung|ngung|huy)\b/.test(
+    normalized,
+  );
+  if (!enable && !disable) return null;
+
+  const nextValue = enable && !disable;
+  if (/\b(nhac nho|reminder|reminders|canh bao chu dong|proactive)\b/.test(normalized)) {
+    updates.proactiveRemindersEnabled = nextValue;
+  }
+  if (
+    /\b(bao cao|digest|brief|tom tat|summary)\b/.test(normalized) &&
+    /\b(hang ngay|moi ngay|daily|hom nay)\b/.test(normalized)
+  ) {
+    updates.dailyDigestEnabled = nextValue;
+  }
+  if (
+    /\b(bao cao|digest|brief|tom tat|summary)\b/.test(normalized) &&
+    /\b(hang tuan|moi tuan|weekly|tuan)\b/.test(normalized)
+  ) {
+    updates.weeklyDigestEnabled = nextValue;
+  }
+  if (
+    /\b(bao cao|digest|brief|tom tat|summary)\b/.test(normalized) &&
+    /\b(hang thang|moi thang|monthly|thang)\b/.test(normalized)
+  ) {
+    updates.monthlyDigestEnabled = nextValue;
+  }
+
+  return Object.keys(updates).length ? updates : null;
+};
+
+type BudgetDigestPeriod = "daily" | "weekly" | "monthly";
+
+const extractBudgetDigestRequestPeriod = (
+  message: string,
+): BudgetDigestPeriod | null => {
+  const normalized = normalizeCopilotText(message);
+  if (!/\b(bao cao|digest|brief|tom tat|summary)\b/.test(normalized)) {
+    return null;
+  }
+  if (/\b(hang ngay|moi ngay|daily|hom nay)\b/.test(normalized)) return "daily";
+  if (/\b(hang tuan|moi tuan|weekly|tuan nay)\b/.test(normalized))
+    return "weekly";
+  if (/\b(hang thang|moi thang|monthly|thang nay)\b/.test(normalized))
+    return "monthly";
+  return null;
+};
+
+const buildBudgetPlanCategories = (
+  targetAmount: number,
+  _planningMode: "spend_cap" | "savings_goal" = "spend_cap",
+  options?: {
+    customShares?: Partial<Record<SpendingCategoryKey, number>> | null;
+    baseShares?: Partial<Record<SpendingCategoryKey, number>> | null;
+  },
+) => {
+  const normalized = normalizeBudgetCategoryShares({
+    customShares: options?.customShares,
+    baseShares: options?.baseShares,
+  }) || {
+    shares: { ...SPENDING_CATEGORY_SHARES },
+  };
+  let allocated = 0;
+  return SPENDING_CATEGORY_ORDER.map((key, index) => {
+    const share = normalized.shares[key] || 0;
+    const amount =
+      index === SPENDING_CATEGORY_ORDER.length - 1
+        ? roundMoney(Math.max(0, targetAmount - allocated))
+        : roundMoney(targetAmount * share);
+    allocated += amount;
+    return {
+      key,
+      label: getStoredBudgetCategoryLabel(key),
+      share,
+      amount,
+      trackingKeys: [key],
+      thresholdAlertsSent: [],
+    } satisfies StoredBudgetPlanCategory;
+  });
+};
+
+const getStoredBudgetPlan = (metadata: unknown): StoredBudgetPlan | null => {
+  const root = normalizeRecord(metadata);
+  const budgetAssistant = normalizeRecord(root.budgetAssistant);
+  const activePlan = normalizeRecord(budgetAssistant.activePlan);
+  if (
+    typeof activePlan.planId !== "string" ||
+    typeof activePlan.currency !== "string" ||
+    typeof activePlan.targetAmount !== "number" ||
+    typeof activePlan.startAt !== "string" ||
+    typeof activePlan.endAt !== "string"
+  ) {
+    return null;
+  }
+
+  const categories = Array.isArray(activePlan.categories)
+    ? activePlan.categories
+        .map((category) => normalizeRecord(category))
+        .filter(
+          (category) =>
+            typeof category.key === "string" &&
+            typeof category.label === "string" &&
+            typeof category.share === "number" &&
+            typeof category.amount === "number",
+        )
+        .map(
+          (category) =>
+            ({
+              key: category.key as string,
+              label: category.label as string,
+              share: category.share as number,
+              amount: category.amount as number,
+              trackingKeys: Array.isArray(category.trackingKeys)
+                ? category.trackingKeys.filter(
+                    (entry): entry is SpendingCategoryKey =>
+                      typeof entry === "string" &&
+                      SPENDING_CATEGORY_ORDER.includes(
+                        entry as SpendingCategoryKey,
+                      ),
+                  )
+                : undefined,
+              thresholdAlertsSent: Array.isArray(category.thresholdAlertsSent)
+                ? category.thresholdAlertsSent
+                    .filter(
+                      (entry): entry is string =>
+                        entry === "warning" || entry === "critical",
+                    )
+                    .slice(0, 4)
+                : [],
+            }) satisfies StoredBudgetPlanCategory,
+        )
+    : [];
+
+  return {
+    planId: activePlan.planId,
+    status: activePlan.status === "EXPIRED" ? "EXPIRED" : "ACTIVE",
+    period: "MONTHLY",
+    currency: activePlan.currency,
+    planningMode:
+      activePlan.planningMode === "savings_goal"
+        ? "savings_goal"
+        : "spend_cap",
+    targetAmount: roundMoney(activePlan.targetAmount),
+    savingsGoalAmount:
+      typeof activePlan.savingsGoalAmount === "number"
+        ? roundMoney(activePlan.savingsGoalAmount)
+        : null,
+    incomeBaselineAmount:
+      typeof activePlan.incomeBaselineAmount === "number"
+        ? roundMoney(activePlan.incomeBaselineAmount)
+        : null,
+    spentAmount:
+      typeof activePlan.spentAmount === "number"
+        ? roundMoney(activePlan.spentAmount)
+        : 0,
+    remainingAmount:
+      typeof activePlan.remainingAmount === "number"
+        ? roundMoney(activePlan.remainingAmount)
+        : roundMoney(activePlan.targetAmount),
+    utilizationRatio:
+      typeof activePlan.utilizationRatio === "number"
+        ? activePlan.utilizationRatio
+        : 0,
+    warningThreshold:
+      typeof activePlan.warningThreshold === "number"
+        ? activePlan.warningThreshold
+        : BUDGET_WARNING_THRESHOLD,
+    criticalThreshold:
+      typeof activePlan.criticalThreshold === "number"
+        ? activePlan.criticalThreshold
+        : BUDGET_CRITICAL_THRESHOLD,
+    thresholdAlertsSent: Array.isArray(activePlan.thresholdAlertsSent)
+      ? activePlan.thresholdAlertsSent
+          .filter((entry): entry is string => typeof entry === "string")
+          .slice(0, 4)
+      : [],
+    startAt: activePlan.startAt,
+    endAt: activePlan.endAt,
+    createdAt:
+      typeof activePlan.createdAt === "string"
+        ? activePlan.createdAt
+        : activePlan.startAt,
+    updatedAt:
+      typeof activePlan.updatedAt === "string"
+        ? activePlan.updatedAt
+        : activePlan.startAt,
+    lastEvaluatedAt:
+      typeof activePlan.lastEvaluatedAt === "string"
+        ? activePlan.lastEvaluatedAt
+        : typeof activePlan.updatedAt === "string"
+          ? activePlan.updatedAt
+          : activePlan.startAt,
+    sourcePrompt:
+      typeof activePlan.sourcePrompt === "string" ? activePlan.sourcePrompt : "",
+    dailyCapRemaining:
+      typeof activePlan.dailyCapRemaining === "number"
+        ? roundMoney(activePlan.dailyCapRemaining)
+        : null,
+    weeklyCapRemaining:
+      typeof activePlan.weeklyCapRemaining === "number"
+        ? roundMoney(activePlan.weeklyCapRemaining)
+        : null,
+    categories:
+      categories.length > 0
+        ? categories
+        : buildBudgetPlanCategories(
+            roundMoney(activePlan.targetAmount),
+            activePlan.planningMode === "savings_goal"
+              ? "savings_goal"
+              : "spend_cap",
+          ),
+    emailAlertsEnabled: activePlan.emailAlertsEnabled !== false,
+  };
+};
+
+const getBudgetAssistantPreferences = (
+  metadata: unknown,
+): StoredBudgetAssistantPreferences => {
+  const root = normalizeRecord(metadata);
+  const budgetAssistant = normalizeRecord(root.budgetAssistant);
+  const raw = normalizeRecord(budgetAssistant.preferences);
+  return {
+    proactiveRemindersEnabled: raw.proactiveRemindersEnabled !== false,
+    dailyDigestEnabled: raw.dailyDigestEnabled === true,
+    weeklyDigestEnabled: raw.weeklyDigestEnabled === true,
+    monthlyDigestEnabled: raw.monthlyDigestEnabled === true,
+    digestDeliveryChannel: "email",
+  };
+};
+
+const getBudgetAssistantAutomationState = (
+  metadata: unknown,
+): StoredBudgetAssistantAutomationState => {
+  const root = normalizeRecord(metadata);
+  const budgetAssistant = normalizeRecord(root.budgetAssistant);
+  const raw = normalizeRecord(budgetAssistant.automationState);
+  return {
+    lastDailyDigestKey:
+      typeof raw.lastDailyDigestKey === "string" ? raw.lastDailyDigestKey : null,
+    lastWeeklyDigestKey:
+      typeof raw.lastWeeklyDigestKey === "string"
+        ? raw.lastWeeklyDigestKey
+        : null,
+    lastMonthlyDigestKey:
+      typeof raw.lastMonthlyDigestKey === "string"
+        ? raw.lastMonthlyDigestKey
+        : null,
+    lastPacingReminderKey:
+      typeof raw.lastPacingReminderKey === "string"
+        ? raw.lastPacingReminderKey
+        : null,
+  };
+};
+
+const setStoredBudgetPlan = (
+  metadata: unknown,
+  plan: StoredBudgetPlan | null,
+): Record<string, unknown> => {
+  const root = normalizeRecord(metadata);
+  const budgetAssistant = normalizeRecord(root.budgetAssistant);
+  if (!plan) {
+    return {
+      ...root,
+      budgetAssistant: {
+        ...budgetAssistant,
+        activePlan: null,
+      },
+    };
+  }
+
+  return {
+    ...root,
+    budgetAssistant: {
+      ...budgetAssistant,
+      activePlan: plan,
+    },
+  };
+};
+
+const setBudgetAssistantPreferences = (
+  metadata: unknown,
+  preferences: StoredBudgetAssistantPreferences,
+): Record<string, unknown> => {
+  const root = normalizeRecord(metadata);
+  const budgetAssistant = normalizeRecord(root.budgetAssistant);
+  return {
+    ...root,
+    budgetAssistant: {
+      ...budgetAssistant,
+      preferences,
+    },
+  };
+};
+
+const setBudgetAssistantAutomationState = (
+  metadata: unknown,
+  automationState: StoredBudgetAssistantAutomationState,
+): Record<string, unknown> => {
+  const root = normalizeRecord(metadata);
+  const budgetAssistant = normalizeRecord(root.budgetAssistant);
+  return {
+    ...root,
+    budgetAssistant: {
+      ...budgetAssistant,
+      automationState,
+    },
+  };
+};
+
+const recalculateBudgetPlanProgress = (
+  plan: StoredBudgetPlan,
+  spentAmount: number,
+  now: Date,
+) => {
+  const endAt = new Date(plan.endAt);
+  const remainingAmount = roundMoney(plan.targetAmount - spentAmount);
+  const utilizationRatio =
+    plan.targetAmount > 0 ? spentAmount / Math.max(plan.targetAmount, 1) : 0;
+  const msRemaining = Math.max(0, endAt.getTime() - now.getTime());
+  const daysRemaining = Math.max(1, Math.ceil(msRemaining / 86400000));
+  const weeksRemaining = Math.max(1, Math.ceil(daysRemaining / 7));
+
+  return {
+    ...plan,
+    status: now <= endAt ? "ACTIVE" : "EXPIRED",
+    spentAmount: roundMoney(spentAmount),
+    remainingAmount,
+    utilizationRatio,
+    dailyCapRemaining:
+      remainingAmount > 0 ? roundMoney(remainingAmount / daysRemaining) : 0,
+    weeklyCapRemaining:
+      remainingAmount > 0 ? roundMoney(remainingAmount / weeksRemaining) : 0,
+    updatedAt: now.toISOString(),
+    lastEvaluatedAt: now.toISOString(),
+  } satisfies StoredBudgetPlan;
+};
+
+const buildPublicBudgetPlanSummary = (
+  plan: StoredBudgetPlan | null,
+): PublicBudgetPlanSummary | null => {
+  if (!plan) return null;
+  return {
+    planId: plan.planId,
+    status: plan.status,
+    period: plan.period,
+    currency: plan.currency,
+    planningMode: plan.planningMode,
+    targetAmount: plan.targetAmount,
+    savingsGoalAmount: plan.savingsGoalAmount,
+    incomeBaselineAmount: plan.incomeBaselineAmount,
+    spentAmount: plan.spentAmount,
+    remainingAmount: plan.remainingAmount,
+    utilizationRatio: plan.utilizationRatio,
+    warningThreshold: plan.warningThreshold,
+    criticalThreshold: plan.criticalThreshold,
+    startAt: plan.startAt,
+    endAt: plan.endAt,
+    createdAt: plan.createdAt,
+    updatedAt: plan.updatedAt,
+    lastEvaluatedAt: plan.lastEvaluatedAt,
+    dailyCapRemaining: plan.dailyCapRemaining,
+    weeklyCapRemaining: plan.weeklyCapRemaining,
+    categories: plan.categories,
+    emailAlertsEnabled: plan.emailAlertsEnabled,
+  };
+};
+
+const getSpendingCategoryLabel = (
+  language: CopilotLanguage,
+  key: SpendingCategoryKey,
+) => {
+  const labels: Record<SpendingCategoryKey, { vi: string; en: string }> = {
+    food: { vi: "Ăn uống", en: "Food & dining" },
+    transport: { vi: "Đi lại", en: "Transport" },
+    bills: { vi: "Hóa đơn", en: "Bills & utilities" },
+    shopping: { vi: "Mua sắm", en: "Shopping & lifestyle" },
+    transfers: { vi: "Chuyển tiền", en: "Transfers & cash-out" },
+    education_health: { vi: "Học tập / sức khỏe", en: "Education / health" },
+    other: { vi: "Khác", en: "Other" },
+  };
+  return language === "vi" ? labels[key].vi : labels[key].en;
+};
+
+const categorizeDebitTransaction = (input: {
+  type: string;
+  description?: string;
+}): SpendingCategoryKey => {
+  const normalized = normalizeCopilotText(
+    `${input.type || ""} ${input.description || ""}`,
+  );
+
+  if (
+    /\b(com|pho|bun|an uong|ca phe|cafe|coffee|tea|tra sua|restaurant|nha hang|grabfood|breakfast|lunch|dinner|grocery|sieu thi|mart|food)\b/.test(
+      normalized,
+    )
+  ) {
+    return "food";
+  }
+  if (
+    /\b(xang|fuel|taxi|grab|uber|be bike|be car|bus|metro|parking|gui xe|di lai|transport)\b/.test(
+      normalized,
+    )
+  ) {
+    return "transport";
+  }
+  if (
+    /\b(hoa don|bill|dien|nuoc|internet|wifi|phone|dien thoai|utility|subscription|rent|thue nha|tra gop|installment)\b/.test(
+      normalized,
+    )
+  ) {
+    return "bills";
+  }
+  if (
+    /\b(shopee|lazada|tiktok shop|mua sam|shopping|fashion|clothes|quan ao|quanao|my pham|cosmetic|movie|cinema|netflix|spotify|game|giai tri|entertainment)\b/.test(
+      normalized,
+    )
+  ) {
+    return "shopping";
+  }
+  if (
+    /\b(hoc phi|tuition|school|course|khoa hoc|book|sach|benh vien|hospital|clinic|pharmacy|thuoc|medicine|health|medical|bao hiem)\b/.test(
+      normalized,
+    )
+  ) {
+    return "education_health";
+  }
+  if (
+    input.type === "TRANSFER" ||
+    input.type === "WITHDRAW" ||
+    /\b(transfer|chuyen tien|gui tien|rut tien|cash out|family|gia dinh)\b/.test(
+      normalized,
+    )
+  ) {
+    return "transfers";
+  }
+  return "other";
+};
+
+const buildBudgetPlanBaseShares = (plan: StoredBudgetPlan | null) => {
+  if (!plan?.categories?.length) return { ...SPENDING_CATEGORY_SHARES };
+  const shares = {} as Partial<Record<SpendingCategoryKey, number>>;
+  for (const category of plan.categories) {
+    if (
+      SPENDING_CATEGORY_ORDER.includes(category.key as SpendingCategoryKey) &&
+      typeof category.share === "number" &&
+      Number.isFinite(category.share) &&
+      category.share >= 0
+    ) {
+      shares[category.key as SpendingCategoryKey] = category.share;
+    }
+  }
+  return Object.keys(shares).length
+    ? (shares as Record<SpendingCategoryKey, number>)
+    : { ...SPENDING_CATEGORY_SHARES };
+};
+
+const buildBudgetCategoryCapMap = (plan: StoredBudgetPlan | null) => {
+  const caps: Partial<Record<SpendingCategoryKey, number>> = {};
+  for (const category of plan?.categories || []) {
+    if (
+      SPENDING_CATEGORY_ORDER.includes(category.key as SpendingCategoryKey) &&
+      typeof category.amount === "number" &&
+      Number.isFinite(category.amount)
+    ) {
+      caps[category.key as SpendingCategoryKey] = roundMoney(category.amount);
+    }
+  }
+  return caps;
+};
+
+const summarizeBudgetPlanCategoryUsage = (input: {
+  transactions: CopilotTransactionPayload[];
+  plan: StoredBudgetPlan;
+  language: CopilotLanguage;
+}) => {
+  const rawSummary = summarizeSpendingCategories({
+    transactions: input.transactions,
+    language: input.language,
+    warningThreshold: input.plan.warningThreshold,
+    categoryCapMap: buildBudgetCategoryCapMap(input.plan),
+  });
+  const byKey = new Map(
+    rawSummary.map((category) => [category.key, category] as const),
+  );
+
+  return input.plan.categories
+    .map((category) => {
+      const key = SPENDING_CATEGORY_ORDER.includes(
+        category.key as SpendingCategoryKey,
+      )
+        ? (category.key as SpendingCategoryKey)
+        : null;
+      if (!key) return null;
+      const summary = byKey.get(key);
+      const spentAmount = roundMoney(summary?.amount || 0);
+      const utilizationRatio =
+        category.amount > 0 ? spentAmount / category.amount : null;
+      return {
+        key,
+        label: category.label,
+        capAmount: roundMoney(category.amount),
+        spentAmount,
+        utilizationRatio,
+        warningState:
+          utilizationRatio !== null && utilizationRatio >= 1
+            ? "over"
+            : utilizationRatio !== null &&
+                utilizationRatio >= input.plan.warningThreshold
+              ? "warning"
+              : "ok",
+      };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+};
+
+const buildBudgetDigestSnapshot = (input: {
+  language: CopilotLanguage;
+  currency: string;
+  period: BudgetDigestPeriod;
+  transactions: CopilotTransactionPayload[];
+  previousTransactions: CopilotTransactionPayload[];
+  budgetPlan: StoredBudgetPlan | null;
+  now: Date;
+}) => {
+  const debitTransactions = input.transactions.filter(
+    (transaction) => transaction.direction === "debit",
+  );
+  const previousDebitTransactions = input.previousTransactions.filter(
+    (transaction) => transaction.direction === "debit",
+  );
+  const spentAmount = roundMoney(
+    debitTransactions.reduce((sum, transaction) => sum + transaction.amount, 0),
+  );
+  const previousSpentAmount = roundMoney(
+    previousDebitTransactions.reduce(
+      (sum, transaction) => sum + transaction.amount,
+      0,
+    ),
+  );
+  const inflowAmount = roundMoney(
+    input.transactions.reduce(
+      (sum, transaction) =>
+        sum + (transaction.direction === "credit" ? transaction.amount : 0),
+      0,
+    ),
+  );
+  const topCategory = summarizeSpendingCategories({
+    transactions: debitTransactions,
+    language: input.language,
+    categoryCapMap: buildBudgetCategoryCapMap(input.budgetPlan),
+    warningThreshold: input.budgetPlan?.warningThreshold,
+  })[0];
+
+  const periodLabel =
+    input.period === "daily"
+      ? localizeCopilotText(input.language, "Hôm nay", "Today")
+      : input.period === "weekly"
+        ? localizeCopilotText(input.language, "Tuần này", "This week")
+        : localizeCopilotText(input.language, "Tháng này", "This month");
+  const previousLabel =
+    input.period === "daily"
+      ? localizeCopilotText(input.language, "hôm qua", "yesterday")
+      : input.period === "weekly"
+        ? localizeCopilotText(input.language, "tuần trước", "last week")
+        : localizeCopilotText(input.language, "tháng trước", "last month");
+  const deltaAmount = roundMoney(spentAmount - previousSpentAmount);
+  const budgetLine = input.budgetPlan
+    ? localizeCopilotText(
+        input.language,
+        `Bạn đã dùng ${Math.round(input.budgetPlan.utilizationRatio * 100)}% mức chi hiện tại, còn lại ${formatCopilotMoney(input.currency, Math.max(0, input.budgetPlan.remainingAmount))}.`,
+        `You have used ${Math.round(input.budgetPlan.utilizationRatio * 100)}% of the active budget, with ${formatCopilotMoney(input.currency, Math.max(0, input.budgetPlan.remainingAmount))} left.`,
+      )
+    : localizeCopilotText(
+        input.language,
+        "Chưa có budget plan đang hoạt động, nên đây là tóm tắt chi tiêu thuần.",
+        "No active budget plan is stored yet, so this is a pure spending summary.",
+      );
+  const topCategoryLine = topCategory
+    ? localizeCopilotText(
+        input.language,
+        `Danh mục chi lớn nhất là ${topCategory.label} với ${formatCopilotMoney(input.currency, topCategory.amount)}.`,
+        `Top spend category was ${topCategory.label} at ${formatCopilotMoney(input.currency, topCategory.amount)}.`,
+      )
+    : localizeCopilotText(
+        input.language,
+        "Không có giao dịch chi ra đáng kể trong kỳ này.",
+        "There were no meaningful debit transactions in this period.",
+      );
+  const comparisonLine = localizeCopilotText(
+    input.language,
+    `${periodLabel} bạn đã chi ${formatCopilotMoney(input.currency, spentAmount)}, ${deltaAmount >= 0 ? "chênh +" : "chênh -"}${formatCopilotMoney(input.currency, Math.abs(deltaAmount))} so với ${previousLabel}.`,
+    `${periodLabel} spend was ${formatCopilotMoney(input.currency, spentAmount)}, ${deltaAmount >= 0 ? "+" : "-"}${formatCopilotMoney(input.currency, Math.abs(deltaAmount))} versus ${previousLabel}.`,
+  );
+  const headline = localizeCopilotText(
+    input.language,
+    `Tóm tắt VaultAI ${periodLabel.toLowerCase()}`,
+    `VaultAI ${periodLabel.toLowerCase()} brief`,
+  );
+  const metricsTable = buildCopilotMarkdownTable(
+    input.language === "vi" ? ["Chỉ số", "Giá trị"] : ["Metric", "Value"],
+    [
+      [
+        input.language === "vi" ? "Tiền vào" : "Inflow",
+        formatCopilotMoney(input.currency, inflowAmount),
+      ],
+      [
+        input.language === "vi" ? "Tiền ra" : "Outflow",
+        formatCopilotMoney(input.currency, spentAmount),
+      ],
+      [
+        input.language === "vi"
+          ? "So sánh kỳ trước"
+          : "Vs previous period",
+        `${deltaAmount >= 0 ? "+" : "-"}${formatCopilotMoney(
+          input.currency,
+          Math.abs(deltaAmount),
+        )}`,
+      ],
+      [
+        input.language === "vi" ? "Số giao dịch" : "Transactions",
+        input.transactions.length,
+      ],
+    ],
+  );
+
+  return {
+    headline,
+    spentAmount,
+    inflowAmount,
+    topCategoryLabel: topCategory?.label || null,
+    topCategoryAmount: topCategory?.amount || 0,
+    deltaAmount,
+    periodLabel,
+    comparisonLine,
+    budgetLine,
+    topCategoryLine,
+    metricsTable,
+  };
+};
+
+const buildBudgetDigestCopilotResponse = async (input: {
+  userId: string;
+  currency: string;
+  language: CopilotLanguage;
+  period: BudgetDigestPeriod;
+}): Promise<CopilotResponsePayload> => {
+  const now = new Date();
+  const range = getBudgetDigestPeriodRange(input.period, now);
+  const [transactions, previousTransactions, userDoc] = await Promise.all([
+    fetchCopilotTransactionsForUser({
+      userId: input.userId,
+      startInclusive: range.startInclusive,
+      endExclusive: range.endExclusive,
+      limit: 1500,
+      context: "/ai/copilot-chat:digest-current",
+    }),
+    fetchCopilotTransactionsForUser({
+      userId: input.userId,
+      startInclusive: range.previousStartInclusive,
+      endExclusive: range.previousEndExclusive,
+      limit: 1500,
+      context: "/ai/copilot-chat:digest-previous",
+    }),
+    createUserRepository().findValidatedById(input.userId),
+  ]);
+
+  const plan = getStoredBudgetPlan(userDoc?.metadata);
+  const digestBudgetPlan =
+    plan &&
+    new Date(plan.startAt) <= now &&
+    new Date(plan.endAt) > now
+      ? recalculateBudgetPlanProgress(
+          plan,
+          await sumCompletedDebitTransactionsForUser({
+            userId: input.userId,
+            startInclusive: new Date(plan.startAt),
+            endExclusive: new Date(plan.endAt),
+            context: "/ai/copilot-chat:digest-budget-refresh",
+          }),
+          now,
+        )
+      : plan;
+  const snapshot = buildBudgetDigestSnapshot({
+    language: input.language,
+    currency: input.currency,
+    period: input.period,
+    transactions,
+    previousTransactions,
+    budgetPlan: digestBudgetPlan,
+    now,
+  });
+
+  return {
+    reply: [
+      snapshot.headline,
+      "",
+      snapshot.metricsTable,
+      "",
+      snapshot.comparisonLine,
+      snapshot.topCategoryLine,
+      snapshot.budgetLine,
+    ].join("\n"),
+    topic: `budget-digest-${input.period}`,
+    suggestedActions:
+      input.language === "vi"
+        ? [
+            "Neu muon doi muc chi, chat lai ke hoach chi tieu moi.",
+            "Bat bao cao ngay, tuan, hoac thang neu ban muon nhan brief qua email.",
+            "Hoi toi danh muc nao dang tieu nhanh nhat neu ban muon cat giam som.",
+          ]
+        : [
+            "Send a new spending target if you want to reshape the active plan.",
+            "Turn daily, weekly, or monthly briefs on if you want these emailed automatically.",
+            "Ask which category is accelerating fastest if you want an early cutback signal.",
+          ],
+    suggestedDepositAmount: null,
+    riskLevel:
+      digestBudgetPlan &&
+      digestBudgetPlan.utilizationRatio >= digestBudgetPlan.warningThreshold
+        ? "medium"
+        : "low",
+    confidence: 0.97,
+    followUpQuestion: localizeCopilotText(
+      input.language,
+      "Ban co muon toi bat gui brief tu dong cho ky nay khong?",
+      "Do you want me to turn on automatic briefs for this period?",
+    ),
+    budgetPlan: buildPublicBudgetPlanSummary(digestBudgetPlan),
+  };
+};
+
+const runBudgetAssistantAutomation = async (input: {
+  userId: string;
+  actor?: string;
+  ipAddress?: string;
+  trigger: "auth_me" | "debit";
+}) => {
+  const userRepository = createUserRepository();
+  const userDoc = await userRepository.findValidatedById(input.userId);
+  if (!userDoc) return;
+
+  const preferences = getBudgetAssistantPreferences(userDoc.metadata);
+  const automationState = getBudgetAssistantAutomationState(userDoc.metadata);
+  const now = new Date();
+  const activePlan = getStoredBudgetPlan(userDoc.metadata);
+  let nextAutomationState = { ...automationState };
+  let metadataChanged = false;
+
+  const maybeSendDigest = async (period: BudgetDigestPeriod, enabled: boolean) => {
+    if (!enabled) return;
+    const key = getBudgetDigestPeriodKey(period, now);
+    const stateKey =
+      period === "daily"
+        ? "lastDailyDigestKey"
+        : period === "weekly"
+          ? "lastWeeklyDigestKey"
+          : "lastMonthlyDigestKey";
+    if (nextAutomationState[stateKey] === key) return;
+
+    const range = getBudgetDigestPeriodRange(period, now);
+    const [transactions, previousTransactions] = await Promise.all([
+      fetchCopilotTransactionsForUser({
+        userId: input.userId,
+        startInclusive: range.startInclusive,
+        endExclusive: range.endExclusive,
+        limit: 1500,
+        context: "/budget-assistant:automation-current",
+      }),
+      fetchCopilotTransactionsForUser({
+        userId: input.userId,
+        startInclusive: range.previousStartInclusive,
+        endExclusive: range.previousEndExclusive,
+        limit: 1500,
+        context: "/budget-assistant:automation-previous",
+      }),
+    ]);
+
+    const snapshot = buildBudgetDigestSnapshot({
+      language: "en",
+      currency:
+        activePlan?.currency ||
+        (typeof userDoc.metadata === "object" &&
+        typeof (userDoc.metadata as Record<string, unknown>).currency === "string"
+          ? String((userDoc.metadata as Record<string, unknown>).currency)
+          : "USD"),
+      period,
+      transactions,
+      previousTransactions,
+      budgetPlan: activePlan,
+      now,
+    });
+
+    await sendBudgetDigestEmail({
+      to: userDoc.email,
+      recipientName: getRecipientName(userDoc),
+      periodLabel: snapshot.periodLabel,
+      headline: snapshot.headline,
+      currency:
+        activePlan?.currency ||
+        (typeof userDoc.metadata === "object" &&
+        typeof (userDoc.metadata as Record<string, unknown>).currency === "string"
+          ? String((userDoc.metadata as Record<string, unknown>).currency)
+          : "USD"),
+      inflowAmount: snapshot.inflowAmount,
+      spentAmount: snapshot.spentAmount,
+      deltaAmount: snapshot.deltaAmount,
+      topCategoryLabel: snapshot.topCategoryLabel,
+      topCategoryAmount: snapshot.topCategoryAmount,
+      budgetLine: snapshot.budgetLine,
+      comparisonLine: snapshot.comparisonLine,
+    });
+    await logAuditEvent({
+      actor: "vaultai-assistant",
+      userId: input.userId,
+      action: "BUDGET_ASSISTANT_DIGEST_SENT",
+      details: {
+        period,
+        periodLabel: snapshot.periodLabel,
+        headline: snapshot.headline,
+        spentAmount: snapshot.spentAmount,
+        inflowAmount: snapshot.inflowAmount,
+        deltaAmount: snapshot.deltaAmount,
+        topCategoryLabel: snapshot.topCategoryLabel,
+        topCategoryAmount: snapshot.topCategoryAmount,
+      },
+      ipAddress: input.ipAddress,
+    });
+    nextAutomationState[stateKey] = key;
+    metadataChanged = true;
+  };
+
+  if (preferences.dailyDigestEnabled) {
+    await maybeSendDigest("daily", true);
+  }
+  if (preferences.weeklyDigestEnabled) {
+    await maybeSendDigest("weekly", true);
+  }
+  if (preferences.monthlyDigestEnabled) {
+    await maybeSendDigest("monthly", true);
+  }
+
+  if (
+    preferences.proactiveRemindersEnabled &&
+    activePlan &&
+    new Date(activePlan.startAt) <= now &&
+    new Date(activePlan.endAt) > now
+  ) {
+    const startAt = new Date(activePlan.startAt);
+    const endAt = new Date(activePlan.endAt);
+    const spentAmount = await sumCompletedDebitTransactionsForUser({
+      userId: input.userId,
+      startInclusive: startAt,
+      endExclusive: endAt,
+      context: "/budget-assistant:pacing-refresh",
+    });
+    const refreshedPlan = recalculateBudgetPlanProgress(activePlan, spentAmount, now);
+    const elapsedDays = Math.max(
+      1,
+      Math.ceil((now.getTime() - startAt.getTime()) / 86400000),
+    );
+    const totalDays = Math.max(
+      1,
+      Math.ceil((endAt.getTime() - startAt.getTime()) / 86400000),
+    );
+    const projectedSpendAmount = roundMoney(
+      (refreshedPlan.spentAmount / elapsedDays) * totalDays,
+    );
+    const pacingKey = `${getBudgetDigestPeriodKey("daily", now)}:${projectedSpendAmount > refreshedPlan.targetAmount ? "over" : "ok"}`;
+    if (
+      projectedSpendAmount > refreshedPlan.targetAmount &&
+      nextAutomationState.lastPacingReminderKey !== pacingKey
+    ) {
+      await sendBudgetPacingReminderEmail({
+        to: userDoc.email,
+        recipientName: getRecipientName(userDoc),
+        currency: refreshedPlan.currency,
+        projectedSpendAmount,
+        targetAmount: refreshedPlan.targetAmount,
+        currentSpentAmount: refreshedPlan.spentAmount,
+        periodLabel: formatCopilotCalendarDate("en", startAt),
+      });
+      await logAuditEvent({
+        actor: "vaultai-assistant",
+        userId: input.userId,
+        action: "BUDGET_ASSISTANT_PACING_REMINDER_SENT",
+        details: {
+          projectedSpendAmount,
+          targetAmount: refreshedPlan.targetAmount,
+          currentSpentAmount: refreshedPlan.spentAmount,
+          currency: refreshedPlan.currency,
+          periodLabel: formatCopilotCalendarDate("en", startAt),
+        },
+        ipAddress: input.ipAddress,
+      });
+      nextAutomationState.lastPacingReminderKey = pacingKey;
+      metadataChanged = true;
+    }
+  }
+
+  if (metadataChanged) {
+    await userRepository.updateMetadata(
+      input.userId,
+      setBudgetAssistantAutomationState(userDoc.metadata, nextAutomationState),
+    );
+    invalidateUserResponseCache(input.userId, ["auth"]);
+  }
+};
+
+const summarizeSpendingCategories = (input: {
+  transactions: CopilotTransactionPayload[];
+  language: CopilotLanguage;
+  targetAmount?: number | null;
+  warningThreshold?: number;
+  categoryCapMap?: Partial<Record<SpendingCategoryKey, number>>;
+}): SpendingCategorySummary[] => {
+  const debitTransactions = input.transactions.filter(
+    (transaction) => transaction.direction === "debit",
+  );
+  const totalSpend = roundMoney(
+    debitTransactions.reduce((sum, transaction) => sum + transaction.amount, 0),
+  );
+
+  const grouped = new Map<
+    SpendingCategoryKey,
+    { amount: number; count: number }
+  >();
+  for (const transaction of debitTransactions) {
+    const categoryKey = categorizeDebitTransaction({
+      type: transaction.type,
+      description: transaction.description,
+    });
+    const current = grouped.get(categoryKey) || { amount: 0, count: 0 };
+    grouped.set(categoryKey, {
+      amount: roundMoney(current.amount + transaction.amount),
+      count: current.count + 1,
+    });
+  }
+
+  return (Object.keys(SPENDING_CATEGORY_SHARES) as SpendingCategoryKey[])
+    .map((key) => {
+      const current = grouped.get(key) || { amount: 0, count: 0 };
+      const capAmount =
+        typeof input.categoryCapMap?.[key] === "number"
+          ? roundMoney(Number(input.categoryCapMap[key] || 0))
+          : typeof input.targetAmount === "number" && input.targetAmount > 0
+            ? roundMoney(input.targetAmount * SPENDING_CATEGORY_SHARES[key])
+            : null;
+      const utilizationRatio =
+        capAmount && capAmount > 0 ? current.amount / capAmount : null;
+      const warningThreshold =
+        typeof input.warningThreshold === "number"
+          ? input.warningThreshold
+          : BUDGET_WARNING_THRESHOLD;
+
+      return {
+        key,
+        label: getSpendingCategoryLabel(input.language, key),
+        amount: roundMoney(current.amount),
+        count: current.count,
+        shareOfSpend:
+          totalSpend > 0 ? roundMoney(current.amount / totalSpend) : 0,
+        capAmount,
+        utilizationRatio,
+        warningState:
+          utilizationRatio !== null && utilizationRatio >= 1
+            ? "over"
+            : utilizationRatio !== null && utilizationRatio >= warningThreshold
+              ? "warning"
+              : "ok",
+      } satisfies SpendingCategorySummary;
+    })
+    .filter((category) => category.amount > 0)
+    .sort((left, right) => right.amount - left.amount);
+};
+
+const buildSpendingAdjustmentSuggestions = (input: {
+  language: CopilotLanguage;
+  categories: SpendingCategorySummary[];
+  hasBudgetPlan: boolean;
+}) => {
+  const top = input.categories[0];
+  const suggestions: string[] = [];
+  if (top) {
+    if (top.key === "shopping") {
+      suggestions.push(
+        localizeCopilotText(
+          input.language,
+          "Tạm dừng mua sắm tùy ý trong vài ngày tới và gom các món cần mua vào một danh sách duy nhất trước khi thanh toán.",
+          "Pause discretionary shopping for the next few days and batch non-essential purchases into one reviewed list before paying.",
+        ),
+      );
+    } else if (top.key === "food") {
+      suggestions.push(
+        localizeCopilotText(
+          input.language,
+          "Đặt trần ăn uống theo ngày và ưu tiên gom đồ ăn, cà phê vào một khung ngân sách cố định.",
+          "Set a daily food cap and fold meals and coffee into one fixed dining budget.",
+        ),
+      );
+    } else if (top.key === "transfers") {
+      suggestions.push(
+        localizeCopilotText(
+          input.language,
+          "Đặt hạn mức chuyển tiền theo tuần để tránh dòng tiền rời ví quá nhanh trong nửa sau của tháng.",
+          "Set a weekly transfer limit so money does not leave the wallet too quickly in the second half of the month.",
+        ),
+      );
+    } else if (top.key === "bills") {
+      suggestions.push(
+        localizeCopilotText(
+          input.language,
+          "Rà soát các khoản hóa đơn và subscription định kỳ để cắt những dịch vụ ít dùng nhất.",
+          "Review recurring bills and subscriptions first, then cut the least-used services.",
+        ),
+      );
+    }
+  }
+
+  if (input.hasBudgetPlan) {
+    suggestions.push(
+      localizeCopilotText(
+        input.language,
+        "Theo sát trần chi theo ngày và theo tuần còn lại để giữ mục tiêu tháng không bị vỡ.",
+        "Use the remaining daily and weekly caps to keep the monthly target intact.",
+      ),
+    );
+  } else {
+    suggestions.push(
+      localizeCopilotText(
+        input.language,
+        "Nếu bạn muốn theo dõi chặt hơn, hãy đặt một trần chi tiêu tháng trong chat để tôi đối chiếu tự động.",
+        "If you want tighter control, set a monthly budget cap in chat so I can compare actual spending automatically.",
+      ),
+    );
+  }
+
+  suggestions.push(
+    localizeCopilotText(
+      input.language,
+      "Tập trung cắt nhóm chi lớn nhất trước, vì đó là nơi tạo ra tác động tiết kiệm nhanh nhất.",
+      "Reduce the largest category first, because that is where savings will move fastest.",
+    ),
+  );
+  return dedupeStringList(suggestions).slice(0, 4);
+};
+
+const buildBudgetCategoryAllocationPromptResponse = (input: {
+  language: CopilotLanguage;
+  currency: string;
+}): CopilotResponsePayload => ({
+  reply: localizeCopilotText(
+    input.language,
+    `Toi co the cho ban tu chinh ty trong tung danh muc ngay trong chat, nhung toi can mot ke hoach ngan sach dang hoat dong truoc. Hay dat tran chi tieu, vi du: "thang nay toi muon chi toi da ${input.currency} 2,000", roi chat tiep "an uong 30%, di lai 10%, hoa don 20%".`,
+    `I can let you tune category weights directly in chat, but I need an active budget plan first. Set a cap first, for example "this month I want to spend at most ${input.currency} 2,000", then follow with "food 30%, transport 10%, bills 20%".`,
+  ),
+  topic: "budget-plan-category-amount-needed",
+  suggestedActions:
+    input.language === "vi"
+      ? [
+          "Dat tran chi tieu hoac muc tieu tiet kiem truoc.",
+          "Sau do gui ty trong theo % cho cac danh muc muon uu tien.",
+          "He thong se tu can phan con lai vao cac danh muc chua nhap.",
+        ]
+      : [
+          "Set a spending cap or savings goal first.",
+          "Then send category percentages for the buckets you want to control.",
+          "The system will rebalance the remaining share across untouched categories.",
+        ],
+  suggestedDepositAmount: null,
+  riskLevel: "low",
+  confidence: 0.94,
+  followUpQuestion: localizeCopilotText(
+    input.language,
+    "Ban muon dat tran chi tieu hoac muc tieu tiet kiem truoc khong?",
+    "Do you want to set a spending cap or savings goal first?",
+  ),
+  budgetPlan: null,
+});
+
+const buildBudgetCategoryAllocationInvalidResponse = (input: {
+  language: CopilotLanguage;
+}): CopilotResponsePayload => ({
+  reply: localizeCopilotText(
+    input.language,
+    "Tong ty trong danh muc ban vua nhap dang vuot 100%, nen toi khong the luu ke hoach nay. Hay giam mot vai nhom hoac chi nhap cac nhom quan trong, toi se tu can phan con lai.",
+    "The category percentages you sent add up to more than 100%, so I cannot save that plan. Reduce a few buckets or send only the most important ones and I will rebalance the rest.",
+  ),
+  topic: "budget-plan-category-invalid",
+  suggestedActions:
+    input.language === "vi"
+      ? [
+          "Dam bao tong cac % khong vuot 100.",
+          "Ban co the chi nhap mot vai danh muc, he thong se tu chia phan con lai.",
+          "Vi du: an uong 30%, di lai 10%, hoa don 20%.",
+        ]
+      : [
+          "Keep the total percentage at or below 100.",
+          "You can send only a few categories and let the system balance the remainder.",
+          "Example: food 30%, transport 10%, bills 20%.",
+        ],
+  suggestedDepositAmount: null,
+  riskLevel: "low",
+  confidence: 0.95,
+  followUpQuestion: localizeCopilotText(
+    input.language,
+    "Ban muon toi can lai ty trong neu ban gui lai danh muc khong?",
+    "Do you want me to rebalance the mix once you resend the category weights?",
+  ),
+  budgetPlan: null,
+});
+
+const buildBudgetAssistantPreferenceResponse = (input: {
+  language: CopilotLanguage;
+  preferences: StoredBudgetAssistantPreferences;
+}): CopilotResponsePayload => {
+  const enabledLines = [
+    input.preferences.proactiveRemindersEnabled
+      ? localizeCopilotText(
+          input.language,
+          "Nhac nho chu dong: bat",
+          "Proactive reminders: on",
+        )
+      : localizeCopilotText(
+          input.language,
+          "Nhac nho chu dong: tat",
+          "Proactive reminders: off",
+        ),
+    input.preferences.dailyDigestEnabled
+      ? localizeCopilotText(
+          input.language,
+          "Bao cao ngay: bat",
+          "Daily brief: on",
+        )
+      : localizeCopilotText(
+          input.language,
+          "Bao cao ngay: tat",
+          "Daily brief: off",
+        ),
+    input.preferences.weeklyDigestEnabled
+      ? localizeCopilotText(
+          input.language,
+          "Bao cao tuan: bat",
+          "Weekly brief: on",
+        )
+      : localizeCopilotText(
+          input.language,
+          "Bao cao tuan: tat",
+          "Weekly brief: off",
+        ),
+    input.preferences.monthlyDigestEnabled
+      ? localizeCopilotText(
+          input.language,
+          "Bao cao thang: bat",
+          "Monthly brief: on",
+        )
+      : localizeCopilotText(
+          input.language,
+          "Bao cao thang: tat",
+          "Monthly brief: off",
+        ),
+  ];
+
+  return {
+    reply: [
+      localizeCopilotText(
+        input.language,
+        "Toi da cap nhat che do tro ly tai chinh cho ban.",
+        "I updated your VaultAI assistant settings.",
+      ),
+      "",
+      ...enabledLines.map((line) => `- ${line}`),
+    ].join("\n"),
+    topic: "budget-assistant-preferences-updated",
+    suggestedActions:
+      input.language === "vi"
+        ? [
+            "Ban co the bao toi bat hoac tat bao cao ngay, tuan, thang bat cu luc nao.",
+            "Hoi toi 'tom tat hom nay' neu muon xem brief ngay lap tuc trong chat.",
+            "Chat lai muc tieu chi tieu moi neu muon doi plan hien tai.",
+          ]
+        : [
+            "You can ask me to turn daily, weekly, or monthly briefs on or off anytime.",
+            "Ask for 'today summary' if you want the brief immediately in chat.",
+            "Send a new spending target anytime if you want to change the active plan.",
+          ],
+    suggestedDepositAmount: null,
+    riskLevel: "low",
+    confidence: 0.96,
+    followUpQuestion: localizeCopilotText(
+      input.language,
+      "Ban co muon toi gui brief ngay hoac brief tuan cho ban khong?",
+      "Do you want me to enable daily or weekly briefs for you?",
+    ),
+    budgetPlan: null,
+  };
+};
+
 const escapeCopilotMarkdownCell = (value: string | number) =>
   String(value).replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 
@@ -5167,6 +6787,7 @@ const parseCopilotIntentClassification = (
 
 const classifyCopilotIntentHeuristically = (
   latestMessage: string,
+  options?: { priorUserMessage?: string | null },
 ): CopilotIntentClassification => {
   const normalized = normalizeCopilotText(latestMessage);
   const asksAnalyticalMarketQuestion =
@@ -5189,6 +6810,30 @@ const classifyCopilotIntentHeuristically = (
   }
 
   if (
+    isBudgetPlanRebuildIntent(latestMessage, options?.priorUserMessage || null)
+  ) {
+    return {
+      intent: "budgeting_help",
+      needs_tools: true,
+      required_tools: ["wallet_summary", "wallet_transactions"],
+      reason:
+        "The user wants VaultAI to rebuild or rebalance an existing budget plan based on current spending context.",
+    };
+  }
+
+  if (
+    isSpendingComparisonIntent(latestMessage, options?.priorUserMessage || null)
+  ) {
+    return {
+      intent: "spending_analysis",
+      needs_tools: true,
+      required_tools: ["wallet_transactions", "wallet_summary"],
+      reason:
+        "The user wants spending trends, comparisons, or outflow analysis based on transaction history.",
+    };
+  }
+
+  if (
     isTodayTransactionReportIntent(latestMessage) ||
     isWeeklyTransactionReportIntent(latestMessage) ||
     isMonthlyTransactionReportIntent(latestMessage) ||
@@ -5205,20 +6850,12 @@ const classifyCopilotIntentHeuristically = (
     };
   }
 
-  if (isSpendingComparisonIntent(latestMessage)) {
-    return {
-      intent: "spending_analysis",
-      needs_tools: true,
-      required_tools: ["wallet_transactions", "wallet_summary"],
-      reason:
-        "The user wants spending trends, comparisons, or outflow analysis based on transaction history.",
-    };
-  }
-
   if (
-    /\b(budget|budgeting|ngan sach|chi tieu hop ly|saving plan|tiet kiem|emergency fund|quy du phong|cash flow plan|ke hoach chi tieu)\b/.test(
+    /\b(budget|budgeting|ngan sach|chi tieu hop ly|chi tieu|tieu toi da|tieu khoang|saving plan|tiet kiem|de danh|save up|save for|emergency fund|quy du phong|cash flow plan|ke hoach chi tieu|nhac nho|reminder|digest|brief|tom tat|summary)\b/.test(
       normalized,
     )
+    || (extractBudgetCategoryAllocationShares(latestMessage) !== null &&
+      /\d{1,3}(?:[.,]\d+)?\s*%/.test(normalized))
   ) {
     return {
       intent: "budgeting_help",
@@ -5286,15 +6923,31 @@ const classifyCopilotIntent = async (input: {
   messages: CopilotMessagePayload[];
   language: CopilotLanguage;
 }): Promise<CopilotIntentClassification> => {
+  const contextualLatestUserMessage =
+    buildContextAwareCopilotUserMessage(input.messages);
   const latestUserMessage =
     [...input.messages].reverse().find((message) => message.role === "user")
       ?.content || "";
-  const heuristic = classifyCopilotIntentHeuristically(latestUserMessage);
+  const previousUserMessage =
+    input.messages
+      .filter((message) => message.role === "user")
+      .slice(-2, -1)[0]?.content || "";
+  const heuristic = classifyCopilotIntentHeuristically(
+    contextualLatestUserMessage || latestUserMessage,
+    {
+      priorUserMessage: previousUserMessage,
+    },
+  );
 
   const isHighConfidenceHeuristic =
     heuristic.intent === "transaction_review" ||
+    (heuristic.intent === "budgeting_help" &&
+      isBudgetPlanRebuildIntent(
+        contextualLatestUserMessage || latestUserMessage,
+        previousUserMessage,
+      )) ||
     (heuristic.intent === "spending_analysis" &&
-      isSpendingComparisonIntent(latestUserMessage)) ||
+      isSpendingComparisonIntent(latestUserMessage, previousUserMessage)) ||
     heuristic.intent === "anomaly_check" ||
     (heuristic.intent === "portfolio_analysis" &&
       Boolean(detectMarketIntent(latestUserMessage))) ||
@@ -7560,31 +9213,31 @@ const buildHeuristicCopilotResponse = (input: {
       balance + safeMonthlySave * horizonMonths,
     );
     const planTable = buildCopilotMarkdownTable(
-      language === "vi" ? ["Hang muc", "Gia tri"] : ["Item", "Value"],
+      language === "vi" ? ["Hạng mục", "Giá trị"] : ["Item", "Value"],
       [
         [
-          language === "vi" ? "So du hien tai" : "Current balance",
+          language === "vi" ? "Số dư hiện tại" : "Current balance",
           formatCopilotMoney(input.currency, balance),
         ],
         [
-          language === "vi" ? "Dong tien rong thang" : "Monthly free cash flow",
+          language === "vi" ? "Dòng tiền ròng tháng" : "Monthly free cash flow",
           formatCopilotSignedMoney(input.currency, netCashFlow),
         ],
         [
           language === "vi"
-            ? "Muc tiet kiem goi y / thang"
+            ? "Mức tiết kiệm gợi ý / tháng"
             : "Suggested monthly saving",
           formatCopilotMoney(input.currency, safeMonthlySave),
         ],
         [
-          language === "vi" ? "Khung thoi gian" : "Horizon",
+          language === "vi" ? "Khung thời gian" : "Horizon",
           language === "vi"
-            ? `${horizonMonths} thang`
+            ? `${horizonMonths} tháng`
             : `${horizonMonths} months`,
         ],
         [
           language === "vi"
-            ? "So du uoc tinh cuoi ky"
+            ? "Số dư ước tính cuối kỳ"
             : "Projected balance at horizon",
           formatCopilotMoney(input.currency, projectedBalance),
         ],
@@ -7594,15 +9247,15 @@ const buildHeuristicCopilotResponse = (input: {
     return {
       reply:
         language === "vi"
-          ? `Toi da dung so du vi va dong tien hien tai de lap mot ke hoach tiet kiem dai han co the duy tri deu thay vi qua suc.\n\n${planTable}\n\nNeu ban muon di duong dai han, uu tien la giu deu lich tiet kiem hang thang va khong de mot giao dich tu y lam vo ky luat dong tien.`
+          ? `Tôi đã dùng số dư ví và dòng tiền hiện tại để lập một kế hoạch tiết kiệm dài hạn có thể duy trì đều thay vì quá sức.\n\n${planTable}\n\nNếu bạn muốn đi đường dài hạn, ưu tiên là giữ đều lịch tiết kiệm hàng tháng và không để một giao dịch tùy ý làm vỡ kỷ luật dòng tiền.`
           : `I used your current wallet balance and cash flow to outline a long-term saving plan that looks sustainable instead of aggressive.\n\n${planTable}\n\nFor longer goals, the main edge is consistency: keep the monthly saving habit stable and avoid letting discretionary spending break the plan.`,
       topic: "long-term-savings-plan",
       suggestedActions:
         language === "vi"
           ? [
-              "Cho toi biet muc tieu cu the nhu hoc phi, du phong, hay mua tai san de toi siet ke hoach sat hon.",
-              "Neu thu nhap khong deu, toi co the doi thanh muc tiet kiem toi thieu va muc tiet kiem stretch.",
-              "Hoi toi bao cao chi tieu thang nay neu ban muon tim them room cho tiet kiem.",
+              "Cho tôi biết mục tiêu cụ thể như học phí, dự phòng hay mua tài sản để tôi siết kế hoạch sát hơn.",
+              "Nếu thu nhập không đều, tôi có thể đổi thành mức tiết kiệm tối thiểu và mức tiết kiệm stretch.",
+              "Hỏi tôi báo cáo chi tiêu tháng này nếu bạn muốn tìm thêm room cho tiết kiệm.",
             ]
           : [
               "Tell me the exact goal, such as tuition, emergency fund, or a major purchase, and I can tighten the plan.",
@@ -7614,7 +9267,7 @@ const buildHeuristicCopilotResponse = (input: {
       confidence: 0.87,
       followUpQuestion: localizeCopilotText(
         language,
-        "Ban muon toi doi ke hoach nay theo muc tieu 6 thang, 12 thang, hay 24 thang?",
+        "Bạn muốn tôi đổi kế hoạch này theo mục tiêu 6 tháng, 12 tháng hay 24 tháng?",
         "Do you want me to reshape this plan for a 6, 12, or 24 month goal?",
       ),
     };
@@ -7626,30 +9279,30 @@ const buildHeuristicCopilotResponse = (input: {
     )
   ) {
     const summaryTable = buildCopilotMarkdownTable(
-      language === "vi" ? ["Chi so", "Gia tri"] : ["Metric", "Value"],
+      language === "vi" ? ["Chỉ số", "Giá trị"] : ["Metric", "Value"],
       [
         [
-          language === "vi" ? "So du hien tai" : "Current balance",
+          language === "vi" ? "Số dư hiện tại" : "Current balance",
           formatCopilotMoney(input.currency, balance),
         ],
         [
-          language === "vi" ? "Thu nhap thang" : "Monthly income",
+          language === "vi" ? "Thu nhập tháng" : "Monthly income",
           formatCopilotMoney(input.currency, income),
         ],
         [
-          language === "vi" ? "Chi phi thang" : "Monthly expenses",
+          language === "vi" ? "Chi phí tháng" : "Monthly expenses",
           formatCopilotMoney(input.currency, expenses),
         ],
         [
-          language === "vi" ? "Dong tien rong" : "Net cash flow",
+          language === "vi" ? "Dòng tiền ròng" : "Net cash flow",
           formatCopilotSignedMoney(input.currency, netCashFlow),
         ],
         [
-          language === "vi" ? "Muc nap goi y" : "Suggested deposit",
+          language === "vi" ? "Mức nạp gợi ý" : "Suggested deposit",
           suggestedDepositAmount !== null
             ? formatCopilotMoney(input.currency, suggestedDepositAmount)
             : language === "vi"
-              ? "Can them du lieu"
+              ? "Cần thêm dữ liệu"
               : "Need more data",
         ],
       ],
@@ -7658,8 +9311,8 @@ const buildHeuristicCopilotResponse = (input: {
       reply:
         language === "vi"
           ? netCashFlow > 0
-            ? `Vi cua ban co kha nang hap thu mot khoan nap them co ke hoach ma khong gay ap luc lon len dong tien hang thang. Dua tren cac so lieu ban nhap, nap theo tung dot se an toan hon chuyen mot khoan lon ngay lap tuc.\n\n${summaryTable}`
-            : `Du lieu hien tai cho thay dong tien tu do dang han che, vi vay toi se uu tien giu thanh khoan va tranh nap them qua manh o luc nay.\n\n${summaryTable}`
+            ? `Ví của bạn có khả năng hấp thụ một khoản nạp thêm có kế hoạch mà không gây áp lực lớn lên dòng tiền hàng tháng. Dựa trên các số liệu bạn nhập, nạp theo từng đợt sẽ an toàn hơn chuyển một khoản lớn ngay lập tức.\n\n${summaryTable}`
+            : `Dữ liệu hiện tại cho thấy dòng tiền tự do đang hạn chế, vì vậy tôi sẽ ưu tiên giữ thanh khoản và tránh nạp thêm quá mạnh ở lúc này.\n\n${summaryTable}`
           : netCashFlow > 0
             ? `Your wallet can likely absorb a planned top-up without stressing monthly cash flow. Based on the numbers you entered, a staged deposit is safer than moving a large amount at once.\n\n${summaryTable}`
             : `Your current inputs show limited free cash flow, so I would avoid an aggressive top-up and preserve liquidity first.\n\n${summaryTable}`,
@@ -7667,11 +9320,11 @@ const buildHeuristicCopilotResponse = (input: {
       suggestedActions:
         language === "vi"
           ? [
-              "Giu lai it nhat mot chu ky chi phi hang thang o trang thai thanh khoan truoc khi nap them lon.",
+              "Giữ lại ít nhất một chu kỳ chi phí hàng tháng ở trạng thái thanh khoản trước khi nạp thêm lớn.",
               suggestedDepositAmount
-                ? `Bat dau voi muc nap khoang ${input.currency} ${suggestedDepositAmount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`
-                : "Cap nhat thu nhap va chi phi hang thang de toi de xuat muc nap chinh xac hon.",
-              "Ra soat cac giao dich ghi no dinh ky de cat giam nhung khoan co the toi uu trong thang nay.",
+                ? `Bắt đầu với mức nạp khoảng ${input.currency} ${suggestedDepositAmount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`
+                : "Cập nhật thu nhập và chi phí hàng tháng để tôi đề xuất mức nạp chính xác hơn.",
+              "Rà soát các giao dịch ghi nợ định kỳ để cắt giảm những khoản có thể tối ưu trong tháng này.",
             ]
           : [
               "Keep at least one monthly expense cycle liquid before larger deposits.",
@@ -7685,7 +9338,7 @@ const buildHeuristicCopilotResponse = (input: {
       confidence: netCashFlow > 0 ? 0.84 : 0.7,
       followUpQuestion: localizeCopilotText(
         language,
-        "Ban muon toi de xuat sat hon cho quy du phong, hoc phi hay phan bo tien dau tu khong?",
+        "Bạn muốn tôi đề xuất sát hơn cho quỹ dự phòng, học phí hay phân bổ tiền đầu tư không?",
         "Do you want a tighter recommendation for emergency fund, tuition, or investment cash allocation?",
       ),
     };
@@ -7878,9 +9531,13 @@ const isWeeklyTransactionReportIntent = (message: string) => {
 const isMonthlyTransactionReportIntent = (message: string) => {
   const normalized = normalizeCopilotText(message);
   const asksForMonth =
-    /\b(this month|monthly|month report|month summary|thang nay|thang truoc|bao cao thang|tong hop thang|thong ke thang)\b/.test(
+    /\b(this month|monthly|month report|month summary|past month|last 30 days|30 days|30 day|1 month|one month|thang nay|thang truoc|1 thang qua|mot thang qua|30 ngay qua|bao cao thang|tong hop thang|thong ke thang)\b/.test(
       normalized,
-    ) || /\b(sao ke|statement)\b/.test(normalized);
+    ) ||
+    /\b(sao ke|statement)\b/.test(normalized) ||
+    /\b(trong|during)\s+(1\s+thang\s+qua|mot\s+thang\s+qua|30\s+ngay\s+qua|1\s+month|30\s+days)\b/.test(
+      normalized,
+    );
   const asksForTransactions =
     /\b(transaction|transactions|giao dich|dong tien|thu chi|money flow|cash flow|sao ke)\b/.test(
       normalized,
@@ -7898,10 +9555,55 @@ const isMonthlyTransactionReportIntent = (message: string) => {
   return asksForMonth && asksForTransactions && asksForReport;
 };
 
-const isSpendingComparisonIntent = (message: string) => {
+const buildContextAwareCopilotUserMessage = (
+  messages: CopilotMessagePayload[],
+) => {
+  const userMessages = messages.filter((message) => message.role === "user");
+  const latest = userMessages[userMessages.length - 1]?.content?.trim() || "";
+  const previous =
+    userMessages[userMessages.length - 2]?.content?.trim() || "";
+  if (!latest || !previous) return latest;
+
+  const normalizedLatest = normalizeCopilotText(latest);
+  const isContextualFollowUp =
+    latest.length <= 120 &&
+    /\b(so sanh|compare|comparison|vs|versus|thi sao|the nao|thang truoc|tuan truoc|hom qua|chi tiet hon|noi ro hon|tach them|tach rieng|them nua|deep dive|lap lai|lam lai|tao lai|can lai|dieu chinh lai|replan|rebalance)\b/.test(
+      normalizedLatest,
+    );
+
+  return isContextualFollowUp ? `${previous}\n${latest}` : latest;
+};
+
+const isBudgetPlanRebuildIntent = (
+  message: string,
+  contextMessage?: string | null,
+) => {
   const normalized = normalizeCopilotText(message);
+  const contextualNormalized = normalizeCopilotText(
+    [contextMessage || "", message].filter(Boolean).join("\n"),
+  );
+  const asksToRebuild =
+    /\b(lap lai|lam lai|tao lai|can lai|dieu chinh lai|tinh lai|sua lai|replan|rebalance|rebuild|redo)\b/.test(
+      normalized,
+    );
+  const mentionsBudgetContext =
+    /\b(budget|ngan sach|ke hoach|chi tieu|tieu|han muc|tiet kiem|de danh|spending cap|saving|thang nay|vuot ngan sach|over budget|qua nhieu)\b/.test(
+      contextualNormalized,
+    );
+
+  return asksToRebuild && mentionsBudgetContext;
+};
+
+const isSpendingComparisonIntent = (
+  message: string,
+  contextMessage?: string | null,
+) => {
+  const normalized = normalizeCopilotText(message);
+  const contextualNormalized = normalizeCopilotText(
+    [contextMessage || "", message].filter(Boolean).join("\n"),
+  );
   const asksComparison =
-    /\b(so voi|compare|comparison|vs|versus|trend|xu huong)\b/.test(
+    /\b(so sanh|so voi|compare|comparison|vs|versus|trend|xu huong)\b/.test(
       normalized,
     ) ||
     /\b(hom nay.*hom qua|tuan nay.*tuan truoc|thang nay.*thang truoc|today.*yesterday|this week.*last week|this month.*last month)\b/.test(
@@ -7911,10 +9613,19 @@ const isSpendingComparisonIntent = (message: string) => {
     /\b(chi tieu|spend|spending|thu chi|money flow|cash flow)\b/.test(
       normalized,
     );
+  const contextSuggestsTransactionReview =
+    /\b(transaction|transactions|giao dich|sao ke|statement|bao cao|tong hop|liet ke|thong ke)\b/.test(
+      contextualNormalized,
+    );
+  const asksRelativeComparisonOnly =
+    /\b(thang truoc|tuan truoc|hom qua|last month|last week|yesterday)\b/.test(
+      normalized,
+    );
 
   return (
-    asksSpending &&
+    (asksSpending || contextSuggestsTransactionReview) &&
     (asksComparison ||
+      asksRelativeComparisonOnly ||
       /\b(hom nay|hom qua|tuan nay|tuan truoc|thang nay|thang truoc|today|yesterday|this week|last week|this month|last month)\b/.test(
         normalized,
       ))
@@ -7944,7 +9655,7 @@ const formatCopilotTransactionLine = (input: {
     input.direction === "credit" ? `+${amountLabel}` : `-${amountLabel}`;
 
   return input.language === "vi"
-    ? `- ${timeLabel} | ${input.direction === "credit" ? "Vao" : "Ra"} | ${signedAmount} | ${input.description} (${input.type})`
+    ? `- ${timeLabel} | ${input.direction === "credit" ? "Vào" : "Ra"} | ${signedAmount} | ${input.description} (${input.type})`
     : `- ${timeLabel} | ${input.direction === "credit" ? "Inflow" : "Outflow"} | ${signedAmount} | ${input.description} (${input.type})`;
 };
 
@@ -7976,22 +9687,22 @@ const buildTransactionReportReply = (input: {
   const netFlow = roundMoney(totalInflow - totalOutflow);
 
   const summaryTable = buildCopilotMarkdownTable(
-    input.language === "vi" ? ["Chi so", "Gia tri"] : ["Metric", "Value"],
+    input.language === "vi" ? ["Chỉ số", "Giá trị"] : ["Metric", "Value"],
     [
       [
-        input.language === "vi" ? "Tong tien vao" : "Total inflow",
+        input.language === "vi" ? "Tổng tiền vào" : "Total inflow",
         formatCopilotMoney(input.currency, totalInflow),
       ],
       [
-        input.language === "vi" ? "Tong tien ra" : "Total outflow",
+        input.language === "vi" ? "Tổng tiền ra" : "Total outflow",
         formatCopilotMoney(input.currency, totalOutflow),
       ],
       [
-        input.language === "vi" ? "Dong tien rong" : "Net flow",
+        input.language === "vi" ? "Dòng tiền ròng" : "Net flow",
         formatCopilotSignedMoney(input.currency, netFlow),
       ],
       [
-        input.language === "vi" ? "So giao dich" : "Transaction count",
+        input.language === "vi" ? "Số giao dịch" : "Transaction count",
         input.transactions.length,
       ],
     ],
@@ -8005,7 +9716,7 @@ const buildTransactionReportReply = (input: {
     ),
     input.language === "vi"
       ? transaction.direction === "credit"
-        ? "Vao"
+        ? "Vào"
         : "Ra"
       : transaction.direction === "credit"
         ? "Inflow"
@@ -8024,7 +9735,7 @@ const buildTransactionReportReply = (input: {
     detailRows.length > 0
       ? buildCopilotMarkdownTable(
           input.language === "vi"
-            ? ["Thoi gian", "Huong", "So tien", "Noi dung", "Loai"]
+            ? ["Thời gian", "Hướng", "Số tiền", "Nội dung", "Loại"]
             : ["Time", "Direction", "Amount", "Description", "Type"],
           detailRows,
         )
@@ -8038,7 +9749,7 @@ const buildTransactionReportReply = (input: {
       "",
       localizeCopilotText(
         input.language,
-        "Khong co giao dich trong khoang thoi gian nay.",
+        "Không có giao dịch trong khoảng thời gian này.",
         "There were no transactions in this period.",
       ),
     ].join("\n");
@@ -8049,7 +9760,7 @@ const buildTransactionReportReply = (input: {
     "",
     summaryTable,
     "",
-    input.language === "vi" ? "Chi tiet giao dich:" : "Transaction details:",
+    input.language === "vi" ? "Chi tiết giao dịch:" : "Transaction details:",
     "",
     detailsTable,
   ].join("\n");
@@ -8073,6 +9784,66 @@ const getStartOfMonth = (value: Date) => {
   const next = getStartOfDay(value);
   next.setDate(1);
   return next;
+};
+
+const getEndOfDay = (value: Date) => {
+  const next = getStartOfDay(value);
+  next.setDate(next.getDate() + 1);
+  return next;
+};
+
+const getEndOfWeek = (value: Date) => {
+  const next = getStartOfWeek(value);
+  next.setDate(next.getDate() + 7);
+  return next;
+};
+
+const getEndOfMonth = (value: Date) => {
+  const next = getStartOfMonth(value);
+  next.setMonth(next.getMonth() + 1);
+  return next;
+};
+
+const getBudgetDigestPeriodRange = (period: BudgetDigestPeriod, now: Date) => {
+  if (period === "daily") {
+    return {
+      startInclusive: getStartOfDay(now),
+      endExclusive: getEndOfDay(now),
+      previousStartInclusive: getStartOfDay(new Date(now.getTime() - 86400000)),
+      previousEndExclusive: getStartOfDay(now),
+    };
+  }
+  if (period === "weekly") {
+    const startInclusive = getStartOfWeek(now);
+    const previousStartInclusive = new Date(startInclusive);
+    previousStartInclusive.setDate(previousStartInclusive.getDate() - 7);
+    return {
+      startInclusive,
+      endExclusive: getEndOfWeek(now),
+      previousStartInclusive,
+      previousEndExclusive: startInclusive,
+    };
+  }
+  const startInclusive = getStartOfMonth(now);
+  const previousStartInclusive = new Date(startInclusive);
+  previousStartInclusive.setMonth(previousStartInclusive.getMonth() - 1);
+  return {
+    startInclusive,
+    endExclusive: getEndOfMonth(now),
+    previousStartInclusive,
+    previousEndExclusive: startInclusive,
+  };
+};
+
+const getBudgetDigestPeriodKey = (period: BudgetDigestPeriod, now: Date) => {
+  if (period === "daily") {
+    return formatCopilotCalendarDate("en", getStartOfDay(now));
+  }
+  if (period === "weekly") {
+    return formatCopilotCalendarDate("en", getStartOfWeek(now));
+  }
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  return `${now.getFullYear()}-${month}`;
 };
 
 const mapTransactionsForCopilot = (
@@ -8257,7 +10028,7 @@ const buildComparisonRow = (input: {
       ? `${delta >= 0 ? "+" : ""}${roundMoney((delta / input.previous) * 100).toFixed(2)}%`
       : input.current > 0
         ? input.language === "vi"
-          ? "moi phat sinh"
+          ? "mới phát sinh"
           : "new spend"
         : "0.00%";
 
@@ -8269,6 +10040,1207 @@ const buildComparisonRow = (input: {
     formatCopilotSignedMoney(input.currency, delta),
     percent,
   ];
+};
+
+const sumCompletedDebitTransactionsForUser = async (input: {
+  userId: string;
+  startInclusive: Date;
+  endExclusive: Date;
+  context: string;
+}) => {
+  const wallets = await prisma.wallet.findMany({
+    where: { userId: input.userId },
+    select: { id: true },
+  });
+  const walletIds = wallets.map((wallet: { id: string }) => wallet.id);
+  const txns = await prisma.transaction.findMany({
+    where: {
+      ...(walletIds.length
+        ? { walletId: { in: walletIds } }
+        : { walletId: "__NO_WALLET__" }),
+      createdAt: {
+        gte: input.startInclusive,
+        lt: input.endExclusive,
+      },
+    },
+    orderBy: { createdAt: "asc" },
+    take: 3000,
+  });
+
+  return roundMoney(
+    txns.reduce((sum, txn) => {
+      const decrypted = safelyDecryptTransaction(txn, input.context);
+      if (!decrypted) return sum;
+      if (decrypted.status !== "COMPLETED") return sum;
+      const metadata = normalizeRecord(decrypted.metadata);
+      const isDebit =
+        decrypted.type !== "DEPOSIT" && metadata.entry !== "CREDIT";
+      return (
+        sum + (isDebit ? Math.max(0, Number(decrypted.amount || 0)) : 0)
+      );
+    }, 0),
+  );
+};
+
+const buildBudgetPlanReply = (input: {
+  language: CopilotLanguage;
+  plan: StoredBudgetPlan;
+  isNewPlan: boolean;
+}) => {
+  const overviewRows: Array<[string, string]> = [];
+  if (input.plan.planningMode === "savings_goal") {
+    overviewRows.push(
+      [
+        input.language === "vi" ? "Chế độ lập kế hoạch" : "Planning mode",
+        localizeCopilotText(
+          input.language,
+          "Theo mục tiêu tiết kiệm",
+          "Savings-led budget",
+        ),
+      ],
+      [
+        input.language === "vi"
+          ? "Mục tiêu để dành cuối tháng"
+          : "End-of-month savings goal",
+        formatCopilotMoney(
+          input.plan.currency,
+          Math.max(0, input.plan.savingsGoalAmount || 0),
+        ),
+      ],
+      [
+        input.language === "vi"
+          ? "Nguồn tiền tháng dùng để tính"
+          : "Monthly income baseline used",
+        formatCopilotMoney(
+          input.plan.currency,
+          Math.max(0, input.plan.incomeBaselineAmount || 0),
+        ),
+      ],
+      [
+        input.language === "vi"
+          ? "Trần chi tối đa để giữ mục tiêu"
+          : "Allowed spend cap to protect the goal",
+        formatCopilotMoney(input.plan.currency, input.plan.targetAmount),
+      ],
+    );
+  } else {
+    overviewRows.push([
+      input.language === "vi" ? "Trần chi tiêu tháng" : "Monthly budget cap",
+      formatCopilotMoney(input.plan.currency, input.plan.targetAmount),
+    ]);
+  }
+
+  overviewRows.push(
+    [
+      input.language === "vi" ? "Đã chi trong kỳ" : "Spent in active period",
+      formatCopilotMoney(input.plan.currency, input.plan.spentAmount),
+    ],
+    [
+      input.language === "vi" ? "Còn lại" : "Remaining budget",
+      input.plan.remainingAmount >= 0
+        ? formatCopilotMoney(input.plan.currency, input.plan.remainingAmount)
+        : `-${formatCopilotMoney(
+            input.plan.currency,
+            Math.abs(input.plan.remainingAmount),
+          )}`,
+    ],
+    [
+      input.language === "vi"
+        ? "Trần chi / ngày còn lại"
+        : "Daily cap for remaining days",
+      typeof input.plan.dailyCapRemaining === "number"
+        ? formatCopilotMoney(input.plan.currency, input.plan.dailyCapRemaining)
+        : input.language === "vi"
+          ? "Không áp dụng"
+          : "Not available",
+    ],
+    [
+      input.language === "vi"
+        ? "Trần chi / tuần còn lại"
+        : "Weekly cap for remaining weeks",
+      typeof input.plan.weeklyCapRemaining === "number"
+        ? formatCopilotMoney(input.plan.currency, input.plan.weeklyCapRemaining)
+        : input.language === "vi"
+          ? "Không áp dụng"
+          : "Not available",
+    ],
+    [
+      input.language === "vi" ? "Cảnh báo email" : "Email alert thresholds",
+      `${Math.round(input.plan.warningThreshold * 100)}% / ${Math.round(
+        input.plan.criticalThreshold * 100,
+      )}%`,
+    ],
+  );
+
+  const overviewTable = buildCopilotMarkdownTable(
+    input.language === "vi" ? ["Chỉ số", "Giá trị"] : ["Metric", "Value"],
+    overviewRows,
+  );
+
+  const categoryTable = buildCopilotMarkdownTable(
+    input.language === "vi"
+      ? ["Nhóm ngân sách", "Tỷ trọng", "Hạn mức"]
+      : ["Budget bucket", "Share", "Cap"],
+    input.plan.categories.map((category) => [
+      input.language === "vi" &&
+      SPENDING_CATEGORY_ORDER.includes(category.key as SpendingCategoryKey)
+        ? getSpendingCategoryLabel(
+            input.language,
+            category.key as SpendingCategoryKey,
+          )
+        : category.label,
+      `${Math.round(category.share * 100)}%`,
+      formatCopilotMoney(input.plan.currency, category.amount),
+    ]),
+  );
+
+  const lead =
+    input.language === "vi"
+      ? input.isNewPlan
+        ? input.plan.planningMode === "savings_goal"
+          ? "Tôi đã tạo và lưu kế hoạch ngân sách theo mục tiêu tiết kiệm cho bạn. Tôi lấy mức để dành cuối tháng để suy ra trần chi tối đa, rồi hệ thống sẽ theo dõi giao dịch thực tế và gửi email khi bạn chạm ngưỡng cảnh báo hoặc vượt mức cho phép."
+          : "Tôi đã tạo và lưu kế hoạch ngân sách tháng này cho bạn. Từ giờ, hệ thống sẽ theo dõi chi tiêu thực tế và gửi email khi bạn chạm ngưỡng cảnh báo hoặc vượt trần."
+        : input.plan.planningMode === "savings_goal"
+          ? "Đây là kế hoạch đang được lưu theo mục tiêu tiết kiệm. Tôi đã đối chiếu nó với giao dịch hiện tại để bạn thấy ngay mức chi tối đa còn lại."
+          : "Đây là kế hoạch ngân sách đang được lưu trong hệ thống. Tôi đã đối chiếu nó với giao dịch hiện tại để bạn thấy ngay mức còn lại."
+      : input.isNewPlan
+        ? input.plan.planningMode === "savings_goal"
+          ? "I created and saved a savings-led monthly plan for you. I used the savings goal to derive the maximum spending cap, and the system will now watch real spending and email you when you hit warning levels or go past the allowed limit."
+          : "I created and saved this month's budget plan for you. From now on, the system will watch real spending and email you when you hit warning levels or go over budget."
+        : input.plan.planningMode === "savings_goal"
+          ? "This is the savings-led plan currently saved in the system. I refreshed it against your latest transactions so you can see the spend room left right now."
+          : "This is the budget plan currently saved in the system. I refreshed it against your latest transactions so you can see what remains right now.";
+
+  const pressureLine =
+    input.plan.remainingAmount < 0
+      ? localizeCopilotText(
+          input.language,
+          input.plan.planningMode === "savings_goal"
+            ? "Bạn đã vượt trần chi tối đa để giữ mục tiêu tiết kiệm, vì vậy mức để dành cuối tháng đang bị đe dọa và ưu tiên lúc này là cắt giảm các khoản linh hoạt."
+            : "Bạn đã vượt trần ngân sách hiện tại, vì vậy ưu tiên lúc này là cắt giảm các khoản linh hoạt cho phần còn lại của tháng.",
+          input.plan.planningMode === "savings_goal"
+            ? "You are already above the spend cap that protects the savings goal, so the end-of-month savings target is now at risk and flexible spending should be cut first."
+            : "You are already over the current budget cap, so the priority now is to cut flexible spending for the rest of the month.",
+        )
+      : input.plan.utilizationRatio >= input.plan.warningThreshold
+        ? localizeCopilotText(
+            input.language,
+            input.plan.planningMode === "savings_goal"
+              ? "Bạn đang ở vùng cảnh báo của kế hoạch tiết kiệm, nên mỗi giao dịch ghi nợ tiếp theo đều ảnh hưởng trực tiếp đến số tiền bạn muốn để dành cuối tháng."
+              : "Bạn đang ở vùng cảnh báo, nên mỗi giao dịch ghi nợ tiếp theo cần được cân nhắc kỹ để tránh vượt trần.",
+            input.plan.planningMode === "savings_goal"
+              ? "You are in the warning zone of the savings-led plan, so each new debit now directly affects the amount you want to keep by month end."
+              : "You are in the warning zone, so each new debit should be weighed carefully to avoid crossing the cap.",
+          )
+        : localizeCopilotText(
+            input.language,
+            input.plan.planningMode === "savings_goal"
+              ? "Nếu bạn giữ những trần chi còn lại này, mục tiêu để dành cuối tháng vẫn nằm trong tầm tay."
+              : "Nếu bạn giữ những trần chi còn lại này, khả năng giữ đúng mục tiêu tháng là tốt.",
+            input.plan.planningMode === "savings_goal"
+              ? "If you hold to the remaining daily and weekly caps, the end-of-month savings goal is still realistic."
+              : "If you keep to the remaining daily and weekly caps, the monthly target is still realistic.",
+          );
+
+  return [lead, "", overviewTable, "", pressureLine, "", categoryTable].join(
+    "\n",
+  );
+};
+
+const buildBudgetPromptMissingAmountResponse = (input: {
+  language: CopilotLanguage;
+  currency: string;
+}): CopilotResponsePayload => ({
+  reply: localizeCopilotText(
+    input.language,
+    `Toi co the lap va luu ke hoach ngan sach ngay trong chat, nhung toi can mot tran chi tieu cu the cho thang nay. Vi du: "thang nay toi muon gioi han chi tieu o muc ${input.currency} 2,000". Ban cung co the noi "toi muon de danh ${input.currency} 500 cuoi thang" de toi tu suy tran chi toi da.`,
+    `I can create and save a budget plan right here in chat, but I need a concrete monthly cap first. For example: "this month I want to keep spending under ${input.currency} 2,000". You can also say "I want to save ${input.currency} 500 by month end" and I will derive the spend cap for you.`,
+  ),
+  topic: "budget-plan-amount-needed",
+  suggestedActions:
+    input.language === "vi"
+      ? [
+          "Nhap tran chi tieu thang nay ban muon dat.",
+          "Neu muon, noi them muc tieu tiet kiem de toi tu suy ra tran chi va chia lai ngan sach.",
+          "Sau khi luu, he thong se canh bao email khi cham nguong 85% va 100%.",
+        ]
+      : [
+          "Send the monthly spending cap you want to enforce.",
+          "Add a savings goal too if you want me to derive the cap and reshape the budget mix.",
+          "After saving, the system will email warnings at 85% and 100%.",
+        ],
+  suggestedDepositAmount: null,
+  riskLevel: "low",
+  confidence: 0.93,
+  followUpQuestion: localizeCopilotText(
+    input.language,
+    "Ban muon dat tran chi tieu thang nay la bao nhieu?",
+    "What monthly spending cap do you want to set?",
+  ),
+  budgetPlan: null,
+});
+
+const buildSavingsGoalMissingIncomeResponse = (input: {
+  language: CopilotLanguage;
+  currency: string;
+  savingsGoalAmount: number;
+}): CopilotResponsePayload => ({
+  reply: localizeCopilotText(
+    input.language,
+    `Toi da hieu muc tieu de danh ${formatCopilotMoney(input.currency, input.savingsGoalAmount)} cuoi thang, nhung hien chua co du du lieu thu nhap thang de suy ra tran chi toi da. Ban co the nhap them thu nhap thang, vi du: "thu nhap thang nay cua toi la ${input.currency} 3,000", hoac dat thang tran chi tieu truc tiep.`,
+    `I understand the goal to save ${formatCopilotMoney(input.currency, input.savingsGoalAmount)} by month end, but I do not have enough monthly income data yet to derive a safe spending cap. You can provide monthly income, for example "my income this month is ${input.currency} 3,000", or set the spending cap directly.`,
+  ),
+  topic: "budget-plan-income-needed",
+  suggestedActions:
+    input.language === "vi"
+      ? [
+          "Nhap thu nhap thang de toi suy ra tran chi toi da.",
+          "Hoac gui truc tiep tran chi tieu ban muon dat trong thang nay.",
+          "Sau khi luu, he thong se doi chieu giao dich voi ke hoach moi.",
+        ]
+      : [
+          "Share monthly income so I can derive a safe spending cap.",
+          "Or send the exact spending cap you want to set this month.",
+          "Once saved, the system will compare transactions against the new plan.",
+        ],
+  suggestedDepositAmount: null,
+  riskLevel: "low",
+  confidence: 0.91,
+  followUpQuestion: localizeCopilotText(
+    input.language,
+    "Thu nhap thang nay cua ban khoang bao nhieu?",
+    "What is your expected monthly income?",
+  ),
+  budgetPlan: null,
+});
+
+const buildSavingsGoalTooHighResponse = (input: {
+  language: CopilotLanguage;
+  currency: string;
+  savingsGoalAmount: number;
+  incomeBaselineAmount: number;
+}): CopilotResponsePayload => ({
+  reply: localizeCopilotText(
+    input.language,
+    `Toi da doi muc tieu de danh ${formatCopilotMoney(input.currency, input.savingsGoalAmount)} voi dong tien vao thang gan day la ${formatCopilotMoney(input.currency, input.incomeBaselineAmount)}, va muc tieu nay dang cao hon hoac bang toan bo thu nhap thang duoc ghi nhan. De lap ke hoach kha thi, ban nen giam muc tieu de danh hoac gui cho toi mot tran chi tieu cu the.`,
+    `I compared the savings goal of ${formatCopilotMoney(input.currency, input.savingsGoalAmount)} with the recent monthly inflow baseline of ${formatCopilotMoney(input.currency, input.incomeBaselineAmount)}, and the goal is at or above the full monthly income on record. To build a workable plan, lower the savings goal or send me a direct monthly spending cap.`,
+  ),
+  topic: "budget-plan-savings-goal-too-high",
+  suggestedActions:
+    input.language === "vi"
+      ? [
+          "Giam muc tieu de danh xuong duoi muc thu nhap thang duoc ghi nhan.",
+          "Hoac dat mot tran chi tieu thang cu the de toi luu ke hoach ngay.",
+          "Neu du lieu thu nhap hien tai chua dung, ban co the cap nhat thu nhap va hoi lai.",
+        ]
+      : [
+          "Lower the savings goal below the income level currently on record.",
+          "Or set a direct monthly spending cap so I can save the plan now.",
+          "If the income baseline is outdated, update it and ask again.",
+        ],
+  suggestedDepositAmount: null,
+  riskLevel: "medium",
+  confidence: 0.92,
+  followUpQuestion: localizeCopilotText(
+    input.language,
+    "Ban muon toi tinh lai voi mot muc tiet kiem thap hon khong?",
+    "Do you want me to recalculate with a smaller savings goal?",
+  ),
+  budgetPlan: null,
+});
+
+const buildWeeklyBudgetPromptMissingAmountResponse = (input: {
+  language: CopilotLanguage;
+  currency: string;
+}): CopilotResponsePayload => ({
+  reply: localizeCopilotText(
+    input.language,
+    `Tôi có thể lập kế hoạch chi tiêu cho tuần tiếp theo ngay trong chat, nhưng tôi cần tổng kinh phí cho tuần đó. Ví dụ: "lập kế hoạch chi tiêu cho tuần tới, kinh phí ${input.currency} 2,000".`,
+    `I can create a spending plan for next week right here in chat, but I need the total budget for that week first. For example: "plan next week spending, budget ${input.currency} 2,000".`,
+  ),
+  topic: "budget-plan-weekly-amount-needed",
+  suggestedActions:
+    input.language === "vi"
+      ? [
+          "Nhập tổng kinh phí bạn muốn dùng cho tuần tới.",
+          "Nếu muốn, bạn có thể thêm tỷ trọng danh mục ngay trong cùng tin nhắn.",
+          "Ví dụ: ăn uống 30%, đi lại 10%, hóa đơn 20%.",
+        ]
+      : [
+          "Send the total amount you want to use next week.",
+          "You can also include category percentages in the same message.",
+          "For example: food 30%, transport 10%, bills 20%.",
+        ],
+  suggestedDepositAmount: null,
+  riskLevel: "low",
+  confidence: 0.94,
+  followUpQuestion: localizeCopilotText(
+    input.language,
+    "Bạn muốn tổng kinh phí cho tuần tới là bao nhiêu?",
+    "What total budget do you want for next week?",
+  ),
+  budgetPlan: null,
+});
+
+const buildWeeklyBudgetPreviewResponse = (input: {
+  language: CopilotLanguage;
+  currency: string;
+  targetAmount: number;
+  categories: StoredBudgetPlanCategory[];
+  recentTransactions: CopilotTransactionPayload[];
+}): CopilotResponsePayload => {
+  const now = new Date();
+  const nextWeekStart = getStartOfWeek(new Date(now.getTime() + 7 * 86400000));
+  const nextWeekEnd = new Date(nextWeekStart);
+  nextWeekEnd.setDate(nextWeekEnd.getDate() + 7);
+  const lastWeekStart = getStartOfWeek(now);
+  const lastWeekSpend = roundMoney(
+    input.recentTransactions
+      .filter(
+        (transaction) =>
+          transaction.direction === "debit" &&
+          transaction.createdAt >= lastWeekStart &&
+          transaction.createdAt < now,
+      )
+      .reduce((sum, transaction) => sum + transaction.amount, 0),
+  );
+  const dailyCap = roundMoney(input.targetAmount / 7);
+  const weeklyTable = buildCopilotMarkdownTable(
+    input.language === "vi" ? ["Chỉ số", "Giá trị"] : ["Metric", "Value"],
+    [
+      [
+        input.language === "vi"
+          ? "Kinh phí tuần tiếp theo"
+          : "Next-week total budget",
+        formatCopilotMoney(input.currency, input.targetAmount),
+      ],
+      [
+        input.language === "vi" ? "Trần chi mỗi ngày" : "Daily cap",
+        formatCopilotMoney(input.currency, dailyCap),
+      ],
+      [
+        input.language === "vi" ? "Chi tuần gần nhất" : "Most recent week spend",
+        formatCopilotMoney(input.currency, lastWeekSpend),
+      ],
+      [
+        input.language === "vi" ? "Khoảng thời gian" : "Planned period",
+        `${formatCopilotCalendarDate(input.language, nextWeekStart)} - ${formatCopilotCalendarDate(input.language, nextWeekEnd)}`,
+      ],
+    ],
+  );
+  const categoryTable = buildCopilotMarkdownTable(
+    input.language === "vi"
+      ? ["Danh mục", "Tỷ trọng", "Hạn mức tuần"]
+      : ["Category", "Share", "Weekly cap"],
+    input.categories.map((category) => [
+      category.label,
+      `${Math.round(category.share * 100)}%`,
+      formatCopilotMoney(input.currency, category.amount),
+    ]),
+  );
+
+  return {
+    reply: [
+      localizeCopilotText(
+        input.language,
+        "Tôi đã lập nhanh kế hoạch chi tiêu cho tuần tiếp theo dựa trên kinh phí bạn vừa đưa.",
+        "I created a quick spending plan for next week based on the budget you provided.",
+      ),
+      "",
+      weeklyTable,
+      "",
+      localizeCopilotText(
+        input.language,
+        "Phân bổ danh mục để bạn bám sát kế hoạch:",
+        "Category allocation to keep the week under control:",
+      ),
+      "",
+      categoryTable,
+    ].join("\n"),
+    topic: "budget-plan-weekly-preview",
+    suggestedActions:
+      input.language === "vi"
+        ? [
+            "Nếu muốn, chat thêm tỷ trọng danh mục như ăn uống 30%, đi lại 10% để tôi cân lại kế hoạch tuần.",
+            "Hỏi tôi mức chi mỗi ngày nếu bạn muốn tôi tách thành 7 ngày cụ thể.",
+            "Nếu bạn muốn lưu thành plan tháng, gửi thêm mục tiêu chi tiêu tháng.",
+          ]
+        : [
+            "Send category percentages like food 30%, transport 10% if you want me to rebalance the weekly mix.",
+            "Ask me for a day-by-day cap if you want a tighter 7-day pacing plan.",
+            "If you want it saved as a persistent plan, send a monthly budget target too.",
+          ],
+    suggestedDepositAmount: null,
+    riskLevel: lastWeekSpend > input.targetAmount ? "medium" : "low",
+    confidence: 0.95,
+    followUpQuestion: localizeCopilotText(
+      input.language,
+      "Bạn có muốn tôi cân lại kế hoạch tuần này theo danh mục ưu tiên của bạn không?",
+      "Do you want me to rebalance this weekly plan around your priority categories?",
+    ),
+    budgetPlan: null,
+  };
+};
+
+const buildBudgetPlanCopilotResponse = async (input: {
+  req: Request;
+  userId: string;
+  currency: string;
+  language: CopilotLanguage;
+  messages: CopilotMessagePayload[];
+  currentBalance: number;
+  monthlyIncome: number;
+  monthlyExpenses: number;
+  recentTransactions: CopilotTransactionPayload[];
+}): Promise<CopilotResponsePayload> => {
+  const latestUserMessage =
+    [...input.messages].reverse().find((message) => message.role === "user")
+      ?.content || "";
+  const contextualMessage =
+    buildContextAwareCopilotUserMessage(input.messages) || latestUserMessage;
+  const normalized = normalizeCopilotText(contextualMessage);
+  const requestedBudgetAmount = extractBudgetTargetAmount(contextualMessage);
+  const requestedSavingsGoalAmount =
+    extractSavingsGoalAmount(contextualMessage);
+  const requestedPlanningScope = extractBudgetPlanningScope(contextualMessage);
+  const requestedCategoryAllocations =
+    extractBudgetCategoryAllocationShares(contextualMessage);
+  const requestedPreferenceUpdates =
+    extractBudgetAssistantPreferenceUpdates(contextualMessage);
+  const requestedDigestPeriod = extractBudgetDigestRequestPeriod(contextualMessage);
+  const userRepository = createUserRepository();
+  const userDoc = await userRepository.findValidatedById(input.userId);
+  if (!userDoc) {
+    return buildHeuristicCopilotResponse({
+      currentBalance: input.currentBalance,
+      currency: input.currency,
+      monthlyIncome: input.monthlyIncome,
+      monthlyExpenses: input.monthlyExpenses,
+      recentTransactions: input.recentTransactions,
+      latestMessage: latestUserMessage,
+    });
+  }
+  const existingPlan = getStoredBudgetPlan(userDoc.metadata);
+
+  if (requestedPreferenceUpdates) {
+    const nextPreferences = {
+      ...getBudgetAssistantPreferences(userDoc.metadata),
+      ...requestedPreferenceUpdates,
+    };
+    await userRepository.updateMetadata(
+      input.userId,
+      setBudgetAssistantPreferences(userDoc.metadata, nextPreferences),
+    );
+    invalidateUserResponseCache(input.userId, ["auth"]);
+    await logAuditEvent({
+      actor: input.req.user?.email || userDoc.email,
+      userId: input.userId,
+      action: "BUDGET_ASSISTANT_PREFERENCES_UPDATED",
+      details: nextPreferences,
+      ipAddress: getRequestIp(input.req),
+    });
+
+    return buildBudgetAssistantPreferenceResponse({
+      language: input.language,
+      preferences: nextPreferences,
+    });
+  }
+
+  if (requestedDigestPeriod) {
+    return buildBudgetDigestCopilotResponse({
+      userId: input.userId,
+      currency: input.currency,
+      language: input.language,
+      period: requestedDigestPeriod,
+    });
+  }
+
+  if (requestedPlanningScope === "weekly") {
+    if (requestedBudgetAmount === null) {
+      return buildWeeklyBudgetPromptMissingAmountResponse({
+        language: input.language,
+        currency: input.currency,
+      });
+    }
+
+    const weeklyMix = normalizeBudgetCategoryShares({
+      customShares: requestedCategoryAllocations,
+      baseShares: buildBudgetPlanBaseShares(existingPlan),
+    });
+    const weeklyCategories = buildBudgetPlanCategories(
+      requestedBudgetAmount,
+      "spend_cap",
+      weeklyMix
+        ? {
+            customShares: weeklyMix.shares,
+          }
+        : undefined,
+    );
+
+    return buildWeeklyBudgetPreviewResponse({
+      language: input.language,
+      currency: input.currency,
+      targetAmount: requestedBudgetAmount,
+      categories: weeklyCategories,
+      recentTransactions: input.recentTransactions,
+    });
+  }
+
+  if (
+    requestedCategoryAllocations &&
+    normalizeBudgetCategoryShares({
+      customShares: requestedCategoryAllocations,
+      baseShares: buildBudgetPlanBaseShares(existingPlan),
+    }) === null
+  ) {
+    return buildBudgetCategoryAllocationInvalidResponse({
+      language: input.language,
+    });
+  }
+
+  if (existingPlan && isBudgetPlanRebuildIntent(contextualMessage, latestUserMessage)) {
+    const now = new Date();
+    const refreshedPlan = recalculateBudgetPlanProgress(
+      existingPlan,
+      await sumCompletedDebitTransactionsForUser({
+        userId: input.userId,
+        startInclusive: new Date(existingPlan.startAt),
+        endExclusive: new Date(existingPlan.endAt),
+        context: "/ai/copilot-chat:budget-plan-rebuild",
+      }),
+      now,
+    );
+
+    if (JSON.stringify(refreshedPlan) !== JSON.stringify(existingPlan)) {
+      await userRepository.updateMetadata(
+        input.userId,
+        setStoredBudgetPlan(userDoc.metadata, refreshedPlan),
+      );
+      invalidateUserResponseCache(input.userId, ["auth"]);
+    }
+
+    const intro = localizeCopilotText(
+      input.language,
+      refreshedPlan.remainingAmount < 0
+        ? "Tôi đã lập lại kế hoạch theo mức chi thực tế tháng này. Hiện bạn đã vượt trần đang lưu, nên phương án khả thi nhất là siết các nhóm chi linh hoạt hoặc đặt lại trần nếu đây là tháng ngoại lệ."
+        : "Tôi đã lập lại kế hoạch theo mức chi thực tế tháng này và cân lại phần ngân sách còn lại cho những ngày còn lại trong kỳ.",
+      refreshedPlan.remainingAmount < 0
+        ? "I rebuilt the plan around this month's actual spending. You are already above the saved cap, so the realistic options now are to cut flexible categories or reset the cap if this is an exceptional month."
+        : "I rebuilt the plan around this month's actual spending and rebalanced the remaining budget across the days left in the period.",
+    );
+
+    return {
+      reply: [
+        intro,
+        "",
+        buildBudgetPlanReply({
+          language: input.language,
+          plan: refreshedPlan,
+          isNewPlan: false,
+        }),
+      ].join("\n"),
+      topic: "budget-plan-rebuilt",
+      suggestedActions:
+        input.language === "vi"
+          ? [
+              "Nếu muốn, tôi có thể siết lại tỷ trọng danh mục theo mức chi hiện tại.",
+              "Bạn cũng có thể gửi lại trần chi tiêu mới nếu muốn lập lại toàn bộ kế hoạch tháng.",
+              "Hỏi tôi danh mục nào đang vượt mạnh nhất nếu muốn cắt nhanh.",
+            ]
+          : [
+              "If you want, I can tighten the category mix around the current spend pattern.",
+              "You can also send a new cap if you want a full month-level rebuild.",
+              "Ask which category is overshooting the most if you want the fastest cuts.",
+            ],
+      suggestedDepositAmount: null,
+      riskLevel:
+        refreshedPlan.utilizationRatio >= refreshedPlan.criticalThreshold
+          ? "high"
+          : refreshedPlan.utilizationRatio >= refreshedPlan.warningThreshold
+            ? "medium"
+            : "low",
+      confidence: 0.96,
+      followUpQuestion: localizeCopilotText(
+        input.language,
+        "Bạn có muốn tôi cân lại luôn theo các danh mục ưu tiên của bạn không?",
+        "Do you want me to rebalance it around your priority categories now?",
+      ),
+      budgetPlan: buildPublicBudgetPlanSummary(refreshedPlan),
+    };
+  }
+
+  if (
+    requestedBudgetAmount !== null ||
+    requestedSavingsGoalAmount !== null
+  ) {
+    let effectiveTargetAmount = requestedBudgetAmount;
+    let planningMode: "spend_cap" | "savings_goal" = "spend_cap";
+    let savingsGoalAmount: number | null = null;
+    let incomeBaselineAmount: number | null = null;
+    const grossBudgetPoolAmount =
+      requestedBudgetAmount !== null &&
+      requestedSavingsGoalAmount !== null
+        ? requestedBudgetAmount
+        : null;
+    const explicitSavingsGoalAmount =
+      requestedBudgetAmount !== null &&
+      requestedSavingsGoalAmount !== null
+        ? requestedSavingsGoalAmount
+        : null;
+    const usesGrossBudgetPool =
+      grossBudgetPoolAmount !== null &&
+      explicitSavingsGoalAmount !== null &&
+      /\b(kinh phi|thu nhap|nguon tien|tong tien|tong ngan sach|tong budget|available|co trong thang)\b/.test(
+        normalized,
+      );
+    const allocationMix = normalizeBudgetCategoryShares({
+      customShares: requestedCategoryAllocations,
+      baseShares: buildBudgetPlanBaseShares(existingPlan),
+    });
+
+    if (usesGrossBudgetPool) {
+      const derivedSpendCap = roundMoney(
+        grossBudgetPoolAmount - explicitSavingsGoalAmount,
+      );
+      if (derivedSpendCap <= 0) {
+        return buildSavingsGoalTooHighResponse({
+          language: input.language,
+          currency: input.currency,
+          savingsGoalAmount: explicitSavingsGoalAmount,
+          incomeBaselineAmount: grossBudgetPoolAmount,
+        });
+      }
+      effectiveTargetAmount = derivedSpendCap;
+      planningMode = "savings_goal";
+      savingsGoalAmount = explicitSavingsGoalAmount;
+      incomeBaselineAmount = roundMoney(grossBudgetPoolAmount);
+    }
+
+    if (
+      effectiveTargetAmount === null &&
+      requestedSavingsGoalAmount !== null
+    ) {
+      if (input.monthlyIncome <= 0) {
+        return buildSavingsGoalMissingIncomeResponse({
+          language: input.language,
+          currency: input.currency,
+          savingsGoalAmount: requestedSavingsGoalAmount,
+        });
+      }
+      const derivedSpendCap = roundMoney(
+        input.monthlyIncome - requestedSavingsGoalAmount,
+      );
+      if (derivedSpendCap <= 0) {
+        return buildSavingsGoalTooHighResponse({
+          language: input.language,
+          currency: input.currency,
+          savingsGoalAmount: requestedSavingsGoalAmount,
+          incomeBaselineAmount: input.monthlyIncome,
+        });
+      }
+      effectiveTargetAmount = derivedSpendCap;
+      planningMode = "savings_goal";
+      savingsGoalAmount = requestedSavingsGoalAmount;
+      incomeBaselineAmount = roundMoney(input.monthlyIncome);
+    }
+
+    if (effectiveTargetAmount === null) {
+      return buildBudgetPromptMissingAmountResponse({
+        language: input.language,
+        currency: input.currency,
+      });
+    }
+
+    const now = new Date();
+    const startAt = getStartOfMonth(now);
+    const endAt = new Date(startAt);
+    endAt.setMonth(endAt.getMonth() + 1);
+    const spentAmount = await sumCompletedDebitTransactionsForUser({
+      userId: input.userId,
+      startInclusive: startAt,
+      endExclusive: endAt,
+      context: "/ai/copilot-chat:budget-plan-create",
+    });
+    const nextPlan = recalculateBudgetPlanProgress(
+      {
+        planId: crypto.randomUUID(),
+        status: "ACTIVE",
+        period: "MONTHLY",
+        currency: input.currency,
+        planningMode,
+        targetAmount: effectiveTargetAmount,
+        savingsGoalAmount,
+        incomeBaselineAmount,
+        spentAmount: 0,
+        remainingAmount: effectiveTargetAmount,
+        utilizationRatio: 0,
+        warningThreshold: BUDGET_WARNING_THRESHOLD,
+        criticalThreshold: BUDGET_CRITICAL_THRESHOLD,
+        thresholdAlertsSent: [],
+        startAt: startAt.toISOString(),
+        endAt: endAt.toISOString(),
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+        lastEvaluatedAt: now.toISOString(),
+        sourcePrompt: latestUserMessage,
+        dailyCapRemaining: null,
+        weeklyCapRemaining: null,
+        categories: buildBudgetPlanCategories(
+          effectiveTargetAmount,
+          planningMode,
+          allocationMix
+            ? {
+                customShares: allocationMix.shares,
+              }
+            : undefined,
+        ),
+        emailAlertsEnabled: true,
+      },
+      spentAmount,
+      now,
+    );
+
+    await userRepository.updateMetadata(
+      input.userId,
+      setStoredBudgetPlan(userDoc.metadata, nextPlan),
+    );
+    invalidateUserResponseCache(input.userId, ["auth"]);
+    await logAuditEvent({
+      actor: input.req.user?.email || userDoc.email,
+      userId: input.userId,
+      action: "BUDGET_PLAN_SAVED",
+      details: {
+        targetAmount: nextPlan.targetAmount,
+        currency: nextPlan.currency,
+        period: nextPlan.period,
+        warningThreshold: nextPlan.warningThreshold,
+        criticalThreshold: nextPlan.criticalThreshold,
+      },
+      ipAddress: getRequestIp(input.req),
+    });
+
+    return {
+      reply: buildBudgetPlanReply({
+        language: input.language,
+        plan: nextPlan,
+        isNewPlan: true,
+      }),
+      topic: "budget-plan-saved",
+      suggestedActions:
+        input.language === "vi"
+          ? [
+              "Hoi toi ngan sach hien tai con bao nhieu neu ban muon kiem tra nhanh bat ky luc nao.",
+              "Khi chi tieu cham 85% hoac vuot 100%, he thong se gui email canh bao cho ban.",
+              requestedCategoryAllocations
+                ? "Ty trong danh muc vua duoc luu; ban co the chat lai % moi bat cu luc nao de doi mix."
+                : "Ban co the chat lai mot muc tieu moi bat cu luc nao de cap nhat ke hoach.",
+            ]
+          : [
+              "Ask me how much budget remains anytime you want a quick check.",
+              "When spending reaches 85% or exceeds 100%, the system will email you a warning.",
+              requestedCategoryAllocations
+                ? "The category mix was saved too; send new percentages anytime to rebalance it."
+                : "You can send a new target in chat anytime to replace this plan.",
+            ],
+      suggestedDepositAmount: null,
+      riskLevel:
+        nextPlan.utilizationRatio >= nextPlan.criticalThreshold
+          ? "high"
+          : nextPlan.utilizationRatio >= nextPlan.warningThreshold
+            ? "medium"
+            : "low",
+      confidence: 0.96,
+      followUpQuestion: localizeCopilotText(
+        input.language,
+        planningMode === "savings_goal"
+          ? "Ban co muon toi doi chieu ngay muc chi con lai de giu muc tieu tiet kiem khong?"
+          : "Ban co muon toi kiem tra ngay muc ngan sach con lai cua thang nay khong?",
+        planningMode === "savings_goal"
+          ? "Do you want me to check the remaining spend room that still protects the savings goal?"
+          : "Do you want me to check the remaining budget for this month right now?",
+      ),
+      budgetPlan: buildPublicBudgetPlanSummary(nextPlan),
+    };
+  }
+
+  if (requestedCategoryAllocations) {
+    if (!existingPlan) {
+      return buildBudgetCategoryAllocationPromptResponse({
+        language: input.language,
+        currency: input.currency,
+      });
+    }
+
+    const allocationMix = normalizeBudgetCategoryShares({
+      customShares: requestedCategoryAllocations,
+      baseShares: buildBudgetPlanBaseShares(existingPlan),
+    });
+    if (!allocationMix) {
+      return buildBudgetCategoryAllocationInvalidResponse({
+        language: input.language,
+      });
+    }
+
+    const now = new Date();
+    const refreshedPlan = recalculateBudgetPlanProgress(
+      {
+        ...existingPlan,
+        categories: buildBudgetPlanCategories(existingPlan.targetAmount, existingPlan.planningMode, {
+          customShares: allocationMix.shares,
+        }).map((category) => ({
+          ...category,
+          thresholdAlertsSent:
+            existingPlan.categories.find((entry) => entry.key === category.key)
+              ?.thresholdAlertsSent || [],
+        })),
+      },
+      await sumCompletedDebitTransactionsForUser({
+        userId: input.userId,
+        startInclusive: new Date(existingPlan.startAt),
+        endExclusive: new Date(existingPlan.endAt),
+        context: "/ai/copilot-chat:budget-plan-category-update",
+      }),
+      now,
+    );
+
+    await userRepository.updateMetadata(
+      input.userId,
+      setStoredBudgetPlan(userDoc.metadata, refreshedPlan),
+    );
+    invalidateUserResponseCache(input.userId, ["auth"]);
+    await logAuditEvent({
+      actor: input.req.user?.email || userDoc.email,
+      userId: input.userId,
+      action: "BUDGET_PLAN_CATEGORY_ALLOCATION_UPDATED",
+      details: {
+        targetAmount: refreshedPlan.targetAmount,
+        currency: refreshedPlan.currency,
+        providedCategories: allocationMix.providedKeys,
+      },
+      ipAddress: getRequestIp(input.req),
+    });
+
+    const intro = localizeCopilotText(
+      input.language,
+      allocationMix.remainderDistributed
+        ? "Toi da cap nhat ty trong danh muc theo yeu cau va tu can lai phan con lai vao nhung nhom ban chua chinh."
+        : "Toi da cap nhat ty trong danh muc dung theo % ban vua gui.",
+      allocationMix.remainderDistributed
+        ? "I updated the category weights you asked for and rebalanced the remaining share across the categories you did not touch."
+        : "I updated the category weights exactly as you sent them.",
+    );
+
+    return {
+      reply: [intro, "", buildBudgetPlanReply({
+        language: input.language,
+        plan: refreshedPlan,
+        isNewPlan: false,
+      })].join("\n"),
+      topic: "budget-plan-category-updated",
+      suggestedActions:
+        input.language === "vi"
+          ? [
+              "Hoi toi danh muc nao dang tieu nhieu nhat de doi chieu voi mix moi.",
+              "Neu muon, chat lai mot vai % khac va toi se can lai tiep.",
+              "Khi mot danh muc cham nguong canh bao, he thong se gui email rieng.",
+            ]
+          : [
+              "Ask which category is spending the most to compare with the new mix.",
+              "Send a few new percentages anytime and I will rebalance again.",
+              "When a category hits its warning threshold, the system will send a separate email alert.",
+            ],
+      suggestedDepositAmount: null,
+      riskLevel:
+        refreshedPlan.utilizationRatio >= refreshedPlan.criticalThreshold
+          ? "high"
+          : refreshedPlan.utilizationRatio >= refreshedPlan.warningThreshold
+            ? "medium"
+            : "low",
+      confidence: 0.96,
+      followUpQuestion: localizeCopilotText(
+        input.language,
+        "Ban co muon toi doi chieu mix moi voi giao dich thang nay ngay bay gio khong?",
+        "Do you want me to compare the new mix against this month's spending right now?",
+      ),
+      budgetPlan: buildPublicBudgetPlanSummary(refreshedPlan),
+    };
+  }
+
+  if (isBudgetPlanSetupIntent(normalized)) {
+    return buildBudgetPromptMissingAmountResponse({
+      language: input.language,
+      currency: input.currency,
+    });
+  }
+  if (existingPlan && isBudgetPlanStatusIntent(normalized)) {
+    const now = new Date();
+    const refreshedPlan = recalculateBudgetPlanProgress(
+      existingPlan,
+      await sumCompletedDebitTransactionsForUser({
+        userId: input.userId,
+        startInclusive: new Date(existingPlan.startAt),
+        endExclusive: new Date(existingPlan.endAt),
+        context: "/ai/copilot-chat:budget-plan-status",
+      }),
+      now,
+    );
+
+    if (JSON.stringify(refreshedPlan) !== JSON.stringify(existingPlan)) {
+      await userRepository.updateMetadata(
+        input.userId,
+        setStoredBudgetPlan(userDoc.metadata, refreshedPlan),
+      );
+      invalidateUserResponseCache(input.userId, ["auth"]);
+    }
+
+    return {
+      reply: buildBudgetPlanReply({
+        language: input.language,
+        plan: refreshedPlan,
+        isNewPlan: false,
+      }),
+      topic: "budget-plan-status",
+      suggestedActions:
+        input.language === "vi"
+          ? [
+              "Neu muon doi muc tran chi, chat lai muc tieu ngan sach moi.",
+              "Hoi toi muc con lai theo ngay neu ban muon can sat trong nhung ngay toi.",
+              "Email canh bao se tiep tuc duoc gui khi ban cham cac nguong da dat.",
+            ]
+          : [
+              "If you want to change the cap, send a new budget target in chat.",
+              "Ask for a remaining daily cap if you want tighter pacing for the coming days.",
+              "Email alerts will keep running as spending crosses the saved thresholds.",
+            ],
+      suggestedDepositAmount: null,
+      riskLevel:
+        refreshedPlan.utilizationRatio >= refreshedPlan.criticalThreshold
+          ? "high"
+          : refreshedPlan.utilizationRatio >= refreshedPlan.warningThreshold
+            ? "medium"
+            : "low",
+      confidence: 0.95,
+      followUpQuestion: localizeCopilotText(
+        input.language,
+        "Ban co muon toi cap nhat lai ngan sach voi mot muc tran moi khong?",
+        "Do you want me to update the budget with a new cap?",
+      ),
+      budgetPlan: buildPublicBudgetPlanSummary(refreshedPlan),
+    };
+  }
+
+  return buildHeuristicCopilotResponse({
+    currentBalance: input.currentBalance,
+    currency: input.currency,
+    monthlyIncome: input.monthlyIncome,
+    monthlyExpenses: input.monthlyExpenses,
+    recentTransactions: input.recentTransactions,
+    latestMessage: latestUserMessage,
+  });
+};
+
+const monitorBudgetPlanAfterDebit = async (input: {
+  userId: string;
+  amount: number;
+  currency: string;
+  description: string;
+  occurredAt: string;
+  actor?: string;
+  ipAddress?: string;
+}) => {
+  const userRepository = createUserRepository();
+  const userDoc = await userRepository.findValidatedById(input.userId);
+  if (!userDoc) return;
+
+  const storedPlan = getStoredBudgetPlan(userDoc.metadata);
+  if (!storedPlan || storedPlan.emailAlertsEnabled === false) return;
+
+  const occurredAt = new Date(input.occurredAt);
+  const startAt = new Date(storedPlan.startAt);
+  const endAt = new Date(storedPlan.endAt);
+  if (
+    Number.isNaN(occurredAt.getTime()) ||
+    occurredAt < startAt ||
+    occurredAt >= endAt
+  ) {
+    return;
+  }
+
+  const refreshedPlan = recalculateBudgetPlanProgress(
+    storedPlan,
+    await sumCompletedDebitTransactionsForUser({
+      userId: input.userId,
+      startInclusive: startAt,
+      endExclusive: endAt,
+      context: "/budget-alert:progress-refresh",
+    }),
+    occurredAt,
+  );
+
+  const monthlyTransactions = await fetchCopilotTransactionsForUser({
+    userId: input.userId,
+    startInclusive: startAt,
+    endExclusive: endAt,
+    limit: 2500,
+    context: "/budget-alert:category-refresh",
+  });
+  const categoryUsage = summarizeBudgetPlanCategoryUsage({
+    transactions: monthlyTransactions,
+    plan: refreshedPlan,
+    language: "en",
+  });
+
+  let milestone: "warning" | "critical" | null = null;
+  if (
+    refreshedPlan.utilizationRatio >= refreshedPlan.criticalThreshold &&
+    !refreshedPlan.thresholdAlertsSent.includes("critical")
+  ) {
+    milestone = "critical";
+  } else if (
+    refreshedPlan.utilizationRatio >= refreshedPlan.warningThreshold &&
+    !refreshedPlan.thresholdAlertsSent.includes("warning")
+  ) {
+    milestone = "warning";
+  }
+
+  const categoryAlerts: Array<{
+    key: SpendingCategoryKey;
+    label: string;
+    thresholdLabel: "warning" | "critical";
+    spentAmount: number;
+    capAmount: number;
+    utilizationRatio: number;
+  }> = [];
+  const nextPlanCategories = refreshedPlan.categories.map((category) => {
+    const usage = categoryUsage.find((entry) => entry.key === category.key);
+    if (!usage || usage.utilizationRatio === null) {
+      return category;
+    }
+    const sent = Array.isArray(category.thresholdAlertsSent)
+      ? category.thresholdAlertsSent
+      : [];
+    let categoryMilestone: "warning" | "critical" | null = null;
+    if (usage.utilizationRatio >= refreshedPlan.criticalThreshold) {
+      if (!sent.includes("critical")) {
+        categoryMilestone = "critical";
+      }
+    } else if (usage.utilizationRatio >= refreshedPlan.warningThreshold) {
+      if (!sent.includes("warning")) {
+        categoryMilestone = "warning";
+      }
+    }
+    if (!categoryMilestone) {
+      return {
+        ...category,
+        thresholdAlertsSent: sent,
+      };
+    }
+
+    categoryAlerts.push({
+      key: usage.key,
+      label: usage.label,
+      thresholdLabel: categoryMilestone,
+      spentAmount: usage.spentAmount,
+      capAmount: usage.capAmount,
+      utilizationRatio: usage.utilizationRatio,
+    });
+    return {
+      ...category,
+      thresholdAlertsSent: [...sent, categoryMilestone],
+    };
+  });
+
+  const nextPlan = {
+    ...refreshedPlan,
+    categories: nextPlanCategories,
+    thresholdAlertsSent:
+      milestone === null
+        ? refreshedPlan.thresholdAlertsSent
+        : [...refreshedPlan.thresholdAlertsSent, milestone],
+  };
+
+  if (JSON.stringify(nextPlan) !== JSON.stringify(storedPlan)) {
+    await userRepository.updateMetadata(
+      input.userId,
+      setStoredBudgetPlan(userDoc.metadata, nextPlan),
+    );
+    invalidateUserResponseCache(input.userId, ["auth"]);
+  }
+
+  if (!milestone && !categoryAlerts.length) return;
+
+  if (milestone) {
+    await logAuditEvent({
+      actor: input.actor || userDoc.email,
+      userId: input.userId,
+      action:
+        milestone === "critical"
+          ? "BUDGET_PLAN_LIMIT_EXCEEDED"
+          : "BUDGET_PLAN_WARNING_TRIGGERED",
+      details: {
+        amount: input.amount,
+        currency: input.currency,
+        description: input.description,
+        spentAmount: nextPlan.spentAmount,
+        targetAmount: nextPlan.targetAmount,
+        utilizationRatio: nextPlan.utilizationRatio,
+        remainingAmount: nextPlan.remainingAmount,
+        milestone,
+      },
+      ipAddress: input.ipAddress,
+    });
+  }
+
+  for (const categoryAlert of categoryAlerts) {
+    await logAuditEvent({
+      actor: input.actor || userDoc.email,
+      userId: input.userId,
+      action:
+        categoryAlert.thresholdLabel === "critical"
+          ? "BUDGET_CATEGORY_LIMIT_EXCEEDED"
+          : "BUDGET_CATEGORY_WARNING_TRIGGERED",
+      details: {
+        amount: input.amount,
+        currency: input.currency,
+        description: input.description,
+        category: categoryAlert.key,
+        categoryLabel: categoryAlert.label,
+        categorySpentAmount: categoryAlert.spentAmount,
+        categoryCapAmount: categoryAlert.capAmount,
+        utilizationRatio: categoryAlert.utilizationRatio,
+        milestone: categoryAlert.thresholdLabel,
+      },
+      ipAddress: input.ipAddress,
+    });
+
+    await sendBudgetCategoryAlertEmail({
+      to: userDoc.email,
+      recipientName: getRecipientName(userDoc),
+      currency: nextPlan.currency,
+      categoryLabel: categoryAlert.label,
+      transactionAmount: input.amount,
+      categorySpentAmount: categoryAlert.spentAmount,
+      categoryCapAmount: categoryAlert.capAmount,
+      categoryUtilizationRatio: categoryAlert.utilizationRatio,
+      thresholdLabel: categoryAlert.thresholdLabel,
+      periodLabel: formatCopilotCalendarDate("en", startAt),
+    });
+  }
+
+  if (milestone) {
+    await sendBudgetThresholdAlertEmail({
+      to: userDoc.email,
+      recipientName: getRecipientName(userDoc),
+      currency: nextPlan.currency,
+      transactionAmount: input.amount,
+      spentAmount: nextPlan.spentAmount,
+      targetAmount: nextPlan.targetAmount,
+      remainingAmount: nextPlan.remainingAmount,
+      utilizationRatio: nextPlan.utilizationRatio,
+      thresholdLabel: milestone,
+      periodLabel: formatCopilotCalendarDate("en", startAt),
+    });
+  }
 };
 
 const buildTodayTransactionReportResponse = async (input: {
@@ -8339,7 +11311,7 @@ const buildTodayTransactionReportResponse = async (input: {
       transactions,
       periodLabel:
         input.language === "vi"
-          ? `Bao cao giao dich hom nay (${APP_TIMEZONE}, 00:00 den hien tai):`
+          ? `Báo cáo giao dịch hôm nay (${APP_TIMEZONE}, 00:00 đến hiện tại):`
           : `Today's transaction report (${APP_TIMEZONE}, 00:00 until now):`,
       detailMode: "time",
     }),
@@ -8347,9 +11319,9 @@ const buildTodayTransactionReportResponse = async (input: {
     suggestedActions:
       input.language === "vi"
         ? [
-            "Hoi them bao cao giao dich tuan nay neu ban muon xem xu huong rong hon.",
-            "Hoi rieng tong tien vao hoac tong tien ra neu ban muon rut gon bao cao.",
-            "Yeu cau toi danh dau giao dich nao lon nhat trong ngay.",
+            "Hỏi thêm báo cáo giao dịch tuần này nếu bạn muốn xem xu hướng rộng hơn.",
+            "Hỏi riêng tổng tiền vào hoặc tổng tiền ra nếu bạn muốn rút gọn báo cáo.",
+            "Yêu cầu tôi đánh dấu giao dịch nào lớn nhất trong ngày.",
           ]
         : [
             "Ask for this week's transaction report if you want a wider trend.",
@@ -8369,7 +11341,7 @@ const buildTodayTransactionReportResponse = async (input: {
     confidence: 0.99,
     followUpQuestion: localizeCopilotText(
       input.language,
-      "Ban co muon toi tach them theo giao dich nap tien, nhan tien va chuyen tien khong?",
+      "Bạn có muốn tôi tách thêm theo giao dịch nạp tiền, nhận tiền và chuyển tiền không?",
       "Do you want me to break this down further by deposit, received transfer, and sent transfer?",
     ),
   };
@@ -8385,10 +11357,10 @@ const buildWeeklyTransactionReportResponse = async (input: {
     select: { id: true },
   });
   const walletIds = wallets.map((wallet: { id: string }) => wallet.id);
-  const endExclusive = new Date();
-  const startInclusive = new Date(endExclusive);
-  startInclusive.setHours(0, 0, 0, 0);
-  startInclusive.setDate(startInclusive.getDate() - 6);
+  const now = new Date();
+  const startInclusive = getStartOfWeek(now);
+  const endExclusive = getEndOfWeek(now);
+  const displayEnd = new Date(endExclusive.getTime() - 1);
 
   const txns = await prisma.transaction.findMany({
     where: {
@@ -8442,30 +11414,30 @@ const buildWeeklyTransactionReportResponse = async (input: {
       transactions,
       periodLabel:
         input.language === "vi"
-          ? `Bao cao giao dich 7 ngay gan nhat (${formatCopilotCalendarDate(input.language, startInclusive)} - ${formatCopilotCalendarDate(input.language, endExclusive)}):`
-          : `Transaction report for the last 7 days (${formatCopilotCalendarDate(input.language, startInclusive)} - ${formatCopilotCalendarDate(input.language, endExclusive)}):`,
+          ? `Báo cáo giao dịch tuần này (${formatCopilotCalendarDate(input.language, startInclusive)} - ${formatCopilotCalendarDate(input.language, displayEnd)}):`
+          : `Transaction report for this calendar week (${formatCopilotCalendarDate(input.language, startInclusive)} - ${formatCopilotCalendarDate(input.language, displayEnd)}):`,
       detailMode: "datetime",
     }),
     topic: "weekly-transaction-report",
     suggestedActions:
       input.language === "vi"
         ? [
-            "Hoi them giao dich co gia tri lon nhat trong 7 ngay qua.",
-            "Yeu cau tach rieng dong tien vao hoac dong tien ra neu ban muon gon hon.",
-            "Hoi them so sanh hom nay voi 7 ngay gan nhat neu ban muon xem xu huong.",
+            "Hỏi thêm giao dịch có giá trị lớn nhất trong tuần này.",
+            "Yêu cầu tách riêng dòng tiền vào hoặc dòng tiền ra nếu bạn muốn gọn hơn.",
+            "Hỏi thêm so sánh tuần này với tuần trước nếu bạn muốn xem xu hướng.",
           ]
         : [
-            "Ask for the largest transaction in the last 7 days.",
+            "Ask for the largest transaction in this calendar week.",
             "Ask for inflows only or outflows only if you want a shorter report.",
-            "Ask for a today-vs-week comparison if you want a trend view.",
+            "Ask for a this-week-vs-last-week comparison if you want a trend view.",
           ],
     suggestedDepositAmount: null,
     riskLevel: "low",
     confidence: 0.99,
     followUpQuestion: localizeCopilotText(
       input.language,
-      "Ban co muon toi tach them theo ngay hoac theo loai giao dich khong?",
-      "Do you want this split further by day or by transaction type?",
+      "Bạn có muốn tôi tách thêm theo ngày hoặc theo loại giao dịch trong tuần này không?",
+      "Do you want this split further by day or by transaction type within this week?",
     ),
   };
 };
@@ -8493,7 +11465,7 @@ const buildMonthlyTransactionReportResponse = async (input: {
       transactions,
       periodLabel:
         input.language === "vi"
-          ? `Sao ke giao dich thang nay (${formatCopilotCalendarDate(input.language, startInclusive)} - ${formatCopilotCalendarDate(input.language, endExclusive)}):`
+          ? `Sao kê giao dịch tháng này (${formatCopilotCalendarDate(input.language, startInclusive)} - ${formatCopilotCalendarDate(input.language, endExclusive)}):`
           : `Transaction statement for this month (${formatCopilotCalendarDate(input.language, startInclusive)} - ${formatCopilotCalendarDate(input.language, endExclusive)}):`,
       detailMode: "datetime",
     }),
@@ -8501,9 +11473,9 @@ const buildMonthlyTransactionReportResponse = async (input: {
     suggestedActions:
       input.language === "vi"
         ? [
-            "Hoi them muc chi tieu lon nhat thang nay neu ban muon kiem tra diem nong.",
-            "Hoi toi so sanh thang nay voi thang truoc neu ban muon xem xu huong.",
-            "Hoi toi tach rieng nap tien, rut tien, va chuyen tien neu ban muon sao ke gon hon.",
+            "Hỏi thêm mức chi tiêu lớn nhất tháng này nếu bạn muốn kiểm tra điểm nóng.",
+            "Hỏi tôi so sánh tháng này với tháng trước nếu bạn muốn xem xu hướng.",
+            "Hỏi tôi tách riêng nạp tiền, rút tiền và chuyển tiền nếu bạn muốn sao kê gọn hơn.",
           ]
         : [
             "Ask for the largest spend this month if you want to inspect the main drivers.",
@@ -8515,7 +11487,7 @@ const buildMonthlyTransactionReportResponse = async (input: {
     confidence: 0.99,
     followUpQuestion: localizeCopilotText(
       input.language,
-      "Ban co muon toi so sanh thang nay voi thang truoc va tom tat diem khac biet chinh khong?",
+      "Bạn có muốn tôi so sánh tháng này với tháng trước và tóm tắt điểm khác biệt chính không?",
       "Do you want me to compare this month with last month and summarize the biggest differences?",
     ),
   };
@@ -8611,28 +11583,28 @@ const buildSpendingComparisonResponse = async (input: {
   const comparisonTable = buildCopilotMarkdownTable(
     input.language === "vi"
       ? [
-          "Ky hien tai",
-          "Chi tieu",
-          "Ky doi chieu",
-          "Chi tieu",
-          "Chenh lech",
+          "Kỳ hiện tại",
+          "Chi tiêu",
+          "Kỳ đối chiếu",
+          "Chi tiêu",
+          "Chênh lệch",
           "%",
         ]
       : ["Current period", "Spend", "Comparison period", "Spend", "Delta", "%"],
     [
       buildComparisonRow({
-        currentLabel: input.language === "vi" ? "Hom nay" : "Today",
-        previousLabel: input.language === "vi" ? "Hom qua" : "Yesterday",
+        currentLabel: input.language === "vi" ? "Hôm nay" : "Today",
+        previousLabel: input.language === "vi" ? "Hôm qua" : "Yesterday",
         current: spendToday,
         previous: spendYesterday,
         currency: input.currency,
         language: input.language,
       }),
       buildComparisonRow({
-        currentLabel: input.language === "vi" ? "Tuan nay" : "This week",
+        currentLabel: input.language === "vi" ? "Tuần này" : "This week",
         previousLabel:
           input.language === "vi"
-            ? "Tuan truoc cung nhip"
+            ? "Tuần trước cùng nhịp"
             : "Last week same pace",
         current: spendThisWeek,
         previous: spendLastWeek,
@@ -8640,10 +11612,10 @@ const buildSpendingComparisonResponse = async (input: {
         language: input.language,
       }),
       buildComparisonRow({
-        currentLabel: input.language === "vi" ? "Thang nay" : "This month",
+        currentLabel: input.language === "vi" ? "Tháng này" : "This month",
         previousLabel:
           input.language === "vi"
-            ? "Thang truoc cung nhip"
+            ? "Tháng trước cùng nhịp"
             : "Last month same pace",
         current: spendThisMonth,
         previous: spendLastMonth,
@@ -8653,35 +11625,205 @@ const buildSpendingComparisonResponse = async (input: {
     ],
   );
 
+  const userRepository = createUserRepository();
+  const userDoc = await userRepository.findValidatedById(input.userId);
+  const storedBudgetPlan = getStoredBudgetPlan(userDoc?.metadata);
+  const refreshedBudgetPlan =
+    storedBudgetPlan &&
+    new Date(storedBudgetPlan.startAt) <= now &&
+    new Date(storedBudgetPlan.endAt) > now
+      ? recalculateBudgetPlanProgress(storedBudgetPlan, spendThisMonth, now)
+      : storedBudgetPlan;
+  if (
+    userDoc &&
+    refreshedBudgetPlan &&
+    JSON.stringify(refreshedBudgetPlan) !== JSON.stringify(storedBudgetPlan)
+  ) {
+    await userRepository.updateMetadata(
+      input.userId,
+      setStoredBudgetPlan(userDoc.metadata, refreshedBudgetPlan),
+    );
+    invalidateUserResponseCache(input.userId, ["auth"]);
+  }
+
+  const monthlyCategorySummary = summarizeSpendingCategories({
+    transactions: transactions.filter(
+      (transaction) =>
+        transaction.createdAt >= monthStart &&
+        transaction.createdAt < now &&
+        transaction.direction === "debit",
+    ),
+    language: input.language,
+    targetAmount: refreshedBudgetPlan?.targetAmount ?? null,
+    warningThreshold: refreshedBudgetPlan?.warningThreshold,
+    categoryCapMap: buildBudgetCategoryCapMap(refreshedBudgetPlan || null),
+  });
+  const categoryTable = monthlyCategorySummary.length
+    ? buildCopilotMarkdownTable(
+        input.language === "vi"
+          ? ["Danh mục", "Đã chi", "Tỷ trọng", "Hạn mức", "Trạng thái"]
+          : ["Category", "Spent", "Share", "Cap", "Status"],
+        monthlyCategorySummary.slice(0, 6).map((category) => [
+          category.label,
+          formatCopilotMoney(input.currency, category.amount),
+          `${Math.round(category.shareOfSpend * 100)}%`,
+          category.capAmount !== null
+            ? formatCopilotMoney(input.currency, category.capAmount)
+            : input.language === "vi"
+              ? "Chưa đặt"
+              : "Not set",
+          category.warningState === "over"
+            ? input.language === "vi"
+              ? "Vượt mức"
+              : "Over limit"
+            : category.warningState === "warning"
+              ? input.language === "vi"
+                ? "Cảnh báo"
+                : "Warning"
+              : input.language === "vi"
+                ? "Ổn định"
+                : "Stable",
+        ]),
+      )
+    : null;
+  const budgetVsActualTable = refreshedBudgetPlan
+    ? buildCopilotMarkdownTable(
+        input.language === "vi"
+          ? ["Hạng mục", "Giá trị"]
+          : ["Budget metric", "Value"],
+        [
+          [
+            input.language === "vi"
+              ? "Hạn mức tháng hiện tại"
+              : "Current monthly cap",
+            formatCopilotMoney(
+              refreshedBudgetPlan.currency,
+              refreshedBudgetPlan.targetAmount,
+            ),
+          ],
+          [
+            input.language === "vi"
+              ? "Chi tiêu thực tế tháng này"
+              : "Actual spend this month",
+            formatCopilotMoney(
+              refreshedBudgetPlan.currency,
+              refreshedBudgetPlan.spentAmount,
+            ),
+          ],
+          [
+            input.language === "vi" ? "Còn lại" : "Remaining",
+            refreshedBudgetPlan.remainingAmount >= 0
+              ? formatCopilotMoney(
+                  refreshedBudgetPlan.currency,
+                  refreshedBudgetPlan.remainingAmount,
+                )
+              : `-${formatCopilotMoney(
+                  refreshedBudgetPlan.currency,
+                  Math.abs(refreshedBudgetPlan.remainingAmount),
+                )}`,
+          ],
+          [
+            input.language === "vi"
+              ? "Mức sử dụng ngân sách"
+              : "Budget usage",
+            `${Math.round(refreshedBudgetPlan.utilizationRatio * 100)}%`,
+          ],
+        ],
+      )
+    : null;
+  const categoryWarnings = monthlyCategorySummary
+    .filter((category) => category.warningState !== "ok")
+    .map((category) =>
+      category.warningState === "over"
+        ? localizeCopilotText(
+            input.language,
+            `${category.label} đã vượt mức tham chiếu của kế hoạch tháng này.`,
+            `${category.label} is already above its reference cap for this month.`,
+          )
+        : localizeCopilotText(
+            input.language,
+            `${category.label} đang tiến sát ngưỡng cảnh báo, nên cần giảm nhịp chi ở nhóm này.`,
+            `${category.label} is approaching its warning threshold, so this category should slow down next.`,
+          ),
+    );
+  const adjustmentSuggestions = buildSpendingAdjustmentSuggestions({
+    language: input.language,
+    categories: monthlyCategorySummary,
+    hasBudgetPlan: Boolean(refreshedBudgetPlan),
+  });
+
   return {
     reply:
-      input.language === "vi"
-        ? `Toi da tong hop nhanh xu huong chi tieu cua ban theo ngay, tuan, va thang de ban nhin ro toc do tieu tien dang thay doi the nao.\n\n${comparisonTable}`
-        : `I summarized your spending trend across day, week, and month so you can see how quickly your outflows are changing.\n\n${comparisonTable}`,
-    topic: "spending-comparison",
-    suggestedActions:
-      input.language === "vi"
-        ? [
-            "Hoi toi giao dich nao dang day chi tieu thang nay len cao nhat.",
-            "Neu muon sao ke chi tiet, hay hoi rieng bao cao hom nay, tuan nay, hoac thang nay.",
-            "Neu muon tiet kiem hon, toi co the doi bang nay thanh muc tran chi tieu cho phan con lai cua thang.",
-          ]
-        : [
-            "Ask which transactions are driving this month's spending the most.",
-            "If you want detail, ask separately for today's, this week's, or this month's statement.",
-            "If you want tighter control, I can turn this into a spending cap for the rest of the month.",
-          ],
+      [
+        input.language === "vi"
+          ? "Tôi đã đối chiếu toàn bộ giao dịch thu chi gần đây để tổng hợp 3 lớp: xu hướng theo ngày/tuần/tháng, mức độ bám sát ngân sách, và danh mục nào đang đẩy chi tiêu lên cao nhất."
+          : "I reviewed your recent money flow in three layers: day/week/month spending trend, budget adherence, and which categories are pushing spend the most.",
+        "",
+        comparisonTable,
+        ...(budgetVsActualTable
+          ? [
+              "",
+              input.language === "vi"
+                ? "So sánh với hạn mức đang đặt:"
+                : "Comparison against your saved cap:",
+              "",
+              budgetVsActualTable,
+            ]
+          : []),
+        ...(categoryTable
+          ? [
+              "",
+              input.language === "vi"
+                ? "Danh mục chi tiêu nổi bật tháng nay:"
+                : "Leading spend categories this month:",
+              "",
+              categoryTable,
+            ]
+          : []),
+        "",
+        input.language === "vi" ? "Cảnh báo:" : "Warnings:",
+        ...(
+          categoryWarnings.length
+            ? categoryWarnings
+            : [
+                localizeCopilotText(
+                  input.language,
+                  refreshedBudgetPlan
+                    ? "Chưa có danh mục nào vượt mức cảnh báo, nhưng bạn vẫn nên giữ sát trần chi còn lại của tháng."
+                    : "Chưa có hạn mức danh mục có sẵn, nhưng tôi đã xác định nhóm chi lớn nhất để bạn theo dõi sát hơn.",
+                  refreshedBudgetPlan
+                    ? "No category has crossed its warning threshold yet, but you should still watch the remaining monthly cap closely."
+                    : "No category cap is saved yet, but I identified the heaviest spend areas for closer tracking.",
+                ),
+              ]
+        ).map((line) => `- ${line}`),
+        "",
+        input.language === "vi" ? "Gợi ý điều chỉnh:" : "Adjustment ideas:",
+        ...adjustmentSuggestions.map((line) => `- ${line}`),
+      ].join("\n"),
+    topic: "spending-budget-insight",
+    suggestedActions: adjustmentSuggestions,
     suggestedDepositAmount: null,
     riskLevel:
-      spendToday > spendYesterday || spendThisWeek > spendLastWeek
+      (refreshedBudgetPlan &&
+        refreshedBudgetPlan.utilizationRatio >=
+          refreshedBudgetPlan.criticalThreshold) ||
+      monthlyCategorySummary.some((category) => category.warningState === "over")
+        ? "high"
+        : spendToday > spendYesterday ||
+            spendThisWeek > spendLastWeek ||
+            monthlyCategorySummary.some(
+              (category) => category.warningState === "warning",
+            )
         ? "medium"
         : "low",
     confidence: 0.98,
     followUpQuestion: localizeCopilotText(
       input.language,
-      "Ban muon toi chi ra ngay nao, nhom nao, hoac giao dich nao dang day chi tieu len cao nhat khong?",
-      "Do you want me to point out which day, category, or transaction is pushing spending higher?",
+      "Bạn muốn tôi đào sâu vào ngày nào, giao dịch nào, hay danh mục nào đang vượt nhiều nhất?",
+      "Do you want me to drill into the specific day, transaction, or category that is overshooting the most?",
     ),
+    budgetPlan: buildPublicBudgetPlanSummary(refreshedBudgetPlan || null),
   };
 };
 
@@ -8698,41 +11840,75 @@ const buildRecentTransactionReviewResponse = async (input: {
     userId: input.userId,
     startInclusive,
     endExclusive,
-    limit: 20,
+    limit: 120,
     context: "/ai/copilot-chat:recent-transaction-review",
   });
+  const categorySummary = summarizeSpendingCategories({
+    transactions,
+    language: input.language,
+    categoryCapMap: buildBudgetCategoryCapMap(
+      getStoredBudgetPlan(
+        (await createUserRepository().findValidatedById(input.userId))?.metadata,
+      ),
+    ),
+  });
+  const categoryTable = categorySummary.length
+    ? buildCopilotMarkdownTable(
+        input.language === "vi"
+          ? ["Danh muc", "Da chi", "So lan", "Ty trong"]
+          : ["Category", "Spent", "Count", "Share"],
+        categorySummary.slice(0, 5).map((category) => [
+          category.label,
+          formatCopilotMoney(input.currency, category.amount),
+          category.count,
+          `${Math.round(category.shareOfSpend * 100)}%`,
+        ]),
+      )
+    : null;
 
   return {
-    reply: buildTransactionReportReply({
-      language: input.language,
-      currency: input.currency,
-      transactions,
-      periodLabel:
-        input.language === "vi"
-          ? `Tong hop giao dich gan day trong 30 ngay (${formatCopilotCalendarDate(input.language, startInclusive)} - ${formatCopilotCalendarDate(input.language, endExclusive)}):`
-          : `Recent transaction review for the last 30 days (${formatCopilotCalendarDate(input.language, startInclusive)} - ${formatCopilotCalendarDate(input.language, endExclusive)}):`,
-      detailMode: "datetime",
-    }),
+    reply: [
+      buildTransactionReportReply({
+        language: input.language,
+        currency: input.currency,
+        transactions: transactions.slice(0, 20),
+        periodLabel:
+          input.language === "vi"
+            ? `Tổng hợp giao dịch gần đây trong 30 ngày (${formatCopilotCalendarDate(input.language, startInclusive)} - ${formatCopilotCalendarDate(input.language, endExclusive)}):`
+            : `Recent transaction review for the last 30 days (${formatCopilotCalendarDate(input.language, startInclusive)} - ${formatCopilotCalendarDate(input.language, endExclusive)}):`,
+        detailMode: "datetime",
+      }),
+      ...(categoryTable
+        ? [
+            "",
+            input.language === "vi"
+              ? "Tóm tắt danh mục chi ra:"
+              : "Outflow category summary:",
+            "",
+            categoryTable,
+          ]
+        : []),
+    ].join("\n"),
     topic: "recent-transaction-review",
     suggestedActions:
       input.language === "vi"
         ? [
-            "Hoi rieng sao ke hom nay, tuan nay, hoac thang nay neu ban muon khung thoi gian cu the hon.",
-            "Hoi toi giao dich nao co gia tri lon nhat neu ban muon xem diem nong nhanh.",
-            "Hoi toi so sanh chi tieu voi ky truoc neu ban muon xem xu huong.",
+            "Hỏi riêng sao kê hôm nay, tuần này hoặc tháng này nếu bạn muốn khung thời gian cụ thể hơn.",
+            "Hỏi tôi giao dịch nào có giá trị lớn nhất nếu bạn muốn xem điểm nóng nhanh.",
+            "Hỏi tôi danh mục nào đang tiêu nhiều nhất nếu bạn muốn xem tâm điểm chi phí.",
           ]
         : [
             "Ask for today's, this week's, or this month's statement if you want a tighter period.",
             "Ask which transaction was the largest if you want the main driver quickly.",
-            "Ask for a spending comparison if you want a trend view.",
+            "Ask which category is consuming the most if you want the cost hotspot.",
           ],
     suggestedDepositAmount: null,
     riskLevel: "low",
     confidence: 0.98,
     followUpQuestion: localizeCopilotText(
       input.language,
-      "Ban co muon toi tach them theo giao dich vao va ra khong?",
-      "Do you want this split further into inflows and outflows?",
+      "Bạn có muốn tôi tách thêm theo tiền vào, tiền ra và danh mục chi tiêu không?",
+      "Do you want this split further into inflows, outflows, and spend categories?",
     ),
   };
 };
@@ -8775,17 +11951,17 @@ const buildTransactionAnomalyReviewResponse = async (input: {
 
   const facts = [
     input.language === "vi"
-      ? `Da ra soat ${transactions.length} giao dich trong 14 ngay gan day tu du lieu vi.`
+      ? `Đã rà soát ${transactions.length} giao dịch trong 14 ngày gần đây từ dữ liệu ví.`
       : `Reviewed ${transactions.length} wallet transactions from the last 14 days.`,
     input.language === "vi"
-      ? `Tong tien vao: ${formatCopilotMoney(input.currency, totalInflow)}. Tong tien ra: ${formatCopilotMoney(input.currency, totalOutflow)}.`
+      ? `Tổng tiền vào: ${formatCopilotMoney(input.currency, totalInflow)}. Tổng tiền ra: ${formatCopilotMoney(input.currency, totalOutflow)}.`
       : `Total inflow: ${formatCopilotMoney(input.currency, totalInflow)}. Total outflow: ${formatCopilotMoney(input.currency, totalOutflow)}.`,
     input.language === "vi"
-      ? `Giao dich ra lon nhat: ${formatCopilotMoney(input.currency, largestOutflow)}.`
+      ? `Giao dịch ra lớn nhất: ${formatCopilotMoney(input.currency, largestOutflow)}.`
       : `Largest outflow: ${formatCopilotMoney(input.currency, largestOutflow)}.`,
     localizeCopilotText(
       input.language,
-      "Trong route chat nay, diem bat thuong realtime co the khong san sang; phan nay chi dua tren ban ghi giao dich va tom tat vi.",
+      "Trong route chat này, điểm bất thường realtime có thể không sẵn sàng; phần này chỉ dựa trên bản ghi giao dịch và tóm tắt ví.",
       "A real-time anomaly score may be unavailable in this chat route; this review is based on wallet records and transaction summaries only.",
     ),
   ];
@@ -8794,17 +11970,17 @@ const buildTransactionAnomalyReviewResponse = async (input: {
     outflowCoverage !== null
       ? localizeCopilotText(
           input.language,
-          `Ty le tien ra / tien vao 14 ngay: ${outflowCoverage.toFixed(2)}%.`,
+          `Tỷ lệ tiền ra / tiền vào 14 ngày: ${outflowCoverage.toFixed(2)}%.`,
           `14-day outflow-to-inflow ratio: ${outflowCoverage.toFixed(2)}%.`,
         )
       : localizeCopilotText(
           input.language,
-          "Khong co dong tien vao de tinh ty le bao phu tien ra.",
+          "Không có dòng tiền vào để tính tỷ lệ bao phủ tiền ra.",
           "There is no inflow data available to calculate an outflow coverage ratio.",
         ),
     localizeCopilotText(
       input.language,
-      `So giao dich ra: ${outflows.length}. So giao dich vao: ${inflows.length}.`,
+      `Số giao dịch ra: ${outflows.length}. Số giao dịch vào: ${inflows.length}.`,
       `Outflow count: ${outflows.length}. Inflow count: ${inflows.length}.`,
     ),
   ];
@@ -8812,9 +11988,9 @@ const buildTransactionAnomalyReviewResponse = async (input: {
   const suggestions =
     input.language === "vi"
       ? [
-          "Neu ban nghi ngo mot giao dich cu the, hay dua thoi gian hoac so tien de toi khoanh vung sat hon.",
-          "Neu co dau hieu bi thuc giuc chuyen tien, khong chia se OTP hoac ma xac minh.",
-          "Neu muon kiem tra tong quat, vao Alerts/Admin de xem risk signals thay vi chat route.",
+          "Nếu bạn nghi ngờ một giao dịch cụ thể, hãy đưa thời gian hoặc số tiền để tôi khoanh vùng sát hơn.",
+          "Nếu có dấu hiệu bị thúc giục chuyển tiền, không chia sẻ OTP hoặc mã xác minh.",
+          "Nếu muốn kiểm tra tổng quát, vào Alerts/Admin để xem risk signals thay vì chat route.",
         ]
       : [
           "If you are concerned about one specific transfer, give me the time or amount and I can narrow the review.",
@@ -8827,10 +12003,10 @@ const buildTransactionAnomalyReviewResponse = async (input: {
       input.language === "vi" ? "Facts:" : "Facts:",
       ...facts.map((fact) => `- ${fact}`),
       "",
-      input.language === "vi" ? "Calculations:" : "Calculations:",
+      input.language === "vi" ? "Tính toán:" : "Calculations:",
       ...calculations.map((calculation) => `- ${calculation}`),
       "",
-      input.language === "vi" ? "Suggestions:" : "Suggestions:",
+      input.language === "vi" ? "Gợi ý:" : "Suggestions:",
       ...suggestions.map((suggestion) => `- ${suggestion}`),
     ].join("\n"),
     topic: "transaction-anomaly-review",
@@ -8844,7 +12020,7 @@ const buildTransactionAnomalyReviewResponse = async (input: {
     confidence: transactions.length ? 0.83 : 0.68,
     followUpQuestion: localizeCopilotText(
       input.language,
-      "Ban co muon toi ra soat mot giao dich cu the theo so tien, thoi gian, hoac nguoi nhan khong?",
+      "Bạn có muốn tôi rà soát một giao dịch cụ thể theo số tiền, thời gian hoặc người nhận không?",
       "Do you want me to review one specific transfer by amount, time, or recipient?",
     ),
   };
@@ -10520,6 +13696,7 @@ const buildPublicUserMetadata = (metadata: unknown) => {
       : {};
   delete source.faceId;
   delete source.transferSecurity;
+  delete source.budgetAssistant;
   const faceId = getInternalFaceIdMetadata(metadata);
   source.faceIdEnabled =
     faceId && typeof faceId.enabled === "boolean" ? faceId.enabled : false;
@@ -10554,6 +13731,12 @@ const buildPublicUserMetadata = (metadata: unknown) => {
     requestedTier: accountProfile.requestedTier,
     hasPendingRequest: accountProfile.hasPendingRequest,
   };
+  source.budgetPlan = buildPublicBudgetPlanSummary(getStoredBudgetPlan(metadata));
+  source.budgetPlanActive =
+    source.budgetPlan &&
+    typeof source.budgetPlan === "object" &&
+    (source.budgetPlan as PublicBudgetPlanSummary).status === "ACTIVE";
+  source.budgetAssistantPreferences = getBudgetAssistantPreferences(metadata);
   return source;
 };
 
@@ -12519,6 +15702,28 @@ const completeAuthorizedTransfer = async (input: {
     counterpartyLabel: getRecipientName(receiverUser),
   });
 
+  runAsyncSideEffect("monitorBudgetPlanAfterDebit", () =>
+    monitorBudgetPlanAfterDebit({
+      userId: input.senderUserId,
+      amount: context.amount,
+      currency: transferResult.currency,
+      description:
+        transferResult.transaction.description ??
+        `Transfer to ${transferResult.receiverAccountNumber}`,
+      occurredAt: transferResult.transaction.createdAt.toISOString(),
+      actor: input.req.user?.email || input.senderUser.email,
+      ipAddress: getRequestIp(input.req),
+    }),
+  );
+  runAsyncSideEffect("runBudgetAssistantAutomation:debit", () =>
+    runBudgetAssistantAutomation({
+      userId: input.senderUserId,
+      actor: input.req.user?.email || input.senderUser.email,
+      ipAddress: getRequestIp(input.req),
+      trigger: "debit",
+    }),
+  );
+
   await userRepository.updateMetadata(
     input.senderUserId,
     upsertRecentTransferRecipientMetadata(input.senderUser.metadata, {
@@ -13038,6 +16243,21 @@ app.post("/ai/copilot-chat", requireAuth, async (req, res) => {
       language,
     });
     return res.json(spendingComparison);
+  }
+
+  if (req.user?.sub && intentClassification.intent === "budgeting_help") {
+    const budgetResponse = await buildBudgetPlanCopilotResponse({
+      req,
+      userId: req.user.sub,
+      currency: effectiveCurrency,
+      language,
+      messages,
+      currentBalance: sourceTruth.currentBalance,
+      monthlyIncome: sourceTruth.monthlyIncome,
+      monthlyExpenses: sourceTruth.monthlyExpenses,
+      recentTransactions: sourceTruth.recentTransactions,
+    });
+    return res.json(budgetResponse);
   }
 
   if (intentClassification.intent === "market_data") {
@@ -15085,6 +18305,15 @@ app.get("/auth/me", requireAuth, async (req, res) => {
           buildSessionSecurityState("low"),
       };
     });
+
+    runAsyncSideEffect("runBudgetAssistantAutomation:auth_me", () =>
+      runBudgetAssistantAutomation({
+        userId,
+        actor: req.user?.email,
+        ipAddress: getRequestIp(req),
+        trigger: "auth_me",
+      }),
+    );
 
     return res.json(payload);
   } catch (err) {
@@ -17806,6 +21035,188 @@ app.get("/security/overview", requireAuth, async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
     console.error("Failed to load security overview", err);
+    return res.status(500).json({ error: "Internal error" });
+  }
+});
+
+app.get("/activity/assistant", requireAuth, async (req, res) => {
+  const userId = req.user?.sub;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const assistantActions = [
+    "BUDGET_PLAN_SAVED",
+    "BUDGET_PLAN_CATEGORY_ALLOCATION_UPDATED",
+    "BUDGET_PLAN_WARNING_TRIGGERED",
+    "BUDGET_PLAN_LIMIT_EXCEEDED",
+    "BUDGET_CATEGORY_WARNING_TRIGGERED",
+    "BUDGET_CATEGORY_LIMIT_EXCEEDED",
+    "BUDGET_ASSISTANT_PREFERENCES_UPDATED",
+    "BUDGET_ASSISTANT_DIGEST_SENT",
+    "BUDGET_ASSISTANT_PACING_REMINDER_SENT",
+  ] as const;
+
+  try {
+    const rows = await prisma.auditLog.findMany({
+      where: {
+        userId,
+        action: { in: [...assistantActions] },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 20,
+    });
+
+    const notifications = rows.map((row) => {
+      const details = normalizeRecord(row.details);
+      const currency =
+        typeof details.currency === "string" && details.currency.trim()
+          ? details.currency.trim().toUpperCase()
+          : "USD";
+
+      if (row.action === "BUDGET_ASSISTANT_DIGEST_SENT") {
+        const periodLabel =
+          typeof details.periodLabel === "string"
+            ? details.periodLabel
+            : "VaultAI brief";
+        const spentAmount =
+          typeof details.spentAmount === "number" ? details.spentAmount : 0;
+        return {
+          id: row.id,
+          title: `VaultAI ${periodLabel} brief`,
+          message:
+            typeof details.headline === "string" && details.headline.trim()
+              ? details.headline.trim()
+              : "VaultAI generated a fresh financial brief for you.",
+          meta:
+            typeof details.topCategoryLabel === "string" &&
+            details.topCategoryLabel.trim()
+              ? `Top category: ${details.topCategoryLabel.trim()}`
+              : "Assistant brief ready",
+          createdAt: row.createdAt.toISOString(),
+          amountText: `${currency} ${spentAmount.toLocaleString("en-US", {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          })}`,
+          amountTone: "negative" as const,
+        };
+      }
+
+      if (row.action === "BUDGET_ASSISTANT_PACING_REMINDER_SENT") {
+        const projectedSpendAmount =
+          typeof details.projectedSpendAmount === "number"
+            ? details.projectedSpendAmount
+            : 0;
+        return {
+          id: row.id,
+          title: "VaultAI pace reminder",
+          message:
+            "Your current spending pace may overshoot the active budget before month end.",
+          meta:
+            typeof details.periodLabel === "string"
+              ? `Tracking period: ${details.periodLabel}`
+              : "Projected overspend risk",
+          createdAt: row.createdAt.toISOString(),
+          amountText: `${currency} ${projectedSpendAmount.toLocaleString(
+            "en-US",
+            {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            },
+          )}`,
+          amountTone: "negative" as const,
+        };
+      }
+
+      if (row.action === "BUDGET_ASSISTANT_PREFERENCES_UPDATED") {
+        return {
+          id: row.id,
+          title: "VaultAI assistant updated",
+          message:
+            "Your reminder and automatic brief settings were updated.",
+          meta: "Assistant preferences saved",
+          createdAt: row.createdAt.toISOString(),
+        };
+      }
+
+      if (row.action === "BUDGET_PLAN_SAVED") {
+        const targetAmount =
+          typeof details.targetAmount === "number" ? details.targetAmount : 0;
+        return {
+          id: row.id,
+          title: "Budget plan saved",
+          message: "VaultAI saved a new active spending plan for you.",
+          meta: "Budget plan updated",
+          createdAt: row.createdAt.toISOString(),
+          amountText: `${currency} ${targetAmount.toLocaleString("en-US", {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          })}`,
+          amountTone: "positive" as const,
+        };
+      }
+
+      if (row.action === "BUDGET_PLAN_CATEGORY_ALLOCATION_UPDATED") {
+        return {
+          id: row.id,
+          title: "Category mix updated",
+          message:
+            "VaultAI rebalanced your category allocations from the latest chat instructions.",
+          meta: "Spending mix changed",
+          createdAt: row.createdAt.toISOString(),
+        };
+      }
+
+      if (row.action === "BUDGET_PLAN_WARNING_TRIGGERED") {
+        return {
+          id: row.id,
+          title: "Budget warning zone",
+          message:
+            "Your overall spending has crossed the warning threshold.",
+          meta: "Overall budget alert",
+          createdAt: row.createdAt.toISOString(),
+        };
+      }
+
+      if (row.action === "BUDGET_PLAN_LIMIT_EXCEEDED") {
+        return {
+          id: row.id,
+          title: "Budget exceeded",
+          message: "Your overall spending has moved beyond the active budget.",
+          meta: "Overall budget alert",
+          createdAt: row.createdAt.toISOString(),
+        };
+      }
+
+      const categoryLabel =
+        typeof details.categoryLabel === "string" && details.categoryLabel.trim()
+          ? details.categoryLabel.trim()
+          : "A spending category";
+      const categorySpentAmount =
+        typeof details.categorySpentAmount === "number"
+          ? details.categorySpentAmount
+          : 0;
+      return {
+        id: row.id,
+        title:
+          row.action === "BUDGET_CATEGORY_LIMIT_EXCEEDED"
+            ? `${categoryLabel} exceeded`
+            : `${categoryLabel} warning`,
+        message:
+          row.action === "BUDGET_CATEGORY_LIMIT_EXCEEDED"
+            ? `${categoryLabel} has moved beyond its saved limit.`
+            : `${categoryLabel} is close to its saved limit.`,
+        meta: "Category budget alert",
+        createdAt: row.createdAt.toISOString(),
+        amountText: `${currency} ${categorySpentAmount.toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })}`,
+        amountTone: "negative" as const,
+      };
+    });
+
+    return res.json(notifications);
+  } catch (err) {
+    console.error("Failed to load assistant activity", err);
     return res.status(500).json({ error: "Internal error" });
   }
 });

@@ -502,3 +502,305 @@ export const sendBalanceChangeEmail = async (input: {
     },
   });
 };
+
+export const sendBudgetThresholdAlertEmail = async (input: {
+  to: string;
+  recipientName: string;
+  currency: string;
+  transactionAmount: number;
+  spentAmount: number;
+  targetAmount: number;
+  remainingAmount: number;
+  utilizationRatio: number;
+  thresholdLabel: "warning" | "critical";
+  periodLabel: string;
+}) => {
+  const spentLabel = formatMoney(input.currency, input.spentAmount);
+  const targetLabel = formatMoney(input.currency, input.targetAmount);
+  const latestTxLabel = formatMoney(input.currency, input.transactionAmount);
+  const remainingLabel =
+    input.remainingAmount >= 0
+      ? formatMoney(input.currency, input.remainingAmount)
+      : `-${formatMoney(input.currency, Math.abs(input.remainingAmount))}`;
+  const subject =
+    input.thresholdLabel === "critical"
+      ? "FPIPay budget alert: monthly budget exceeded"
+      : "FPIPay budget alert: 85% threshold reached";
+  const headline =
+    input.thresholdLabel === "critical"
+      ? "Monthly budget exceeded"
+      : "Budget warning threshold reached";
+  const guidance =
+    input.thresholdLabel === "critical"
+      ? "You have moved beyond the spending cap saved in VaultAI. Slow down non-essential outflows and review the remaining days of the month."
+      : "You are approaching the budget cap saved in VaultAI. Review the remaining daily and weekly limits before making more debit transactions.";
+
+  return sendEmail({
+    to: input.to,
+    subject,
+    text:
+      `Hello ${input.recipientName},\n\n` +
+      `${headline}\n` +
+      `Tracking period: ${input.periodLabel}\n` +
+      `Budget cap: ${targetLabel}\n` +
+      `Spent so far: ${spentLabel}\n` +
+      `Remaining: ${remainingLabel}\n` +
+      `Latest debit: ${latestTxLabel}\n` +
+      `Budget usage: ${Math.round(input.utilizationRatio * 100)}%\n\n` +
+      `${guidance}`,
+    html: `
+      <div style="margin:0;padding:24px 12px;background:#f3f4f6;font-family:Arial,Helvetica,sans-serif;color:#111827">
+        <div style="max-width:620px;margin:0 auto;background:#ffffff;border:1px solid #d1d5db">
+          <div style="padding:18px 24px;border-bottom:3px solid ${
+            input.thresholdLabel === "critical" ? "#b91c1c" : "#c2410c"
+          }">
+            <div style="font-size:18px;font-weight:700;color:#111827">VaultAI Budget Monitor</div>
+            <div style="margin-top:8px;font-size:24px;font-weight:700;color:${
+              input.thresholdLabel === "critical" ? "#991b1b" : "#9a3412"
+            }">${headline}</div>
+          </div>
+          <div style="padding:24px">
+            <p style="margin:0 0 14px;font-size:14px;color:#111827">Hello ${input.recipientName},</p>
+            <p style="margin:0 0 16px;font-size:14px;line-height:1.7;color:#374151">
+              VaultAI checked your latest debit against the budget plan saved in chat and found that your spending has crossed an alert threshold.
+            </p>
+            <table role="presentation" style="width:100%;border-collapse:collapse;border:1px solid #d1d5db;margin:0 0 16px">
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;width:42%;font-size:13px;color:#6b7280">Tracking period</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827">${input.periodLabel}</td></tr>
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:13px;color:#6b7280">Budget cap</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;font-weight:700;color:#111827">${targetLabel}</td></tr>
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:13px;color:#6b7280">Spent so far</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;font-weight:700;color:#111827">${spentLabel}</td></tr>
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:13px;color:#6b7280">Remaining</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827">${remainingLabel}</td></tr>
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:13px;color:#6b7280">Latest debit</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827">${latestTxLabel}</td></tr>
+              <tr><td style="padding:10px 12px;background:#f9fafb;font-size:13px;color:#6b7280">Budget usage</td><td style="padding:10px 12px;font-size:14px;color:#111827">${Math.round(
+                input.utilizationRatio * 100,
+              )}%</td></tr>
+            </table>
+            <p style="margin:0;font-size:13px;line-height:1.7;color:#374151">${guidance}</p>
+          </div>
+        </div>
+      </div>
+    `,
+    debug: {
+      thresholdLabel: input.thresholdLabel,
+      transactionAmount: input.transactionAmount,
+      spentAmount: input.spentAmount,
+      targetAmount: input.targetAmount,
+      remainingAmount: input.remainingAmount,
+      utilizationRatio: input.utilizationRatio,
+      periodLabel: input.periodLabel,
+    },
+  });
+};
+
+export const sendBudgetCategoryAlertEmail = async (input: {
+  to: string;
+  recipientName: string;
+  currency: string;
+  categoryLabel: string;
+  transactionAmount: number;
+  categorySpentAmount: number;
+  categoryCapAmount: number;
+  categoryUtilizationRatio: number;
+  thresholdLabel: "warning" | "critical";
+  periodLabel: string;
+}) => {
+  const spentLabel = formatMoney(input.currency, input.categorySpentAmount);
+  const capLabel = formatMoney(input.currency, input.categoryCapAmount);
+  const latestTxLabel = formatMoney(input.currency, input.transactionAmount);
+  const usagePercent = Math.round(input.categoryUtilizationRatio * 100);
+  const subject =
+    input.thresholdLabel === "critical"
+      ? `FPIPay category alert: ${input.categoryLabel} exceeded its limit`
+      : `FPIPay category alert: ${input.categoryLabel} is nearing its limit`;
+  const headline =
+    input.thresholdLabel === "critical"
+      ? `${input.categoryLabel} category exceeded`
+      : `${input.categoryLabel} category warning`;
+  const guidance =
+    input.thresholdLabel === "critical"
+      ? `Spending in ${input.categoryLabel} has moved beyond the saved category cap. Pause new payments in this bucket and let VaultAI rebalance the rest of the month.`
+      : `Spending in ${input.categoryLabel} is close to the saved category cap. Review upcoming payments in this bucket before the next debit lands.`;
+
+  return sendEmail({
+    to: input.to,
+    subject,
+    text:
+      `Hello ${input.recipientName},\n\n` +
+      `${headline}\n` +
+      `Tracking period: ${input.periodLabel}\n` +
+      `Category: ${input.categoryLabel}\n` +
+      `Category cap: ${capLabel}\n` +
+      `Spent in category: ${spentLabel}\n` +
+      `Latest debit: ${latestTxLabel}\n` +
+      `Category usage: ${usagePercent}%\n\n` +
+      `${guidance}`,
+    html: `
+      <div style="margin:0;padding:24px 12px;background:#f3f4f6;font-family:Arial,Helvetica,sans-serif;color:#111827">
+        <div style="max-width:620px;margin:0 auto;background:#ffffff;border:1px solid #d1d5db">
+          <div style="padding:18px 24px;border-bottom:3px solid ${
+            input.thresholdLabel === "critical" ? "#b91c1c" : "#c2410c"
+          }">
+            <div style="font-size:18px;font-weight:700;color:#111827">VaultAI Category Monitor</div>
+            <div style="margin-top:8px;font-size:24px;font-weight:700;color:${
+              input.thresholdLabel === "critical" ? "#991b1b" : "#9a3412"
+            }">${headline}</div>
+          </div>
+          <div style="padding:24px">
+            <p style="margin:0 0 14px;font-size:14px;color:#111827">Hello ${input.recipientName},</p>
+            <p style="margin:0 0 16px;font-size:14px;line-height:1.7;color:#374151">
+              VaultAI checked your latest debit against the saved category allocation and found that one specific spending bucket crossed an alert threshold.
+            </p>
+            <table role="presentation" style="width:100%;border-collapse:collapse;border:1px solid #d1d5db;margin:0 0 16px">
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;width:42%;font-size:13px;color:#6b7280">Tracking period</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827">${input.periodLabel}</td></tr>
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:13px;color:#6b7280">Category</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;font-weight:700;color:#111827">${input.categoryLabel}</td></tr>
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:13px;color:#6b7280">Category cap</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827">${capLabel}</td></tr>
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:13px;color:#6b7280">Spent in category</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;font-weight:700;color:#111827">${spentLabel}</td></tr>
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:13px;color:#6b7280">Latest debit</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827">${latestTxLabel}</td></tr>
+              <tr><td style="padding:10px 12px;background:#f9fafb;font-size:13px;color:#6b7280">Category usage</td><td style="padding:10px 12px;font-size:14px;color:#111827">${usagePercent}%</td></tr>
+            </table>
+            <p style="margin:0;font-size:13px;line-height:1.7;color:#374151">${guidance}</p>
+          </div>
+        </div>
+      </div>
+    `,
+    debug: {
+      thresholdLabel: input.thresholdLabel,
+      categoryLabel: input.categoryLabel,
+      transactionAmount: input.transactionAmount,
+      categorySpentAmount: input.categorySpentAmount,
+      categoryCapAmount: input.categoryCapAmount,
+      categoryUtilizationRatio: input.categoryUtilizationRatio,
+      periodLabel: input.periodLabel,
+    },
+  });
+};
+
+export const sendBudgetDigestEmail = async (input: {
+  to: string;
+  recipientName: string;
+  periodLabel: string;
+  headline: string;
+  currency: string;
+  inflowAmount: number;
+  spentAmount: number;
+  deltaAmount: number;
+  topCategoryLabel?: string | null;
+  topCategoryAmount?: number;
+  budgetLine: string;
+  comparisonLine: string;
+}) => {
+  const inflowLabel = formatMoney(input.currency, input.inflowAmount);
+  const spentLabel = formatMoney(input.currency, input.spentAmount);
+  const deltaLabel = `${input.deltaAmount >= 0 ? "+" : "-"}${formatMoney(
+    input.currency,
+    Math.abs(input.deltaAmount),
+  )}`;
+  const topCategoryLine =
+    input.topCategoryLabel && typeof input.topCategoryAmount === "number"
+      ? `${input.topCategoryLabel} (${formatMoney(
+          input.currency,
+          input.topCategoryAmount,
+        )})`
+      : "No standout debit category";
+
+  return sendEmail({
+    to: input.to,
+    subject: `FPIPay VaultAI brief: ${input.periodLabel}`,
+    text:
+      `Hello ${input.recipientName},\n\n` +
+      `${input.headline}\n` +
+      `Period: ${input.periodLabel}\n` +
+      `Inflow: ${inflowLabel}\n` +
+      `Outflow: ${spentLabel}\n` +
+      `Delta vs prior period: ${deltaLabel}\n` +
+      `Top category: ${topCategoryLine}\n\n` +
+      `${input.comparisonLine}\n${input.budgetLine}`,
+    html: `
+      <div style="margin:0;padding:24px 12px;background:#f3f4f6;font-family:Arial,Helvetica,sans-serif;color:#111827">
+        <div style="max-width:620px;margin:0 auto;background:#ffffff;border:1px solid #d1d5db">
+          <div style="padding:18px 24px;border-bottom:3px solid #1d4ed8">
+            <div style="font-size:18px;font-weight:700;color:#111827">VaultAI Brief</div>
+            <div style="margin-top:8px;font-size:24px;font-weight:700;color:#1e3a8a">${input.headline}</div>
+          </div>
+          <div style="padding:24px">
+            <p style="margin:0 0 14px;font-size:14px;color:#111827">Hello ${input.recipientName},</p>
+            <table role="presentation" style="width:100%;border-collapse:collapse;border:1px solid #d1d5db;margin:0 0 16px">
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;width:42%;font-size:13px;color:#6b7280">Period</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827">${input.periodLabel}</td></tr>
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:13px;color:#6b7280">Inflow</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827">${inflowLabel}</td></tr>
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:13px;color:#6b7280">Outflow</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;font-weight:700;color:#111827">${spentLabel}</td></tr>
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:13px;color:#6b7280">Vs prior period</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827">${deltaLabel}</td></tr>
+              <tr><td style="padding:10px 12px;background:#f9fafb;font-size:13px;color:#6b7280">Top category</td><td style="padding:10px 12px;font-size:14px;color:#111827">${topCategoryLine}</td></tr>
+            </table>
+            <p style="margin:0 0 12px;font-size:13px;line-height:1.7;color:#374151">${input.comparisonLine}</p>
+            <p style="margin:0;font-size:13px;line-height:1.7;color:#374151">${input.budgetLine}</p>
+          </div>
+        </div>
+      </div>
+    `,
+    debug: {
+      periodLabel: input.periodLabel,
+      inflowAmount: input.inflowAmount,
+      spentAmount: input.spentAmount,
+      deltaAmount: input.deltaAmount,
+      topCategoryLabel: input.topCategoryLabel || null,
+      topCategoryAmount: input.topCategoryAmount || 0,
+    },
+  });
+};
+
+export const sendBudgetPacingReminderEmail = async (input: {
+  to: string;
+  recipientName: string;
+  currency: string;
+  projectedSpendAmount: number;
+  targetAmount: number;
+  currentSpentAmount: number;
+  periodLabel: string;
+}) => {
+  const projectedLabel = formatMoney(input.currency, input.projectedSpendAmount);
+  const targetLabel = formatMoney(input.currency, input.targetAmount);
+  const currentSpentLabel = formatMoney(input.currency, input.currentSpentAmount);
+
+  return sendEmail({
+    to: input.to,
+    subject: "FPIPay VaultAI reminder: current spend pace is too high",
+    text:
+      `Hello ${input.recipientName},\n\n` +
+      `VaultAI projects that your current spending pace may overshoot the active budget.\n` +
+      `Tracking period: ${input.periodLabel}\n` +
+      `Current spend: ${currentSpentLabel}\n` +
+      `Projected month-end spend: ${projectedLabel}\n` +
+      `Target cap: ${targetLabel}\n\n` +
+      `Slow down discretionary spending or ask VaultAI to rebalance the plan if your priorities changed.`,
+    html: `
+      <div style="margin:0;padding:24px 12px;background:#f3f4f6;font-family:Arial,Helvetica,sans-serif;color:#111827">
+        <div style="max-width:620px;margin:0 auto;background:#ffffff;border:1px solid #d1d5db">
+          <div style="padding:18px 24px;border-bottom:3px solid #c2410c">
+            <div style="font-size:18px;font-weight:700;color:#111827">VaultAI Pace Reminder</div>
+            <div style="margin-top:8px;font-size:24px;font-weight:700;color:#9a3412">Current spend pace is too high</div>
+          </div>
+          <div style="padding:24px">
+            <p style="margin:0 0 14px;font-size:14px;color:#111827">Hello ${input.recipientName},</p>
+            <p style="margin:0 0 16px;font-size:14px;line-height:1.7;color:#374151">
+              VaultAI estimates that your current spending pace may push you above the active budget before month end.
+            </p>
+            <table role="presentation" style="width:100%;border-collapse:collapse;border:1px solid #d1d5db;margin:0 0 16px">
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;width:42%;font-size:13px;color:#6b7280">Tracking period</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827">${input.periodLabel}</td></tr>
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:13px;color:#6b7280">Current spend</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827">${currentSpentLabel}</td></tr>
+              <tr><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:13px;color:#6b7280">Projected spend</td><td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;font-weight:700;color:#111827">${projectedLabel}</td></tr>
+              <tr><td style="padding:10px 12px;background:#f9fafb;font-size:13px;color:#6b7280">Target cap</td><td style="padding:10px 12px;font-size:14px;color:#111827">${targetLabel}</td></tr>
+            </table>
+            <p style="margin:0;font-size:13px;line-height:1.7;color:#374151">
+              Slow down discretionary spending or ask VaultAI to rebalance your plan if your priorities changed.
+            </p>
+          </div>
+        </div>
+      </div>
+    `,
+    debug: {
+      projectedSpendAmount: input.projectedSpendAmount,
+      targetAmount: input.targetAmount,
+      currentSpentAmount: input.currentSpentAmount,
+      periodLabel: input.periodLabel,
+    },
+  });
+};
