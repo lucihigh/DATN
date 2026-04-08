@@ -4859,13 +4859,7 @@ const SPENDING_CATEGORY_ALIASES: Record<SpendingCategoryKey, string[]> = {
     "internet",
     "rent",
   ],
-  shopping: [
-    "mua sam",
-    "shopping",
-    "lifestyle",
-    "giai tri",
-    "entertainment",
-  ],
+  shopping: ["mua sam", "shopping", "lifestyle", "giai tri", "entertainment"],
   transfers: ["chuyen tien", "transfer", "transfers", "rut tien", "cash out"],
   education_health: [
     "hoc tap",
@@ -4971,7 +4965,7 @@ const extractBudgetTargetAmount = (message: string) => {
 const extractSavingsGoalAmount = (message: string) => {
   const normalized = normalizeCopilotText(message);
   if (
-    !/\b(save|saving|savings|tiet kiem|de danh|de duoc|bo ra|muc tieu tiet kiem|save up)\b/.test(
+    !/\b(save|saving|savings|tiet kiem|tich kiem|de danh|de duoc|bo ra|muc tieu tiet kiem|save up)\b/.test(
       normalized,
     )
   ) {
@@ -4992,7 +4986,7 @@ const extractSavingsGoalAmount = (message: string) => {
   }
 
   const contextualMatch = normalized.match(
-    /\b(?:save|saving|savings|tiet kiem|de danh|de duoc|save up)\b[\s\S]{0,30}?(\d[\d.,]*)(?:\s*(k|m|nghin|ngan|trieu))?\b/,
+    /\b(?:save|saving|savings|tiet kiem|tich kiem|de danh|de duoc|save up)\b[\s\S]{0,30}?(\d[\d.,]*)(?:\s*(k|m|nghin|ngan|trieu))?\b/,
   );
   if (contextualMatch) {
     const parsed = parseBudgetAmountCandidate(
@@ -5006,7 +5000,7 @@ const extractSavingsGoalAmount = (message: string) => {
 };
 
 const isBudgetPlanSetupIntent = (message: string) =>
-  /\b(lap|tao|dat|set|create|build|ke hoach|muc tieu|toi se|du dinh|gioi han|han muc|phan bo|toi da|toi muon|giu duoi|toi da|toi muon tieu|tieu toi da|tiet kiem|de danh|save|saving)\b/.test(
+  /\b(lap|tao|dat|set|create|build|ke hoach|muc tieu|toi se|du dinh|gioi han|han muc|phan bo|toi da|toi muon|giu duoi|toi da|toi muon tieu|tieu toi da|tiet kiem|tich kiem|de danh|save|saving)\b/.test(
     normalizeCopilotText(message),
   );
 
@@ -5014,6 +5008,18 @@ const isBudgetPlanStatusIntent = (message: string) =>
   /\b(hien tai|current|con lai|remaining|con bao nhieu|used|da dung|vuot|over budget|tinh hinh|status|kiem tra)\b/.test(
     normalizeCopilotText(message),
   );
+
+const isBudgetGoalPlanningIntent = (message: string) => {
+  const normalized = normalizeCopilotText(message);
+  const hasBudgetAmount = extractBudgetTargetAmount(message) !== null;
+  const hasSavingsGoal = extractSavingsGoalAmount(message) !== null;
+  const hasPlanningLanguage =
+    /\b(siet|giam|kiem soat|lap|tao|dat|ke hoach|muc tieu|de co the|muon|can|gioi han|han muc|kinh phi|budget|tiet kiem|tich kiem|de danh)\b/.test(
+      normalized,
+    );
+
+  return (hasBudgetAmount || hasSavingsGoal) && hasPlanningLanguage;
+};
 
 const extractBudgetPlanningScope = (
   message: string,
@@ -5155,7 +5161,11 @@ const extractBudgetAssistantPreferenceUpdates = (
   if (!enable && !disable) return null;
 
   const nextValue = enable && !disable;
-  if (/\b(nhac nho|reminder|reminders|canh bao chu dong|proactive)\b/.test(normalized)) {
+  if (
+    /\b(nhac nho|reminder|reminders|canh bao chu dong|proactive)\b/.test(
+      normalized,
+    )
+  ) {
     updates.proactiveRemindersEnabled = nextValue;
   }
   if (
@@ -5288,9 +5298,7 @@ const getStoredBudgetPlan = (metadata: unknown): StoredBudgetPlan | null => {
     period: "MONTHLY",
     currency: activePlan.currency,
     planningMode:
-      activePlan.planningMode === "savings_goal"
-        ? "savings_goal"
-        : "spend_cap",
+      activePlan.planningMode === "savings_goal" ? "savings_goal" : "spend_cap",
     targetAmount: roundMoney(activePlan.targetAmount),
     savingsGoalAmount:
       typeof activePlan.savingsGoalAmount === "number"
@@ -5342,7 +5350,9 @@ const getStoredBudgetPlan = (metadata: unknown): StoredBudgetPlan | null => {
           ? activePlan.updatedAt
           : activePlan.startAt,
     sourcePrompt:
-      typeof activePlan.sourcePrompt === "string" ? activePlan.sourcePrompt : "",
+      typeof activePlan.sourcePrompt === "string"
+        ? activePlan.sourcePrompt
+        : "",
     dailyCapRemaining:
       typeof activePlan.dailyCapRemaining === "number"
         ? roundMoney(activePlan.dailyCapRemaining)
@@ -5387,7 +5397,9 @@ const getBudgetAssistantAutomationState = (
   const raw = normalizeRecord(budgetAssistant.automationState);
   return {
     lastDailyDigestKey:
-      typeof raw.lastDailyDigestKey === "string" ? raw.lastDailyDigestKey : null,
+      typeof raw.lastDailyDigestKey === "string"
+        ? raw.lastDailyDigestKey
+        : null,
     lastWeeklyDigestKey:
       typeof raw.lastWeeklyDigestKey === "string"
         ? raw.lastWeeklyDigestKey
@@ -5759,9 +5771,7 @@ const buildBudgetDigestSnapshot = (input: {
         formatCopilotMoney(input.currency, spentAmount),
       ],
       [
-        input.language === "vi"
-          ? "So sánh kỳ trước"
-          : "Vs previous period",
+        input.language === "vi" ? "So sánh kỳ trước" : "Vs previous period",
         `${deltaAmount >= 0 ? "+" : "-"}${formatCopilotMoney(
           input.currency,
           Math.abs(deltaAmount),
@@ -5817,9 +5827,7 @@ const buildBudgetDigestCopilotResponse = async (input: {
 
   const plan = getStoredBudgetPlan(userDoc?.metadata);
   const digestBudgetPlan =
-    plan &&
-    new Date(plan.startAt) <= now &&
-    new Date(plan.endAt) > now
+    plan && new Date(plan.startAt) <= now && new Date(plan.endAt) > now
       ? recalculateBudgetPlanProgress(
           plan,
           await sumCompletedDebitTransactionsForUser({
@@ -5897,7 +5905,10 @@ const runBudgetAssistantAutomation = async (input: {
   let nextAutomationState = { ...automationState };
   let metadataChanged = false;
 
-  const maybeSendDigest = async (period: BudgetDigestPeriod, enabled: boolean) => {
+  const maybeSendDigest = async (
+    period: BudgetDigestPeriod,
+    enabled: boolean,
+  ) => {
     if (!enabled) return;
     const key = getBudgetDigestPeriodKey(period, now);
     const stateKey =
@@ -5931,7 +5942,8 @@ const runBudgetAssistantAutomation = async (input: {
       currency:
         activePlan?.currency ||
         (typeof userDoc.metadata === "object" &&
-        typeof (userDoc.metadata as Record<string, unknown>).currency === "string"
+        typeof (userDoc.metadata as Record<string, unknown>).currency ===
+          "string"
           ? String((userDoc.metadata as Record<string, unknown>).currency)
           : "USD"),
       period,
@@ -5949,7 +5961,8 @@ const runBudgetAssistantAutomation = async (input: {
       currency:
         activePlan?.currency ||
         (typeof userDoc.metadata === "object" &&
-        typeof (userDoc.metadata as Record<string, unknown>).currency === "string"
+        typeof (userDoc.metadata as Record<string, unknown>).currency ===
+          "string"
           ? String((userDoc.metadata as Record<string, unknown>).currency)
           : "USD"),
       inflowAmount: snapshot.inflowAmount,
@@ -6004,7 +6017,11 @@ const runBudgetAssistantAutomation = async (input: {
       endExclusive: endAt,
       context: "/budget-assistant:pacing-refresh",
     });
-    const refreshedPlan = recalculateBudgetPlanProgress(activePlan, spentAmount, now);
+    const refreshedPlan = recalculateBudgetPlanProgress(
+      activePlan,
+      spentAmount,
+      now,
+    );
     const elapsedDays = Math.max(
       1,
       Math.ceil((now.getTime() - startAt.getTime()) / 86400000),
@@ -6821,6 +6838,16 @@ const classifyCopilotIntentHeuristically = (
     };
   }
 
+  if (isBudgetGoalPlanningIntent(latestMessage)) {
+    return {
+      intent: "budgeting_help",
+      needs_tools: true,
+      required_tools: ["wallet_summary", "wallet_transactions"],
+      reason:
+        "The user is defining a spending cap, savings goal, or a budget plan that should be handled by VaultAI budgeting logic.",
+    };
+  }
+
   if (
     isSpendingComparisonIntent(latestMessage, options?.priorUserMessage || null)
   ) {
@@ -6853,8 +6880,8 @@ const classifyCopilotIntentHeuristically = (
   if (
     /\b(budget|budgeting|ngan sach|chi tieu hop ly|chi tieu|tieu toi da|tieu khoang|saving plan|tiet kiem|de danh|save up|save for|emergency fund|quy du phong|cash flow plan|ke hoach chi tieu|nhac nho|reminder|digest|brief|tom tat|summary)\b/.test(
       normalized,
-    )
-    || (extractBudgetCategoryAllocationShares(latestMessage) !== null &&
+    ) ||
+    (extractBudgetCategoryAllocationShares(latestMessage) !== null &&
       /\d{1,3}(?:[.,]\d+)?\s*%/.test(normalized))
   ) {
     return {
@@ -6923,15 +6950,15 @@ const classifyCopilotIntent = async (input: {
   messages: CopilotMessagePayload[];
   language: CopilotLanguage;
 }): Promise<CopilotIntentClassification> => {
-  const contextualLatestUserMessage =
-    buildContextAwareCopilotUserMessage(input.messages);
+  const contextualLatestUserMessage = buildContextAwareCopilotUserMessage(
+    input.messages,
+  );
   const latestUserMessage =
     [...input.messages].reverse().find((message) => message.role === "user")
       ?.content || "";
   const previousUserMessage =
-    input.messages
-      .filter((message) => message.role === "user")
-      .slice(-2, -1)[0]?.content || "";
+    input.messages.filter((message) => message.role === "user").slice(-2, -1)[0]
+      ?.content || "";
   const heuristic = classifyCopilotIntentHeuristically(
     contextualLatestUserMessage || latestUserMessage,
     {
@@ -9560,8 +9587,7 @@ const buildContextAwareCopilotUserMessage = (
 ) => {
   const userMessages = messages.filter((message) => message.role === "user");
   const latest = userMessages[userMessages.length - 1]?.content?.trim() || "";
-  const previous =
-    userMessages[userMessages.length - 2]?.content?.trim() || "";
+  const previous = userMessages[userMessages.length - 2]?.content?.trim() || "";
   if (!latest || !previous) return latest;
 
   const normalizedLatest = normalizeCopilotText(latest);
@@ -9587,7 +9613,7 @@ const isBudgetPlanRebuildIntent = (
       normalized,
     );
   const mentionsBudgetContext =
-    /\b(budget|ngan sach|ke hoach|chi tieu|tieu|han muc|tiet kiem|de danh|spending cap|saving|thang nay|vuot ngan sach|over budget|qua nhieu)\b/.test(
+    /\b(budget|ngan sach|ke hoach|chi tieu|tieu|han muc|tiet kiem|tich kiem|de danh|spending cap|saving|thang nay|vuot ngan sach|over budget|qua nhieu)\b/.test(
       contextualNormalized,
     );
 
@@ -9613,6 +9639,10 @@ const isSpendingComparisonIntent = (
     /\b(chi tieu|spend|spending|thu chi|money flow|cash flow)\b/.test(
       normalized,
     );
+  const asksReportLikeReview =
+    /\b(bao cao|tong hop|liet ke|thong ke|phan tich|xem|review|summary|report|statement)\b/.test(
+      normalized,
+    );
   const contextSuggestsTransactionReview =
     /\b(transaction|transactions|giao dich|sao ke|statement|bao cao|tong hop|liet ke|thong ke)\b/.test(
       contextualNormalized,
@@ -9626,9 +9656,10 @@ const isSpendingComparisonIntent = (
     (asksSpending || contextSuggestsTransactionReview) &&
     (asksComparison ||
       asksRelativeComparisonOnly ||
-      /\b(hom nay|hom qua|tuan nay|tuan truoc|thang nay|thang truoc|today|yesterday|this week|last week|this month|last month)\b/.test(
-        normalized,
-      ))
+      (asksReportLikeReview &&
+        /\b(hom nay|hom qua|tuan nay|tuan truoc|thang nay|thang truoc|today|yesterday|this week|last week|this month|last month)\b/.test(
+          normalized,
+        )))
   );
 };
 
@@ -10075,9 +10106,7 @@ const sumCompletedDebitTransactionsForUser = async (input: {
       const metadata = normalizeRecord(decrypted.metadata);
       const isDebit =
         decrypted.type !== "DEPOSIT" && metadata.entry !== "CREDIT";
-      return (
-        sum + (isDebit ? Math.max(0, Number(decrypted.amount || 0)) : 0)
-      );
+      return sum + (isDebit ? Math.max(0, Number(decrypted.amount || 0)) : 0);
     }, 0),
   );
 };
@@ -10419,7 +10448,9 @@ const buildWeeklyBudgetPreviewResponse = (input: {
         formatCopilotMoney(input.currency, dailyCap),
       ],
       [
-        input.language === "vi" ? "Chi tuần gần nhất" : "Most recent week spend",
+        input.language === "vi"
+          ? "Chi tuần gần nhất"
+          : "Most recent week spend",
         formatCopilotMoney(input.currency, lastWeekSpend),
       ],
       [
@@ -10507,7 +10538,8 @@ const buildBudgetPlanCopilotResponse = async (input: {
     extractBudgetCategoryAllocationShares(contextualMessage);
   const requestedPreferenceUpdates =
     extractBudgetAssistantPreferenceUpdates(contextualMessage);
-  const requestedDigestPeriod = extractBudgetDigestRequestPeriod(contextualMessage);
+  const requestedDigestPeriod =
+    extractBudgetDigestRequestPeriod(contextualMessage);
   const userRepository = createUserRepository();
   const userDoc = await userRepository.findValidatedById(input.userId);
   if (!userDoc) {
@@ -10598,7 +10630,10 @@ const buildBudgetPlanCopilotResponse = async (input: {
     });
   }
 
-  if (existingPlan && isBudgetPlanRebuildIntent(contextualMessage, latestUserMessage)) {
+  if (
+    existingPlan &&
+    isBudgetPlanRebuildIntent(contextualMessage, latestUserMessage)
+  ) {
     const now = new Date();
     const refreshedPlan = recalculateBudgetPlanProgress(
       existingPlan,
@@ -10669,22 +10704,17 @@ const buildBudgetPlanCopilotResponse = async (input: {
     };
   }
 
-  if (
-    requestedBudgetAmount !== null ||
-    requestedSavingsGoalAmount !== null
-  ) {
+  if (requestedBudgetAmount !== null || requestedSavingsGoalAmount !== null) {
     let effectiveTargetAmount = requestedBudgetAmount;
     let planningMode: "spend_cap" | "savings_goal" = "spend_cap";
     let savingsGoalAmount: number | null = null;
     let incomeBaselineAmount: number | null = null;
     const grossBudgetPoolAmount =
-      requestedBudgetAmount !== null &&
-      requestedSavingsGoalAmount !== null
+      requestedBudgetAmount !== null && requestedSavingsGoalAmount !== null
         ? requestedBudgetAmount
         : null;
     const explicitSavingsGoalAmount =
-      requestedBudgetAmount !== null &&
-      requestedSavingsGoalAmount !== null
+      requestedBudgetAmount !== null && requestedSavingsGoalAmount !== null
         ? requestedSavingsGoalAmount
         : null;
     const usesGrossBudgetPool =
@@ -10716,10 +10746,7 @@ const buildBudgetPlanCopilotResponse = async (input: {
       incomeBaselineAmount = roundMoney(grossBudgetPoolAmount);
     }
 
-    if (
-      effectiveTargetAmount === null &&
-      requestedSavingsGoalAmount !== null
-    ) {
+    if (effectiveTargetAmount === null && requestedSavingsGoalAmount !== null) {
       if (input.monthlyIncome <= 0) {
         return buildSavingsGoalMissingIncomeResponse({
           language: input.language,
@@ -10885,9 +10912,13 @@ const buildBudgetPlanCopilotResponse = async (input: {
     const refreshedPlan = recalculateBudgetPlanProgress(
       {
         ...existingPlan,
-        categories: buildBudgetPlanCategories(existingPlan.targetAmount, existingPlan.planningMode, {
-          customShares: allocationMix.shares,
-        }).map((category) => ({
+        categories: buildBudgetPlanCategories(
+          existingPlan.targetAmount,
+          existingPlan.planningMode,
+          {
+            customShares: allocationMix.shares,
+          },
+        ).map((category) => ({
           ...category,
           thresholdAlertsSent:
             existingPlan.categories.find((entry) => entry.key === category.key)
@@ -10931,11 +10962,15 @@ const buildBudgetPlanCopilotResponse = async (input: {
     );
 
     return {
-      reply: [intro, "", buildBudgetPlanReply({
-        language: input.language,
-        plan: refreshedPlan,
-        isNewPlan: false,
-      })].join("\n"),
+      reply: [
+        intro,
+        "",
+        buildBudgetPlanReply({
+          language: input.language,
+          plan: refreshedPlan,
+          isNewPlan: false,
+        }),
+      ].join("\n"),
       topic: "budget-plan-category-updated",
       suggestedActions:
         input.language === "vi"
@@ -11663,27 +11698,29 @@ const buildSpendingComparisonResponse = async (input: {
         input.language === "vi"
           ? ["Danh mục", "Đã chi", "Tỷ trọng", "Hạn mức", "Trạng thái"]
           : ["Category", "Spent", "Share", "Cap", "Status"],
-        monthlyCategorySummary.slice(0, 6).map((category) => [
-          category.label,
-          formatCopilotMoney(input.currency, category.amount),
-          `${Math.round(category.shareOfSpend * 100)}%`,
-          category.capAmount !== null
-            ? formatCopilotMoney(input.currency, category.capAmount)
-            : input.language === "vi"
-              ? "Chưa đặt"
-              : "Not set",
-          category.warningState === "over"
-            ? input.language === "vi"
-              ? "Vượt mức"
-              : "Over limit"
-            : category.warningState === "warning"
-              ? input.language === "vi"
-                ? "Cảnh báo"
-                : "Warning"
+        monthlyCategorySummary
+          .slice(0, 6)
+          .map((category) => [
+            category.label,
+            formatCopilotMoney(input.currency, category.amount),
+            `${Math.round(category.shareOfSpend * 100)}%`,
+            category.capAmount !== null
+              ? formatCopilotMoney(input.currency, category.capAmount)
               : input.language === "vi"
-                ? "Ổn định"
-                : "Stable",
-        ]),
+                ? "Chưa đặt"
+                : "Not set",
+            category.warningState === "over"
+              ? input.language === "vi"
+                ? "Vượt mức"
+                : "Over limit"
+              : category.warningState === "warning"
+                ? input.language === "vi"
+                  ? "Cảnh báo"
+                  : "Warning"
+                : input.language === "vi"
+                  ? "Ổn định"
+                  : "Stable",
+          ]),
       )
     : null;
   const budgetVsActualTable = refreshedBudgetPlan
@@ -11723,9 +11760,7 @@ const buildSpendingComparisonResponse = async (input: {
                 )}`,
           ],
           [
-            input.language === "vi"
-              ? "Mức sử dụng ngân sách"
-              : "Budget usage",
+            input.language === "vi" ? "Mức sử dụng ngân sách" : "Budget usage",
             `${Math.round(refreshedBudgetPlan.utilizationRatio * 100)}%`,
           ],
         ],
@@ -11753,54 +11788,52 @@ const buildSpendingComparisonResponse = async (input: {
   });
 
   return {
-    reply:
-      [
-        input.language === "vi"
-          ? "Tôi đã đối chiếu toàn bộ giao dịch thu chi gần đây để tổng hợp 3 lớp: xu hướng theo ngày/tuần/tháng, mức độ bám sát ngân sách, và danh mục nào đang đẩy chi tiêu lên cao nhất."
-          : "I reviewed your recent money flow in three layers: day/week/month spending trend, budget adherence, and which categories are pushing spend the most.",
-        "",
-        comparisonTable,
-        ...(budgetVsActualTable
-          ? [
-              "",
-              input.language === "vi"
-                ? "So sánh với hạn mức đang đặt:"
-                : "Comparison against your saved cap:",
-              "",
-              budgetVsActualTable,
-            ]
-          : []),
-        ...(categoryTable
-          ? [
-              "",
-              input.language === "vi"
-                ? "Danh mục chi tiêu nổi bật tháng nay:"
-                : "Leading spend categories this month:",
-              "",
-              categoryTable,
-            ]
-          : []),
-        "",
-        input.language === "vi" ? "Cảnh báo:" : "Warnings:",
-        ...(
-          categoryWarnings.length
-            ? categoryWarnings
-            : [
-                localizeCopilotText(
-                  input.language,
-                  refreshedBudgetPlan
-                    ? "Chưa có danh mục nào vượt mức cảnh báo, nhưng bạn vẫn nên giữ sát trần chi còn lại của tháng."
-                    : "Chưa có hạn mức danh mục có sẵn, nhưng tôi đã xác định nhóm chi lớn nhất để bạn theo dõi sát hơn.",
-                  refreshedBudgetPlan
-                    ? "No category has crossed its warning threshold yet, but you should still watch the remaining monthly cap closely."
-                    : "No category cap is saved yet, but I identified the heaviest spend areas for closer tracking.",
-                ),
-              ]
-        ).map((line) => `- ${line}`),
-        "",
-        input.language === "vi" ? "Gợi ý điều chỉnh:" : "Adjustment ideas:",
-        ...adjustmentSuggestions.map((line) => `- ${line}`),
-      ].join("\n"),
+    reply: [
+      input.language === "vi"
+        ? "Tôi đã đối chiếu toàn bộ giao dịch thu chi gần đây để tổng hợp 3 lớp: xu hướng theo ngày/tuần/tháng, mức độ bám sát ngân sách, và danh mục nào đang đẩy chi tiêu lên cao nhất."
+        : "I reviewed your recent money flow in three layers: day/week/month spending trend, budget adherence, and which categories are pushing spend the most.",
+      "",
+      comparisonTable,
+      ...(budgetVsActualTable
+        ? [
+            "",
+            input.language === "vi"
+              ? "So sánh với hạn mức đang đặt:"
+              : "Comparison against your saved cap:",
+            "",
+            budgetVsActualTable,
+          ]
+        : []),
+      ...(categoryTable
+        ? [
+            "",
+            input.language === "vi"
+              ? "Danh mục chi tiêu nổi bật tháng nay:"
+              : "Leading spend categories this month:",
+            "",
+            categoryTable,
+          ]
+        : []),
+      "",
+      input.language === "vi" ? "Cảnh báo:" : "Warnings:",
+      ...(categoryWarnings.length
+        ? categoryWarnings
+        : [
+            localizeCopilotText(
+              input.language,
+              refreshedBudgetPlan
+                ? "Chưa có danh mục nào vượt mức cảnh báo, nhưng bạn vẫn nên giữ sát trần chi còn lại của tháng."
+                : "Chưa có hạn mức danh mục có sẵn, nhưng tôi đã xác định nhóm chi lớn nhất để bạn theo dõi sát hơn.",
+              refreshedBudgetPlan
+                ? "No category has crossed its warning threshold yet, but you should still watch the remaining monthly cap closely."
+                : "No category cap is saved yet, but I identified the heaviest spend areas for closer tracking.",
+            ),
+          ]
+      ).map((line) => `- ${line}`),
+      "",
+      input.language === "vi" ? "Gợi ý điều chỉnh:" : "Adjustment ideas:",
+      ...adjustmentSuggestions.map((line) => `- ${line}`),
+    ].join("\n"),
     topic: "spending-budget-insight",
     suggestedActions: adjustmentSuggestions,
     suggestedDepositAmount: null,
@@ -11808,15 +11841,17 @@ const buildSpendingComparisonResponse = async (input: {
       (refreshedBudgetPlan &&
         refreshedBudgetPlan.utilizationRatio >=
           refreshedBudgetPlan.criticalThreshold) ||
-      monthlyCategorySummary.some((category) => category.warningState === "over")
+      monthlyCategorySummary.some(
+        (category) => category.warningState === "over",
+      )
         ? "high"
         : spendToday > spendYesterday ||
             spendThisWeek > spendLastWeek ||
             monthlyCategorySummary.some(
               (category) => category.warningState === "warning",
             )
-        ? "medium"
-        : "low",
+          ? "medium"
+          : "low",
     confidence: 0.98,
     followUpQuestion: localizeCopilotText(
       input.language,
@@ -11848,7 +11883,8 @@ const buildRecentTransactionReviewResponse = async (input: {
     language: input.language,
     categoryCapMap: buildBudgetCategoryCapMap(
       getStoredBudgetPlan(
-        (await createUserRepository().findValidatedById(input.userId))?.metadata,
+        (await createUserRepository().findValidatedById(input.userId))
+          ?.metadata,
       ),
     ),
   });
@@ -11857,12 +11893,14 @@ const buildRecentTransactionReviewResponse = async (input: {
         input.language === "vi"
           ? ["Danh muc", "Da chi", "So lan", "Ty trong"]
           : ["Category", "Spent", "Count", "Share"],
-        categorySummary.slice(0, 5).map((category) => [
-          category.label,
-          formatCopilotMoney(input.currency, category.amount),
-          category.count,
-          `${Math.round(category.shareOfSpend * 100)}%`,
-        ]),
+        categorySummary
+          .slice(0, 5)
+          .map((category) => [
+            category.label,
+            formatCopilotMoney(input.currency, category.amount),
+            category.count,
+            `${Math.round(category.shareOfSpend * 100)}%`,
+          ]),
       )
     : null;
 
@@ -13731,7 +13769,9 @@ const buildPublicUserMetadata = (metadata: unknown) => {
     requestedTier: accountProfile.requestedTier,
     hasPendingRequest: accountProfile.hasPendingRequest,
   };
-  source.budgetPlan = buildPublicBudgetPlanSummary(getStoredBudgetPlan(metadata));
+  source.budgetPlan = buildPublicBudgetPlanSummary(
+    getStoredBudgetPlan(metadata),
+  );
   source.budgetPlanActive =
     source.budgetPlan &&
     typeof source.budgetPlan === "object" &&
@@ -21130,8 +21170,7 @@ app.get("/activity/assistant", requireAuth, async (req, res) => {
         return {
           id: row.id,
           title: "VaultAI assistant updated",
-          message:
-            "Your reminder and automatic brief settings were updated.",
+          message: "Your reminder and automatic brief settings were updated.",
           meta: "Assistant preferences saved",
           createdAt: row.createdAt.toISOString(),
         };
@@ -21169,8 +21208,7 @@ app.get("/activity/assistant", requireAuth, async (req, res) => {
         return {
           id: row.id,
           title: "Budget warning zone",
-          message:
-            "Your overall spending has crossed the warning threshold.",
+          message: "Your overall spending has crossed the warning threshold.",
           meta: "Overall budget alert",
           createdAt: row.createdAt.toISOString(),
         };
@@ -21187,7 +21225,8 @@ app.get("/activity/assistant", requireAuth, async (req, res) => {
       }
 
       const categoryLabel =
-        typeof details.categoryLabel === "string" && details.categoryLabel.trim()
+        typeof details.categoryLabel === "string" &&
+        details.categoryLabel.trim()
           ? details.categoryLabel.trim()
           : "A spending category";
       const categorySpentAmount =
