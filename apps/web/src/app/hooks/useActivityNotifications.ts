@@ -25,6 +25,8 @@ type NotificationTransaction = {
   };
 };
 
+type AssistantNotificationResponse = ActivityNotification[];
+
 const getStartOfLocalDay = (value: Date) => {
   const next = new Date(value);
   next.setHours(0, 0, 0, 0);
@@ -241,9 +243,10 @@ export function useActivityNotifications({
       let hasSuccess = false;
 
       try {
-        const [txResp, securityResp] = await Promise.all([
+        const [txResp, securityResp, assistantResp] = await Promise.all([
           fetch(`${apiBase}/transactions`, { headers }),
           fetch(`${apiBase}/security/overview`, { headers }),
+          fetch(`${apiBase}/activity/assistant`, { headers }),
         ]);
 
         if (txResp.ok) {
@@ -286,14 +289,6 @@ export function useActivityNotifications({
                 };
               }),
           );
-
-          const digestNotification = buildDailyDigestNotification(
-            txs,
-            new Date(),
-          );
-          if (digestNotification) {
-            nextNotifications.push(digestNotification);
-          }
         }
 
         if (securityResp.ok) {
@@ -314,6 +309,19 @@ export function useActivityNotifications({
                 timeLabel: formatNotificationTime(createdAt),
               };
             }),
+          );
+        }
+
+        if (assistantResp.ok) {
+          const assistantNotifications =
+            (await assistantResp.json()) as AssistantNotificationResponse;
+          hasSuccess = true;
+          nextNotifications = nextNotifications.concat(
+            assistantNotifications.slice(0, 12).map((notification) => ({
+              ...notification,
+              type: "assistant" as const,
+              timeLabel: formatNotificationTime(notification.createdAt),
+            })),
           );
         }
 

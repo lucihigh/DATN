@@ -16,10 +16,10 @@ MAX_DOMINANT_BIN_RATIO = 0.3
 MAX_CLIP_RATIO = 0.34
 MIN_MEAN_STEP_DELTA = 0.014
 MIN_STEP_DELTA = 0.008
-MIN_MOTION_SCORE = 0.2
-MIN_LIVENESS_SCORE = 0.62
-MIN_FACE_COVERAGE = 0.085
-MIN_SAMPLE_COUNT = 12
+MIN_MOTION_SCORE = 0.12
+MIN_LIVENESS_SCORE = 0.53
+MIN_FACE_COVERAGE = 0.06
+MIN_SAMPLE_COUNT = 8
 MAX_SPOOF_SCORE_TO_PASS = 0.72
 MIN_CONFIDENCE_TO_PASS = 0.3
 MIN_FACE_PARALLAX_SCORE = 0.008
@@ -245,9 +245,9 @@ def _telemetry_findings(step_map: dict[FaceStep, FaceLivenessStepCapture]) -> li
         findings.append("Live challenge evidence is incomplete.")
         return findings
 
-    if closer.coverage < max(center.coverage * 1.12, center.coverage + 0.02):
+    if closer.coverage < max(center.coverage * 1.08, center.coverage + 0.015):
         findings.append("Closer-step frame did not increase face coverage enough.")
-    if closer.motion < 0.008:
+    if closer.motion < 0.005:
         findings.append("Challenge movement looked too limited for a live scan.")
     return findings
 

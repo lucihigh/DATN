@@ -1,6 +1,9 @@
 export const NOTIFICATION_READ_STORAGE_PREFIX = "fpipay_notification_reads";
 
-export type ActivityNotificationType = "transactions" | "security";
+export type ActivityNotificationType =
+  | "transactions"
+  | "security"
+  | "assistant";
 
 export type ActivityNotification = {
   id: string;

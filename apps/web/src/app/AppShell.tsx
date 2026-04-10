@@ -469,6 +469,38 @@ type SecurityTrustedDeviceItem = {
   current: boolean;
 };
 
+type BudgetPlanCategory = {
+  key: string;
+  label: string;
+  share: number;
+  amount: number;
+};
+
+type BudgetPlanSummary = {
+  planId: string;
+  status: "ACTIVE" | "EXPIRED";
+  period: "MONTHLY";
+  currency: string;
+  planningMode: "spend_cap" | "savings_goal";
+  targetAmount: number;
+  savingsGoalAmount: number | null;
+  incomeBaselineAmount: number | null;
+  spentAmount: number;
+  remainingAmount: number;
+  utilizationRatio: number;
+  warningThreshold: number;
+  criticalThreshold: number;
+  startAt: string;
+  endAt: string;
+  createdAt: string;
+  updatedAt: string;
+  lastEvaluatedAt: string;
+  dailyCapRemaining: number | null;
+  weeklyCapRemaining: number | null;
+  categories: BudgetPlanCategory[];
+  emailAlertsEnabled: boolean;
+};
+
 type BrowserDeviceContext = {
   browser?: string;
   browserVersion?: string;
@@ -519,7 +551,7 @@ type TransferSafetyAdvisory = {
   blockedUntil?: string | null;
 };
 
-type ActivityNotificationType = "transactions" | "security";
+type ActivityNotificationType = "transactions" | "security" | "assistant";
 
 type ActivityNotification = {
   id: string;
@@ -1317,6 +1349,94 @@ const normalizeSavedTransferRecipients = (value: unknown) =>
         )
     : [];
 
+const parseBudgetPlanSummary = (value: unknown): BudgetPlanSummary | null => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.planId !== "string" ||
+    typeof record.currency !== "string" ||
+    typeof record.targetAmount !== "number" ||
+    typeof record.spentAmount !== "number" ||
+    typeof record.remainingAmount !== "number" ||
+    typeof record.utilizationRatio !== "number" ||
+    typeof record.startAt !== "string" ||
+    typeof record.endAt !== "string"
+  ) {
+    return null;
+  }
+
+  const categories = Array.isArray(record.categories)
+    ? record.categories
+        .map((item) =>
+          item && typeof item === "object" && !Array.isArray(item)
+            ? (item as Record<string, unknown>)
+            : null,
+        )
+        .filter(
+          (item): item is Record<string, unknown> =>
+            item !== null &&
+            typeof item.key === "string" &&
+            typeof item.label === "string" &&
+            typeof item.share === "number" &&
+            typeof item.amount === "number",
+        )
+        .map(
+          (item) =>
+            ({
+              key: item.key as string,
+              label: item.label as string,
+              share: item.share as number,
+              amount: item.amount as number,
+            }) satisfies BudgetPlanCategory,
+        )
+    : [];
+
+  return {
+    planId: record.planId,
+    status: record.status === "EXPIRED" ? "EXPIRED" : "ACTIVE",
+    period: "MONTHLY",
+    currency: record.currency,
+    planningMode:
+      record.planningMode === "savings_goal" ? "savings_goal" : "spend_cap",
+    targetAmount: Number(record.targetAmount || 0),
+    savingsGoalAmount:
+      typeof record.savingsGoalAmount === "number"
+        ? Number(record.savingsGoalAmount || 0)
+        : null,
+    incomeBaselineAmount:
+      typeof record.incomeBaselineAmount === "number"
+        ? Number(record.incomeBaselineAmount || 0)
+        : null,
+    spentAmount: Number(record.spentAmount || 0),
+    remainingAmount: Number(record.remainingAmount || 0),
+    utilizationRatio: Number(record.utilizationRatio || 0),
+    warningThreshold: Number(record.warningThreshold || 0.85),
+    criticalThreshold: Number(record.criticalThreshold || 1),
+    startAt: record.startAt,
+    endAt: record.endAt,
+    createdAt:
+      typeof record.createdAt === "string" ? record.createdAt : record.startAt,
+    updatedAt:
+      typeof record.updatedAt === "string" ? record.updatedAt : record.startAt,
+    lastEvaluatedAt:
+      typeof record.lastEvaluatedAt === "string"
+        ? record.lastEvaluatedAt
+        : record.endAt,
+    dailyCapRemaining:
+      typeof record.dailyCapRemaining === "number"
+        ? record.dailyCapRemaining
+        : null,
+    weeklyCapRemaining:
+      typeof record.weeklyCapRemaining === "number"
+        ? record.weeklyCapRemaining
+        : null,
+    categories,
+    emailAlertsEnabled: record.emailAlertsEnabled !== false,
+  };
+};
+
 const upsertSavedTransferRecipient = (
   recipients: SavedTransferRecipient[],
   input: {
@@ -1796,6 +1916,9 @@ function DashboardView({
   const [transferFaceVerifyOpen, setTransferFaceVerifyOpen] = useState(false);
   const [transferFaceVerifyBusy, setTransferFaceVerifyBusy] = useState(false);
   const [transferFaceCaptureError, setTransferFaceCaptureError] = useState("");
+  const [transferFaceScanStatus, setTransferFaceScanStatus] = useState<
+    "idle" | "loading" | "ready" | "scanning" | "verified" | "error"
+  >("idle");
   const [transferFaceIdEnabled, setTransferFaceIdEnabled] = useState(false);
   const [transferPinEnabled, setTransferPinEnabled] = useState(false);
   const [transferServerFaceIdRequired, setTransferServerFaceIdRequired] =
@@ -1830,6 +1953,7 @@ function DashboardView({
   const [securityAlerts, setSecurityAlerts] = useState<SecurityAlertItem[]>(
     dashboardSecurityAlerts,
   );
+  const [budgetPlan, setBudgetPlan] = useState<BudgetPlanSummary | null>(null);
   const [securityRecentLogins, setSecurityRecentLogins] = useState<
     SecurityRecentLoginItem[]
   >([]);
@@ -1839,6 +1963,7 @@ function DashboardView({
   const [securityAlertsBusy, setSecurityAlertsBusy] = useState(false);
   const [securityAlertsError, setSecurityAlertsError] = useState("");
   const [securityAlertsModalOpen, setSecurityAlertsModalOpen] = useState(false);
+  const [budgetPlanModalOpen, setBudgetPlanModalOpen] = useState(false);
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
   const [transferReceipt, setTransferReceipt] =
     useState<TransactionReceipt | null>(null);
@@ -1935,6 +2060,53 @@ function DashboardView({
       ? walletDigits
       : `${"*".repeat(walletDigits.length - 4)}${walletDigits.slice(-4)}`;
   const walletGroups = maskedDigits.match(/.{1,4}/g) ?? [];
+  const budgetUsagePercent = budgetPlan
+    ? Math.max(0, Math.round(budgetPlan.utilizationRatio * 100))
+    : 0;
+  const budgetTone = budgetPlan
+    ? budgetPlan.utilizationRatio >= budgetPlan.criticalThreshold
+      ? "danger"
+      : budgetPlan.utilizationRatio >= budgetPlan.warningThreshold
+        ? "warn"
+        : "safe"
+    : "safe";
+  const budgetHeadlineValue = budgetPlan
+    ? `${budgetPlan.currency} ${budgetPlan.targetAmount.toLocaleString("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })}`
+    : "";
+  const budgetPeriodLabel = budgetPlan
+    ? `${new Date(budgetPlan.startAt).toLocaleDateString("en-US", {
+        month: "short",
+        day: "2-digit",
+      })} - ${new Date(budgetPlan.endAt).toLocaleDateString("en-US", {
+        month: "short",
+        day: "2-digit",
+      })}`
+    : "";
+  const budgetHeroCopy = budgetPlan
+    ? budgetPlan.planningMode === "savings_goal" &&
+      typeof budgetPlan.savingsGoalAmount === "number"
+      ? `Built from a savings goal of ${budgetPlan.currency} ${budgetPlan.savingsGoalAmount.toLocaleString(
+          "en-US",
+          {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          },
+        )}${
+          typeof budgetPlan.incomeBaselineAmount === "number"
+            ? ` using an observed monthly income baseline of ${budgetPlan.currency} ${budgetPlan.incomeBaselineAmount.toLocaleString(
+                "en-US",
+                {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                },
+              )}`
+            : ""
+        }.`
+      : `Used ${budgetUsagePercent}% of the active monthly budget across ${budgetPeriodLabel}.`
+    : "";
   const defaultTransferContent = `${user?.name ?? "User"} transfer`;
   const transferAmountNumber = Number(transferAmount.replace(/,/g, ""));
   const isTransferFaceIdRequired =
@@ -3835,6 +4007,37 @@ function DashboardView({
     [formatSecurityAlertTime, token],
   );
 
+  const refreshUserMetadataSignals = useCallback(async () => {
+    if (!user?.id || !token) {
+      setTransferFaceIdEnabled(false);
+      setTransferPinEnabled(false);
+      setSavedTransferRecipients([]);
+      setBudgetPlan(null);
+      return;
+    }
+
+    try {
+      const resp = await fetch(`${API_BASE}/auth/me`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = (await resp.json().catch(() => null)) as {
+        metadata?: Record<string, unknown>;
+      } | null;
+      if (!resp.ok || !data) return;
+      setTransferFaceIdEnabled(data.metadata?.faceIdEnabled === true);
+      setTransferPinEnabled(data.metadata?.transferPinEnabled === true);
+      setSavedTransferRecipients(
+        normalizeSavedTransferRecipients(data.metadata?.recentTransferRecipients),
+      );
+      setBudgetPlan(parseBudgetPlanSummary(data.metadata?.budgetPlan));
+    } catch {
+      setTransferFaceIdEnabled(false);
+      setTransferPinEnabled(false);
+      setSavedTransferRecipients([]);
+      setBudgetPlan(null);
+    }
+  }, [token, user?.id]);
+
   const refreshWalletSnapshot = useCallback(
     async (options?: { resetOnFailure?: boolean; force?: boolean }) => {
       if (!token) {
@@ -4118,6 +4321,7 @@ function DashboardView({
         riskLevel?: string;
         confidence?: number;
         followUpQuestion?: string | null;
+        budgetPlan?: BudgetPlanSummary | null;
       } | null;
       if (!resp.ok || !data?.reply) {
         toast(data?.error || "AI copilot is unavailable", "error");
@@ -4156,6 +4360,15 @@ function DashboardView({
             : session,
         ),
       }));
+      if (data?.budgetPlan) {
+        setBudgetPlan(data.budgetPlan);
+      }
+      if (
+        typeof data?.topic === "string" &&
+        data.topic.startsWith("budget-plan")
+      ) {
+        void refreshUserMetadataSignals();
+      }
     } catch (error) {
       const isTimeout =
         error instanceof DOMException && error.name === "AbortError";
@@ -5078,44 +5291,8 @@ function DashboardView({
   }, [refreshSecurityAlerts]);
 
   useEffect(() => {
-    if (!user || !token) {
-      setTransferFaceIdEnabled(false);
-      setTransferPinEnabled(false);
-      setSavedTransferRecipients([]);
-      return;
-    }
-
-    let cancelled = false;
-    const loadTransferFaceFlag = async () => {
-      try {
-        const resp = await fetch(`${API_BASE}/auth/me`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        const data = (await resp.json().catch(() => null)) as {
-          metadata?: Record<string, unknown>;
-        } | null;
-        if (!resp.ok || !data || cancelled) return;
-        setTransferFaceIdEnabled(data.metadata?.faceIdEnabled === true);
-        setTransferPinEnabled(data.metadata?.transferPinEnabled === true);
-        setSavedTransferRecipients(
-          normalizeSavedTransferRecipients(
-            data.metadata?.recentTransferRecipients,
-          ),
-        );
-      } catch {
-        if (!cancelled) {
-          setTransferFaceIdEnabled(false);
-          setTransferPinEnabled(false);
-          setSavedTransferRecipients([]);
-        }
-      }
-    };
-
-    void loadTransferFaceFlag();
-    return () => {
-      cancelled = true;
-    };
-  }, [token, user?.id]);
+    void refreshUserMetadataSignals();
+  }, [refreshUserMetadataSignals]);
 
   useEffect(() => {
     if (!token) return;
@@ -5124,6 +5301,7 @@ function DashboardView({
       if (document.visibilityState === "hidden") return;
       void refreshWalletSnapshot();
       void refreshSecurityAlerts({ silent: true });
+      void refreshUserMetadataSignals();
     };
 
     const interval = window.setInterval(refreshIfVisible, 20000);
@@ -5135,7 +5313,7 @@ function DashboardView({
       window.removeEventListener("focus", refreshIfVisible);
       document.removeEventListener("visibilitychange", refreshIfVisible);
     };
-  }, [refreshSecurityAlerts, refreshWalletSnapshot, token]);
+  }, [refreshSecurityAlerts, refreshUserMetadataSignals, refreshWalletSnapshot, token]);
 
   const openDetailsModal = () => {
     setDetailsModalOpen(true);
@@ -5815,6 +5993,7 @@ function DashboardView({
     goToTransferStep(3);
     setTransferFaceProof(null);
     setTransferFaceCaptureError("");
+    setTransferFaceScanStatus("idle");
     setTransferFaceResetKey((value) => value + 1);
     setTransferFaceVerifyBusy(false);
   }, [goToTransferStep]);
@@ -5835,6 +6014,7 @@ function DashboardView({
       status: "idle" | "loading" | "ready" | "scanning" | "verified" | "error";
       message: string;
     }) => {
+      setTransferFaceScanStatus(feedback.status);
       if (feedback.status === "error") {
         setTransferFaceCaptureError(feedback.message);
         return;
@@ -6055,6 +6235,7 @@ function DashboardView({
       }
       setTransferFaceProof(null);
       setTransferFaceCaptureError("");
+      setTransferFaceScanStatus("idle");
       setTransferFaceResetKey((value) => value + 1);
       setTransferOpen(false);
       setTransferFaceVerifyOpen(true);
@@ -6634,10 +6815,10 @@ function DashboardView({
             type="button"
             className="dashboard-all-actions"
             onClick={() => {
-              openCopilotWorkspace();
+              setBudgetPlanModalOpen(true);
             }}
           >
-            Open VaultAI workspace
+            {budgetPlan ? "Open VaultAI budget plan" : "Plan with VaultAI"}
           </button>
         </aside>
       </div>
@@ -6736,6 +6917,155 @@ function DashboardView({
                 })}
               </section>
             </div>
+          </div>
+        </div>
+      )}
+
+      {budgetPlanModalOpen && (
+        <div
+          className="modal-overlay"
+          onClick={() => setBudgetPlanModalOpen(false)}
+        >
+          <div
+            className={`modal-card budget-plan-modal ${budgetPlan ? `budget-plan-block ${budgetTone}` : ""}`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="budget-plan-modal-head">
+              <div>
+                <h3>VaultAI Budget Plan</h3>
+                <p>
+                  {budgetPlan
+                    ? "Review your active plan, then jump into chat if you want VaultAI to rebalance it."
+                    : "No active budget plan yet. Open VaultAI to create one from a spending cap or savings goal."}
+                </p>
+              </div>
+              <div className="budget-plan-modal-actions">
+                <button
+                  type="button"
+                  className="pill"
+                  onClick={() => {
+                    setBudgetPlanModalOpen(false);
+                    openCopilotWorkspace();
+                  }}
+                >
+                  {budgetPlan ? "Update In Chat" : "Open VaultAI workspace"}
+                </button>
+                <button
+                  type="button"
+                  className="card-details-close"
+                  onClick={() => setBudgetPlanModalOpen(false)}
+                >
+                  x
+                </button>
+              </div>
+            </div>
+
+            {budgetPlan ? (
+              <div className="budget-plan-grid">
+                <div className="budget-plan-hero">
+                  <span className={`budget-plan-pill ${budgetTone}`}>
+                    {budgetPlan.status === "EXPIRED"
+                      ? "Expired"
+                      : budgetTone === "danger"
+                        ? "Over Budget"
+                        : budgetTone === "warn"
+                          ? "Warning Zone"
+                          : "On Track"}
+                  </span>
+                  <strong>{budgetHeadlineValue}</strong>
+                  <p>
+                    {budgetPlan.planningMode === "savings_goal"
+                      ? `${budgetHeroCopy} Used ${budgetUsagePercent}% of the spending room across ${budgetPeriodLabel}.`
+                      : budgetHeroCopy}
+                  </p>
+                </div>
+                <div className="budget-plan-metrics">
+                  {budgetPlan.planningMode === "savings_goal" &&
+                  typeof budgetPlan.savingsGoalAmount === "number" ? (
+                    <div>
+                      <span>Savings Goal</span>
+                      <strong>
+                        {budgetPlan.currency}{" "}
+                        {budgetPlan.savingsGoalAmount.toLocaleString("en-US", {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}
+                      </strong>
+                    </div>
+                  ) : null}
+                  <div>
+                    <span>Spent</span>
+                    <strong>
+                      {budgetPlan.currency}{" "}
+                      {budgetPlan.spentAmount.toLocaleString("en-US", {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Remaining</span>
+                    <strong>
+                      {budgetPlan.remainingAmount >= 0 ? "" : "-"}
+                      {budgetPlan.currency}{" "}
+                      {Math.abs(budgetPlan.remainingAmount).toLocaleString(
+                        "en-US",
+                        {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        },
+                      )}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Daily Cap Left</span>
+                    <strong>
+                      {budgetPlan.currency}{" "}
+                      {Number(budgetPlan.dailyCapRemaining || 0).toLocaleString(
+                        "en-US",
+                        {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        },
+                      )}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Email Alerts</span>
+                    <strong>
+                      {Math.round(budgetPlan.warningThreshold * 100)}% /{" "}
+                      {Math.round(budgetPlan.criticalThreshold * 100)}%
+                    </strong>
+                  </div>
+                </div>
+                <div className="budget-plan-categories">
+                  {budgetPlan.categories.slice(0, 6).map((category) => (
+                    <div key={category.key} className="budget-plan-category">
+                      <span>{category.label}</span>
+                      <strong>
+                        {budgetPlan.currency}{" "}
+                        {category.amount.toLocaleString("en-US", {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}
+                      </strong>
+                      <small>
+                        {Math.round(category.share * 100)}% allocation
+                      </small>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="budget-plan-empty">
+                <strong>No active VaultAI plan</strong>
+                <p>
+                  Start with a message like "tháng này tôi muốn chi tối đa 2,000
+                  USD" or "muốn để dành 500 USD cuối tháng" and VaultAI will
+                  build the plan for you.
+                </p>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -7648,7 +7978,12 @@ function DashboardView({
               onClick={closeTransferFaceVerification}
             >
               <div
-                className="faceid-modal transfer-faceid-modal"
+                className={`faceid-modal transfer-faceid-modal ${
+                  transferFaceScanStatus === "loading" ||
+                  transferFaceScanStatus === "scanning"
+                    ? "is-scanning"
+                    : ""
+                }`}
                 onClick={(event) => event.stopPropagation()}
               >
                 <div className="faceid-modal-head">
@@ -11260,7 +11595,7 @@ function App() {
   const [activeTab, setActiveTab] = useState("Dashboard");
   const [showNotifications, setShowNotifications] = useState(false);
   const [notificationFilter, setNotificationFilter] = useState<
-    "all" | "transactions" | "security"
+    "all" | "transactions" | "security" | "assistant"
   >("all");
   const [showAllNotificationsInDropdown, setShowAllNotificationsInDropdown] =
     useState(false);
@@ -11366,6 +11701,9 @@ function App() {
     useState<FaceIdProof | null>(null);
   const [faceEnrollmentResetKey, setFaceEnrollmentResetKey] = useState(0);
   const [faceEnrollmentError, setFaceEnrollmentError] = useState("");
+  const [faceEnrollmentScanStatus, setFaceEnrollmentScanStatus] = useState<
+    "idle" | "loading" | "ready" | "scanning" | "verified" | "error"
+  >("idle");
 
   const isInvoicesActive =
     activeTab === "Invoice List" || activeTab === "Create Invoices";
@@ -11501,6 +11839,7 @@ function App() {
   const resetFaceEnrollmentModal = useCallback(() => {
     setFaceEnrollmentProof(null);
     setFaceEnrollmentError("");
+    setFaceEnrollmentScanStatus("idle");
     setFaceEnrollmentResetKey((value) => value + 1);
   }, []);
 
@@ -11529,6 +11868,7 @@ function App() {
       status: "idle" | "loading" | "ready" | "scanning" | "verified" | "error";
       message: string;
     }) => {
+      setFaceEnrollmentScanStatus(feedback.status);
       if (feedback.status === "error") {
         setFaceEnrollmentError(feedback.message);
         return;
@@ -11870,6 +12210,7 @@ function App() {
                       <option value="all">All</option>
                       <option value="transactions">Balance</option>
                       <option value="security">Security</option>
+                      <option value="assistant">Assistant</option>
                     </select>
                   </div>
                   {notificationsBusy && notifications.length === 0 && (
@@ -11903,14 +12244,18 @@ function App() {
                                 >
                                   {notification.type === "transactions"
                                     ? "TX"
-                                    : "SH"}
+                                    : notification.type === "security"
+                                      ? "SH"
+                                      : "AI"}
                                 </span>
                                 <span
                                   className={`notif-pill notif-${notification.type}`}
                                 >
                                   {notification.type === "transactions"
                                     ? "Balance"
-                                    : "Security"}
+                                    : notification.type === "security"
+                                      ? "Security"
+                                      : "Assistant"}
                                 </span>
                                 <span className="notif-time">
                                   {notification.timeLabel}
@@ -12285,7 +12630,12 @@ function App() {
                 onClick={() => closeFaceEnrollmentModal()}
               >
                 <div
-                  className="faceid-modal"
+                  className={`faceid-modal ${
+                    faceEnrollmentScanStatus === "loading" ||
+                    faceEnrollmentScanStatus === "scanning"
+                      ? "is-scanning"
+                      : ""
+                  }`}
                   onClick={(event) => event.stopPropagation()}
                 >
                   <div className="faceid-modal-head">
@@ -12315,11 +12665,20 @@ function App() {
                     onChange={handleFaceEnrollmentCaptureChange}
                     onFeedbackChange={handleFaceEnrollmentFeedbackChange}
                   />
-                  {faceEnrollmentError ? (
-                    <div className="card-otp-error transfer-faceid-error">
-                      {faceEnrollmentError}
-                    </div>
-                  ) : null}
+                  <div
+                    className={`faceid-modal-error-slot ${
+                      faceEnrollmentError ? "is-visible" : ""
+                    }`}
+                    aria-live="polite"
+                  >
+                    {faceEnrollmentError ? (
+                      <div className="card-otp-error transfer-faceid-error">
+                        {faceEnrollmentError}
+                      </div>
+                    ) : (
+                      <span aria-hidden="true"> </span>
+                    )}
+                  </div>
                   <div className="faceid-modal-actions">
                     <button
                       type="button"
