@@ -17,9 +17,9 @@ export default function NotificationsView({
   onMarkRead,
   onMarkAllRead,
 }: NotificationsViewProps) {
-  const [filter, setFilter] = useState<"all" | "transactions" | "security">(
-    "all",
-  );
+  const [filter, setFilter] = useState<
+    "all" | "transactions" | "security" | "assistant"
+  >("all");
 
   const filtered = notifications.filter(
     (notification) => filter === "all" || notification.type === filter,
@@ -34,7 +34,7 @@ export default function NotificationsView({
         <div>
           <h3>Activity Notifications</h3>
           <p className="muted">
-            Balance movements and security events for this account.
+            Balance movements, security events, and VaultAI assistant activity.
           </p>
         </div>
         <div className="notifications-head-actions">
@@ -46,6 +46,7 @@ export default function NotificationsView({
             <option value="all">All</option>
             <option value="transactions">Balance</option>
             <option value="security">Security</option>
+            <option value="assistant">Assistant</option>
           </select>
           <button
             type="button"
@@ -74,7 +75,9 @@ export default function NotificationsView({
                 <div className={`notif-pill notif-${notification.type}`}>
                   {notification.type === "transactions"
                     ? "Balance"
-                    : "Security"}
+                    : notification.type === "security"
+                      ? "Security"
+                      : "Assistant"}
                 </div>
                 <span className="notification-time">
                   {notification.timeLabel}

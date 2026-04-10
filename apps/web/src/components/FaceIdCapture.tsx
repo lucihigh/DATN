@@ -126,11 +126,13 @@ const STEP_COLORS: Record<FaceIdStepId, string> = {
   move_right: "#22c55e",
   move_closer: "#f59e0b",
 };
+const ACTIVE_LIVENESS_COLORS = ["#38bdf8", "#ef4444", "#f59e0b", "#22c55e"] as const;
 
 const PROCESS_INTERVAL_MS = 220;
+const ACTIVE_LIVENESS_CYCLE_MS = 320;
 const MIN_VIDEO_DURATION_MS = 5000;
 const MIN_SCAN_DURATION_MS = MIN_VIDEO_DURATION_MS;
-const TIMED_CAPTURE_GRACE_MS = 1200;
+const TIMED_CAPTURE_GRACE_MS = 2600;
 const REQUIRED_STEP_STREAK = 3;
 const COMPAT_REQUIRED_STEP_STREAK = 4;
 const MEDIAPIPE_WASM_PATH =
@@ -146,6 +148,18 @@ const GEOMETRY_INDICES = [33, 133, 362, 263, 1, 61, 291, 13, 14, 152, 10];
 
 const clamp = (value: number, min: number, max: number) =>
   Math.min(Math.max(value, min), max);
+
+const hexToRgb = (value: string) => {
+  const normalized = value.replace("#", "").trim();
+  if (!/^[\da-fA-F]{6}$/.test(normalized)) {
+    return { red: 56, green: 189, blue: 248 };
+  }
+  return {
+    red: Number.parseInt(normalized.slice(0, 2), 16),
+    green: Number.parseInt(normalized.slice(2, 4), 16),
+    blue: Number.parseInt(normalized.slice(4, 6), 16),
+  };
+};
 
 const base64FromBytes = (bytes: Uint8Array) => {
   let result = "";
@@ -526,17 +540,26 @@ const computeCueScore = (
   red /= samples;
   green /= samples;
   blue /= samples;
-
-  switch (cueColor) {
-    case "#38bdf8":
-      return clamp((blue - red * 0.35 - green * 0.35) / 80, 0, 1);
-    case "#a78bfa":
-      return clamp((blue + red - green * 1.2) / 170, 0, 1);
-    case "#22c55e":
-      return clamp((green - red * 0.35 - blue * 0.35) / 80, 0, 1);
-    default:
-      return clamp((red + green - blue * 1.1) / 160, 0, 1);
-  }
+  const target = hexToRgb(cueColor);
+  const observedTotal = Math.max(red + green + blue, 1);
+  const targetTotal = Math.max(target.red + target.green + target.blue, 1);
+  const observed = {
+    red: red / observedTotal,
+    green: green / observedTotal,
+    blue: blue / observedTotal,
+  };
+  const expected = {
+    red: target.red / targetTotal,
+    green: target.green / targetTotal,
+    blue: target.blue / targetTotal,
+  };
+  const distance =
+    Math.abs(observed.red - expected.red) +
+    Math.abs(observed.green - expected.green) +
+    Math.abs(observed.blue - expected.blue);
+  const brightness = clamp(observedTotal / 420, 0, 1);
+  const similarity = clamp(1 - distance / 1.35, 0, 1);
+  return clamp(similarity * (0.52 + brightness * 0.48), 0, 1);
 };
 
 const computePresenceScore = (imageData: Uint8ClampedArray): number => {
@@ -656,6 +679,7 @@ export function FaceIdCapture({
   const [scanProgress, setScanProgress] = useState(0);
   const [faceAligned, setFaceAligned] = useState(false);
   const [alignmentGlow, setAlignmentGlow] = useState(0);
+  const [cueCycleIndex, setCueCycleIndex] = useState(0);
   const isVerifyMode = mode === "verify";
 
   useEffect(() => {
@@ -664,6 +688,9 @@ export function FaceIdCapture({
 
   const activeStep = challenge?.steps[stepIndex] ?? null;
   const activeCueColor = activeStep ? STEP_COLORS[activeStep.id] : "#38bdf8";
+  const displayedCueColor = active
+    ? ACTIVE_LIVENESS_COLORS[cueCycleIndex % ACTIVE_LIVENESS_COLORS.length]
+    : activeCueColor;
 
   const stopCamera = useCallback(() => {
     if (rafRef.current !== null) {
@@ -740,6 +767,7 @@ export function FaceIdCapture({
     setScanProgress(0);
     setFaceAligned(false);
     setAlignmentGlow(0);
+    setCueCycleIndex(0);
     onChange(null);
   }, [isVerifyMode, onChange, stopCamera]);
 
@@ -748,6 +776,43 @@ export function FaceIdCapture({
   }, [resetKey, resetState]);
 
   useEffect(() => () => stopCamera(), [stopCamera]);
+
+  useEffect(() => {
+    if (!active) {
+      setCueCycleIndex(0);
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      setCueCycleIndex((current) => current + 1);
+    }, ACTIVE_LIVENESS_CYCLE_MS);
+    return () => window.clearInterval(intervalId);
+  }, [active]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const root = document.documentElement;
+    if (active) {
+      root.style.setProperty("--faceid-global-cue", displayedCueColor);
+      root.style.setProperty(
+        "--faceid-global-liveness-strength",
+        Math.max(0.72, alignmentGlow).toFixed(3),
+      );
+      root.style.setProperty(
+        "--faceid-global-flash-alpha",
+        (0.1 + Math.max(0.72, alignmentGlow) * 0.18).toFixed(3),
+      );
+    } else {
+      root.style.removeProperty("--faceid-global-cue");
+      root.style.removeProperty("--faceid-global-liveness-strength");
+      root.style.removeProperty("--faceid-global-flash-alpha");
+    }
+
+    return () => {
+      root.style.removeProperty("--faceid-global-cue");
+      root.style.removeProperty("--faceid-global-liveness-strength");
+      root.style.removeProperty("--faceid-global-flash-alpha");
+    };
+  }, [active, alignmentGlow, displayedCueColor]);
 
   const refreshAvailableCameras = useCallback(async () => {
     if (!navigator.mediaDevices?.enumerateDevices) return;
@@ -808,9 +873,9 @@ export function FaceIdCapture({
           },
           runningMode: "VIDEO",
           numFaces: 1,
-          minFaceDetectionConfidence: 0.55,
-          minFacePresenceConfidence: 0.55,
-          minTrackingConfidence: 0.5,
+          minFaceDetectionConfidence: 0.48,
+          minFacePresenceConfidence: 0.48,
+          minTrackingConfidence: 0.42,
           outputFaceBlendshapes: false,
           outputFacialTransformationMatrixes: false,
         });
@@ -1419,11 +1484,11 @@ export function FaceIdCapture({
       const deltaX = centerX - targetCenterX;
       const deltaY = centerY - targetCenterY;
       const sizeRatio = coverage / Math.max(targetCoverage, 0.0001);
-      const horizontalScore = clamp(1 - Math.abs(deltaX) / 0.18, 0, 1);
-      const verticalScore = clamp(1 - Math.abs(deltaY) / 0.19, 0, 1);
-      const sizeScore = clamp(1 - Math.abs(1 - sizeRatio) / 0.82, 0, 1);
-      const framePaddingX = targetBox.width * 0.12;
-      const framePaddingY = targetBox.height * 0.12;
+      const horizontalScore = clamp(1 - Math.abs(deltaX) / 0.22, 0, 1);
+      const verticalScore = clamp(1 - Math.abs(deltaY) / 0.23, 0, 1);
+      const sizeScore = clamp(1 - Math.abs(1 - sizeRatio) / 0.96, 0, 1);
+      const framePaddingX = targetBox.width * 0.16;
+      const framePaddingY = targetBox.height * 0.16;
       const withinScanWindow =
         box.x >= targetBox.x - framePaddingX &&
         box.y >= targetBox.y - framePaddingY &&
@@ -1436,16 +1501,16 @@ export function FaceIdCapture({
       );
       const aligned =
         withinScanWindow &&
-        sizeRatio >= 0.46 &&
-        sizeRatio <= 1.38 &&
-        Math.abs(deltaX) <= 0.16 &&
-        Math.abs(deltaY) <= 0.17;
+        sizeRatio >= 0.36 &&
+        sizeRatio <= 1.6 &&
+        Math.abs(deltaX) <= 0.22 &&
+        Math.abs(deltaY) <= 0.23;
       const scanReady =
         withinScanWindow &&
-        sizeRatio >= 0.54 &&
-        sizeRatio <= 1.2 &&
-        Math.abs(deltaX) <= 0.125 &&
-        Math.abs(deltaY) <= 0.13;
+        sizeRatio >= 0.42 &&
+        sizeRatio <= 1.38 &&
+        Math.abs(deltaX) <= 0.18 &&
+        Math.abs(deltaY) <= 0.19;
 
       return {
         centerX,
@@ -1465,14 +1530,14 @@ export function FaceIdCapture({
   const isReadyToStartTimedCapture = useCallback(
     (alignment: AlignmentSnapshot, motionMetric: number) =>
       alignment.scanReady &&
-      alignment.coverage >= 0.085 &&
-      motionMetric <= 0.16,
+      alignment.coverage >= 0.064 &&
+      motionMetric <= 0.28,
     [],
   );
 
   const canContinueTimedCapture = useCallback(
     (alignment: AlignmentSnapshot, motionMetric: number) =>
-      alignment.aligned && alignment.coverage >= 0.072 && motionMetric <= 0.24,
+      alignment.aligned && alignment.coverage >= 0.054 && motionMetric <= 0.36,
     [],
   );
 
@@ -1491,37 +1556,37 @@ export function FaceIdCapture({
       if (activeStep.id === "center") {
         matched =
           alignment.scanReady &&
-          alignment.coverage >= 0.085 &&
-          motionMetric <= 0.16;
+          alignment.coverage >= 0.07 &&
+          motionMetric <= 0.22;
         hint = matched
           ? "Hold still to lock the center step."
           : "Center your face inside the oval and hold still.";
       } else if (activeStep.id === "move_left") {
         matched = Boolean(
           baseline &&
-          alignment.centerX <= baseline.centerX - 0.08 &&
-          Math.abs(alignment.centerY - baseline.centerY) <= 0.13 &&
-          alignment.coverage >= baseline.coverage * 0.68 &&
-          alignment.coverage <= baseline.coverage * 1.38 &&
+          alignment.centerX <= baseline.centerX - 0.065 &&
+          Math.abs(alignment.centerY - baseline.centerY) <= 0.16 &&
+          alignment.coverage >= baseline.coverage * 0.62 &&
+          alignment.coverage <= baseline.coverage * 1.46 &&
           motionMetric >= 0.01,
         );
         hint = "Turn or move your face slightly to the left.";
       } else if (activeStep.id === "move_right") {
         matched = Boolean(
           baseline &&
-          alignment.centerX >= baseline.centerX + 0.08 &&
-          Math.abs(alignment.centerY - baseline.centerY) <= 0.13 &&
-          alignment.coverage >= baseline.coverage * 0.68 &&
-          alignment.coverage <= baseline.coverage * 1.38 &&
+          alignment.centerX >= baseline.centerX + 0.065 &&
+          Math.abs(alignment.centerY - baseline.centerY) <= 0.16 &&
+          alignment.coverage >= baseline.coverage * 0.62 &&
+          alignment.coverage <= baseline.coverage * 1.46 &&
           motionMetric >= 0.01,
         );
         hint = "Turn or move your face slightly to the right.";
       } else if (activeStep.id === "move_closer") {
         matched = Boolean(
           baseline &&
-          alignment.coverage >= Math.max(baseline.coverage * 1.08, 0.12) &&
-          Math.abs(alignment.deltaX) <= 0.18 &&
-          Math.abs(alignment.deltaY) <= 0.19 &&
+          alignment.coverage >= Math.max(baseline.coverage * 1.04, 0.1) &&
+          Math.abs(alignment.deltaX) <= 0.21 &&
+          Math.abs(alignment.deltaY) <= 0.22 &&
           motionMetric >= 0.005,
         );
         hint = "Move closer until your face fills more of the oval.";
@@ -1741,17 +1806,17 @@ export function FaceIdCapture({
         const totalSteps = challenge?.steps.length ?? 0;
         let alignmentMessage = "Face aligned. Scanning now.";
 
-        if (alignment.sizeRatio < 0.58) {
+        if (alignment.sizeRatio < 0.52) {
           alignmentMessage = "Move closer until your face fits the oval.";
-        } else if (alignment.sizeRatio > 1.12) {
+        } else if (alignment.sizeRatio > 1.22) {
           alignmentMessage = "Move a little back so your full face fits.";
-        } else if (alignment.deltaX < -0.09) {
+        } else if (alignment.deltaX < -0.11) {
           alignmentMessage = "Move slightly to the right.";
-        } else if (alignment.deltaX > 0.09) {
+        } else if (alignment.deltaX > 0.11) {
           alignmentMessage = "Move slightly to the left.";
-        } else if (alignment.deltaY < -0.1) {
+        } else if (alignment.deltaY < -0.12) {
           alignmentMessage = "Lower your face into the oval.";
-        } else if (alignment.deltaY > 0.1) {
+        } else if (alignment.deltaY > 0.12) {
           alignmentMessage = "Raise your face into the oval.";
         } else if (activeStep?.id === "move_left") {
           alignmentMessage = "Turn or move slightly to the left.";
@@ -1817,9 +1882,12 @@ export function FaceIdCapture({
           sampleW,
           sampleH,
         ).data;
-        cueAccumulatorRef.current += computeCueScore(cueImage, activeCueColor);
+        cueAccumulatorRef.current += computeCueScore(
+          cueImage,
+          displayedCueColor,
+        );
         sampleCountRef.current += 1;
-        cueAccumulatorRef.current += 0.4;
+        cueAccumulatorRef.current += 0.48;
         const stepMatched =
           challenge && totalSteps > 0
             ? evaluateStep(alignment, motionMetric, totalSteps)
@@ -1838,7 +1906,7 @@ export function FaceIdCapture({
         if (
           !scanStartedAtRef.current &&
           readyToStartTimedCapture &&
-          readyFrameStreakRef.current >= 2
+          readyFrameStreakRef.current >= 1
         ) {
           resumeTimedCapture(now);
         }
@@ -2062,11 +2130,11 @@ export function FaceIdCapture({
     }
   }, [
     active,
-    activeCueColor,
     challenge,
     computeFrameMotion,
     createImageCapture,
     captureMode,
+    displayedCueColor,
     ensureDetector,
     evaluateStep,
     evaluateCompatibilityStep,
@@ -2317,16 +2385,20 @@ export function FaceIdCapture({
     1000
   ).toFixed(1);
   const cueStyle = {
-    "--faceid-cue": activeCueColor,
+    "--faceid-cue": displayedCueColor,
     "--faceid-lock-strength": alignmentGlow.toFixed(3),
+    "--faceid-liveness-strength": (
+      active ? Math.max(0.72, alignmentGlow) : 0.24
+    ).toFixed(3),
   } as CSSProperties;
 
   return (
-    <div className={`faceid-card faceid-card-${status}`} style={cueStyle}>
-      {status === "error" && diagnostic ? (
-        <small className="faceid-diagnostic">{diagnostic}</small>
-      ) : null}
-
+    <div
+      className={`faceid-card faceid-card-${status} ${
+        active ? "faceid-card-active" : ""
+      }`}
+      style={cueStyle}
+    >
       {shouldShowCameraPicker ? (
         <div className="faceid-device-row">
           <label className="faceid-camera-select">
@@ -2373,9 +2445,40 @@ export function FaceIdCapture({
           />
           {active ? (
             <div className="faceid-overlay" aria-hidden="true">
-              <div
-                className={`faceid-oval ${faceAligned ? "is-aligned" : ""}`}
-              />
+              <div className="faceid-oval-shell">
+                <svg
+                  className="faceid-progress-ring"
+                  viewBox="0 0 100 100"
+                  preserveAspectRatio="none"
+                  aria-hidden="true"
+                >
+                  <circle
+                    className="faceid-progress-ring-track"
+                    cx="50"
+                    cy="50"
+                    r="46"
+                  />
+                  <circle
+                    className="faceid-progress-ring-value"
+                    cx="50"
+                    cy="50"
+                    r="46"
+                    pathLength={100}
+                    strokeDasharray={`${
+                      Math.max(
+                        0,
+                        Math.min(
+                          100,
+                          (status === "verified" ? 1 : visibleProgress) * 100,
+                        ),
+                      )
+                    } 100`}
+                  />
+                </svg>
+                <div
+                  className={`faceid-oval ${faceAligned ? "is-aligned" : ""}`}
+                />
+              </div>
             </div>
           ) : (
             <div className="faceid-placeholder">
@@ -2412,41 +2515,6 @@ export function FaceIdCapture({
         </small>
       </div>
 
-      <div className="faceid-feedback-panel">
-        <div className="faceid-live-hint" aria-live="polite">
-          {message}
-        </div>
-
-        <div className="faceid-scan-progress" aria-hidden="true">
-          <div className="faceid-progress-top">
-            <span>
-              {status === "verified"
-                ? "Capture complete"
-                : active
-                  ? "Recording in progress"
-                  : "Awaiting capture"}
-            </span>
-            <strong>
-              {status === "verified"
-                ? "5.0s"
-                : active
-                  ? `${visibleProgressSeconds}s`
-                  : "0.0s"}
-            </strong>
-          </div>
-          <div className="faceid-scan-progress-bar">
-            <span style={{ width: `${Math.round(visibleProgress * 100)}%` }} />
-          </div>
-          <small>
-            {status === "verified"
-              ? "5-second video complete"
-              : active
-                ? `Recording ${visibleProgressSeconds}s / ${(MIN_SCAN_DURATION_MS / 1000).toFixed(1)}s`
-                : "Ready to record"}
-          </small>
-        </div>
-      </div>
-
       <div className="faceid-actions">
         {active ? (
           <button
@@ -2477,6 +2545,14 @@ export function FaceIdCapture({
           </span>
         ) : null}
       </div>
+
+      <small
+        className={`faceid-tech-copy ${
+          status === "error" && diagnostic ? "is-visible" : ""
+        }`}
+      >
+        {status === "error" && diagnostic ? diagnostic : " "}
+      </small>
     </div>
   );
 }

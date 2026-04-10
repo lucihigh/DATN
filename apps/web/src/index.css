@@ -594,6 +594,10 @@ body.theme-light .user-menu-dropdown {
   background: #fee2e2;
   color: #991b1b;
 }
+.notif-assistant {
+  background: #dcfce7;
+  color: #166534;
+}
 
 @media (max-width: 720px) {
   .notif-dropdown {
@@ -1742,6 +1746,178 @@ h3 {
   color: #45b8ff;
   cursor: pointer;
   text-align: right;
+}
+.budget-plan-block {
+  overflow: hidden;
+}
+.budget-plan-block.safe {
+  border-color: rgba(45, 212, 191, 0.28);
+}
+.budget-plan-block.warn {
+  border-color: rgba(251, 191, 36, 0.34);
+}
+.budget-plan-block.danger {
+  border-color: rgba(248, 113, 113, 0.38);
+}
+.budget-plan-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 14px;
+}
+.budget-plan-hero {
+  display: grid;
+  gap: 8px;
+  padding: 16px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(26, 64, 114, 0.5), rgba(10, 26, 56, 0.82));
+  border: 1px solid rgba(120, 170, 255, 0.16);
+}
+.budget-plan-pill {
+  width: fit-content;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.budget-plan-pill.safe {
+  background: rgba(16, 185, 129, 0.18);
+  color: #6ee7b7;
+}
+.budget-plan-pill.warn {
+  background: rgba(245, 158, 11, 0.18);
+  color: #fbbf24;
+}
+.budget-plan-pill.danger {
+  background: rgba(239, 68, 68, 0.18);
+  color: #fda4af;
+}
+.budget-plan-hero strong {
+  font-size: 30px;
+  line-height: 1;
+}
+.budget-plan-hero p {
+  margin: 0;
+  color: #a7b9dd;
+  line-height: 1.5;
+}
+.budget-plan-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.budget-plan-metrics div,
+.budget-plan-category {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  border-radius: 12px;
+  background: rgba(13, 27, 56, 0.9);
+  border: 1px solid rgba(41, 63, 106, 0.8);
+}
+.budget-plan-metrics span,
+.budget-plan-category span {
+  font-size: 11px;
+  color: #8ea5cf;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.budget-plan-metrics strong,
+.budget-plan-category strong {
+  font-size: 18px;
+  color: #f5f8ff;
+}
+.budget-plan-category small {
+  color: #8ea5cf;
+  font-size: 12px;
+}
+.budget-plan-categories {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.budget-plan-modal {
+  width: min(1120px, 94vw);
+  max-width: 1120px;
+  max-height: 88vh;
+  overflow: auto;
+}
+.budget-plan-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.budget-plan-modal-head h3 {
+  margin: 0;
+}
+.budget-plan-modal-head p {
+  margin: 6px 0 0;
+  color: #9fb2da;
+  line-height: 1.5;
+}
+.budget-plan-modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.budget-plan-empty {
+  display: grid;
+  gap: 10px;
+  padding: 18px;
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(19, 39, 76, 0.88), rgba(8, 20, 44, 0.94));
+  border: 1px solid rgba(69, 114, 193, 0.26);
+}
+.budget-plan-empty strong {
+  font-size: 18px;
+  color: #f5f8ff;
+}
+.budget-plan-empty p {
+  margin: 0;
+  color: #9fb2da;
+  line-height: 1.6;
+}
+@media (max-width: 960px) {
+  .budget-plan-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .budget-plan-categories {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .budget-plan-modal-head {
+    flex-direction: column;
+  }
+
+  .budget-plan-modal-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+@media (max-width: 640px) {
+  .budget-plan-metrics,
+  .budget-plan-categories {
+    grid-template-columns: 1fr;
+  }
+
+  .budget-plan-hero strong {
+    font-size: 24px;
+  }
+
+  .budget-plan-modal {
+    width: min(94vw, 94vw);
+    padding: 18px;
+  }
+
+  .budget-plan-modal-actions {
+    flex-wrap: wrap;
+  }
 }
 .dashboard-alert-list {
   display: grid;
@@ -4077,7 +4253,9 @@ h3 {
   max-width: min(520px, calc(100vw - 32px));
   padding: 12px 14px 14px;
   max-height: calc(100dvh - 48px);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
   gap: 0;
@@ -4197,6 +4375,7 @@ h3 {
   position: relative;
   width: min(520px, calc(100vw - 32px));
   max-width: 100%;
+  min-width: 0;
 }
 .transfer-modal-frame-with-ai {
   display: block;
@@ -4897,18 +5076,87 @@ h3 {
 .transfer-faceid-overlay {
   z-index: 2200;
   padding: 12px;
+  isolation: isolate;
+  overflow: hidden;
+  background:
+    radial-gradient(
+      84% 72% at 50% 50%,
+      rgba(8, 15, 32, 0.12) 0%,
+      rgba(2, 6, 23, 0.76) 62%,
+      rgba(2, 6, 23, 0.92) 100%
+    ),
+    rgba(2, 6, 23, 0.8);
+  backdrop-filter: blur(18px) saturate(1.18);
+  -webkit-backdrop-filter: blur(18px) saturate(1.18);
+}
+.transfer-faceid-overlay::before,
+.transfer-faceid-overlay::after {
+  content: "";
+  position: absolute;
+  inset: -18%;
+  pointer-events: none;
+  z-index: 0;
+  mix-blend-mode: screen;
+}
+.transfer-faceid-overlay::before {
+  background:
+    radial-gradient(
+      circle at 20% 18%,
+      color-mix(in srgb, var(--faceid-global-cue, #38bdf8) 34%, transparent),
+      transparent 24%
+    ),
+    radial-gradient(
+      circle at 80% 24%,
+      color-mix(in srgb, var(--faceid-global-cue, #38bdf8) 28%, transparent),
+      transparent 24%
+    ),
+    radial-gradient(
+      circle at 78% 76%,
+      color-mix(in srgb, var(--faceid-global-cue, #38bdf8) 26%, transparent),
+      transparent 28%
+    ),
+    radial-gradient(
+      circle at 22% 78%,
+      color-mix(in srgb, var(--faceid-global-cue, #38bdf8) 26%, transparent),
+      transparent 26%
+    ),
+    radial-gradient(
+      circle at 50% 50%,
+      color-mix(in srgb, var(--faceid-global-cue, #38bdf8) 16%, transparent),
+      transparent 36%
+    );
+  filter: blur(36px) saturate(1.22);
+  opacity: calc(0.52 + var(--faceid-global-liveness-strength, 0.3) * 0.34);
+  animation: transfer-faceid-screenwash 1.36s ease-in-out infinite;
+}
+.transfer-faceid-overlay::after {
+  background:
+    radial-gradient(
+      72% 72% at 50% 50%,
+      color-mix(in srgb, var(--faceid-global-cue, #38bdf8) 22%, transparent),
+      transparent 70%
+    );
+  filter: blur(72px) saturate(1.2);
+  opacity: calc(0.24 + var(--faceid-global-liveness-strength, 0.3) * 0.22);
+  animation: transfer-faceid-screenwash-alt 1.36s ease-in-out infinite;
+}
+.transfer-faceid-overlay > * {
+  position: relative;
+  z-index: 1;
 }
 .faceid-modal.transfer-faceid-modal {
   width: min(1120px, calc(100vw - 40px));
   max-width: min(1120px, calc(100vw - 40px));
   max-height: calc(100dvh - 28px);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   position: relative;
   z-index: 2201;
   display: grid;
   gap: 12px;
   padding: 16px;
-  grid-template-columns: minmax(320px, 380px) minmax(460px, 1fr);
+  grid-template-columns: minmax(300px, 360px) minmax(0, 1fr);
   grid-template-rows: auto auto auto auto;
   grid-template-areas:
     "head head"
@@ -4916,6 +5164,34 @@ h3 {
     "error capture"
     "actions actions";
   align-items: start;
+  align-content: start;
+  min-height: 0;
+  border-color: rgba(133, 184, 255, 0.24);
+  background:
+    radial-gradient(
+      110% 90% at 10% 0%,
+      rgba(170, 216, 255, 0.14) 0%,
+      transparent 62%
+    ),
+    radial-gradient(
+      120% 120% at 100% 0%,
+      rgba(167, 139, 250, 0.14) 0%,
+      transparent 48%
+    ),
+    linear-gradient(180deg, rgba(8, 18, 48, 0.88), rgba(9, 20, 44, 0.94));
+  box-shadow:
+    0 32px 96px rgba(2, 6, 23, 0.46),
+    0 0 36px rgba(56, 189, 248, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+.faceid-modal.transfer-faceid-modal.is-scanning {
+  overflow: hidden !important;
+  max-height: min(92dvh, 760px) !important;
+  grid-template-columns: 1fr !important;
+  grid-template-rows: auto minmax(0, 1fr) !important;
+  grid-template-areas:
+    "head"
+    "capture" !important;
 }
 .transfer-faceid-actions {
   margin-top: 0;
@@ -4945,10 +5221,11 @@ h3 {
   color: #9fc4ff;
   font-size: 11px;
   line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 .transfer-faceid-summary-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
   gap: 8px;
 }
 .transfer-faceid-summary-grid div {
@@ -4978,6 +5255,17 @@ h3 {
   gap: 8px;
   padding: 10px;
   min-width: 0;
+  min-height: 0;
+}
+.faceid-modal.transfer-faceid-modal.is-scanning .transfer-faceid-summary-card,
+.faceid-modal.transfer-faceid-modal.is-scanning .transfer-faceid-error,
+.faceid-modal.transfer-faceid-modal.is-scanning .transfer-faceid-actions {
+  display: none;
+}
+.faceid-modal.transfer-faceid-modal.is-scanning .faceid-card {
+  align-self: center;
+  justify-self: center;
+  width: min(100%, 980px);
 }
 .transfer-faceid-modal .faceid-head p {
   font-size: 11px;
@@ -4993,9 +5281,19 @@ h3 {
 .transfer-faceid-modal .faceid-camera {
   gap: 6px;
   align-items: start;
+  min-width: 0;
 }
 .transfer-faceid-modal .faceid-camera-help {
   font-size: 11px;
+  min-height: calc(1.45em * 2);
+  overflow-wrap: anywhere;
+}
+.transfer-faceid-modal .faceid-feedback-panel {
+  min-height: 168px;
+}
+.transfer-faceid-modal .faceid-live-hint {
+  min-height: 72px;
+  overflow-wrap: anywhere;
 }
 .transfer-faceid-modal .faceid-actions {
   gap: 10px;
@@ -5013,7 +5311,8 @@ h3 {
     width: min(1180px, calc(100vw - 48px));
     max-width: min(1180px, calc(100vw - 48px));
     max-height: calc(100dvh - 28px);
-    overflow: hidden;
+    overflow-x: hidden;
+    overflow-y: auto;
     grid-template-columns: minmax(280px, 320px) minmax(0, 1fr);
     grid-template-rows: auto auto auto auto;
     grid-template-areas:
@@ -5065,7 +5364,8 @@ h3 {
     width: min(560px, calc(100vw - 24px));
     max-width: min(560px, calc(100vw - 24px));
     max-height: calc(100dvh - 24px);
-    overflow: auto;
+    overflow-x: hidden;
+    overflow-y: auto;
     grid-template-columns: 1fr;
     grid-template-rows: auto auto auto auto auto;
     grid-template-areas:
@@ -5108,6 +5408,14 @@ h3 {
   .transfer-faceid-overlay {
     padding: 12px !important;
     align-items: center !important;
+    background:
+      radial-gradient(
+        110% 84% at 50% 50%,
+        rgba(8, 15, 32, 0.08) 0%,
+        rgba(2, 6, 23, 0.8) 58%,
+        rgba(2, 6, 23, 0.94) 100%
+      ),
+      rgba(2, 6, 23, 0.84) !important;
   }
 
   .faceid-modal.transfer-faceid-modal {
@@ -5116,7 +5424,8 @@ h3 {
     max-height: calc(100dvh - 56px) !important;
     padding: 12px !important;
     gap: 10px !important;
-    overflow: hidden !important;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
     grid-template-columns: 1fr !important;
     grid-template-rows: auto auto minmax(0, 1fr) auto !important;
     grid-template-areas:
@@ -5227,6 +5536,28 @@ h3 {
 
   .transfer-faceid-actions .btn-primary {
     width: 100% !important;
+  }
+}
+@keyframes transfer-faceid-screenwash {
+  0% {
+    transform: translate3d(-1%, -1%, 0) scale(0.98);
+  }
+  50% {
+    transform: translate3d(1%, 1%, 0) scale(1.04);
+  }
+  100% {
+    transform: translate3d(-1%, -1%, 0) scale(0.98);
+  }
+}
+@keyframes transfer-faceid-screenwash-alt {
+  0% {
+    transform: scale(0.94);
+  }
+  50% {
+    transform: scale(1.08);
+  }
+  100% {
+    transform: scale(0.94);
   }
 }
 .transfer-actions {
@@ -9106,6 +9437,10 @@ body.theme-light .auth-form-shell {
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.06),
     0 20px 36px rgba(2, 6, 23, 0.28);
+  transition:
+    border-color 180ms ease,
+    background 180ms ease,
+    box-shadow 180ms ease;
 }
 .faceid-video,
 .faceid-preview {
@@ -9148,6 +9483,25 @@ body.theme-light .auth-form-shell {
   --faceid-live-zoom: 1.25;
   filter: saturate(1.06) contrast(1.05);
 }
+.faceid-stage.is-live {
+  border-color: color-mix(
+    in srgb,
+    var(--faceid-cue, #38bdf8) 34%,
+    rgba(148, 163, 184, 0.18)
+  );
+  background:
+    radial-gradient(
+      74% 56% at 50% -4%,
+      color-mix(in srgb, var(--faceid-cue, #38bdf8) 28%, transparent),
+      transparent 74%
+    ),
+    linear-gradient(180deg, #091326, #0b1732 52%, #0a1530);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 0 calc(16px + var(--faceid-liveness-strength, 0) * 26px)
+      color-mix(in srgb, var(--faceid-cue, #38bdf8) 28%, transparent),
+    0 20px 36px rgba(2, 6, 23, 0.28);
+}
 .faceid-canvas {
   display: none;
 }
@@ -9159,20 +9513,138 @@ body.theme-light .auth-form-shell {
 .faceid-overlay {
   position: absolute;
   inset: 0;
+  --faceid-oval-width: min(72%, 248px);
+  --faceid-oval-aspect: 0.82;
+  --faceid-ring-gap: clamp(24px, 7.5%, 32px);
   pointer-events: none;
   background:
-    radial-gradient(circle at 50% 50%, rgba(56, 189, 248, 0.05), transparent 38%),
+    radial-gradient(
+      circle at 50% 50%,
+      color-mix(in srgb, var(--faceid-cue, #38bdf8) 9%, transparent),
+      transparent 38%
+    ),
     linear-gradient(180deg, rgba(2, 6, 23, 0.18), rgba(2, 6, 23, 0.32));
+}
+.faceid-oval-shell {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: calc(var(--faceid-oval-width) + var(--faceid-ring-gap) * 2);
+  aspect-ratio: var(--faceid-oval-aspect);
+  transform: translate(-50%, -50%);
+}
+.faceid-progress-ring {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+  overflow: visible;
+  opacity: 0.72;
+  filter: drop-shadow(
+    0 0 calc(6px + var(--faceid-liveness-strength, 0) * 8px)
+      color-mix(in srgb, var(--faceid-cue, #38bdf8) 18%, transparent)
+  );
+}
+.faceid-progress-ring-track,
+.faceid-progress-ring-value {
+  fill: none;
+  vector-effect: non-scaling-stroke;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.faceid-progress-ring-track {
+  stroke: rgba(148, 163, 184, 0.1);
+  stroke-width: 2.4;
+}
+.faceid-progress-ring-value {
+  stroke: color-mix(in srgb, var(--faceid-cue, #38bdf8) 88%, white 12%);
+  stroke-linecap: round;
+  stroke-width: 3;
+  transition:
+    stroke 180ms ease,
+    stroke-dasharray 180ms linear;
+}
+.faceid-overlay::before {
+  content: "";
+  position: absolute;
+  inset: -6%;
+  border-radius: 32px;
+  opacity: calc(0.32 + var(--faceid-liveness-strength, 0) * 0.36);
+  background:
+    radial-gradient(
+      28% 18% at 50% 8%,
+      color-mix(in srgb, var(--faceid-cue, #38bdf8) 58%, transparent),
+      transparent 70%
+    ),
+    radial-gradient(
+      18% 24% at 92% 50%,
+      color-mix(in srgb, var(--faceid-cue, #38bdf8) 48%, transparent),
+      transparent 72%
+    ),
+    radial-gradient(
+      28% 18% at 50% 92%,
+      color-mix(in srgb, var(--faceid-cue, #38bdf8) 48%, transparent),
+      transparent 72%
+    ),
+    radial-gradient(
+      18% 26% at 8% 50%,
+      color-mix(in srgb, var(--faceid-cue, #38bdf8) 44%, transparent),
+      transparent 72%
+    );
+  filter: blur(18px) saturate(1.24);
+  animation: faceid-active-liveness-pulse 1.36s steps(1, end) infinite;
+}
+.faceid-limelight {
+  position: absolute;
+  z-index: 1;
+  opacity: calc(0.64 + var(--faceid-liveness-strength, 0) * 0.28);
+  border-radius: 999px;
+  mix-blend-mode: screen;
+  background: color-mix(in srgb, var(--faceid-cue, #38bdf8) 92%, white 8%);
+  box-shadow:
+    0 0 14px color-mix(in srgb, var(--faceid-cue, #38bdf8) 42%, transparent),
+    0 0 30px color-mix(in srgb, var(--faceid-cue, #38bdf8) 28%, transparent);
+  animation: faceid-limelight-flicker 1.36s steps(1, end) infinite;
+  transition:
+    background 180ms ease,
+    box-shadow 180ms ease,
+    opacity 180ms ease;
+}
+.faceid-limelight-top,
+.faceid-limelight-bottom {
+  left: 24px;
+  right: 24px;
+  height: 11px;
+}
+.faceid-limelight-top {
+  top: 16px;
+}
+.faceid-limelight-bottom {
+  bottom: 16px;
+}
+.faceid-limelight-left,
+.faceid-limelight-right {
+  top: 22px;
+  bottom: 22px;
+  width: 11px;
+  background: color-mix(in srgb, var(--faceid-cue, #38bdf8) 92%, white 8%);
+}
+.faceid-limelight-left {
+  left: 16px;
+}
+.faceid-limelight-right {
+  right: 16px;
 }
 .faceid-oval {
   position: absolute;
   left: 50%;
   top: 50%;
-  width: min(60%, 198px);
-  aspect-ratio: 0.82;
+  width: var(--faceid-oval-width);
+  aspect-ratio: var(--faceid-oval-aspect);
   transform: translate(-50%, -50%);
-  border-radius: 48% 48% 44% 44%;
-  border: 2px solid color-mix(in srgb, var(--faceid-cue, #38bdf8) 72%, white);
+  border-radius: 50%;
+  border: 2.2px solid color-mix(in srgb, var(--faceid-cue, #38bdf8) 78%, white);
   background: radial-gradient(
     circle at center,
     rgba(255, 255, 255, 0.06),
@@ -9257,20 +9729,10 @@ body.theme-light .auth-form-shell {
   text-align: left;
 }
 .faceid-scan-progress-bar {
-  width: 100%;
-  height: 10px;
-  border-radius: 999px;
-  overflow: hidden;
-  background: rgba(255, 255, 255, 0.08);
-  box-shadow: inset 0 1px 3px rgba(2, 6, 23, 0.28);
+  display: none;
 }
 .faceid-scan-progress-bar span {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, #38bdf8, #14b8a6 48%, #84cc16 100%);
-  box-shadow: 0 0 22px rgba(56, 189, 248, 0.3);
-  transition: width 180ms ease;
+  display: none;
 }
 .faceid-actions {
   display: grid;
@@ -9319,6 +9781,50 @@ body.theme-light .auth-form-shell {
   50% {
     filter: saturate(1.18);
   }
+}
+@keyframes faceid-modal-surface-pulse {
+  0%,
+  100% {
+    opacity: calc(var(--faceid-global-flash-alpha, 0) * 0.9);
+  }
+  50% {
+    opacity: calc(var(--faceid-global-flash-alpha, 0) * 1.22);
+  }
+}
+@keyframes faceid-active-liveness-pulse {
+  0%,
+  100% {
+    opacity: calc(0.24 + var(--faceid-liveness-strength, 0) * 0.3);
+    transform: scale(0.98);
+  }
+  50% {
+    opacity: calc(0.48 + var(--faceid-liveness-strength, 0) * 0.4);
+    transform: scale(1.02);
+  }
+}
+@keyframes faceid-limelight-flicker {
+  0%,
+  100% {
+    opacity: calc(0.42 + var(--faceid-liveness-strength, 0) * 0.22);
+  }
+  50% {
+    opacity: calc(0.92 + var(--faceid-liveness-strength, 0) * 0.08);
+  }
+}
+.faceid-tech-copy {
+  display: block;
+  width: 100%;
+  min-height: 18px;
+  color: #86a4cf;
+  font-size: 10px;
+  line-height: 1.4;
+  opacity: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  transition: opacity 160ms ease;
+}
+.faceid-tech-copy.is-visible {
+  opacity: 1;
 }
 .auth-ai-monitor {
   display: flex;
@@ -9392,9 +9898,10 @@ body.transfer-faceid-screen-open #root {
   backdrop-filter: blur(14px);
 }
 .faceid-modal {
-  width: min(420px, 100%);
+  position: relative;
+  width: min(476px, calc(100vw - 32px));
   max-height: min(92vh, 920px);
-  overflow: auto;
+  overflow: hidden;
   display: grid;
   gap: 14px;
   padding: 16px;
@@ -9417,6 +9924,77 @@ body.transfer-faceid-screen-open #root {
   box-shadow:
     0 28px 80px rgba(2, 6, 23, 0.4),
     inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  isolation: isolate;
+  transition:
+    border-color 180ms ease,
+    background 180ms ease,
+    box-shadow 180ms ease;
+}
+.faceid-modal::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 0;
+  opacity: calc(0.22 + var(--faceid-global-flash-alpha, 0.18));
+  background:
+    radial-gradient(
+      140% 120% at 10% 0%,
+      color-mix(in srgb, var(--faceid-global-cue, #38bdf8) 48%, transparent),
+      transparent 54%
+    ),
+    radial-gradient(
+      140% 120% at 100% 100%,
+      color-mix(in srgb, var(--faceid-global-cue, #38bdf8) 42%, transparent),
+      transparent 50%
+    ),
+    radial-gradient(
+      110% 110% at 50% 50%,
+      color-mix(in srgb, var(--faceid-global-cue, #38bdf8) 20%, transparent),
+      transparent 62%
+    ),
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--faceid-global-cue, #38bdf8) 34%, transparent),
+      color-mix(in srgb, var(--faceid-global-cue, #38bdf8) 14%, transparent) 38%,
+      color-mix(in srgb, var(--faceid-global-cue, #38bdf8) 32%, transparent)
+    );
+  box-shadow:
+    inset 0 0 0 1px
+      color-mix(in srgb, var(--faceid-global-cue, #38bdf8) 46%, transparent),
+    inset 0 0 96px
+      color-mix(in srgb, var(--faceid-global-cue, #38bdf8) 12%, transparent),
+    0 0 82px
+      color-mix(in srgb, var(--faceid-global-cue, #38bdf8) 32%, transparent);
+  animation: faceid-modal-surface-pulse 1.36s steps(1, end) infinite;
+}
+.faceid-modal::after {
+  content: "";
+  position: absolute;
+  inset: -6%;
+  border-radius: calc(18px + 12px);
+  pointer-events: none;
+  z-index: 0;
+  opacity: calc(0.32 + var(--faceid-global-flash-alpha, 0.18) * 1.75);
+  background:
+    radial-gradient(
+      96% 76% at 50% 16%,
+      color-mix(in srgb, var(--faceid-global-cue, #38bdf8) 34%, transparent),
+      transparent 76%
+    ),
+    radial-gradient(
+      120% 110% at 50% 50%,
+      color-mix(in srgb, var(--faceid-global-cue, #38bdf8) 26%, transparent),
+      transparent 70%
+    );
+  filter: blur(36px) saturate(1.45);
+  mix-blend-mode: screen;
+  animation: faceid-modal-surface-pulse 1.36s steps(1, end) infinite;
+}
+.faceid-modal > * {
+  position: relative;
+  z-index: 1;
 }
 .faceid-modal-head {
   display: flex;
@@ -9463,19 +10041,39 @@ body.transfer-faceid-screen-open #root {
   gap: 10px;
   pointer-events: auto;
 }
+.faceid-modal.is-scanning::before {
+  opacity: calc(0.42 + var(--faceid-global-flash-alpha, 0.22) * 1.9);
+}
+.faceid-modal.is-scanning::after {
+  opacity: calc(0.5 + var(--faceid-global-flash-alpha, 0.22) * 2.25);
+}
+.faceid-modal-error-slot {
+  min-height: 62px;
+}
+.faceid-modal-error-slot > * {
+  margin: 0;
+}
+.faceid-modal-error-slot:not(.is-visible) {
+  display: none;
+}
 
 @media (min-width: 980px) {
   .faceid-modal:not(.transfer-faceid-modal) {
-    width: min(500px, calc(100vw - 88px));
-    max-width: 500px;
-    max-height: calc(100vh - 88px);
-    overflow: auto;
-    padding: 12px;
-    gap: 10px;
-    border-radius: 20px;
+    width: min(560px, calc(100vw - 72px));
+    max-width: 560px;
+    height: auto;
+    max-height: none;
+    overflow: hidden;
+    padding: 20px 20px 24px;
+    gap: 12px;
+    border-radius: 22px;
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto auto auto;
+    align-items: start;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-head {
+    grid-column: 1 / -1;
     align-items: flex-start;
     gap: 6px;
   }
@@ -9500,9 +10098,8 @@ body.transfer-faceid-screen-open #root {
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-card {
     display: grid;
-    gap: 8px;
+    gap: 12px;
     padding: 0;
-    border-radius: 0;
     border: 0;
     background: transparent;
     box-shadow: none;
@@ -9541,6 +10138,7 @@ body.transfer-faceid-screen-open #root {
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-device-row {
+    grid-column: 1 / -1;
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: end;
     gap: 8px;
@@ -9572,18 +10170,22 @@ body.transfer-faceid-screen-open #root {
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-camera {
-    gap: 6px;
+    gap: 14px;
+    min-height: 0;
+    align-content: start;
+    justify-items: center;
+    padding-block: 6px 0;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-stage {
-    --faceid-stage-width: min(100%, 286px);
-    --faceid-stage-height: 344px;
-    border-radius: 20px;
+    --faceid-stage-width: min(100%, 360px);
+    --faceid-stage-height: 390px;
+    border-radius: 22px;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-placeholder {
-    min-height: 344px;
-    padding: 14px;
+    min-height: 390px;
+    padding: 20px;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-placeholder span {
@@ -9597,10 +10199,12 @@ body.transfer-faceid-screen-open #root {
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-camera-help {
-    max-width: 34ch;
+    max-width: 32ch;
     margin: 0 auto;
     text-align: center;
-    font-size: 10px;
+    font-size: 11px;
+    line-height: 1.45;
+    min-height: 0;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-feedback-panel {
@@ -9638,30 +10242,67 @@ body.transfer-faceid-screen-open #root {
   .faceid-modal:not(.transfer-faceid-modal) .faceid-actions {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
-    gap: 6px;
+    gap: 10px;
+    width: 176px;
+    margin: 4px auto 0;
+    align-self: auto;
+    z-index: 3;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-actions .pill,
   .faceid-modal:not(.transfer-faceid-modal) .faceid-actions .btn-primary {
     width: 100%;
-    min-height: 38px;
-    border-radius: 12px;
-    font-size: 12px;
+    min-height: 46px;
+    border-radius: 16px;
+    font-size: 13px;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-actions {
-    justify-content: flex-end;
-    gap: 6px;
-    position: relative;
+    display: grid;
+    grid-template-columns: 148px minmax(0, 1fr);
+    gap: 14px;
+    width: min(100%, 420px);
+    margin: 2px auto 0;
     z-index: 3;
+    align-self: auto;
   }
 
   .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-actions .pill,
   .faceid-modal:not(.transfer-faceid-modal) .faceid-modal-actions .btn-primary {
-    min-height: 36px;
-    border-radius: 12px;
-    padding: 0 12px;
+    width: 100%;
+    min-height: 46px;
+    border-radius: 18px;
+    padding: 0 18px;
+    justify-content: center;
+    font-size: 13px;
     pointer-events: auto;
+  }
+
+  .faceid-modal.is-scanning:not(.transfer-faceid-modal) .faceid-card {
+    display: grid;
+  }
+
+  .faceid-modal.is-scanning:not(.transfer-faceid-modal) .faceid-actions,
+  .faceid-modal.is-scanning:not(.transfer-faceid-modal) .faceid-modal-actions,
+  .faceid-modal.is-scanning:not(.transfer-faceid-modal) .faceid-modal-error-slot,
+  .faceid-modal.is-scanning:not(.transfer-faceid-modal) .faceid-tech-copy {
+    display: none;
+  }
+
+  .faceid-modal.is-scanning:not(.transfer-faceid-modal)
+    .faceid-card
+    > .faceid-device-row {
+    display: none;
+  }
+
+  .faceid-modal.is-scanning:not(.transfer-faceid-modal) .faceid-camera {
+    gap: 14px;
+    padding-block: 0;
+    align-content: center;
+  }
+
+  .faceid-modal:not(.transfer-faceid-modal) .faceid-tech-copy {
+    display: none;
   }
 }
 
@@ -9678,8 +10319,9 @@ body.transfer-faceid-screen-open #root {
     padding: 16px;
   }
   .faceid-modal {
-    padding: 18px;
-    border-radius: 20px;
+    width: min(520px, calc(100vw - 28px));
+    padding: 20px;
+    border-radius: 22px;
   }
   .faceid-modal-head {
     flex-direction: column;
@@ -9697,7 +10339,7 @@ body.transfer-faceid-screen-open #root {
 
   .faceid-modal:not(.transfer-faceid-modal) {
     width: min(100%, calc(100vw - 16px)) !important;
-    max-width: 360px !important;
+    max-width: 388px !important;
     max-height: calc(100dvh - 16px) !important;
     padding: 10px !important;
     gap: 8px !important;
@@ -14348,6 +14990,12 @@ body.theme-dark .notif-icon-security {
   color: #ffd997;
   border-color: rgba(247, 201, 117, 0.46);
   background: rgba(158, 113, 26, 0.22);
+}
+
+body.theme-dark .notif-icon-assistant {
+  color: #b8f5d0;
+  border-color: rgba(94, 234, 161, 0.42);
+  background: rgba(22, 101, 52, 0.24);
 }
 
 @keyframes notifDropdownReveal {
